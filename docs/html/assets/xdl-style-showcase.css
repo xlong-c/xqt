@@ -1,0 +1,171 @@
+@import "xdl-doc.css";
+
+/*
+  Local components for docs/html/style-showcase.html.
+  The page itself uses xdl-style-atlas; this file only draws compact previews
+  of the two allowed templates.
+*/
+
+body.style-showcase-body .hero-panel .emphasis-strip {
+  margin-top: 16px;
+}
+
+body.style-showcase-body .template-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+body.style-showcase-body .template-card {
+  display: grid;
+  gap: 16px;
+}
+
+body.style-showcase-body .template-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+body.style-showcase-body .template-card-head code {
+  font-size: 0.9rem;
+}
+
+body.style-showcase-body .template-mini {
+  min-height: 260px;
+  padding: 18px;
+  border: 1px solid var(--xdl-border);
+  border-radius: var(--xdl-radius);
+  overflow: hidden;
+}
+
+body.style-showcase-body .atlas-mini {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 14px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--xdl-accent) 8%, transparent) 1px, transparent 1px) 0 0 / 26px 26px,
+    var(--xdl-surface-soft);
+}
+
+body.style-showcase-body .atlas-mini-nav,
+body.style-showcase-body .atlas-mini-main,
+body.style-showcase-body .ledger-mini {
+  background: var(--xdl-surface);
+  border: 1px solid var(--xdl-border);
+  border-radius: var(--xdl-radius);
+  box-shadow: var(--xdl-shadow-soft);
+}
+
+body.style-showcase-body .atlas-mini-nav {
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+body.style-showcase-body .atlas-mini-nav span {
+  height: 30px;
+  border-radius: 6px;
+  background: var(--xdl-surface-muted);
+  border: 1px solid var(--xdl-border);
+}
+
+body.style-showcase-body .atlas-mini-nav span:first-child {
+  background: var(--xdl-accent-soft);
+  border-color: color-mix(in srgb, var(--xdl-accent) 36%, var(--xdl-border));
+}
+
+body.style-showcase-body .atlas-mini-main {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+body.style-showcase-body .atlas-mini-title {
+  width: 70%;
+  height: 34px;
+  border-radius: 6px;
+  background: var(--xdl-text-strong);
+}
+
+body.style-showcase-body .atlas-mini-stats,
+body.style-showcase-body .atlas-mini-grid {
+  display: grid;
+  gap: 10px;
+}
+
+body.style-showcase-body .atlas-mini-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body.style-showcase-body .atlas-mini-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body.style-showcase-body .atlas-mini-stats span,
+body.style-showcase-body .atlas-mini-grid span {
+  min-height: 54px;
+  border: 1px solid var(--xdl-border);
+  border-radius: var(--xdl-radius);
+  background: var(--xdl-surface-soft);
+}
+
+body.style-showcase-body .ledger-mini {
+  padding: 22px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--xdl-border) 42%, transparent) 1px, transparent 1px) 0 0 / 28px 28px,
+    var(--xdl-surface);
+}
+
+body.style-showcase-body .ledger-mini-title {
+  width: 58%;
+  height: 32px;
+  margin-bottom: 18px;
+  border-bottom: 4px solid var(--xdl-accent);
+}
+
+body.style-showcase-body .ledger-mini-lines {
+  display: grid;
+  gap: 10px;
+}
+
+body.style-showcase-body .ledger-mini-lines span {
+  height: 12px;
+  border-radius: 999px;
+  background: var(--xdl-border-strong);
+}
+
+body.style-showcase-body .ledger-mini-lines span:nth-child(2) {
+  width: 88%;
+}
+
+body.style-showcase-body .ledger-mini-lines span:nth-child(3) {
+  width: 94%;
+}
+
+body.style-showcase-body .ledger-mini-lines span:nth-child(4) {
+  width: 72%;
+}
+
+body.style-showcase-body .ledger-mini-lines span:nth-child(5) {
+  width: 64%;
+}
+
+body.style-showcase-body .ledger-mini-callout {
+  height: 54px;
+  margin-top: 22px;
+  border: 1px solid color-mix(in srgb, var(--xdl-accent) 28%, var(--xdl-border));
+  border-left: 4px solid var(--xdl-accent);
+  border-radius: var(--xdl-radius);
+  background: var(--xdl-code-bg);
+}
+
+@media (max-width: 860px) {
+  body.style-showcase-body .template-grid,
+  body.style-showcase-body .atlas-mini {
+    grid-template-columns: 1fr;
+  }
+}
