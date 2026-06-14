@@ -10,6 +10,74 @@ body.style-showcase-body .hero-panel .emphasis-strip {
   margin-top: 16px;
 }
 
+body.style-showcase-body .topbar-inner {
+  width: min(var(--xdl-content-wide), 100%);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+}
+
+body.style-showcase-body .topbar .theme-switcher {
+  justify-content: flex-end;
+}
+
+body.style-showcase-body .layout.layout-docked-toc {
+  --xdl-docked-toc-width: 292px;
+  --xdl-docked-toc-collapsed-width: 78px;
+  --xdl-docked-toc-gap: 28px;
+  margin-top: 0;
+}
+
+body.style-showcase-body .layout.layout-docked-toc .page-column {
+  gap: 0;
+}
+
+body.style-showcase-body .layout.layout-docked-toc .toc.toc-docked {
+  top: 94px;
+}
+
+body.style-showcase-body > .layout.layout-docked-toc .showcase-header {
+  border-bottom: 1px solid var(--xdl-border-strong);
+}
+
+body.style-showcase-body .layout.layout-docked-toc .showcase-header .hero {
+  display: block;
+  padding-top: 66px;
+  padding-bottom: 56px;
+}
+
+body.style-showcase-body .showcase-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.92fr);
+  align-items: center;
+  gap: 48px;
+}
+
+body.style-showcase-body .showcase-hero-copy {
+  max-width: 760px;
+}
+
+body.style-showcase-body .showcase-header h1 {
+  max-width: 11ch;
+  margin-bottom: 20px;
+}
+
+body.style-showcase-body .showcase-header .lead {
+  max-width: 66ch;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+body.style-showcase-body .showcase-header .hero-actions {
+  margin-top: 26px;
+}
+
+body.style-showcase-body .showcase-header .hero-panel {
+  width: min(100%, 560px);
+  justify-self: start;
+}
+
 body.style-showcase-body .template-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
@@ -164,6 +232,25 @@ body.style-showcase-body .ledger-mini-callout {
 }
 
 @media (max-width: 860px) {
+  body.style-showcase-body .topbar-inner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  body.style-showcase-body .topbar .theme-switcher {
+    justify-content: flex-start;
+  }
+
+  body.style-showcase-body .layout.layout-docked-toc {
+    --xdl-docked-toc-gap: 18px;
+  }
+
+  body.style-showcase-body .layout.layout-docked-toc .showcase-header .hero {
+    padding-top: 46px;
+    padding-bottom: 32px;
+  }
+
+  body.style-showcase-body .showcase-hero-grid,
   body.style-showcase-body .template-grid,
   body.style-showcase-body .atlas-mini {
     grid-template-columns: 1fr;
