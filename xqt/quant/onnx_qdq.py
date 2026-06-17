@@ -1,0 +1,187 @@
+"""ONNX Runtime static QDQ quantization adapter."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Optional, Sequence
+
+import numpy as np
+import torch
+
+from xqt.core.artifact import file_sha256
+from xqt.core.errors import XQTBackendError
+
+
+@dataclass
+class ONNXQDQQuantizationResult:
+    """ONNX QDQ quantization metadata."""
+
+    path: Path
+    source_path: Path
+    checksum: str
+    calibration_samples: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _as_numpy_inputs(
+    batch: Any,
+    input_names: Sequence[str],
+) -> dict[str, np.ndarray]:
+    if isinstance(batch, Mapping):
+        data = batch.get("inputs", batch.get("input", batch.get("x")))
+        if data is None:
+            data = {
+                key: value
+                for key, value in batch.items()
+                if key not in {"targets", "target", "y", "labels", "label"}
+            }
+    elif isinstance(batch, (tuple, list)) and len(batch) >= 2:
+        data = batch[0] if len(batch) == 2 else tuple(batch[:-1])
+    else:
+        data = batch
+
+    if isinstance(data, torch.Tensor):
+        if len(input_names) != 1:
+            raise ValueError("single Tensor calibration batch requires one input name")
+        return {input_names[0]: data.detach().cpu().numpy()}
+    if isinstance(data, Mapping):
+        return {
+            str(key): value.detach().cpu().numpy()
+            for key, value in data.items()
+            if isinstance(value, torch.Tensor)
+        }
+    if isinstance(data, (tuple, list)):
+        if len(data) != len(input_names):
+            raise ValueError("tuple/list calibration batch length must match input_names")
+        return {
+            input_name: value.detach().cpu().numpy()
+            for input_name, value in zip(input_names, data)
+            if isinstance(value, torch.Tensor)
+        }
+    raise TypeError("calibration batch must contain Tensor inputs")
+
+
+class IterableCalibrationDataReader:
+    """Small ONNX Runtime CalibrationDataReader for PyTorch iterables."""
+
+    def __init__(
+        self,
+        dataloader: Iterable[Any],
+        *,
+        input_names: Sequence[str] = ("input",),
+        sample_limit: Optional[int] = None,
+    ) -> None:
+        self.input_names = tuple(input_names)
+        self.sample_limit = sample_limit
+        self._records = [
+            _as_numpy_inputs(batch, self.input_names)
+            for index, batch in enumerate(dataloader)
+            if sample_limit is None or index < sample_limit
+        ]
+        self._index = 0
+
+    @property
+    def samples(self) -> int:
+        """Return the number of calibration batches captured."""
+
+        return len(self._records)
+
+    def get_next(self) -> Optional[dict[str, np.ndarray]]:
+        """Return the next calibration sample for ONNX Runtime."""
+
+        if self._index >= len(self._records):
+            return None
+        record = self._records[self._index]
+        self._index += 1
+        return record
+
+    def rewind(self) -> None:
+        """Reset iteration for tests or repeated calibration."""
+
+        self._index = 0
+
+
+def quantize_onnx_qdq_static(
+    onnx_path: str | Path,
+    output_path: str | Path,
+    calibration_data: Iterable[Any],
+    *,
+    input_names: Sequence[str] = ("input",),
+    sample_limit: Optional[int] = None,
+    activation_type: str = "QUInt8",
+    weight_type: str = "QInt8",
+    per_channel: bool = False,
+    reduce_range: bool = False,
+    op_types_to_quantize: Optional[Sequence[str]] = None,
+    extra_options: Optional[Mapping[str, Any]] = None,
+) -> ONNXQDQQuantizationResult:
+    """Run ONNX Runtime static QDQ quantization."""
+
+    source = Path(onnx_path)
+    if not source.is_file():
+        raise XQTBackendError(f"ONNX file not found: {source}")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from onnxruntime.quantization import (  # type: ignore[import-untyped]
+            QuantFormat,
+            QuantType,
+            quantize_static,
+        )
+    except ImportError as exc:
+        raise XQTBackendError(
+            "onnxruntime.quantization is required for ONNX QDQ quantization"
+        ) from exc
+
+    quant_types = {
+        "QInt8": QuantType.QInt8,
+        "QUInt8": QuantType.QUInt8,
+    }
+    if activation_type not in quant_types:
+        raise ValueError("activation_type must be QInt8 or QUInt8")
+    if weight_type not in quant_types:
+        raise ValueError("weight_type must be QInt8 or QUInt8")
+
+    reader = IterableCalibrationDataReader(
+        calibration_data,
+        input_names=input_names,
+        sample_limit=sample_limit,
+    )
+    if reader.samples == 0:
+        raise ValueError("calibration_data must yield at least one batch")
+
+    quantize_static(
+        str(source),
+        str(output),
+        reader,
+        quant_format=QuantFormat.QDQ,
+        activation_type=quant_types[activation_type],
+        weight_type=quant_types[weight_type],
+        per_channel=per_channel,
+        reduce_range=reduce_range,
+        op_types_to_quantize=list(op_types_to_quantize or []),
+        extra_options=dict(extra_options or {}),
+    )
+    return ONNXQDQQuantizationResult(
+        path=output,
+        source_path=source,
+        checksum=file_sha256(output),
+        calibration_samples=reader.samples,
+        metadata={
+            "input_names": list(input_names),
+            "activation_type": activation_type,
+            "weight_type": weight_type,
+            "per_channel": per_channel,
+            "reduce_range": reduce_range,
+            "op_types_to_quantize": list(op_types_to_quantize or []),
+        },
+    )
+
+
+__all__ = [
+    "IterableCalibrationDataReader",
+    "ONNXQDQQuantizationResult",
+    "quantize_onnx_qdq_static",
+]
