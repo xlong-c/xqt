@@ -58,7 +58,12 @@ def benchmark_memory(
     if iterations <= 0:
         raise ValueError("iterations must be positive")
 
-    use_cuda = device == "cuda" and torch.cuda.is_available()
+    torch_device = torch.device(device) if device is not None else None
+    use_cuda = (
+        torch_device is not None
+        and torch_device.type == "cuda"
+        and torch.cuda.is_available()
+    )
     if use_cuda and sync_cuda:
         torch.cuda.synchronize()
     if use_cuda:

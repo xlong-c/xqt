@@ -70,6 +70,44 @@ def test_benchmark_memory_reports_process_rss() -> None:
     assert data["backend"] == "process_rss"
 
 
+def test_benchmark_helpers_accept_cuda_device_index(monkeypatch) -> None:
+    sync_calls = {"count": 0}
+    reset_calls = {"count": 0}
+
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr(
+        "torch.cuda.synchronize",
+        lambda: sync_calls.__setitem__("count", sync_calls["count"] + 1),
+    )
+    monkeypatch.setattr(
+        "torch.cuda.reset_peak_memory_stats",
+        lambda: reset_calls.__setitem__("count", reset_calls["count"] + 1),
+    )
+    monkeypatch.setattr("torch.cuda.max_memory_allocated", lambda: 123)
+    monkeypatch.setattr("torch.cuda.max_memory_reserved", lambda: 456)
+
+    latency_report = benchmark_callable(
+        lambda: None,
+        warmup=0,
+        iterations=1,
+        sync_cuda=True,
+        device="cuda:0",
+    )
+    memory_report = benchmark_memory(
+        lambda: None,
+        iterations=1,
+        device="cuda:0",
+        sync_cuda=True,
+    )
+
+    assert latency_report.iterations == 1
+    assert sync_calls["count"] >= 2
+    assert reset_calls["count"] == 1
+    assert memory_report.backend == "cuda"
+    assert memory_report.cuda_peak_allocated_bytes == 123
+    assert memory_report.cuda_peak_reserved_bytes == 456
+
+
 def test_benchmark_memory_rejects_invalid_iterations() -> None:
     with pytest.raises(ValueError, match="iterations must be positive"):
         benchmark_memory(lambda: None, iterations=0, device="cpu")

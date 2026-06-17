@@ -11,7 +11,7 @@
 - `bf16_clein.py`
 - `sdnq_clein.py`
 - `torchao_vit.py`
-- `core/`, `pipeline/`, `eval/`, `benchmark/`, `quant/`, `prune/`, `distill/`, `diffusion_distill/`, `export/`: 当前 XQT 包化基础能力
+- `core/`, `data/`, `pipeline/`, `eval/`, `benchmark/`, `quant/`, `prune/`, `distill/`, `diffusion_distill/`, `export/`: 当前 XQT 包化基础能力
 - `recipes/smoke_cpu.yaml`: CPU smoke recipe
 - `recipes/hf_text_kd_prune.yaml`: HF 文本分类 KD + pruning recipe 支架
 

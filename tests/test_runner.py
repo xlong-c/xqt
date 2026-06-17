@@ -547,6 +547,7 @@ def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> 
     assert vit_config.project.name == "image_vit_torchao_fp8"
     assert vit_config.data.validation is not None
     assert vit_config.data.validation.params["input_shape"] == [3, 224, 224]
+    assert vit_config.model.device == "cuda:0"
 
     def fake_quantize_onnx_qdq_static(
         onnx_path,
@@ -605,6 +606,27 @@ def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> 
     assert context.metrics["export"]["artifacts"][0]["dry_run"] is True
 
 
+def test_image_vit_torchao_fp8_recipe_runs_on_cuda_when_available(tmp_path) -> None:
+    if not torch.cuda.is_available():
+        return
+
+    config = load_xqt_config(
+        "xqt/recipes/image_vit_torchao_fp8.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "vit_fp8_cuda")},
+            "benchmark": {"warmup": 1, "iterations": 2},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.metrics["quant"]["backend"] == "torchao"
+    assert context.metrics["quant"]["strategy"] == "fp8_dynamic"
+    assert context.metrics["quant"]["quantized_module_count"] > 0
+    assert context.metrics["benchmark"]["memory"]["backend"] == "cuda"
+    assert context.artifacts["manifest"].is_file()
+
+
 def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
     teacher = torch.nn.Linear(4, 2)
     config = load_xqt_config(
@@ -625,6 +647,15 @@ def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
 
 
 def test_cifar100_qdq_recipe_loads_real_local_data_and_quantizes(monkeypatch, tmp_path) -> None:
+    def fake_build_torchvision_image_classification_loader(spec):
+        del spec
+        inputs = torch.randn(2, 3, 224, 224)
+        targets = torch.tensor([0, 1], dtype=torch.long)
+        return torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(inputs, targets),
+            batch_size=1,
+        )
+
     def fake_quantize_onnx_qdq_static(
         onnx_path,
         output_path_arg,
@@ -647,6 +678,10 @@ def test_cifar100_qdq_recipe_loads_real_local_data_and_quantizes(monkeypatch, tm
             metadata={"input_names": list(kwargs["input_names"])},
         )
 
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.build_torchvision_image_classification_loader",
+        fake_build_torchvision_image_classification_loader,
+    )
     monkeypatch.setattr(
         "xqt.pipeline.passes.quantize_onnx_qdq_static",
         fake_quantize_onnx_qdq_static,

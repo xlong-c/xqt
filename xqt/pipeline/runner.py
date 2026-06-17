@@ -34,10 +34,14 @@ DEFAULT_PASS_ORDER = (
 
 
 def _ensure_builtin_passes_registered() -> None:
+    """Import built-in passes for their registration side effects."""
+
     import xqt.pipeline.passes  # noqa: F401
 
 
 def _ensure_config(config: ConfigInput | XQTConfig) -> XQTConfig:
+    """Accept either a loaded config object or a config source."""
+
     if is_dataclass(config) and isinstance(config, XQTConfig):
         return config
     return load_xqt_config(config)

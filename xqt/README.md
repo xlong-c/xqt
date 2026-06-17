@@ -20,6 +20,7 @@
 当前包模块:
 
 - `core`: structured config, artifact manifest, checksum, XQT registry.
+- `data`: synthetic classification samples, calibration dataloader utilities, torchvision image classification loader.
 - `pipeline`: sequential pass manager 和最小 YAML runner.
 - `eval`: tensor output diff 和 metric flatten helper.
 - `benchmark`: latency 和 memory benchmark helper.
@@ -45,7 +46,7 @@
 - `recipes/smoke_cpu.yaml`: CPU-only schema 和 runner smoke recipe, 用于验证配置,PyTorch native export 和 manifest 路径.
 - `recipes/image_resnet_onnx_qdq_int8.yaml`: ResNet/CNN ONNX Runtime QDQ INT8 + TensorRT dry-run smoke recipe, 包含真实 `trtexec` 运行时使用的 `performance_thresholds` 示例.
 - `recipes/image_resnet_cifar100_qdq_cpu.yaml`: 使用本地 CIFAR-100 的 ResNet ONNX Runtime QDQ CPU recipe.
-- `recipes/image_vit_torchao_fp8.yaml`: ViT torchao FP8 smoke recipe, 真实 FP8 收益需要匹配硬件验证.
+- `recipes/image_vit_torchao_fp8.yaml`: ViT torchao FP8 CUDA recipe, 当前默认使用 `cuda:0`,可在支持 FP8 的 NVIDIA GPU 上直接跑 quant + benchmark; 真实收益仍应结合 pretrained 权重和目标任务数据复验.
 - `recipes/prune_finetune_cpu.yaml`: 线性 sparsity schedule + teacher KD 微调的 CPU smoke recipe.
 - `recipes/hf_text_kd_prune.yaml`: HF 文本分类 KD + 全局 L1 非结构化剪枝 recipe 支架, 依赖 `transformers` 和 `datasets`, 不下载权重到 git.
 

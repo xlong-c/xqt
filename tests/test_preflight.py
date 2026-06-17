@@ -86,5 +86,42 @@ def test_preflight_marks_torchao_fp8_as_cuda_requirement(monkeypatch) -> None:
     checks = {check.name: check for check in report.checks}
 
     assert report.passed is False
+    assert checks["model.device"].passed is False
     assert checks["dependency.torchao"].passed is True
     assert checks["hardware.cuda"].passed is False
+
+
+def test_preflight_accepts_cuda_device_index(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 1)
+
+    config_path = tmp_path / "recipe.yaml"
+    config_path.write_text(
+        """
+model:
+  target: torch.nn.Linear
+  params:
+    in_features: 4
+    out_features: 2
+  device: cuda:0
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 1
+    batch_size: 1
+compression:
+  quant:
+    enabled: true
+    backend: torchao
+    policy:
+      strategy: fp8_dynamic
+      include_module_types: [Linear]
+""",
+        encoding="utf-8",
+    )
+
+    report = preflight_xqt_config(config_path)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["model.device"].passed is True
+    assert checks["hardware.cuda"].passed is True

@@ -47,6 +47,8 @@ from xqt.quant.onnx_qdq import quantize_onnx_qdq_static
 
 
 def _split_inputs_from_batch(batch: Any) -> Any:
+    """Best-effort extraction of model inputs from a loader batch."""
+
     if isinstance(batch, Mapping):
         inputs = batch.get("inputs", batch.get("input", batch.get("x")))
         if inputs is not None:
@@ -62,6 +64,8 @@ def _split_inputs_from_batch(batch: Any) -> Any:
 
 
 def _move_to_device(data: Any, device: torch.device) -> Any:
+    """Recursively move nested batch structures onto the target device."""
+
     if isinstance(data, torch.Tensor):
         return data.to(device)
     if isinstance(data, Mapping):
@@ -74,6 +78,8 @@ def _move_to_device(data: Any, device: torch.device) -> Any:
 
 
 def _call_model(model: nn.Module, inputs: Any) -> Any:
+    """Call a module with mapping, tuple, or positional inputs."""
+
     if isinstance(inputs, Mapping):
         return model(**inputs)
     if isinstance(inputs, tuple):
@@ -339,6 +345,7 @@ class QuantPass:
         if not quant_config.enabled:
             return context
         if quant_config.backend == "onnxruntime_qdq":
+            # QDQ path needs an exportable ONNX graph before calibration can run.
             dataloader = context.data.get("calibration") or context.data.get("validation")
             if dataloader is None:
                 raise ValueError("calibration or validation data is required for ONNX QDQ")
@@ -454,6 +461,8 @@ class ExportPass:
         if dataloader is None:
             raise ValueError("validation data is required for export")
         batch = next(iter(dataloader))
+        # Built-in exporters currently assume a single tensor input so the
+        # runtime diff path can stay deterministic across backends.
         example_input = batch[0] if isinstance(batch, (tuple, list)) else batch
         if not isinstance(example_input, torch.Tensor):
             raise TypeError("built-in export pass currently supports one Tensor input")

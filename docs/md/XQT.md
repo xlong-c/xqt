@@ -451,7 +451,7 @@ Manifest 必填字段:
 
 | ID | 目标 | 模块 | 价值 | 退出条件 |
 | --- | --- | --- | --- | --- |
-| `image_vit_torchao_fp8` | XDL/timm ViT 分类 | quant + eval + benchmark | 收敛 `xqt/torchao_vit.py` | 已有 YAML smoke recipe, 真实 pretrained/timm 权重和硬件 FP8 验证待补 |
+| `image_vit_torchao_fp8` | XDL/timm ViT 分类 | quant + eval + benchmark | 收敛 `xqt/torchao_vit.py` | 已有 CUDA recipe, 可在支持 FP8 的 NVIDIA GPU 上直接跑 quant + benchmark; pretrained/timm 权重和真实任务精度仍待补 |
 | `image_resnet_onnx_qdq_int8` | ResNet/CNN 分类 | quant + export | 打通 ONNX Q/DQ 和 ONNX Runtime diff | 已有 YAML smoke recipe, synthetic image runner 测试和 TensorRT 阈值解析测试,真实 TensorRT engine 待目标机器验证 |
 | `image_resnet_cifar100_qdq_cpu` | ResNet/CIFAR-100 | quant + eval + benchmark | 在本地真实数据上验证 ONNX Runtime QDQ CPU 路径 | 已用本地 CIFAR-100 生成真实 QDQ ONNX, manifest 和 benchmark |
 | `hf_text_kd_prune` | HF 文本分类 | distill + prune | 复用知乎示例但改为 YAML | 已有 recipe 支架和 fake HF pipeline 测试, 真实 checkpoint 运行待补 |
@@ -585,7 +585,7 @@ benchmark:
 - [x] 实现 ONNX Runtime static QDQ INT8 adapter, 支持 PyTorch iterable 到 `CalibrationDataReader` 的桥接和内置 `onnxruntime_qdq` pass.
 - [x] 跑通一个 ViT 或 ResNet 的 PTQ smoke recipe. 当前 `image_resnet_onnx_qdq_int8.yaml` 可在测试中通过 synthetic image + QDQ adapter + TensorRT dry-run 路径.
 - [x] 跑通真实本地数据的 ONNX Runtime QDQ CPU recipe. 当前 `image_resnet_cifar100_qdq_cpu.yaml` 已使用本地 CIFAR-100 生成真实 QDQ ONNX, manifest 和 benchmark.
-- [ ] 跑通 `image_vit_torchao_fp8` 的 CUDA/FP8 硬件验证,以及 `image_resnet_onnx_qdq_int8` 的 TensorRT 真实 engine 生成. 当前 `xqt-preflight` 显示本环境无 CUDA 且缺少 `trtexec`,只能完成 CPU/ONNX Runtime 路径. TensorRT `trtexec` 输出解析,性能阈值判定和 manifest metric 已有纯单测覆盖;真实 engine 阈值仍需要目标机器. `hf_text_kd_prune` 的真实 HF 数据运行还需要安装 `datasets`.
+- [ ] 跑通 `image_resnet_onnx_qdq_int8` 的 TensorRT 真实 engine 生成. 当前 XQT 已可在支持 FP8 的 NVIDIA CUDA 环境上直接运行 `image_vit_torchao_fp8`, `xqt-preflight` 也会校验 `model.device` 和 FP8 所需 CUDA. 但本环境仍缺少 `trtexec`, 因此 TensorRT 路径暂时只能完成 dry-run,输出解析,性能阈值判定和 manifest metric 的测试覆盖. `hf_text_kd_prune` 的真实 HF 数据运行还需要安装 `datasets`.
 
 ### 阶段 4: PyTorch native,ONNX 和 TensorRT 导出
 

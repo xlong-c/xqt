@@ -63,6 +63,8 @@ def load_checkpoint_into_model(
 
     checkpoint = torch.load(checkpoint_path, map_location=map_location)
     state_dict: Mapping[str, Any]
+    # Support the common checkpoint layouts seen in XDL experiments:
+    # explicit state_key, model_state_dict, nested state_dict, or a raw state dict.
     if state_key is not None:
         state_dict = checkpoint[state_key]
     elif isinstance(checkpoint, Mapping) and "model_state_dict" in checkpoint:
@@ -100,6 +102,8 @@ def xdl_checkpoint_to_xqt_context(
         state_key=state_key,
         strict=strict,
     )
+    # Keep the checkpoint path in the manifest so downstream export and
+    # reporting can trace the run back to its training artifact.
     context = create_context(
         config,
         model=model,

@@ -65,7 +65,10 @@ def benchmark_callable(
     if iterations <= 0:
         raise ValueError("iterations must be positive")
 
-    should_sync_cuda = sync_cuda and (device == "cuda" or device is None)
+    torch_device = torch.device(device) if device is not None else None
+    should_sync_cuda = sync_cuda and (
+        torch_device is None or torch_device.type == "cuda"
+    )
 
     with torch.no_grad():
         for _ in range(warmup):
