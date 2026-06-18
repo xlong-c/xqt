@@ -2,6 +2,8 @@
 
 本文档负责定义 `xqt/` 的目标边界, 模块拆分和建设任务. 它是规划文档, 不是已实现 API 承诺. 当前 `xqt/` 仍是实验目录, 公共接口稳定前不要把本文中的模块名视为可导入契约.
 
+`xqt/` 内分析,诊断和优化建议能力的细化规划见 [XQT_ANALYSIS.md](XQT_ANALYSIS.md). 导出前前置融合的边界和配置见 [XQT_PRE_EXPORT_FUSION.md](XQT_PRE_EXPORT_FUSION.md). `xqt` 中蒸馏数据集,校准数据集,验证数据和 prompt 数据的角色边界与实现任务见 [XQT_DATA.md](XQT_DATA.md).
+
 ## 1. 项目定位
 
 `xqt` 是基于 PyTorch 的模型压缩与部署工具链, 面向从训练产物到推理产物的工程路径:
@@ -429,6 +431,7 @@ Pass 输入输出约束:
 | `load_model` | `ModelSpec` | `model`, `example_input` | 模型 `eval()` 前向成功 |
 | `load_data` | `DataSpec` | dataloader/sample batch | batch shape 和 dtype 符合 `ShapeSpec` |
 | `baseline_eval` | model + validation data | baseline metric/report | 指标可复现 |
+| `analyze` | baseline/candidate model + sample batch | sensitivity/drift/recommendation report | 报告字段完整,可选阈值检查通过 |
 | `quant` | model + calibration data | quantized model/artifact | output diff + dtype policy report |
 | `prune` | model + pruning plan | pruned model/artifact | sparsity/shape report + output diff |
 | `distill` | teacher + student + train data | distilled checkpoint | student metric 不低于阈值 |
@@ -591,6 +594,7 @@ benchmark:
 
 - [x] 实现 `export/torch_exporter.py`, 支持 `torch_export` ExportedProgram 保存/加载校验和 TorchScript trace/script fallback.
 - [x] 实现 `export/onnx_exporter.py`, 默认 `dynamo=True`.
+- [x] 实现导出前前置融合 helper, 支持 eager/fx 两种模式并在 ONNX export metadata 中留痕.
 - [x] 实现 ONNX checker 和 ONNX Runtime diff 验证.
 - [x] 实现 `export/tensorrt.py`, 首期可调用 `trtexec` 或 Python builder. 当前实现为 `trtexec` adapter, 支持 dry-run,命令构造测试,性能摘要解析和 `performance_thresholds` 阈值报告.
 - [x] 支持 TensorRT dynamic shape profile 和 FP16/INT8 标记.

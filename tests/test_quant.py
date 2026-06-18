@@ -7,10 +7,13 @@ from xqt.core.errors import XQTBackendError
 from xqt.quant import (
     IterableCalibrationDataReader,
     QuantizationPolicy,
+    analyze_activation_drift,
+    analyze_layer_errors,
     analyze_layer_sensitivity,
     calibrate_activation_statistics,
     list_quantizable_modules,
     quantize_onnx_qdq_static,
+    recommend_high_precision_modules,
     should_quantize_module,
     suggest_high_precision_modules,
 )
@@ -74,6 +77,29 @@ def test_calibrate_activation_statistics_collects_ranges() -> None:
     assert all(stat.maximum >= stat.minimum for stat in stats)
 
 
+def test_analyze_activation_drift_reports_stat_deltas() -> None:
+    reference = TinyModel()
+    candidate = TinyModel()
+    candidate.load_state_dict(reference.state_dict())
+    with torch.no_grad():
+        candidate.features[0].bias.add_(0.5)
+
+    drift = analyze_activation_drift(
+        reference,
+        candidate,
+        [torch.ones(2, 3), torch.full((2, 3), 2.0)],
+        module_names=["features.0"],
+    )
+
+    assert len(drift) == 1
+    assert drift[0].name == "features.0"
+    assert drift[0].mean_delta != 0.0
+    assert drift[0].range_ratio is not None
+    assert drift[0].to_dict()["reference"]["name"] == "features.0"
+    assert "saturation_ratio" in drift[0].to_dict()["reference"]
+    assert "clipping_ratio_delta" in drift[0].to_dict()
+
+
 def test_synthetic_classification_loader_supports_image_shape() -> None:
     loader = build_synthetic_classification_loader(
         SyntheticClassificationSpec(
@@ -135,6 +161,66 @@ def test_analyze_layer_sensitivity_and_suggestions() -> None:
     threshold = (records[0].diff.max_abs + records[1].diff.max_abs) / 2.0
     assert suggest_high_precision_modules(records, max_abs_threshold=threshold) == [
         records[0].name
+    ]
+
+
+def test_analyze_layer_errors_collects_summaries_and_weight_diff() -> None:
+    reference = TinyModel()
+    candidate = TinyModel()
+    candidate.load_state_dict(reference.state_dict())
+    with torch.no_grad():
+        candidate.features[0].weight.add_(0.2)
+        candidate.features[0].bias.add_(0.5)
+        candidate.features[2].bias.add_(0.1)
+
+    records = analyze_layer_errors(
+        reference,
+        candidate,
+        torch.ones(2, 3),
+        module_names=["features.0", "features.2"],
+    )
+
+    assert {record.name for record in records} == {"features.0", "features.2"}
+    assert records[0].diff.max_abs >= records[1].diff.max_abs
+    assert records[0].diff.max_abs >= records[1].diff.max_abs
+    by_name = {record.name: record for record in records}
+    assert by_name["features.0"].reference_summary["shape"] == [2, 4]
+    assert by_name["features.0"].candidate_summary["shape"] == [2, 4]
+    assert by_name["features.0"].weight_diff is not None
+    assert by_name["features.0"].weight_diff.mean_abs > 0.0
+    assert "high_error" in by_name["features.0"].tags
+    assert by_name["features.0"].recommendation == "consider_higher_precision"
+    assert by_name["features.0"].to_dict()["weight_diff"] is not None
+
+
+def test_recommend_high_precision_modules_uses_analysis_records() -> None:
+    reference = TinyModel()
+    candidate = TinyModel()
+    candidate.load_state_dict(reference.state_dict())
+    with torch.no_grad():
+        candidate.features[0].weight.add_(0.2)
+        candidate.features[0].bias.add_(0.5)
+        candidate.features[2].bias.add_(0.1)
+
+    records = analyze_layer_errors(
+        reference,
+        candidate,
+        torch.ones(2, 3),
+        module_names=["features.0", "features.2"],
+    )
+
+    recommended = recommend_high_precision_modules(records, top_k=1)
+    sorted_by_mean_abs = sorted(records, key=lambda record: record.diff.mean_abs, reverse=True)
+    assert recommended == [sorted_by_mean_abs[0].name]
+    threshold = (records[0].diff.mean_abs + records[1].diff.mean_abs) / 2.0
+    threshold_expected = [
+        record.name for record in sorted_by_mean_abs if record.diff.mean_abs >= threshold
+    ]
+    assert recommend_high_precision_modules(records, mean_abs_threshold=threshold) == threshold_expected
+    assert recommend_high_precision_modules(records, require_weight_shift=True) == [
+        record.name
+        for record in sorted_by_mean_abs
+        if record.weight_diff is not None and record.weight_diff.mean_abs > 0.0
     ]
 
 
@@ -251,6 +337,44 @@ def test_quantize_onnx_qdq_static_calls_onnxruntime_quantizer(monkeypatch, tmp_p
     assert calls["kwargs"]["activation_type"] == "QUInt8"
     assert calls["kwargs"]["weight_type"] == "QInt8"
     assert calls["kwargs"]["op_types_to_quantize"] == ["Conv", "MatMul"]
+    assert result.metadata["calibration_summary"]["batch_count"] == 1
+    assert result.metadata["calibration_summary"]["input_names"] == ["input"]
+
+
+def test_iterable_calibration_data_reader_supports_tuple_multi_input_names() -> None:
+    reader = IterableCalibrationDataReader(
+        [
+            (
+                torch.ones(1, 3),
+                torch.zeros(1, 3),
+                torch.tensor([1]),
+            )
+        ],
+        input_names=["left", "right"],
+    )
+
+    record = reader.get_next()
+    assert record is not None
+    assert set(record.keys()) == {"left", "right"}
+    assert record["left"].shape == (1, 3)
+    assert record["right"].shape == (1, 3)
+
+
+def test_iterable_calibration_data_reader_supports_mapping_multi_input_names() -> None:
+    reader = IterableCalibrationDataReader(
+        [
+            {
+                "input_ids": torch.ones(1, 3),
+                "attention_mask": torch.zeros(1, 3),
+                "labels": torch.tensor([1]),
+            }
+        ],
+        input_names=["input_ids", "attention_mask"],
+    )
+
+    record = reader.get_next()
+    assert record is not None
+    assert set(record.keys()) == {"input_ids", "attention_mask"}
 
 
 def test_quantize_onnx_qdq_static_rejects_missing_onnx(tmp_path) -> None:

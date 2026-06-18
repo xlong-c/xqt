@@ -46,6 +46,14 @@ class PromptRecord:
     prompt: str
     negative_prompt: Optional[str] = None
     seed: Optional[int] = None
+    guidance_scale: Optional[float] = None
+    steps: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    condition_image: Optional[str] = None
+    condition_mask: Optional[str] = None
+    reference_image: Optional[str] = None
+    latent_cache_key: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

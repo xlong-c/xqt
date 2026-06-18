@@ -2,7 +2,11 @@ import pytest
 import torch
 from torch import nn
 
-from xqt.distill.hooks import ModuleOutputCapture, capture_module_outputs
+from xqt.distill.hooks import (
+    ModuleOutputCapture,
+    analyze_feature_alignment,
+    capture_module_outputs,
+)
 from xqt.distill.losses import (
     distillation_loss,
     feature_distillation_loss,
@@ -94,3 +98,41 @@ def test_module_output_capture_records_named_outputs_and_removes_hooks() -> None
     with pytest.raises(KeyError, match="Modules not found"):
         with ModuleOutputCapture(model, ["missing"]):
             model(inputs)
+
+
+def test_analyze_feature_alignment_reports_feature_diff() -> None:
+    teacher = nn.Sequential(
+        nn.Linear(3, 4),
+        nn.ReLU(),
+        nn.Linear(4, 2),
+    )
+    student = nn.Sequential(
+        nn.Linear(3, 4),
+        nn.ReLU(),
+        nn.Linear(4, 2),
+    )
+    student.load_state_dict(teacher.state_dict())
+    with torch.no_grad():
+        student[0].bias.add_(0.4)
+
+    records = analyze_feature_alignment(teacher, student, torch.ones(2, 3), module_names=["0", "2"])
+
+    assert {record.teacher_name for record in records} == {"0", "2"}
+    assert records[0].diff.max_abs >= records[1].diff.max_abs
+    assert records[0].teacher_summary["shape"] == [2, 4]
+    assert records[0].student_summary["shape"] == [2, 4]
+    assert records[0].recommendation is not None
+    assert "high_feature_error" in records[0].tags
+
+
+def test_analyze_feature_alignment_marks_shape_mismatch_invalid() -> None:
+    teacher = nn.Sequential(nn.Linear(3, 4))
+    student = nn.Sequential(nn.Linear(3, 5))
+
+    records = analyze_feature_alignment(teacher, student, torch.ones(2, 3), module_names=["0"])
+
+    assert len(records) == 1
+    assert records[0].diff.valid is False
+    assert "shape mismatch" in records[0].diff.message
+    assert records[0].recommendation == "review_layer_mapping"
+    assert "shape_mismatch" in records[0].tags

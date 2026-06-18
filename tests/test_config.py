@@ -28,6 +28,8 @@ def test_load_xqt_config_merges_mapping_and_overrides() -> None:
     assert config.compression.quant.policy == {"dtype": "fp8"}
     assert config.benchmark.warmup == 1
     assert config.benchmark.iterations == 3
+    assert config.analysis.enabled is False
+    assert config.analysis.metrics == ["max_abs", "mean_abs", "cosine_similarity"]
 
 
 def test_load_xqt_config_from_yaml_resolves_xdl_resolver(tmp_path) -> None:
@@ -63,6 +65,9 @@ benchmark:
         ({"compression": {"axes": ["latency"]}}, "Unsupported compression axes"),
         ({"benchmark": {"warmup": -1}}, "benchmark.warmup"),
         ({"benchmark": {"iterations": 0}}, "benchmark.iterations"),
+        ({"analysis": {"compare_to": "candidate"}}, "analysis.compare_to"),
+        ({"analysis": {"top_k": 0}}, "analysis.top_k"),
+        ({"analysis": {"metrics": []}}, "analysis.metrics"),
         (
             {"compression": {"prune": {"target_sparsity": 1.5}}},
             "target_sparsity",
@@ -78,6 +83,83 @@ benchmark:
     ],
 )
 def test_load_xqt_config_rejects_invalid_values(
+    raw_config: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(XQTConfigError, match=message):
+        load_xqt_config(raw_config)
+
+
+def test_load_xqt_config_validates_pre_export_fusion_under_export_and_quant() -> None:
+    config = load_xqt_config(
+        {
+            "compression": {
+                "quant": {
+                    "policy": {
+                        "pre_export_fusion": {
+                            "enabled": True,
+                            "mode": "fx",
+                        }
+                    }
+                }
+            },
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "params": {
+                            "pre_export_fusion": {
+                                "enabled": True,
+                                "mode": "eager",
+                                "modules_to_fuse": [["conv", "bn"]],
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+    )
+
+    assert config.compression.quant.policy["pre_export_fusion"]["mode"] == "fx"
+    assert config.export.targets[0].params["pre_export_fusion"]["mode"] == "eager"
+
+
+@pytest.mark.parametrize(
+    ("raw_config", "message"),
+    [
+        (
+            {
+                "compression": {
+                    "quant": {
+                        "policy": {
+                            "pre_export_fusion": {"enabled": True, "mode": "bad"}
+                        }
+                    }
+                }
+            },
+            "compression.quant.policy.pre_export_fusion.mode",
+        ),
+        (
+            {
+                "export": {
+                    "targets": [
+                        {
+                            "format": "onnx",
+                            "params": {
+                                "pre_export_fusion": {
+                                    "enabled": True,
+                                    "mode": "eager",
+                                }
+                            },
+                        }
+                    ]
+                }
+            },
+            "export.targets.0.params.pre_export_fusion.modules_to_fuse",
+        ),
+    ],
+)
+def test_load_xqt_config_rejects_invalid_pre_export_fusion(
     raw_config: dict[str, object],
     message: str,
 ) -> None:

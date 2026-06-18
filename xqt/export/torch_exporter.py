@@ -11,6 +11,11 @@ from torch import nn
 
 from xqt.core.artifact import file_sha256
 from xqt.eval.compare import TensorDiff, compare_tensors
+from xqt.export.input_utils import (
+    call_model_with_example_input,
+    first_tensor_output,
+    split_example_input,
+)
 
 
 @dataclass
@@ -34,22 +39,6 @@ class TorchScriptExportResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _as_example_args(example_input: Any) -> tuple[Any, ...]:
-    if isinstance(example_input, tuple):
-        return example_input
-    if isinstance(example_input, list):
-        return tuple(example_input)
-    return (example_input,)
-
-
-def _first_tensor_output(output: Any) -> torch.Tensor:
-    if isinstance(output, torch.Tensor):
-        return output
-    if isinstance(output, (tuple, list)) and output and isinstance(output[0], torch.Tensor):
-        return output[0]
-    raise TypeError("export diff currently requires a Tensor or tuple/list first Tensor output")
-
-
 def export_torch_program(
     model: nn.Module,
     example_input: Any,
@@ -67,13 +56,16 @@ def export_torch_program(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     model.eval()
-    args = _as_example_args(example_input)
+    example_spec = split_example_input(example_input)
 
     with torch.no_grad():
-        reference_output = _first_tensor_output(model(*args))
+        reference_output = first_tensor_output(
+            call_model_with_example_input(model, example_input)
+        )
     exported = torch.export.export(
         model,
-        args,
+        example_spec.args,
+        kwargs=dict(example_spec.kwargs) if example_spec.kwargs else None,
         dynamic_shapes=dict(dynamic_shapes) if dynamic_shapes else None,
         strict=strict,
     )
@@ -87,7 +79,9 @@ def export_torch_program(
         if compare_output:
             loaded_module = loaded.module()
             with torch.no_grad():
-                candidate_output = _first_tensor_output(loaded_module(*args))
+                candidate_output = first_tensor_output(
+                    call_model_with_example_input(loaded_module, example_input)
+                )
             diff = compare_tensors(reference_output, candidate_output, atol=atol, rtol=rtol)
 
     return TorchExportResult(
@@ -119,12 +113,26 @@ def export_torchscript(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     model.eval()
-    args = _as_example_args(example_input)
+    example_spec = split_example_input(example_input)
     with torch.no_grad():
-        reference_output = _first_tensor_output(model(*args))
+        reference_output = first_tensor_output(
+            call_model_with_example_input(model, example_input)
+        )
 
     if method == "trace":
-        scripted = torch.jit.trace(model, args, check_trace=check_trace)
+        if example_spec.kwargs:
+            scripted = torch.jit.trace(
+                model,
+                example_kwarg_inputs=dict(example_spec.kwargs),
+                check_trace=check_trace,
+                strict=False,
+            )
+        else:
+            scripted = torch.jit.trace(
+                model,
+                example_spec.args,
+                check_trace=check_trace,
+            )
     elif method == "script":
         scripted = torch.jit.script(model)
     else:
@@ -136,7 +144,9 @@ def export_torchscript(
         loaded = torch.jit.load(str(output), map_location="cpu")
         loaded.eval()
         with torch.no_grad():
-            candidate_output = _first_tensor_output(loaded(*args))
+            candidate_output = first_tensor_output(
+                call_model_with_example_input(loaded, example_input)
+            )
         diff = compare_tensors(reference_output, candidate_output, atol=atol, rtol=rtol)
 
     return TorchScriptExportResult(

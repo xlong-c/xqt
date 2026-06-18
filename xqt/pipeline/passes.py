@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -14,14 +15,19 @@ from xqt.core.imports import build_target
 from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
 from xqt.data import (
-    SyntheticClassificationSpec,
-    TorchvisionImageClassificationSpec,
-    build_synthetic_classification_loader,
-    build_torchvision_image_classification_loader,
+    build_data_split,
+    prompt_summary,
 )
-from xqt.distill import HFTextClassificationBundle, train_logit_distillation
+from xqt.distill import (
+    HFTextClassificationBundle,
+    analyze_feature_alignment,
+    train_logit_distillation,
+)
 from xqt.eval import (
+    build_pareto_points,
     evaluate_pytorch_model,
+    records_to_rows,
+    write_csv_report,
     write_json_report,
     write_markdown_report,
 )
@@ -35,14 +41,18 @@ from xqt.export import (
     export_torch_program,
     export_torchscript,
 )
+from xqt.export.input_utils import default_input_names, first_tensor_output
 from xqt.prune import (
+    collect_module_importance,
     PruningSchedule,
     apply_global_l1_unstructured_pruning,
+    rank_prune_candidates,
     remove_pruning_reparameterization,
     run_prune_kd_loop,
     summarize_pruning,
 )
-from xqt.quant import quantize_with_torchao
+from xqt.quant import analyze_layer_errors, quantize_with_torchao
+from xqt.quant import analyze_activation_drift, recommend_high_precision_modules
 from xqt.quant.onnx_qdq import quantize_onnx_qdq_static
 
 
@@ -118,66 +128,72 @@ class LoadModelPass:
 
 @register_pass("load_data")
 class LoadDataPass:
-    """Build configured calibration and validation data."""
+    """Build configured calibration, train, validation, and prompt data."""
 
     name = "load_data"
 
-    def _build_data_split(self, split: Any, context: XQTContext, *, default_seed: int) -> Any:
-        if split.target == "synthetic_classification":
-            input_dim = int(context.config.model.params.get("in_features", 4))
-            output_dim = int(context.config.model.params.get("out_features", 2))
-            input_shape = split.params.get("input_shape")
-            num_classes = int(split.params.get("num_classes", output_dim))
-            spec = SyntheticClassificationSpec(
-                sample_limit=split.sample_limit or 8,
-                batch_size=split.batch_size,
-                input_dim=input_dim,
-                input_shape=input_shape,
-                num_classes=num_classes,
-                seed=int(split.params.get("seed", default_seed)),
-            )
-            return build_synthetic_classification_loader(spec)
-        if split.target == "torchvision_image_classification":
-            spec = TorchvisionImageClassificationSpec(
-                dataset_name=str(split.params.get("dataset_name", "CIFAR100")),
-                root=split.root or str(split.params.get("root", "./data")),
-                train=bool(split.params.get("train", False)),
-                download=bool(split.params.get("download", False)),
-                batch_size=split.batch_size,
-                sample_limit=split.sample_limit,
-                shuffle=bool(split.params.get("shuffle", False)),
-                num_workers=int(split.params.get("num_workers", 0)),
-                transform_params=dict(split.params.get("transform_params", {})),
-            )
-            return build_torchvision_image_classification_loader(spec)
-        raise ValueError(
-            "Only target=synthetic_classification or "
-            "target=torchvision_image_classification is supported by the built-in "
-            "data pass"
+    def _build_data_split(
+        self,
+        split_name: str,
+        split: Any,
+        context: XQTContext,
+        *,
+        default_seed: int,
+    ) -> Any:
+        return build_data_split(
+            split_name,
+            split,
+            model_params=context.config.model.params,
+            default_seed=default_seed,
         )
 
     def run(self, context: XQTContext) -> XQTContext:
         calibration = context.config.data.calibration
+        prompts = context.config.data.prompts
         validation = context.config.data.validation
         train = context.config.data.train
         if calibration is not None and "calibration" not in context.data:
             context.data["calibration"] = self._build_data_split(
+                "calibration",
                 calibration,
                 context,
                 default_seed=2,
             )
         if train is not None and "train" not in context.data:
             context.data["train"] = self._build_data_split(
+                "train",
                 train,
                 context,
                 default_seed=1,
             )
         if validation is not None and "validation" not in context.data:
             context.data["validation"] = self._build_data_split(
+                "validation",
                 validation,
                 context,
                 default_seed=0,
             )
+        if prompts is not None and "prompts" not in context.data:
+            built_prompts = self._build_data_split(
+                "prompts",
+                prompts,
+                context,
+                default_seed=3,
+            )
+            context.data["prompts"] = built_prompts
+            summary = prompt_summary(built_prompts)
+            context.metrics["prompts"] = summary
+            if context.manifest is not None:
+                context.manifest.add_metric(
+                    MetricRecord(
+                        name="prompts.count",
+                        value=summary["count"],
+                        metadata={
+                            "has_negative_prompt": summary["has_negative_prompt"],
+                            "has_seed": summary["has_seed"],
+                        },
+                    )
+                )
         return context
 
 
@@ -234,6 +250,8 @@ class BaselineEvalPass:
 
     def run(self, context: XQTContext) -> XQTContext:
         model = context.require_model()
+        if context.reference_model is None:
+            context.reference_model = copy.deepcopy(model)
         dataloader = context.data.get("validation")
         if dataloader is None:
             raise ValueError("validation data is required for baseline_eval")
@@ -251,6 +269,140 @@ class BaselineEvalPass:
                         value=value,
                     )
                 )
+        return context
+
+
+@register_pass("analyze")
+class AnalyzePass:
+    """Analyze current model outputs against the baseline snapshot."""
+
+    name = "analyze"
+
+    def run(self, context: XQTContext) -> XQTContext:
+        analysis_config = context.config.analysis
+        if not analysis_config.enabled:
+            return context
+        model = context.require_model()
+        if analysis_config.compare_to != "baseline":
+            raise ValueError("Only analysis.compare_to=baseline is supported")
+        reference_model = context.reference_model
+        if reference_model is None:
+            raise ValueError("reference_model is required for analyze pass")
+
+        dataloader = context.data.get("validation")
+        if dataloader is None:
+            raise ValueError("validation data is required for analyze pass")
+        batch = next(iter(dataloader))
+        inputs = _move_to_device(
+            _split_inputs_from_batch(batch),
+            torch.device(context.config.model.device),
+        )
+        model = model.to(context.config.model.device)
+        reference_model = reference_model.to(context.config.model.device)
+        records = analyze_layer_errors(
+            reference_model,
+            model,
+            inputs,
+            module_names=analysis_config.module_names,
+            atol=context.config.validation.output_diff.atol,
+            rtol=context.config.validation.output_diff.rtol,
+            include_weight_diff=analysis_config.include_weight_diff,
+            policy=None,
+        )
+        if analysis_config.top_k is not None:
+            records = records[: analysis_config.top_k]
+
+        rows = records_to_rows(records)
+        activation_drift = analyze_activation_drift(
+            reference_model,
+            model,
+            [inputs],
+            module_names=analysis_config.module_names,
+        )
+        importance_records = collect_module_importance(
+            model,
+            module_names=analysis_config.module_names,
+        )
+        prune_candidates: list[dict[str, object]] = []
+        if analysis_config.recommendations.prune_candidates:
+            prune_candidate_records = rank_prune_candidates(
+                model,
+                records,
+                module_names=analysis_config.module_names,
+                top_k=analysis_config.top_k,
+            )
+            prune_candidates = [record.to_dict() for record in prune_candidate_records]
+        recommended_modules: list[str] = []
+        if analysis_config.recommendations.mixed_precision:
+            recommended_modules = recommend_high_precision_modules(
+                records,
+                top_k=analysis_config.top_k,
+            )
+        teacher_student_alignment: list[dict[str, object]] = []
+        if isinstance(context.teacher, nn.Module):
+            alignment_records = analyze_feature_alignment(
+                context.teacher.to(context.config.model.device),
+                model,
+                inputs,
+                module_names=analysis_config.module_names,
+                atol=context.config.validation.output_diff.atol,
+                rtol=context.config.validation.output_diff.rtol,
+            )
+            if analysis_config.top_k is not None:
+                alignment_records = alignment_records[: analysis_config.top_k]
+            teacher_student_alignment = [
+                record.to_dict() for record in alignment_records
+            ]
+        context.metrics["analysis"] = {
+            "compare_to": analysis_config.compare_to,
+            "metrics": list(analysis_config.metrics),
+            "record_count": len(records),
+            "records": [record.to_dict() for record in records],
+            "rows": rows,
+            "activation_drift": [record.to_dict() for record in activation_drift],
+            "importance": [record.to_dict() for record in importance_records],
+            "prune_candidates": prune_candidates,
+            "recommended_high_precision_modules": recommended_modules,
+            "teacher_student_alignment": teacher_student_alignment,
+            "pareto_points": [],
+        }
+
+        artifact_dir = Path(context.config.project.artifact_dir)
+        if analysis_config.export.json:
+            json_path = write_json_report(
+                context.metrics["analysis"],
+                artifact_dir / "analysis.json",
+            )
+            context.artifacts["analysis_json"] = json_path
+        if analysis_config.export.csv:
+            csv_path = write_csv_report(rows, artifact_dir / "analysis.csv")
+            context.artifacts["analysis_csv"] = csv_path
+        if analysis_config.export.markdown:
+            top_rows = rows[: min(analysis_config.top_k or len(rows), len(rows))]
+            markdown_sections = {
+                record.get("name", f"layer_{index}"): {
+                    "module_type": record.get("module_type"),
+                    "diff.max_abs": record.get("diff.max_abs"),
+                    "diff.mean_abs": record.get("diff.mean_abs"),
+                    "recommendation": record.get("recommendation"),
+                }
+                for index, record in enumerate(top_rows)
+            }
+            markdown_path = write_markdown_report(
+                "XQT Analysis",
+                markdown_sections,
+                artifact_dir / "analysis.md",
+            )
+            context.artifacts["analysis_markdown"] = markdown_path
+
+        if context.manifest is not None:
+            context.manifest.add_metric(
+                MetricRecord(
+                    name="analysis.record_count",
+                    value=len(records),
+                    metadata={"compare_to": analysis_config.compare_to},
+                )
+            )
         return context
 
 
@@ -351,27 +503,27 @@ class QuantPass:
                 raise ValueError("calibration or validation data is required for ONNX QDQ")
             policy = quant_config.policy
             onnx_path = policy.get("onnx_path") or context.artifacts.get("last_onnx")
+            export_metadata: dict[str, Any] = {}
+            batch = next(iter(dataloader))
+            example_input = _split_inputs_from_batch(batch)
+            input_names = list(policy.get("input_names") or default_input_names(example_input))
             if onnx_path is None:
-                batch = next(iter(dataloader))
-                example_input = _split_inputs_from_batch(batch)
-                if not isinstance(example_input, torch.Tensor):
-                    raise TypeError(
-                        "ONNX QDQ auto-export currently supports one Tensor input"
-                    )
                 onnx_path = (
                     Path(context.config.project.artifact_dir)
                     / str(policy.get("source_name", "quant_source.onnx"))
                 )
-                export_onnx(
+                export_result = export_onnx(
                     model,
                     example_input,
                     onnx_path,
                     opset=policy.get("opset"),
-                    input_names=policy.get("input_names"),
+                    input_names=input_names,
                     output_names=policy.get("output_names"),
                     dynamo=bool(policy.get("dynamo", True)),
                     validate=bool(policy.get("validate", True)),
+                    pre_export_fusion=policy.get("pre_export_fusion"),
                 )
+                export_metadata = dict(export_result.metadata)
                 context.artifacts["last_onnx"] = Path(onnx_path)
             output_path = policy.get("output_path")
             if output_path is None:
@@ -382,7 +534,7 @@ class QuantPass:
                 onnx_path,
                 output_path,
                 dataloader,
-                input_names=policy.get("input_names") or ("input",),
+                input_names=input_names,
                 sample_limit=policy.get("sample_limit"),
                 activation_type=str(policy.get("activation_type", "QUInt8")),
                 weight_type=str(policy.get("weight_type", "QInt8")),
@@ -391,6 +543,10 @@ class QuantPass:
                 op_types_to_quantize=policy.get("op_types_to_quantize"),
                 extra_options=policy.get("extra_options"),
             )
+            if export_metadata.get("pre_export_fusion") is not None:
+                result.metadata["pre_export_fusion"] = dict(
+                    export_metadata["pre_export_fusion"]
+                )
             context.artifacts["quant_onnx"] = result.path
             context.artifacts["last_onnx"] = result.path
             context.metrics["quant"] = {
@@ -398,6 +554,7 @@ class QuantPass:
                 "path": str(result.path),
                 "checksum": result.checksum,
                 "calibration_samples": result.calibration_samples,
+                "calibration_summary": result.metadata.get("calibration_summary"),
                 "metadata": result.metadata,
             }
             if context.manifest is not None:
@@ -461,19 +618,11 @@ class ExportPass:
         if dataloader is None:
             raise ValueError("validation data is required for export")
         batch = next(iter(dataloader))
-        # Built-in exporters currently assume a single tensor input so the
-        # runtime diff path can stay deterministic across backends.
-        example_input = batch[0] if isinstance(batch, (tuple, list)) else batch
-        if not isinstance(example_input, torch.Tensor):
-            raise TypeError("built-in export pass currently supports one Tensor input")
+        example_input = _split_inputs_from_batch(batch)
 
         exported: list[dict[str, object]] = []
         with torch.no_grad():
-            reference_output = model(example_input)
-            if isinstance(reference_output, (tuple, list)):
-                reference_output = reference_output[0]
-            if not isinstance(reference_output, torch.Tensor):
-                raise TypeError("model output must be a Tensor for export diff")
+            reference_output = first_tensor_output(_call_model(model, example_input))
 
         for index, target in enumerate(context.config.export.targets):
             if target.format == "torch_export":
@@ -587,10 +736,12 @@ class ExportPass:
                     output_path,
                     opset=target.opset,
                     dynamic_shapes=target.dynamic_shapes,
-                    input_names=target.params.get("input_names"),
+                    input_names=target.params.get("input_names")
+                    or default_input_names(example_input),
                     output_names=target.params.get("output_names"),
                     dynamo=bool(target.params.get("dynamo", True)),
                     validate=bool(target.params.get("validate", True)),
+                    pre_export_fusion=target.params.get("pre_export_fusion"),
                 )
                 diff = None
                 if bool(target.params.get("runtime_diff", True)):
@@ -598,11 +749,12 @@ class ExportPass:
                         result.path,
                         reference_output,
                         example_input,
-                        input_name=(target.params.get("input_names") or ["input"])[0],
+                        input_names=result.metadata.get("input_names"),
                         atol=context.config.validation.output_diff.atol,
                         rtol=context.config.validation.output_diff.rtol,
                     )
                     result.output_diff = diff
+                result_metadata = getattr(result, "metadata", {})
                 record = ArtifactRecord.from_file(
                     result.path,
                     format="onnx",
@@ -611,6 +763,7 @@ class ExportPass:
                         "opset": result.opset,
                         "checked": result.checked,
                         "output_diff": diff.to_dict() if diff is not None else None,
+                        **result_metadata,
                     },
                 )
                 context.artifacts[f"export_{index}"] = result.path
@@ -624,6 +777,7 @@ class ExportPass:
                         "checked": result.checked,
                         "checksum": result.checksum,
                         "output_diff": diff.to_dict() if diff is not None else None,
+                        "pre_export_fusion": result_metadata.get("pre_export_fusion"),
                     }
                 )
                 continue
@@ -872,6 +1026,21 @@ class BenchmarkPass:
             )
             benchmark_metrics["memory"] = memory_report.to_dict()
         context.metrics["benchmark"] = benchmark_metrics
+        analysis_metrics = context.metrics.get("analysis")
+        if isinstance(analysis_metrics, dict):
+            analysis_metrics["pareto_points"] = build_pareto_points(
+                [
+                    {
+                        "config_id": context.config.project.name,
+                        "benchmark": context.metrics["benchmark"],
+                        "analysis": {
+                            "records": analysis_metrics.get("records", []),
+                        },
+                        "baseline": context.metrics.get("baseline", {}),
+                    }
+                ],
+                metric_delta_key="baseline.metrics.top1",
+            )
         if context.manifest is not None:
             context.manifest.add_metric(
                 MetricRecord(
@@ -913,6 +1082,7 @@ class WriteReportsPass:
 
 
 __all__ = [
+    "AnalyzePass",
     "BaselineEvalPass",
     "BenchmarkPass",
     "DistillPass",

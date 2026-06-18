@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -28,6 +29,8 @@ class TeacherCacheRecord:
 
     key: str
     path: Path
+    sample_identity: Optional[str] = None
+    dataset_signature: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -44,15 +47,27 @@ class TeacherOutputCache:
     def exists(self, key: str) -> bool:
         return self.path_for_key(key).is_file()
 
+    def key_for_identity(self, sample_identity: str, *, prefix: str = "sample") -> str:
+        """Build a stable cache key from a sample identity."""
+
+        digest = hashlib.sha256(sample_identity.encode("utf-8")).hexdigest()[:16]
+        return f"{prefix}_{digest}"
+
     def write(
         self,
         key: str,
         output: TeacherOutput,
+        *,
+        sample_identity: Optional[str] = None,
+        dataset_signature: Optional[str] = None,
     ) -> TeacherCacheRecord:
         path = self.path_for_key(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
+                "key": key,
+                "sample_identity": sample_identity,
+                "dataset_signature": dataset_signature,
                 "logits": output.logits.detach().cpu(),
                 "features": {
                     name: value.detach().cpu()
@@ -62,18 +77,78 @@ class TeacherOutputCache:
             },
             path,
         )
-        return TeacherCacheRecord(key=key, path=path, metadata=dict(output.metadata))
+        return TeacherCacheRecord(
+            key=key,
+            path=path,
+            sample_identity=sample_identity,
+            dataset_signature=dataset_signature,
+            metadata=dict(output.metadata),
+        )
 
-    def read(self, key: str) -> TeacherOutput:
+    def read(
+        self,
+        key: str,
+        *,
+        expected_identity: Optional[str] = None,
+        expected_dataset_signature: Optional[str] = None,
+    ) -> TeacherOutput:
         payload = torch.load(self.path_for_key(key), map_location="cpu")
         features = payload.get("features", {})
         if not isinstance(features, Mapping):
             raise ValueError("Cached teacher features must be a mapping")
+        sample_identity = payload.get("sample_identity")
+        dataset_signature = payload.get("dataset_signature")
+        if expected_identity is not None and sample_identity != expected_identity:
+            raise ValueError("Cached teacher sample identity does not match expected identity")
+        if (
+            expected_dataset_signature is not None
+            and dataset_signature != expected_dataset_signature
+        ):
+            raise ValueError("Cached teacher dataset signature does not match expected signature")
+        metadata = dict(payload.get("metadata", {}))
+        if sample_identity is not None:
+            metadata["sample_identity"] = sample_identity
+        if dataset_signature is not None:
+            metadata["dataset_signature"] = dataset_signature
         return TeacherOutput(
             logits=payload["logits"],
             features=dict(features),
-            metadata=dict(payload.get("metadata", {})),
+            metadata=metadata,
         )
+
+
+def batch_identity(batch: Any) -> str:
+    """Build a deterministic identity string for a teacher-cache batch."""
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            detached = value.detach().cpu()
+            return {
+                "type": "tensor",
+                "shape": list(detached.shape),
+                "dtype": str(detached.dtype),
+                "sha256": hashlib.sha256(detached.numpy().tobytes()).hexdigest(),
+            }
+        if isinstance(value, Mapping):
+            return {
+                str(key): normalize(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, tuple):
+            return [normalize(item) for item in value]
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        return value
+
+    payload = json.dumps(normalize(batch), sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def dataset_signature(sample_identities: Sequence[str]) -> str:
+    """Build a deterministic signature for a calibration or distillation dataset slice."""
+
+    payload = json.dumps(list(sample_identities), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _batch_inputs(batch: Any) -> Any:
@@ -131,6 +206,8 @@ def cache_teacher_outputs(
     device: str | torch.device = "cpu",
     key_prefix: str = "batch",
     max_batches: Optional[int] = None,
+    sample_identities: Optional[Sequence[str]] = None,
+    data_version: Optional[str] = None,
 ) -> list[TeacherCacheRecord]:
     """Run a teacher over batches and cache logits plus optional feature tensors."""
 
@@ -139,12 +216,22 @@ def cache_teacher_outputs(
     was_training = teacher.training
     teacher.eval()
 
+    batch_limit = min(len(batches), max_batches) if max_batches is not None else len(batches)
+    if sample_identities is not None and len(sample_identities) < batch_limit:
+        raise ValueError("sample_identities must cover every cached batch")
+    resolved_sample_identities = [
+        sample_identities[index] if sample_identities is not None else batch_identity(batches[index])
+        for index in range(batch_limit)
+    ]
+    resolved_dataset_signature = data_version or dataset_signature(resolved_sample_identities)
+
     records: list[TeacherCacheRecord] = []
     with torch.no_grad():
         for batch_index, batch in enumerate(batches):
             if max_batches is not None and batch_index >= max_batches:
                 break
-            key = f"{key_prefix}_{batch_index}"
+            sample_identity = resolved_sample_identities[batch_index]
+            key = cache.key_for_identity(sample_identity, prefix=key_prefix)
             inputs = _move_to_device(_batch_inputs(batch), torch_device)
 
             if feature_module_names:
@@ -169,8 +256,14 @@ def cache_teacher_outputs(
                     TeacherOutput(
                         logits=logits,
                         features=features,
-                        metadata={"batch_index": batch_index},
+                        metadata={
+                            "batch_index": batch_index,
+                            "sample_identity": sample_identity,
+                            "dataset_signature": resolved_dataset_signature,
+                        },
                     ),
+                    sample_identity=sample_identity,
+                    dataset_signature=resolved_dataset_signature,
                 )
             )
 
@@ -183,5 +276,7 @@ __all__ = [
     "TeacherCacheRecord",
     "TeacherOutput",
     "TeacherOutputCache",
+    "batch_identity",
     "cache_teacher_outputs",
+    "dataset_signature",
 ]

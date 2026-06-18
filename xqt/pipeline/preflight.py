@@ -22,6 +22,7 @@ class PreflightCheck:
     name: str
     passed: bool
     message: str
+    level: str = "info"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -29,6 +30,7 @@ class PreflightCheck:
             "name": self.name,
             "passed": self.passed,
             "message": self.message,
+            "level": self.level,
             "metadata": dict(self.metadata),
         }
 
@@ -44,11 +46,13 @@ class PreflightReport:
         return all(check.passed for check in self.checks)
 
     def add(self, name: str, passed: bool, message: str, **metadata: Any) -> None:
+        level = str(metadata.pop("level", "info"))
         self.checks.append(
             PreflightCheck(
                 name=name,
                 passed=passed,
                 message=message,
+                level=level,
                 metadata=metadata,
             )
         )
@@ -152,6 +156,36 @@ def _quant_policy_requires_cuda(policy: dict[str, Any]) -> bool:
     return "fp8" in strategy or "float8" in strategy
 
 
+def _check_qdq_calibration(report: PreflightReport, loaded: XQTConfig) -> None:
+    calibration = loaded.data.calibration
+    validation = loaded.data.validation
+    if calibration is not None:
+        report.add(
+            "data.calibration",
+            True,
+            "calibration data configured",
+            source="calibration",
+        )
+        return
+    if validation is not None:
+        report.add(
+            "data.calibration",
+            True,
+            "calibration data missing; validation fallback will be used",
+            level="warning",
+            source="validation",
+            fallback="validation",
+        )
+        return
+    report.add(
+        "data.calibration",
+        False,
+        "calibration or validation data is required for ONNX QDQ",
+        level="error",
+        missing=["calibration", "validation"],
+    )
+
+
 def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
     """Run lightweight dependency and target checks for a recipe."""
 
@@ -171,9 +205,12 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
         if split is None:
             continue
         if split.target and split.target not in {
+            "prompt_file",
+            "prompt_list",
             "synthetic_classification",
             "hf_text_classification",
             "torchvision_image_classification",
+            "xdl_dataset",
         }:
             _check_target(report, f"data.{split_name}.target", split.target)
         else:
@@ -200,12 +237,11 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 _check_cuda(report, "hardware.cuda")
         if quant.backend == "onnxruntime_qdq":
             _check_dependency(report, "onnxruntime")
+            _check_qdq_calibration(report, loaded)
 
-    distill = loaded.compression.distill
-    if (
-        distill.enabled
-        and loaded.model.target
-        == "xqt.distill.build_hf_text_classification_bundle_from_params"
+    if loaded.model.target == "xqt.distill.build_hf_text_classification_bundle_from_params" or any(
+        getattr(getattr(loaded.data, split_name), "target", None) == "hf_text_classification"
+        for split_name in ("train", "validation", "calibration")
     ):
         _check_dependency(report, "transformers")
         _check_dependency(report, "datasets")

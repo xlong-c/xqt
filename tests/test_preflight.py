@@ -54,6 +54,9 @@ def test_preflight_checks_targets_dependencies_and_export_commands(tmp_path) -> 
     assert checks["data.validation.target"].passed is True
     assert checks["data.validation.root"].passed is False
     assert checks["dependency.onnxruntime"].passed is True
+    assert checks["data.calibration"].passed is True
+    assert checks["data.calibration"].level == "warning"
+    assert checks["data.calibration"].metadata["fallback"] == "validation"
     assert checks["export.targets.0.tensorrt.trtexec"].passed is False
     assert checks["export.targets.1.mnn.MNNConvert"].passed is False
 
@@ -125,3 +128,138 @@ compression:
 
     assert checks["model.device"].passed is True
     assert checks["hardware.cuda"].passed is True
+
+
+def test_preflight_marks_configured_calibration_for_qdq(tmp_path) -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+        },
+        "data": {
+            "calibration": {
+                "target": "synthetic_classification",
+                "sample_limit": 1,
+                "batch_size": 1,
+            }
+        },
+        "compression": {
+            "quant": {
+                "enabled": True,
+                "backend": "onnxruntime_qdq",
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["data.calibration"].passed is True
+    assert checks["data.calibration"].level == "info"
+    assert checks["data.calibration"].metadata["source"] == "calibration"
+
+
+def test_preflight_treats_prompt_list_as_builtin_target() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+        },
+        "data": {
+            "prompts": {
+                "target": "prompt_list",
+                "sample_limit": 1,
+                "params": {"prompts": ["a castle"]},
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["data.prompts.target"].passed is True
+    assert checks["data.prompts.target"].message == "built-in data target"
+
+
+def test_preflight_treats_xdl_dataset_as_builtin_target() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+        },
+        "data": {
+            "validation": {
+                "target": "xdl_dataset",
+                "batch_size": 1,
+                "params": {
+                    "dataset": {
+                        "target": "registry:SyntheticClassificationDataset",
+                        "params": {
+                            "num_samples": 2,
+                            "input_shape": [4],
+                            "num_classes": 2,
+                        },
+                    }
+                },
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["data.validation.target"].passed is True
+    assert checks["data.validation.target"].message == "built-in data target"
+
+
+def test_preflight_fails_without_calibration_or_validation_for_qdq() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+        },
+        "compression": {
+            "quant": {
+                "enabled": True,
+                "backend": "onnxruntime_qdq",
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert report.passed is False
+    assert checks["data.calibration"].passed is False
+    assert checks["data.calibration"].level == "error"
+
+
+def test_preflight_checks_hf_text_data_dependencies(monkeypatch) -> None:
+    def fake_package_available(package_name: str) -> bool:
+        return package_name not in {"transformers", "datasets"}
+
+    monkeypatch.setattr(
+        "xqt.pipeline.preflight._package_available",
+        fake_package_available,
+    )
+    config = {
+        "model": {
+            "params": {
+                "teacher_name_or_path": "teacher",
+                "dataset_name": "glue",
+            }
+        },
+        "data": {
+            "train": {
+                "target": "hf_text_classification",
+                "sample_limit": 1,
+                "batch_size": 1,
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["dependency.transformers"].passed is False
+    assert checks["dependency.datasets"].passed is False

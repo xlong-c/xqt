@@ -42,12 +42,44 @@ def _validate_config(config: XQTConfig) -> None:
         raise XQTConfigError("benchmark.warmup must be non-negative")
     if config.benchmark.iterations <= 0:
         raise XQTConfigError("benchmark.iterations must be positive")
+    if config.analysis.compare_to not in {"baseline"}:
+        raise XQTConfigError("analysis.compare_to must be baseline")
+    if config.analysis.top_k is not None and config.analysis.top_k <= 0:
+        raise XQTConfigError("analysis.top_k must be positive when provided")
+    if not config.analysis.metrics:
+        raise XQTConfigError("analysis.metrics must not be empty")
     if config.compression.prune.target_sparsity < 0 or config.compression.prune.target_sparsity > 1:
         raise XQTConfigError("compression.prune.target_sparsity must be in [0, 1]")
     if config.compression.diffusion_distill.teacher_steps <= 0:
         raise XQTConfigError("compression.diffusion_distill.teacher_steps must be positive")
     if config.compression.diffusion_distill.student_steps <= 0:
         raise XQTConfigError("compression.diffusion_distill.student_steps must be positive")
+    def validate_pre_export_fusion(config_value: Any, location: str) -> None:
+        if config_value is None:
+            return
+        if not isinstance(config_value, Mapping):
+            raise XQTConfigError(f"{location} must be a mapping")
+        mode = str(config_value.get("mode", "eager"))
+        if mode not in {"eager", "fx"}:
+            raise XQTConfigError(f"{location}.mode must be eager or fx")
+        if mode == "eager" and bool(config_value.get("enabled", False)):
+            groups = config_value.get("modules_to_fuse")
+            if not isinstance(groups, list) or not groups:
+                raise XQTConfigError(
+                    f"{location}.modules_to_fuse must be a non-empty list "
+                    "when mode=eager and enabled=true"
+                )
+
+    for index, target in enumerate(config.export.targets):
+        validate_pre_export_fusion(
+            target.params.get("pre_export_fusion"),
+            f"export.targets.{index}.params.pre_export_fusion",
+        )
+
+    validate_pre_export_fusion(
+        config.compression.quant.policy.get("pre_export_fusion"),
+        "compression.quant.policy.pre_export_fusion",
+    )
 
 
 def load_xqt_config(

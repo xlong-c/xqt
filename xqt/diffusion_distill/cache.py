@@ -34,6 +34,25 @@ class DiffusionCache:
         payload = json.dumps(asdict(prompt), sort_keys=True, ensure_ascii=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def condition_key(self, prompt: PromptRecord) -> str:
+        payload = {
+            "prompt": prompt.prompt,
+            "negative_prompt": prompt.negative_prompt,
+            "seed": prompt.seed,
+            "guidance_scale": prompt.guidance_scale,
+            "steps": prompt.steps,
+            "width": prompt.width,
+            "height": prompt.height,
+            "condition_image": prompt.condition_image,
+            "condition_mask": prompt.condition_mask,
+            "reference_image": prompt.reference_image,
+            "latent_cache_key": prompt.latent_cache_key,
+            "metadata": dict(prompt.metadata),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+
     def write_spec(self, spec: DiffusionSpec) -> Path:
         spec.validate()
         path = self.root / "spec.json"

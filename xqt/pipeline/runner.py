@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -27,6 +28,7 @@ DEFAULT_PASS_ORDER = (
     "load_data",
     "baseline_eval",
     *DEFAULT_COMPRESSION_PASS_ORDER,
+    "analyze",
     "export",
     "benchmark",
     "write_reports",
@@ -68,6 +70,8 @@ def default_pass_names(config: XQTConfig) -> list[str]:
     for name in DEFAULT_PASS_ORDER:
         if name in DEFAULT_COMPRESSION_PASS_ORDER and name not in compression_passes:
             continue
+        if name == "analyze" and not config.analysis.enabled:
+            continue
         if name == "export" and not config.export.targets:
             continue
         names.append(name)
@@ -108,6 +112,7 @@ def create_context(
     return XQTContext(
         config=loaded_config,
         model=model,
+        reference_model=copy.deepcopy(model) if model is not None else None,
         teacher=teacher,
         data=dict(data or {}),
         artifacts=dict(artifacts or {}),

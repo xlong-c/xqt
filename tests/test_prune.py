@@ -3,12 +3,14 @@ import torch
 from torch import nn
 
 from xqt.prune import (
+    collect_module_importance,
     apply_global_l1_unstructured_pruning,
     prune_batchnorm_channels,
     prune_conv2d_in_channels,
     prune_conv2d_out_channels,
     prune_linear_in_features,
     prune_linear_out_features,
+    rank_prune_candidates,
     remove_pruning_reparameterization,
     summarize_pruning,
     tensor_sparsity,
@@ -123,3 +125,111 @@ def test_structured_pruning_helpers_reject_empty_or_duplicate_indices() -> None:
         prune_linear_out_features(linear, [])
     with pytest.raises(ValueError, match="must be unique"):
         prune_linear_out_features(linear, [0, 0])
+
+
+class TinyPruneModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(3, 4),
+            nn.ReLU(),
+            nn.Linear(4, 2),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x)
+
+
+def test_collect_module_importance_returns_weight_statistics() -> None:
+    model = TinyPruneModel()
+    with torch.no_grad():
+        model.features[0].weight.fill_(0.5)
+        model.features[2].weight.copy_(
+            torch.tensor(
+                [
+                    [1.0, 2.0, 3.0, 4.0],
+                    [4.0, 3.0, 2.0, 1.0],
+                ]
+            )
+        )
+
+    records = collect_module_importance(model)
+
+    assert [record.name for record in records] == ["features.0", "features.2"]
+    by_name = {record.name: record for record in records}
+    assert by_name["features.0"].parameter_count == 12
+    assert by_name["features.0"].l1_mean == pytest.approx(0.5)
+    assert by_name["features.0"].max_abs == pytest.approx(0.5)
+    assert by_name["features.2"].parameter_count == 8
+    assert by_name["features.2"].l1_mean == pytest.approx(2.5)
+    assert by_name["features.2"].to_dict()["module_type"] == "Linear"
+
+
+def test_rank_prune_candidates_supports_importance_only() -> None:
+    model = TinyPruneModel()
+    with torch.no_grad():
+        model.features[0].weight.fill_(0.1)
+        model.features[2].weight.fill_(2.0)
+
+    candidates = rank_prune_candidates(model, [], top_k=1)
+
+    assert len(candidates) == 1
+    assert candidates[0].name == "features.0"
+    assert candidates[0].rank == 1
+    assert candidates[0].sensitivity_available is False
+    assert candidates[0].combined_score == pytest.approx(0.0)
+
+
+def test_rank_prune_candidates_combines_importance_and_sensitivity() -> None:
+    class Diff:
+        def __init__(self, mean_abs: float) -> None:
+            self.mean_abs = mean_abs
+
+    class Record:
+        def __init__(self, name: str, mean_abs: float) -> None:
+            self.name = name
+            self.diff = Diff(mean_abs)
+
+    candidate = TinyPruneModel()
+    with torch.no_grad():
+        candidate.features[0].weight.fill_(0.1)
+        candidate.features[2].weight.fill_(2.0)
+    sensitivity_records = [
+        Record("features.0", 0.05),
+        Record("features.2", 0.8),
+    ]
+    candidates = rank_prune_candidates(candidate, sensitivity_records)
+
+    assert [record.name for record in candidates] == ["features.0", "features.2"]
+    assert candidates[0].sensitivity_available is True
+    assert candidates[0].combined_score <= candidates[1].combined_score
+    assert candidates[1].sensitivity_score >= candidates[0].sensitivity_score
+
+
+def test_rank_prune_candidates_can_require_sensitivity() -> None:
+    model = TinyPruneModel()
+
+    candidates = rank_prune_candidates(
+        model,
+        [],
+        require_sensitivity=True,
+    )
+
+    assert candidates == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"importance_weight": -1.0}, "non-negative"),
+        ({"sensitivity_weight": -1.0}, "non-negative"),
+        ({"importance_weight": 0.0, "sensitivity_weight": 0.0}, "positive"),
+        ({"top_k": 0}, "top_k must be positive"),
+    ],
+)
+def test_rank_prune_candidates_rejects_invalid_parameters(
+    kwargs: dict[str, float | int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        rank_prune_candidates(TinyPruneModel(), [], **kwargs)

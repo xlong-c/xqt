@@ -87,6 +87,32 @@ class IterableCalibrationDataReader:
 
         return len(self._records)
 
+    @property
+    def summary(self) -> dict[str, Any]:
+        """Return a lightweight summary of captured calibration inputs."""
+
+        input_names: list[str] = []
+        shapes: dict[str, list[list[int]]] = {}
+        dtypes: dict[str, list[str]] = {}
+        if self._records:
+            input_names = sorted(self._records[0].keys())
+        for record in self._records:
+            for name, value in record.items():
+                shapes.setdefault(name, []).append(list(value.shape))
+                dtypes.setdefault(name, []).append(str(value.dtype))
+        return {
+            "input_names": input_names,
+            "batch_count": len(self._records),
+            "shapes": {
+                name: shape_list[: min(3, len(shape_list))]
+                for name, shape_list in shapes.items()
+            },
+            "dtypes": {
+                name: sorted(set(dtype_list))
+                for name, dtype_list in dtypes.items()
+            },
+        }
+
     def get_next(self) -> Optional[dict[str, np.ndarray]]:
         """Return the next calibration sample for ONNX Runtime."""
 
@@ -176,6 +202,7 @@ def quantize_onnx_qdq_static(
             "per_channel": per_channel,
             "reduce_range": reduce_range,
             "op_types_to_quantize": list(op_types_to_quantize or []),
+            "calibration_summary": reader.summary,
         },
     )
 

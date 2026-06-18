@@ -3,13 +3,17 @@ import torch
 from torch import nn
 
 from xqt.eval.accuracy import evaluate_pytorch_model, topk_accuracy
-from xqt.eval.compare import compare_tensors
+from xqt.eval.compare import compare_tensors, summarize_tensor
 from xqt.eval.report import (
+    build_pareto_points,
     flatten_metrics,
+    records_to_dataframe,
+    records_to_rows,
     write_csv_report,
     write_json_report,
     write_markdown_report,
 )
+from xqt.quant.sensitivity import LayerAnalysisRecord
 
 
 class FixedLogitModel(nn.Module):
@@ -27,8 +31,16 @@ def test_compare_tensors_reports_common_diff_metrics() -> None:
     assert diff.max_abs == pytest.approx(0.001, abs=1e-6)
     assert diff.mean_abs > 0.0
     assert diff.mean_squared > 0.0
+    assert diff.relative_error is not None and diff.relative_error > 0.0
     assert diff.cosine_similarity == pytest.approx(1.0, abs=1e-5)
+    assert diff.correlation == pytest.approx(1.0, abs=1e-5)
+    assert diff.argmax_mismatch_rate == 0.0
+    assert diff.valid is True
+    assert diff.message == "ok"
+    assert diff.reference_summary is not None
+    assert diff.candidate_summary is not None
     assert diff.to_dict()["allclose"] is True
+    assert diff.to_dict()["reference_summary"] is not None
 
 
 def test_compare_tensors_handles_empty_and_zero_vectors() -> None:
@@ -37,12 +49,54 @@ def test_compare_tensors_handles_empty_and_zero_vectors() -> None:
 
     assert empty.max_abs == 0.0
     assert empty.cosine_similarity is None
+    assert empty.correlation is None
+    assert empty.relative_error is None
     assert zeros.cosine_similarity is None
+    assert zeros.correlation is None
+    assert zeros.relative_error is None
+    assert zeros.argmax_mismatch_rate == 0.0
+
+
+def test_compare_tensors_supports_structured_details_and_argmax_mismatch() -> None:
+    reference = torch.tensor([[0.1, 0.9], [0.8, 0.2]])
+    candidate = torch.tensor([[0.6, 0.4], [0.8, 0.2]])
+
+    diff = compare_tensors(
+        reference,
+        candidate,
+        structured={"per_token": 0, "per_channel": 1},
+    )
+
+    assert diff.argmax_mismatch_rate == pytest.approx(0.5)
+    assert diff.details is not None
+    assert diff.details["per_token"]["axis"] == 0
+    assert diff.details["per_token"]["size"] == 2
+    assert len(diff.details["per_channel"]["mean_abs"]) == 2
+    assert diff.to_dict()["details"] is not None
 
 
 def test_compare_tensors_rejects_shape_mismatch() -> None:
     with pytest.raises(ValueError, match="Tensor shapes differ"):
         compare_tensors(torch.zeros(1, 2), torch.zeros(2, 1))
+
+
+def test_summarize_tensor_reports_statistics_and_special_values() -> None:
+    tensor = torch.tensor([0.0, 1.0, float("nan"), float("inf"), -1.0])
+
+    summary = summarize_tensor(tensor)
+
+    assert summary.shape == (5,)
+    assert summary.dtype == "torch.float32"
+    assert summary.numel == 5
+    assert summary.mean == pytest.approx(0.0)
+    assert summary.std == pytest.approx((2.0 / 3.0) ** 0.5)
+    assert summary.minimum == -1.0
+    assert summary.maximum == 1.0
+    assert summary.zero_ratio == pytest.approx(1.0 / 3.0)
+    assert summary.nan_count == 1
+    assert summary.inf_count == 1
+    assert summary.quantiles["p01"] <= summary.quantiles["p50"] <= summary.quantiles["p99"]
+    assert summary.to_dict()["shape"] == [5]
 
 
 def test_flatten_metrics_uses_dotted_keys() -> None:
@@ -58,6 +112,65 @@ def test_flatten_metrics_uses_dotted_keys() -> None:
         "latency.p50_ms": 3.4,
         "passed": True,
     }
+
+
+def test_records_to_rows_and_dataframe_flatten_analysis_records() -> None:
+    reference = torch.tensor([1.0, 2.0, 3.0])
+    candidate = torch.tensor([1.0, 2.5, 2.5])
+    diff = compare_tensors(reference, candidate)
+    weight_diff = compare_tensors(torch.tensor([1.0, 2.0]), torch.tensor([1.1, 1.9]))
+    record = LayerAnalysisRecord(
+        name="features.0",
+        module_type="Linear",
+        diff=diff,
+        parameter_count=16,
+        reference_summary=diff.reference_summary.to_dict() if diff.reference_summary else {},
+        candidate_summary=diff.candidate_summary.to_dict() if diff.candidate_summary else {},
+        weight_diff=weight_diff,
+        recommendation="consider_higher_precision",
+        tags=("high_error",),
+    )
+
+    rows = records_to_rows([record])
+    frame = records_to_dataframe([record])
+
+    assert rows[0]["name"] == "features.0"
+    assert rows[0]["diff.max_abs"] == diff.max_abs
+    assert rows[0]["weight_diff.mean_abs"] == weight_diff.mean_abs
+    assert rows[0]["reference_summary.shape"] == [3]
+    assert rows[0]["tags"] == ["high_error"]
+    assert frame.loc[0, "name"] == "features.0"
+    assert float(frame.loc[0, "diff.max_abs"]) == pytest.approx(diff.max_abs)
+
+
+def test_build_pareto_points_extracts_nested_metrics() -> None:
+    runs = [
+        {
+            "config_id": "recipe_a",
+            "benchmark": {
+                "latency": {"p50_ms": 3.2},
+                "memory": {"delta_bytes": 1024},
+            },
+            "analysis": {
+                "records": [{"diff": {"mean_abs": 0.02}}],
+            },
+            "baseline": {
+                "metrics": {"top1": 0.81},
+            },
+        }
+    ]
+
+    points = build_pareto_points(runs)
+
+    assert points == [
+        {
+            "config_id": "recipe_a",
+            "latency_ms": 3.2,
+            "memory_bytes": 1024,
+            "error": 0.02,
+            "metric_delta": 0.81,
+        }
+    ]
 
 
 def test_topk_accuracy_handles_multiclass_and_binary_logits() -> None:

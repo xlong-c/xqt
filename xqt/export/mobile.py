@@ -13,6 +13,7 @@ from torch import nn
 
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
+from xqt.export.input_utils import split_example_input
 
 
 @dataclass
@@ -272,8 +273,12 @@ def export_executorch_program(
         raise XQTBackendError("executorch is required for ExecuTorch export") from exc
 
     model.eval()
-    args = example_input if isinstance(example_input, tuple) else (example_input,)
-    exported = torch.export.export(model, args)
+    example_spec = split_example_input(example_input)
+    exported = torch.export.export(
+        model,
+        example_spec.args,
+        kwargs=dict(example_spec.kwargs) if example_spec.kwargs else None,
+    )
     edge_program = to_edge(exported)
     executorch_program = edge_program.to_executorch()
     with output.open("wb") as handle:

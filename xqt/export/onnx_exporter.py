@@ -13,6 +13,12 @@ from torch import nn
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
 from xqt.eval.compare import TensorDiff, compare_tensors
+from xqt.export.fusion import apply_pre_export_fusion
+from xqt.export.input_utils import (
+    build_onnx_feed,
+    default_input_names,
+    split_example_input,
+)
 
 
 @dataclass
@@ -27,14 +33,6 @@ class ONNXExportResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _as_example_args(example_input: Any) -> tuple[Any, ...]:
-    if isinstance(example_input, tuple):
-        return example_input
-    if isinstance(example_input, list):
-        return tuple(example_input)
-    return (example_input,)
-
-
 def export_onnx(
     model: nn.Module,
     example_input: Any,
@@ -46,33 +44,40 @@ def export_onnx(
     dynamic_shapes: Optional[Mapping[str, Any]] = None,
     dynamo: bool = True,
     validate: bool = True,
+    pre_export_fusion: Optional[Mapping[str, Any]] = None,
 ) -> ONNXExportResult:
     """Export a PyTorch module to ONNX using the modern dynamo exporter by default."""
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     model.eval()
-    args = _as_example_args(example_input)
+    example_spec = split_example_input(example_input)
+    resolved_input_names = list(input_names or default_input_names(example_input))
+    fusion_result = apply_pre_export_fusion(model, pre_export_fusion)
+    export_model = fusion_result.model
+    export_model.eval()
 
     kwargs: dict[str, Any] = {
         "dynamo": dynamo,
-        "input_names": list(input_names or ["input"]),
+        "input_names": resolved_input_names,
         "output_names": list(output_names or ["output"]),
     }
     if opset is not None:
         kwargs["opset_version"] = opset
     if dynamic_shapes:
         kwargs["dynamic_shapes"] = dict(dynamic_shapes)
+    if example_spec.kwargs:
+        kwargs["kwargs"] = dict(example_spec.kwargs)
 
     try:
-        torch.onnx.export(model, args, str(output), **kwargs)
+        torch.onnx.export(export_model, example_spec.args, str(output), **kwargs)
     except TypeError:
         fallback_kwargs = {
             key: value
             for key, value in kwargs.items()
             if key not in {"dynamo", "dynamic_shapes"}
         }
-        torch.onnx.export(model, args, str(output), **fallback_kwargs)
+        torch.onnx.export(export_model, example_spec.args, str(output), **fallback_kwargs)
 
     checked = validate_onnx(output) if validate else False
     return ONNXExportResult(
@@ -82,8 +87,9 @@ def export_onnx(
         checked=checked,
         metadata={
             "dynamo": dynamo,
-            "input_names": list(input_names or ["input"]),
+            "input_names": resolved_input_names,
             "output_names": list(output_names or ["output"]),
+            "pre_export_fusion": dict(fusion_result.metadata),
         },
     )
 
@@ -107,6 +113,7 @@ def compare_onnxruntime_outputs(
     example_input: Any,
     *,
     input_name: str = "input",
+    input_names: Optional[Sequence[str]] = None,
     atol: float = 1e-5,
     rtol: float = 1e-5,
 ) -> TensorDiff:
@@ -117,11 +124,10 @@ def compare_onnxruntime_outputs(
     except ImportError as exc:
         raise XQTBackendError("onnxruntime is required for ONNX Runtime diff") from exc
 
-    args = _as_example_args(example_input)
-    if len(args) != 1 or not isinstance(args[0], torch.Tensor):
-        raise ValueError("compare_onnxruntime_outputs currently supports one Tensor input")
+    resolved_input_names = list(input_names or [input_name])
+    feeds = build_onnx_feed(example_input, input_names=resolved_input_names)
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    ort_output = session.run(None, {input_name: args[0].detach().cpu().numpy()})[0]
+    ort_output = session.run(None, feeds)[0]
     candidate = torch.from_numpy(np.asarray(ort_output))
     return compare_tensors(reference_output, candidate, atol=atol, rtol=rtol)
 

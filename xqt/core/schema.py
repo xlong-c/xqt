@@ -166,6 +166,50 @@ class BenchmarkConfig:
 
 
 @dataclass
+class AnalysisExportConfig:
+    """Artifact export settings for analysis reports."""
+
+    json: bool = True
+    csv: bool = True
+    markdown: bool = True
+
+
+@dataclass
+class AnalysisStructuredConfig:
+    """Structured diff output switches for analysis reports."""
+
+    per_channel: bool = False
+    per_token: bool = False
+
+
+@dataclass
+class AnalysisRecommendationConfig:
+    """Recommendation toggles for analysis pass outputs."""
+
+    mixed_precision: bool = True
+    prune_candidates: bool = True
+
+
+@dataclass
+class AnalysisConfig:
+    """Analysis and recommendation pass settings."""
+
+    enabled: bool = False
+    compare_to: str = "baseline"
+    module_names: Optional[List[str]] = None
+    top_k: Optional[int] = None
+    metrics: List[str] = field(
+        default_factory=lambda: ["max_abs", "mean_abs", "cosine_similarity"]
+    )
+    structured: AnalysisStructuredConfig = field(default_factory=AnalysisStructuredConfig)
+    recommendations: AnalysisRecommendationConfig = field(
+        default_factory=AnalysisRecommendationConfig
+    )
+    include_weight_diff: bool = True
+    export: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
+
+
+@dataclass
 class XQTConfig:
     """XQT recipe schema v1."""
 
@@ -177,11 +221,16 @@ class XQTConfig:
     export: ExportConfig = field(default_factory=ExportConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
 
 
 __all__ = [
     "COMPRESSION_AXES",
     "XQT_CONFIG_VERSION",
+    "AnalysisConfig",
+    "AnalysisExportConfig",
+    "AnalysisRecommendationConfig",
+    "AnalysisStructuredConfig",
     "BenchmarkConfig",
     "ComponentConfig",
     "CompressionConfig",

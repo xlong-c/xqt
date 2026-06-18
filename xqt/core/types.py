@@ -13,6 +13,7 @@ class XQTContext:
 
     config: XQTConfig
     model: Any = None
+    reference_model: Any = None
     teacher: Any = None
     data: Dict[str, Any] = field(default_factory=dict)
     artifacts: Dict[str, Any] = field(default_factory=dict)

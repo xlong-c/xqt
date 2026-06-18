@@ -45,7 +45,14 @@ def test_diffusion_spec_rejects_invalid_values(spec: DiffusionSpec) -> None:
 
 def test_diffusion_cache_round_trips_prompt_latent_and_trajectory(tmp_path) -> None:
     cache = DiffusionCache(tmp_path)
-    prompt = PromptRecord(prompt="a small castle", seed=7)
+    prompt = PromptRecord(
+        prompt="a small castle",
+        seed=7,
+        guidance_scale=6.5,
+        condition_image="images/source.png",
+        condition_mask="images/mask.png",
+        latent_cache_key="latent-007",
+    )
     key = cache.prompt_key(prompt)
     latent = torch.randn(1, 4, 8, 8)
     schedule = build_step_schedule(10, 3)
@@ -63,12 +70,19 @@ def test_diffusion_cache_round_trips_prompt_latent_and_trajectory(tmp_path) -> N
     assert prompt_path.is_file()
     assert latent_path.is_file()
     assert trajectory_path.is_file()
-    assert cache.read_prompt(key).prompt == "a small castle"
+    loaded_prompt = cache.read_prompt(key)
+    assert loaded_prompt.prompt == "a small castle"
+    assert loaded_prompt.guidance_scale == 6.5
+    assert loaded_prompt.condition_image == "images/source.png"
+    assert loaded_prompt.condition_mask == "images/mask.png"
+    assert loaded_prompt.latent_cache_key == "latent-007"
     assert torch.equal(cache.read_latent(key), latent)
     loaded_trajectory = cache.read_trajectory(key)
     assert loaded_trajectory.timesteps == [9, 4, 0]
     assert torch.equal(loaded_trajectory.latents[1], latent + 1)
     assert loaded_trajectory.metadata == {"kind": "teacher"}
+
+    assert cache.condition_key(prompt) == cache.condition_key(loaded_prompt)
 
 
 def test_diffusion_cache_rejects_mismatched_trajectory_lengths(tmp_path) -> None:

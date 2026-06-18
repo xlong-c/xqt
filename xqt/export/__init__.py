@@ -5,6 +5,7 @@ from .capability import (
     ExportCapability,
     deployment_capability_matrix,
 )
+from .fusion import PreExportFusionResult, apply_pre_export_fusion
 from .mobile import (
     CommandExportResult,
     ExecuTorchExportResult,
@@ -47,6 +48,7 @@ __all__ = [
     "ExportCapability",
     "ONNXExportResult",
     "OpenVINOExportResult",
+    "PreExportFusionResult",
     "TensorRTBuildResult",
     "TensorRTPerformanceCheck",
     "TensorRTPerformanceMetrics",
@@ -58,6 +60,7 @@ __all__ = [
     "build_pnnx_command",
     "build_tensorrt_engine",
     "build_trtexec_command",
+    "apply_pre_export_fusion",
     "compare_openvino_outputs",
     "compare_onnxruntime_outputs",
     "deployment_capability_matrix",

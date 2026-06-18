@@ -20,7 +20,7 @@
 当前包模块:
 
 - `core`: structured config, artifact manifest, checksum, XQT registry.
-- `data`: synthetic classification samples, calibration dataloader utilities, torchvision image classification loader.
+- `data`: synthetic classification samples, calibration dataloader utilities, torchvision image classification loader, `xdl.dataset` bridge loader.
 - `pipeline`: sequential pass manager 和最小 YAML runner.
 - `eval`: tensor output diff 和 metric flatten helper.
 - `benchmark`: latency 和 memory benchmark helper.
