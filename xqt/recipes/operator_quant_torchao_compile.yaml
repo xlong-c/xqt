@@ -1,0 +1,64 @@
+config_version: 1
+
+project:
+  name: operator_quant_torchao_compile
+  artifact_dir: artifacts/xqt/operator_quant_torchao_compile
+
+model:
+  target: xqt.quant.toy_models.build_hetero_quant_toy_model
+  params:
+    in_features: 4
+    hidden_features: 4
+    num_classes: 2
+  dtype: float32
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 2
+    params:
+      input_shape: [4]
+      num_classes: 2
+
+compression:
+  axes:
+    - precision
+  quant:
+    enabled: true
+    backend: torchao
+    strategy: dynamic_int8
+    policy:
+      include_module_types: [Linear]
+  prune:
+    enabled: false
+  distill:
+    enabled: false
+  diffusion_distill:
+    enabled: false
+
+operator_optimization:
+  enabled: true
+  default_backend: torch_compile
+  targets:
+    - name: model
+      backend: torch_compile
+      mode: reduce-overhead
+      fallback: eager
+      min_speedup: 1.000001
+      validate:
+        atol: 1.0e-5
+        rtol: 1.0e-5
+
+export:
+  targets: []
+
+validation:
+  output_diff:
+    atol: 1.0e-5
+    rtol: 1.0e-5
+
+benchmark:
+  warmup: 0
+  iterations: 1

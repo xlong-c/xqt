@@ -20,6 +20,7 @@ DEFAULT_COMPRESSION_PASS_ORDER = (
     "distill",
     "prune",
     "quant",
+    "operator_optimization",
     "diffusion_distill",
 )
 
@@ -57,6 +58,7 @@ def enabled_pass_names(config: XQTConfig) -> list[str]:
         "distill": compression.distill.enabled,
         "prune": compression.prune.enabled,
         "quant": compression.quant.enabled,
+        "operator_optimization": config.operator_optimization.enabled,
         "diffusion_distill": compression.diffusion_distill.enabled,
     }
     return [name for name in DEFAULT_COMPRESSION_PASS_ORDER if enabled[name]]

@@ -1,0 +1,76 @@
+config_version: 1
+
+project:
+  name: operator_qdq_export_guard
+  artifact_dir: artifacts/xqt/operator_qdq_export_guard
+
+model:
+  target: xqt.quant.toy_models.build_hetero_quant_toy_model
+  params:
+    in_features: 4
+    hidden_features: 4
+    num_classes: 2
+  dtype: float32
+  device: cpu
+
+data:
+  calibration:
+    target: synthetic_classification
+    sample_limit: 2
+    batch_size: 1
+    params:
+      input_shape: [4]
+      num_classes: 2
+  validation:
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 2
+    params:
+      input_shape: [4]
+      num_classes: 2
+
+compression:
+  axes:
+    - precision
+  quant:
+    enabled: true
+    backend: onnxruntime_qdq
+    strategy: static_int8
+    calibration_split: calibration
+    policy:
+      input_names: [input]
+      sample_limit: 1
+  prune:
+    enabled: false
+  distill:
+    enabled: false
+  diffusion_distill:
+    enabled: false
+
+operator_optimization:
+  enabled: true
+  default_backend: torch_compile
+  targets:
+    - name: model
+      backend: torch_compile
+      fallback: eager
+      min_speedup: 1.000001
+      validate:
+        atol: 1.0e-5
+        rtol: 1.0e-5
+
+export:
+  targets:
+    - format: onnx
+      output_path: artifacts/xqt/operator_qdq_export_guard/model.onnx
+      params:
+        runtime_diff: false
+
+validation:
+  output_diff:
+    atol: 1.0e-5
+    rtol: 1.0e-5
+
+benchmark:
+  warmup: 0
+  iterations: 1

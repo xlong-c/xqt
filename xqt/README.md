@@ -24,11 +24,12 @@
 - `pipeline`: sequential pass manager 和最小 YAML runner.
 - `eval`: tensor output diff 和 metric flatten helper.
 - `benchmark`: latency 和 memory benchmark helper.
-- `quant`: quantization policy, activation calibration, layer sensitivity helper.
+- `quant`: quantization policy, backend capability matrix, activation calibration, layer sensitivity helper.
+- `operator_opt`: `torch.compile`-first operator optimization pass, backend capability matrix and runtime fallback reporting.
 - `quant.onnx_qdq`: ONNX Runtime static QDQ INT8 quantization adapter.
 - `export`: `torch.export` ExportedProgram, TorchScript fallback, ONNX export/checker/runtime diff, TensorRT `trtexec` adapter 和性能阈值报告, OpenVINO optional adapter.
 - `export.mobile`: ExecuTorch `.pte`, `pnnx`/ONNX -> ncnn, ONNX -> MNN 的可选 adapter, 支持 dry-run 命令验证.
-- `prune`: PyTorch global L1 pruning, sparsity report, basic structured rewrite helper.
+- `prune`: PyTorch global L1 pruning, sparsity report, CNN structured channel/filter pruning, ViT/Transformer structured MLP neuron pruning, attention head pruning, block pruning, and N:M structured sparsity reports.
 - `prune.schedule`: pruning schedule and prune + KD helper.
 - `distill`: logit KD, feature/relation distillation loss, feature hook helper.
 - `distill.cache`: teacher logits/features disk cache helper.
@@ -47,8 +48,20 @@
 - `recipes/image_resnet_onnx_qdq_int8.yaml`: ResNet/CNN ONNX Runtime QDQ INT8 + TensorRT dry-run smoke recipe, 包含真实 `trtexec` 运行时使用的 `performance_thresholds` 示例.
 - `recipes/image_resnet_cifar100_qdq_cpu.yaml`: 使用本地 CIFAR-100 的 ResNet ONNX Runtime QDQ CPU recipe.
 - `recipes/image_vit_torchao_fp8.yaml`: ViT torchao FP8 CUDA recipe, 当前默认使用 `cuda:0`,可在支持 FP8 的 NVIDIA GPU 上直接跑 quant + benchmark; 真实收益仍应结合 pretrained 权重和目标任务数据复验.
+- `recipes/multi_component_quant_smoke.yaml`: toy `vision_encoder -> projector -> decoder` 异构量化 smoke recipe, 用于验证 component policy,多 backend metrics 和 manifest 表达.
 - `recipes/prune_finetune_cpu.yaml`: 线性 sparsity schedule + teacher KD 微调的 CPU smoke recipe.
+- `recipes/cnn_structured_prune.yaml`: chain-like CNN 结构化 channel pruning CPU smoke recipe.
+- `recipes/vit_structured_prune.yaml`: ViT structured pruning CPU smoke recipe, 支持通过 override 切换 `mlp_neuron`, `head`, `block`.
 - `recipes/hf_text_kd_prune.yaml`: HF 文本分类 KD + 全局 L1 非结构化剪枝 recipe 支架, 依赖 `transformers` 和 `datasets`, 不下载权重到 git.
+
+量化 recipe 约定:
+
+- `compression.quant.strategy` 显式写出 backend 目标策略,不要只藏在 `policy`.
+- `onnxruntime_qdq` recipe 显式写 `calibration_split`.
+- `torchao` recipe 显式写 `skip_quantize` / `keep_high_precision`,避免默认规则隐式变化.
+- `xqt.quant.capability` 记录当前可用和计划中的 backend 能力边界; preflight 会把 CUDA,calibration 和 ONNX exportable graph 等约束写入检查结果.
+- `gptq`,`awq`,`bitsandbytes` 目前只是 planned backend 接口预留,可进入 config/preflight,但 runner 不会执行.
+- `operator_optimization` 当前只有 `torch_compile` 会实际执行;`deployment_backend`,`triton`,`tilelang`,`custom_cuda` 当前进入 config/preflight 和 manifest,但不会在 built-in executor 里执行内核替换.
 
 运行入口:
 

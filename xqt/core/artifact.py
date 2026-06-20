@@ -108,6 +108,7 @@ class ArtifactManifest:
     dependencies: Dict[str, Optional[str]] = field(default_factory=collect_dependency_versions)
     artifacts: List[ArtifactRecord] = field(default_factory=list)
     metrics: List[MetricRecord] = field(default_factory=list)
+    operator_optimization: Optional[Dict[str, Any]] = None
 
     def add_artifact(self, artifact: ArtifactRecord) -> None:
         """Append an artifact record."""

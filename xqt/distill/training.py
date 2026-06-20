@@ -8,6 +8,8 @@ from typing import Any, Iterable, Mapping, Optional
 import torch
 from torch import nn
 
+from xqt.data.input_utils import split_batch
+
 from .losses import distillation_loss
 
 
@@ -32,24 +34,8 @@ class DistillationTrainReport:
 
 
 def _split_batch(batch: Any) -> tuple[Any, Optional[torch.Tensor]]:
-    if isinstance(batch, Mapping):
-        inputs = batch.get("inputs", batch.get("input", batch.get("x")))
-        targets = batch.get(
-            "targets",
-            batch.get("target", batch.get("y", batch.get("labels", batch.get("label")))),
-        )
-        if inputs is None:
-            inputs = {
-                key: value
-                for key, value in batch.items()
-                if key not in {"targets", "target", "y", "labels", "label"}
-            }
-        return inputs, targets if isinstance(targets, torch.Tensor) else None
-    if isinstance(batch, (tuple, list)) and len(batch) >= 2:
-        inputs = batch[0] if len(batch) == 2 else tuple(batch[:-1])
-        targets = batch[-1]
-        return inputs, targets if isinstance(targets, torch.Tensor) else None
-    return batch, None
+    split = split_batch(batch)
+    return split.inputs, split.targets
 
 
 def _move_to_device(data: Any, device: torch.device) -> Any:

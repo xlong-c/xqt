@@ -92,6 +92,8 @@ def test_preflight_marks_torchao_fp8_as_cuda_requirement(monkeypatch) -> None:
     assert checks["model.device"].passed is False
     assert checks["dependency.torchao"].passed is True
     assert checks["hardware.cuda"].passed is False
+    assert checks["compression.quant.capability"].metadata["requires_cuda"] is True
+    assert checks["compression.quant.capability"].metadata["primary_module_types"] == ["Linear"]
 
 
 def test_preflight_accepts_cuda_device_index(monkeypatch, tmp_path) -> None:
@@ -157,6 +159,9 @@ def test_preflight_marks_configured_calibration_for_qdq(tmp_path) -> None:
     assert checks["data.calibration"].passed is True
     assert checks["data.calibration"].level == "info"
     assert checks["data.calibration"].metadata["source"] == "calibration"
+    assert checks["data.calibration"].metadata["calibration_split"] == "calibration"
+    assert checks["compression.quant.capability"].metadata["requires_calibration"] is True
+    assert checks["compression.quant.capability"].metadata["requires_exportable_graph"] is True
 
 
 def test_preflight_treats_prompt_list_as_builtin_target() -> None:
@@ -234,6 +239,99 @@ def test_preflight_fails_without_calibration_or_validation_for_qdq() -> None:
     assert checks["data.calibration"].level == "error"
 
 
+def test_preflight_reports_component_level_quantization_checks() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+        },
+        "data": {
+            "calibration": {
+                "target": "synthetic_classification",
+                "sample_limit": 1,
+                "batch_size": 1,
+            },
+            "validation": {
+                "target": "synthetic_classification",
+                "sample_limit": 1,
+                "batch_size": 1,
+            },
+        },
+        "compression": {
+            "quant": {
+                "enabled": True,
+                "backend": "torchao",
+                "component_policies": [
+                    {
+                        "name": "vision_encoder",
+                        "target": "encoder",
+                        "backend": "onnxruntime_qdq",
+                        "calibration_split": "calibration",
+                        "validation_split": "validation",
+                    },
+                    {
+                        "name": "decoder",
+                        "target": "decoder",
+                        "backend": "torchao",
+                    },
+                ],
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["compression.quant.component_policies"].passed is True
+    assert checks["compression.quant.component_policies"].metadata["count"] == 2
+    assert checks["compression.quant.component_policies.vision_encoder.target"].passed is True
+    assert checks["compression.quant.component_policies.vision_encoder.backend"].metadata["backend"] == "onnxruntime_qdq"
+    assert checks["compression.quant.component_policies.vision_encoder.capability"].metadata["component"] == "vision_encoder"
+    assert checks["compression.quant.component_policies.vision_encoder.capability"].metadata["requires_exportable_graph"] is True
+    assert checks["compression.quant.component_policies.vision_encoder.data_source"].passed is True
+    assert checks["compression.quant.component_policies.vision_encoder.data_source"].metadata["component"] == "vision_encoder"
+    assert checks["compression.quant.component_policies.decoder.backend"].metadata["backend"] == "torchao"
+    assert checks["compression.quant.component_policies.decoder.capability"].metadata["runtime"] == "pytorch"
+    assert checks["compression.quant.runtime_mix"].passed is True
+    assert checks["compression.quant.runtime_mix"].level == "warning"
+    assert checks["compression.quant.runtime_mix"].metadata["backends"] == [
+        "onnxruntime_qdq",
+        "torchao",
+    ]
+
+
+def test_preflight_reports_planned_quant_backend_as_warning() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+        },
+        "compression": {
+            "quant": {
+                "enabled": True,
+                "backend": "gptq",
+                "component_policies": [
+                    {
+                        "name": "decoder",
+                        "backend": "awq",
+                        "target": "decoder",
+                    }
+                ],
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["compression.quant.capability"].passed is False
+    assert checks["compression.quant.capability"].level == "warning"
+    assert checks["compression.quant.capability"].metadata["status"] == "planned"
+    assert checks["compression.quant.component_policies.decoder.capability"].passed is False
+    assert checks["compression.quant.component_policies.decoder.capability"].metadata["backend"] == "awq"
+    assert checks["compression.quant.component_policies.decoder.capability"].metadata["status"] == "planned"
+
+
 def test_preflight_checks_hf_text_data_dependencies(monkeypatch) -> None:
     def fake_package_available(package_name: str) -> bool:
         return package_name not in {"transformers", "datasets"}
@@ -263,3 +361,55 @@ def test_preflight_checks_hf_text_data_dependencies(monkeypatch) -> None:
 
     assert checks["dependency.transformers"].passed is False
     assert checks["dependency.datasets"].passed is False
+
+
+def test_preflight_reports_nm_structured_backend_capability() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+            "device": "cpu",
+        },
+        "compression": {
+            "prune": {
+                "enabled": True,
+                "method": "nm_structured",
+                "selection": {"pattern": [2, 4]},
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["compression.prune.nm_backend"].passed is False
+    assert checks["compression.prune.nm_backend"].level == "warning"
+    assert checks["compression.prune.nm_backend"].metadata["pattern"] == [2, 4]
+    assert checks["compression.prune.nm_backend"].metadata["pattern_present"] is True
+    assert checks["compression.prune.nm_backend"].metadata["speedup_verified"] is False
+
+
+def test_preflight_reports_block_sparse_backend_capability() -> None:
+    config = {
+        "model": {
+            "target": "torch.nn.Linear",
+            "params": {"in_features": 4, "out_features": 2},
+            "device": "cpu",
+        },
+        "compression": {
+            "prune": {
+                "enabled": True,
+                "method": "block_sparse",
+                "selection": {"block_shape": [2, 2]},
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["compression.prune.block_sparse_backend"].passed is False
+    assert checks["compression.prune.block_sparse_backend"].level == "warning"
+    assert checks["compression.prune.block_sparse_backend"].metadata["block_shape"] == [2, 2]
+    assert checks["compression.prune.block_sparse_backend"].metadata["pattern_present"] is True
+    assert checks["compression.prune.block_sparse_backend"].metadata["speedup_verified"] is False

@@ -33,3 +33,41 @@ def test_train_logit_distillation_updates_student_and_reports_metrics() -> None:
     assert len(report.loss_history) == 2
     assert not torch.equal(before, student.weight)
     assert report.to_dict()["steps"] == 2
+
+
+def test_train_logit_distillation_supports_unlabeled_multi_input_batches() -> None:
+    teacher = nn.Linear(3, 2)
+    student = nn.Linear(3, 2)
+
+    class PairWrapper(nn.Module):
+        def __init__(self, linear: nn.Linear) -> None:
+            super().__init__()
+            self.linear = linear
+
+        def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+            return self.linear(left + right)
+
+    teacher_model = PairWrapper(teacher)
+    student_model = PairWrapper(student)
+    before = student.weight.detach().clone()
+    loader = [
+        (
+            torch.randn(4, 3),
+            torch.randn(4, 3),
+        )
+    ]
+    optimizer = torch.optim.SGD(student_model.parameters(), lr=0.1)
+
+    report = train_logit_distillation(
+        student_model,
+        teacher_model,
+        loader,
+        optimizer,
+        temperature=2.0,
+        alpha=1.0,
+    )
+
+    assert report.steps == 1
+    assert report.samples == 4
+    assert report.mean_loss > 0.0
+    assert not torch.equal(before, student.weight)

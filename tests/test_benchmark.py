@@ -2,6 +2,7 @@ import pytest
 
 from xqt.benchmark.latency import benchmark_callable
 from xqt.benchmark.memory import benchmark_memory
+from xqt.benchmark.profiler import profile_callable
 
 
 def test_benchmark_callable_reports_latency_samples() -> None:
@@ -111,3 +112,51 @@ def test_benchmark_helpers_accept_cuda_device_index(monkeypatch) -> None:
 def test_benchmark_memory_rejects_invalid_iterations() -> None:
     with pytest.raises(ValueError, match="iterations must be positive"):
         benchmark_memory(lambda: None, iterations=0, device="cpu")
+
+
+def test_profile_callable_reports_operator_rows() -> None:
+    calls = {"count": 0}
+
+    def fn() -> object:
+        calls["count"] += 1
+        return None
+
+    report = profile_callable(
+        fn,
+        warmup=0,
+        active=1,
+        repeat=1,
+        device="cpu",
+        top_k=5,
+    )
+
+    assert calls["count"] == 1
+    assert report.record_count >= 1
+    assert report.kernel_count >= 1
+    assert "cpu" in report.activities
+    assert report.operators[0].count >= 1
+    assert report.to_dict()["operators"]
+
+
+@pytest.mark.parametrize(
+    ("warmup", "active", "repeat", "message"),
+    [
+        (-1, 1, 1, "warmup must be non-negative"),
+        (0, 0, 1, "active must be positive"),
+        (0, 1, 0, "repeat must be positive"),
+    ],
+)
+def test_profile_callable_rejects_invalid_counts(
+    warmup: int,
+    active: int,
+    repeat: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        profile_callable(
+            lambda: None,
+            warmup=warmup,
+            active=active,
+            repeat=repeat,
+            device="cpu",
+        )

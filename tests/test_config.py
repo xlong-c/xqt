@@ -58,6 +58,142 @@ benchmark:
     assert config.compression.prune.target_sparsity == 0.5
 
 
+def test_load_xqt_config_supports_structured_prune_fields() -> None:
+    config = load_xqt_config(
+        {
+            "compression": {
+                "axes": ["width", "sparsity"],
+                "prune": {
+                    "enabled": True,
+                    "method": "structured",
+                    "granularity": "channel",
+                    "scope": "global",
+                    "target_sparsity": 0.25,
+                    "importance": {"metric": "l1"},
+                    "selection": {"min_keep": 1},
+                    "rewrite": {"inplace": True},
+                },
+            }
+        }
+    )
+
+    assert config.compression.prune.method == "structured"
+    assert config.compression.prune.granularity == "channel"
+    assert config.compression.prune.scope == "global"
+    assert config.compression.prune.importance == {"metric": "l1"}
+    assert config.compression.prune.selection == {"min_keep": 1}
+    assert config.compression.prune.rewrite == {"inplace": True}
+
+
+def test_load_xqt_config_supports_structured_prune_keep_indices_and_importance_type() -> None:
+    config = load_xqt_config(
+        {
+            "compression": {
+                "axes": ["width", "depth"],
+                "prune": {
+                    "enabled": True,
+                    "method": "structured",
+                    "granularity": "block",
+                    "importance": {"type": "l2"},
+                    "selection": {"keep_indices": {"blocks": [0, 2]}},
+                },
+            }
+        }
+    )
+
+    assert config.compression.prune.importance == {"type": "l2"}
+    assert config.compression.prune.selection == {"keep_indices": {"blocks": [0, 2]}}
+
+
+def test_load_xqt_config_supports_extended_structured_prune_granularities() -> None:
+    for granularity in ("stage", "hidden_width", "embedding_width", "expert"):
+        importance = {"metric": "usage"} if granularity == "expert" else {"metric": "l1"}
+        config = load_xqt_config(
+            {
+                "compression": {
+                    "axes": ["width", "depth"],
+                    "prune": {
+                        "enabled": True,
+                        "method": "structured",
+                        "granularity": granularity,
+                        "importance": importance,
+                        "selection": {"min_keep": 1},
+                    },
+                }
+            }
+        )
+
+        assert config.compression.prune.granularity == granularity
+
+
+def test_load_xqt_config_supports_extended_quant_fields() -> None:
+    config = load_xqt_config(
+        {
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "onnxruntime_qdq",
+                    "strategy": "static_int8",
+                    "calibration_split": "calibration_vision",
+                    "validation_split": "validation_vision",
+                    "keep_high_precision": ["head", "norm"],
+                    "skip_quantize": ["head"],
+                    "force_quantize": ["features.0"],
+                    "analysis_only_modules": ["projector"],
+                    "component_policies": [
+                        {
+                            "name": "vision_encoder",
+                            "target": "encoder",
+                            "backend": "torchao",
+                            "strategy": "weight_only_int8",
+                            "keep_high_precision": ["head"],
+                            "skip_quantize": ["head"],
+                            "force_quantize": ["blocks.0.attn.qkv"],
+                            "policy": {"dtype": "int8"},
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    quant = config.compression.quant
+    assert quant.strategy == "static_int8"
+    assert quant.calibration_split == "calibration_vision"
+    assert quant.validation_split == "validation_vision"
+    assert quant.keep_high_precision == ["head", "norm"]
+    assert quant.skip_quantize == ["head"]
+    assert quant.force_quantize == ["features.0"]
+    assert quant.analysis_only_modules == ["projector"]
+    assert len(quant.component_policies) == 1
+    assert quant.component_policies[0].name == "vision_encoder"
+    assert quant.component_policies[0].backend == "torchao"
+    assert quant.component_policies[0].target == "encoder"
+
+
+def test_load_xqt_config_accepts_planned_quant_backends_as_interface_reservations() -> None:
+    config = load_xqt_config(
+        {
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "gptq",
+                    "component_policies": [
+                        {
+                            "name": "decoder",
+                            "backend": "awq",
+                            "target": "model.decoder",
+                        }
+                    ],
+                }
+            }
+        }
+    )
+
+    assert config.compression.quant.backend == "gptq"
+    assert config.compression.quant.component_policies[0].backend == "awq"
+
+
 @pytest.mark.parametrize(
     ("raw_config", "message"),
     [
@@ -69,8 +205,89 @@ benchmark:
         ({"analysis": {"top_k": 0}}, "analysis.top_k"),
         ({"analysis": {"metrics": []}}, "analysis.metrics"),
         (
+            {"compression": {"quant": {"backend": "bad_backend"}}},
+            "compression.quant.backend",
+        ),
+        (
+            {"compression": {"quant": {"keep_high_precision": "head"}}},
+            "compression.quant.keep_high_precision",
+        ),
+        (
+            {"compression": {"quant": {"force_quantize": ["head"], "skip_quantize": ["head"]}}},
+            "compression.quant.skip_quantize",
+        ),
+        (
+            {
+                "compression": {
+                    "quant": {
+                        "component_policies": [
+                            {"name": "encoder"},
+                            {"name": "encoder"},
+                        ]
+                    }
+                }
+            },
+            "component_policies\\[\\*\\].name must be unique",
+        ),
+        (
+            {
+                "compression": {
+                    "quant": {
+                        "component_policies": [
+                            {"name": "encoder", "backend": "bad_backend"},
+                        ]
+                    }
+                }
+            },
+            "component_policies.0.backend",
+        ),
+        (
+            {
+                "compression": {
+                    "quant": {
+                        "component_policies": [
+                            {
+                                "name": "encoder",
+                                "skip_quantize": ["head"],
+                                "force_quantize": ["head"],
+                            },
+                        ]
+                    }
+                }
+            },
+            "component_policies.0.skip_quantize",
+        ),
+        (
             {"compression": {"prune": {"target_sparsity": 1.5}}},
             "target_sparsity",
+        ),
+        (
+            {"compression": {"prune": {"enabled": True, "method": "structured"}}},
+            "compression.prune.granularity",
+        ),
+        (
+            {"compression": {"prune": {"granularity": "bad"}}},
+            "compression.prune.granularity",
+        ),
+        (
+            {"compression": {"prune": {"scope": "bad"}}},
+            "compression.prune.scope",
+        ),
+        (
+            {"compression": {"prune": {"importance": {"type": "bad"}}}},
+            "compression.prune.importance.type",
+        ),
+        (
+            {"compression": {"prune": {"selection": {"keep_indices": []}}}},
+            "compression.prune.selection.keep_indices",
+        ),
+        (
+            {"compression": {"prune": {"selection": {"keep_indices": {"blocks": []}}}}},
+            "compression.prune.selection.keep_indices",
+        ),
+        (
+            {"compression": {"prune": {"selection": {"keep_indices": {"blocks": ["0"]}}}}},
+            "compression.prune.selection.keep_indices",
         ),
         (
             {"compression": {"diffusion_distill": {"teacher_steps": 0}}},
@@ -174,3 +391,4 @@ def test_xqt_config_to_dict_returns_plain_mapping() -> None:
 
     assert data["project"]["name"] == "plain_dict"
     assert data["compression"]["axes"] == []
+    assert data["compression"]["quant"]["component_policies"] == []

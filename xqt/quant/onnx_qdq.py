@@ -11,6 +11,8 @@ import torch
 
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
+from xqt.data.input_utils import extract_model_inputs
+from xqt.export.input_utils import build_onnx_feed
 
 
 @dataclass
@@ -28,38 +30,10 @@ def _as_numpy_inputs(
     batch: Any,
     input_names: Sequence[str],
 ) -> dict[str, np.ndarray]:
-    if isinstance(batch, Mapping):
-        data = batch.get("inputs", batch.get("input", batch.get("x")))
-        if data is None:
-            data = {
-                key: value
-                for key, value in batch.items()
-                if key not in {"targets", "target", "y", "labels", "label"}
-            }
-    elif isinstance(batch, (tuple, list)) and len(batch) >= 2:
-        data = batch[0] if len(batch) == 2 else tuple(batch[:-1])
-    else:
-        data = batch
-
-    if isinstance(data, torch.Tensor):
-        if len(input_names) != 1:
-            raise ValueError("single Tensor calibration batch requires one input name")
-        return {input_names[0]: data.detach().cpu().numpy()}
-    if isinstance(data, Mapping):
-        return {
-            str(key): value.detach().cpu().numpy()
-            for key, value in data.items()
-            if isinstance(value, torch.Tensor)
-        }
-    if isinstance(data, (tuple, list)):
-        if len(data) != len(input_names):
-            raise ValueError("tuple/list calibration batch length must match input_names")
-        return {
-            input_name: value.detach().cpu().numpy()
-            for input_name, value in zip(input_names, data)
-            if isinstance(value, torch.Tensor)
-        }
-    raise TypeError("calibration batch must contain Tensor inputs")
+    return build_onnx_feed(
+        extract_model_inputs(batch, expected_input_count=len(input_names)),
+        input_names=input_names,
+    )
 
 
 class IterableCalibrationDataReader:

@@ -163,9 +163,15 @@ def _shared_module_names(
     candidate_model: nn.Module,
     policy: Optional[QuantizationPolicy] = None,
 ) -> list[str]:
-    reference_candidates = list_quantizable_modules(reference_model, policy)
+    reference_candidates = [
+        candidate
+        for candidate in list_quantizable_modules(reference_model, policy)
+        if candidate.quantize
+    ]
     candidate_names = {
-        candidate.name for candidate in list_quantizable_modules(candidate_model, policy)
+        candidate.name
+        for candidate in list_quantizable_modules(candidate_model, policy)
+        if candidate.quantize
     }
     return [
         candidate.name
@@ -187,6 +193,7 @@ def calibrate_activation_statistics(
     names = list(module_names) if module_names is not None else [
         candidate.name
         for candidate in list_quantizable_modules(model, policy)
+        if candidate.quantize
     ]
     if not names:
         return []

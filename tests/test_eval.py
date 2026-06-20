@@ -21,6 +21,11 @@ class FixedLogitModel(nn.Module):
         return x
 
 
+class PairLogitModel(nn.Module):
+    def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        return left + right
+
+
 def test_compare_tensors_reports_common_diff_metrics() -> None:
     reference = torch.tensor([1.0, 2.0, 3.0])
     candidate = torch.tensor([1.0, 2.001, 2.999])
@@ -220,6 +225,21 @@ def test_evaluate_pytorch_model_supports_mapping_batches_and_custom_metrics() ->
 
     assert report.samples == 2
     assert report.metrics == {"top2": 1.0}
+
+
+def test_evaluate_pytorch_model_supports_unlabeled_multi_input_batches() -> None:
+    report = evaluate_pytorch_model(
+        PairLogitModel(),
+        [
+            (
+                torch.tensor([[0.1, 0.9], [0.8, 0.2]]),
+                torch.tensor([[0.0, 0.0], [0.0, 0.0]]),
+            )
+        ],
+    )
+
+    assert report.samples == 2
+    assert report.metrics["top1"] == 0.0
 
 
 def test_evaluate_pytorch_model_counts_samples_without_targets() -> None:

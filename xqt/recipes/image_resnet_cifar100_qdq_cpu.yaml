@@ -45,6 +45,9 @@ compression:
   quant:
     enabled: true
     backend: onnxruntime_qdq
+    strategy: static_int8
+    calibration_split: calibration
+    keep_high_precision: [head]
     policy:
       source_name: resnet18_cifar100_source.onnx
       output_path: artifacts/xqt/image_resnet_cifar100_qdq_cpu/resnet18_cifar100_qdq.onnx

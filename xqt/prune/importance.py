@@ -67,9 +67,12 @@ class PruneCandidateRecord:
         }
 
 
-def _materialize_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def _materialize_tensor(tensor: torch.Tensor) -> Optional[torch.Tensor]:
     if hasattr(tensor, "dequantize"):
-        tensor = tensor.dequantize()
+        try:
+            tensor = tensor.dequantize()
+        except (NotImplementedError, RuntimeError, TypeError):
+            return None
     return tensor.detach().to(dtype=torch.float32, device="cpu")
 
 
@@ -105,6 +108,8 @@ def collect_module_importance(
         if not isinstance(parameter, torch.Tensor):
             continue
         tensor = _materialize_tensor(parameter)
+        if tensor is None:
+            continue
         if tensor.numel() == 0:
             continue
         flat = tensor.flatten()

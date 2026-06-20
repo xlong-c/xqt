@@ -1,0 +1,64 @@
+config_version: 1
+
+project:
+  name: operator_llm_mlp_triton
+  artifact_dir: artifacts/xqt/operator_llm_mlp_triton
+
+model:
+  target: xqt.operator_opt.toy_models.build_toy_llm_mlp_classifier
+  params:
+    hidden_dim: 8
+    intermediate_dim: 16
+    num_classes: 2
+  dtype: float32
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 2
+    params:
+      input_shape: [8]
+      num_classes: 2
+
+compression:
+  axes:
+    - precision
+  quant:
+    enabled: false
+  prune:
+    enabled: false
+  distill:
+    enabled: false
+  diffusion_distill:
+    enabled: false
+
+operator_optimization:
+  enabled: true
+  stage: after_compression
+  default_backend: triton
+  targets:
+    - name: mlp_triton
+      target: mlp
+      backend: triton
+      patterns:
+        - swiglu
+      fallback: eager
+      min_speedup: 1.10
+      validate:
+        atol: 1.0e-4
+        rtol: 1.0e-4
+
+export:
+  targets: []
+
+validation:
+  output_diff:
+    atol: 1.0e-4
+    rtol: 1.0e-4
+
+benchmark:
+  warmup: 0
+  iterations: 1
+  percentiles: [50, 90, 99]

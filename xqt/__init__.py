@@ -12,6 +12,15 @@ from .core.registry import (
     register_recipe,
 )
 from .core.schema import XQTConfig
+from .operator_opt import (
+    OperatorOptimizationExecutionPlan,
+    OperatorOptimizationExecutionResult,
+    OperatorOptimizationReport,
+    OperatorOptimizationTargetPlan,
+    build_operator_optimization_plan,
+    describe_operator_backend_capability,
+    execute_operator_optimization_plan,
+)
 from .pipeline.preflight import preflight_xqt_config
 from .pipeline.runner import run_xqt_recipe
 from .xdl_adapter import (
@@ -25,10 +34,17 @@ __all__ = [
     "ArtifactRecord",
     "EXPORTER_REGISTRY",
     "MetricRecord",
+    "OperatorOptimizationExecutionPlan",
+    "OperatorOptimizationExecutionResult",
+    "OperatorOptimizationReport",
+    "OperatorOptimizationTargetPlan",
     "PASS_REGISTRY",
     "RECIPE_REGISTRY",
     "XQTConfig",
     "XQTRegistry",
+    "build_operator_optimization_plan",
+    "describe_operator_backend_capability",
+    "execute_operator_optimization_plan",
     "load_xqt_config",
     "load_checkpoint_into_model",
     "preflight_xqt_config",

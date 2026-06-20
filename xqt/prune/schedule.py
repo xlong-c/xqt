@@ -16,6 +16,7 @@ from .masks import (
     remove_pruning_reparameterization,
     summarize_pruning,
 )
+from .structured import StructuredPruningReport, apply_structured_pruning
 
 
 @dataclass
@@ -66,6 +67,26 @@ class PruneKDStepReport:
 
 
 @dataclass
+class StructuredPruneKDStepReport:
+    """A single structured prune + KD step report."""
+
+    step: int
+    target_sparsity: float
+    pruning: StructuredPruningReport
+    distillation: Optional[DistillationTrainReport] = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "step": self.step,
+            "target_sparsity": self.target_sparsity,
+            "pruning": self.pruning.to_dict(),
+            "distillation": (
+                self.distillation.to_dict() if self.distillation is not None else None
+            ),
+        }
+
+
+@dataclass
 class PruneKDReport:
     """Full prune + KD loop report."""
 
@@ -80,6 +101,26 @@ class PruneKDReport:
     def to_dict(self) -> dict[str, object]:
         return {
             "final_sparsity": self.final_sparsity,
+            "steps": [step.to_dict() for step in self.steps],
+        }
+
+
+@dataclass
+class StructuredPruneKDReport:
+    """Full structured prune + KD loop report."""
+
+    steps: list[StructuredPruneKDStepReport] = field(default_factory=list)
+
+    @property
+    def final_sparsity(self) -> float:
+        if not self.steps:
+            return 0.0
+        return self.steps[-1].pruning.sparsity
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "final_sparsity": self.final_sparsity,
+            "method": "structured",
             "steps": [step.to_dict() for step in self.steps],
         }
 
@@ -126,9 +167,69 @@ def run_prune_kd_loop(
     return PruneKDReport(steps=reports)
 
 
+def run_structured_prune_kd_loop(
+    student: nn.Module,
+    teacher: Optional[nn.Module],
+    dataloader: Optional[Iterable[object]],
+    *,
+    schedule: PruningSchedule,
+    granularity: str,
+    scope: str,
+    importance: Optional[dict[str, object]] = None,
+    selection: Optional[dict[str, object]] = None,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    temperature: float = 2.0,
+    alpha: float = 0.5,
+    device: str | torch.device = "cpu",
+    kd_steps_per_prune: Optional[int] = None,
+    example_input: object = None,
+) -> StructuredPruneKDReport:
+    """Apply scheduled structured pruning and optionally run KD after one rewrite."""
+
+    schedule_values = schedule.values()
+    if not schedule_values:
+        return StructuredPruneKDReport()
+
+    pruning = apply_structured_pruning(
+        student,
+        schedule_values[-1],
+        granularity=granularity,
+        scope=scope,
+        importance=importance,
+        selection=selection,
+        example_input=example_input,
+    )
+    reports: list[StructuredPruneKDStepReport] = []
+    for step_index, sparsity in enumerate(schedule_values):
+        distill_report: Optional[DistillationTrainReport] = None
+        if teacher is not None and dataloader is not None and optimizer is not None:
+            distill_report = train_logit_distillation(
+                student,
+                teacher,
+                dataloader,
+                optimizer,
+                temperature=temperature,
+                alpha=alpha,
+                device=device,
+                max_steps=kd_steps_per_prune,
+            )
+        reports.append(
+            StructuredPruneKDStepReport(
+                step=step_index,
+                target_sparsity=sparsity,
+                pruning=pruning,
+                distillation=distill_report,
+            )
+        )
+    return StructuredPruneKDReport(steps=reports)
+
+
 __all__ = [
     "PruneKDReport",
     "PruneKDStepReport",
     "PruningSchedule",
+    "StructuredPruneKDReport",
+    "StructuredPruneKDStepReport",
     "run_prune_kd_loop",
+    "run_structured_prune_kd_loop",
 ]

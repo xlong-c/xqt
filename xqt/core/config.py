@@ -10,7 +10,24 @@ from omegaconf.errors import OmegaConfBaseException
 from xdl.config.resolver import register_default_resolvers
 
 from .errors import XQTConfigError
-from .schema import COMPRESSION_AXES, XQTConfig, XQT_CONFIG_VERSION
+from .schema import (
+    COMPRESSION_AXES,
+    CUTILE_PASS_CONFIG_KEYS,
+    CUTLASS_PASS_CONFIG_KEYS,
+    OPERATOR_OPT_BACKENDS,
+    PRUNE_GRANULARITIES,
+    PRUNE_SCOPES,
+    QuantComponentPolicyConfig,
+    QuantConfig,
+    TILELANG_PASS_CONFIG_KEYS,
+    XQTConfig,
+    XQT_CONFIG_VERSION,
+)
+
+_STRUCTURED_IMPORTANCE_TYPES = {"l1", "l2", "bn_gamma", "usage"}
+_AVAILABLE_QUANT_BACKENDS = {"torchao", "onnxruntime_qdq"}
+_PLANNED_QUANT_BACKENDS = {"awq", "bitsandbytes", "gptq"}
+_SUPPORTED_QUANT_BACKENDS = _AVAILABLE_QUANT_BACKENDS | _PLANNED_QUANT_BACKENDS
 
 ConfigInput = Union[str, Path, Mapping[str, Any]]
 
@@ -24,6 +41,173 @@ def _load_raw_config(config: ConfigInput) -> Any:
     if isinstance(config, Mapping):
         return OmegaConf.create(dict(config))
     raise XQTConfigError(f"Unsupported config input type: {type(config).__name__}")
+
+
+def _validate_pre_export_fusion(config_value: Any, location: str) -> None:
+    if config_value is None:
+        return
+    if not isinstance(config_value, Mapping):
+        raise XQTConfigError(f"{location} must be a mapping")
+    mode = str(config_value.get("mode", "eager"))
+    if mode not in {"eager", "fx"}:
+        raise XQTConfigError(f"{location}.mode must be eager or fx")
+    if mode == "eager" and bool(config_value.get("enabled", False)):
+        groups = config_value.get("modules_to_fuse")
+        if not isinstance(groups, list) or not groups:
+            raise XQTConfigError(
+                f"{location}.modules_to_fuse must be a non-empty list "
+                "when mode=eager and enabled=true"
+            )
+
+
+def _validate_quant_string_list(values: list[str], location: str) -> None:
+    if not isinstance(values, list):
+        raise XQTConfigError(f"{location} must be a list of strings")
+    if any(not isinstance(value, str) or not value for value in values):
+        raise XQTConfigError(f"{location} must contain only non-empty strings")
+
+
+def _validate_quant_component_lists(
+    component: QuantConfig | QuantComponentPolicyConfig,
+    location: str,
+) -> None:
+    _validate_quant_string_list(component.keep_high_precision, f"{location}.keep_high_precision")
+    _validate_quant_string_list(component.skip_quantize, f"{location}.skip_quantize")
+    _validate_quant_string_list(component.force_quantize, f"{location}.force_quantize")
+    overlap = sorted(set(component.skip_quantize) & set(component.force_quantize))
+    if overlap:
+        raise XQTConfigError(
+            f"{location}.skip_quantize and {location}.force_quantize overlap: {overlap}"
+        )
+
+
+def _validate_quant_config(quant_config: QuantConfig) -> None:
+    if quant_config.backend not in _SUPPORTED_QUANT_BACKENDS:
+        allowed = ", ".join(sorted(_SUPPORTED_QUANT_BACKENDS))
+        raise XQTConfigError(f"compression.quant.backend must be one of: {allowed}")
+    _validate_quant_component_lists(quant_config, "compression.quant")
+    _validate_quant_string_list(
+        quant_config.analysis_only_modules,
+        "compression.quant.analysis_only_modules",
+    )
+
+    seen_component_names: set[str] = set()
+    for index, component in enumerate(quant_config.component_policies):
+        location = f"compression.quant.component_policies.{index}"
+        if not component.name:
+            raise XQTConfigError(f"{location}.name must be a non-empty string")
+        if component.name in seen_component_names:
+            raise XQTConfigError(
+                f"compression.quant.component_policies[*].name must be unique: {component.name}"
+            )
+        seen_component_names.add(component.name)
+        if component.backend is not None and component.backend not in _SUPPORTED_QUANT_BACKENDS:
+            allowed = ", ".join(sorted(_SUPPORTED_QUANT_BACKENDS))
+            raise XQTConfigError(f"{location}.backend must be one of: {allowed}")
+        _validate_quant_component_lists(component, location)
+        _validate_pre_export_fusion(
+            component.policy.get("pre_export_fusion"),
+            f"{location}.policy.pre_export_fusion",
+        )
+
+
+def _validate_operator_optimization_config(config: XQTConfig) -> None:
+    operator_config = config.operator_optimization
+    if operator_config.default_backend not in OPERATOR_OPT_BACKENDS:
+        allowed = ", ".join(OPERATOR_OPT_BACKENDS)
+        raise XQTConfigError(
+            "operator_optimization.default_backend must be one of: "
+            f"{allowed}"
+        )
+    if operator_config.stage not in {"after_compression"}:
+        raise XQTConfigError(
+            "operator_optimization.stage must be after_compression"
+        )
+
+    seen_names: set[str] = set()
+    for index, target in enumerate(operator_config.targets):
+        location = f"operator_optimization.targets.{index}"
+        if not target.name:
+            raise XQTConfigError(f"{location}.name must be a non-empty string")
+        if target.name in seen_names:
+            raise XQTConfigError(
+                f"operator_optimization.targets[*].name must be unique: {target.name}"
+            )
+        seen_names.add(target.name)
+        if target.backend is None:
+            raise XQTConfigError(f"{location}.backend is required")
+        if target.backend not in OPERATOR_OPT_BACKENDS:
+            allowed = ", ".join(OPERATOR_OPT_BACKENDS)
+            raise XQTConfigError(f"{location}.backend must be one of: {allowed}")
+        if target.target is None and target.name != "model":
+            raise XQTConfigError(
+                f"{location}.target is required unless {location}.name=model"
+            )
+        if target.fallback not in {"eager"}:
+            raise XQTConfigError(f"{location}.fallback must be eager")
+        if target.min_speedup <= 1.0:
+            raise XQTConfigError(f"{location}.min_speedup must be greater than 1.0")
+        if target.validate.atol < 0 or target.validate.rtol < 0:
+            raise XQTConfigError(
+                f"{location}.validate.atol and {location}.validate.rtol must be non-negative"
+            )
+        if not isinstance(target.patterns, list):
+            raise XQTConfigError(f"{location}.patterns must be a list of strings")
+        if any(not isinstance(pattern, str) or not pattern for pattern in target.patterns):
+            raise XQTConfigError(f"{location}.patterns must contain only non-empty strings")
+        if target.backend == "torch_compile":
+            if target.mode is not None and target.mode not in {
+                "default",
+                "reduce-overhead",
+                "max-autotune",
+                "max-autotune-no-cudagraphs",
+            }:
+                raise XQTConfigError(
+                    f"{location}.mode is not a supported torch.compile mode"
+                )
+        if target.backend == "tilelang":
+            if target.tilelang.target != "cuda":
+                raise XQTConfigError(f"{location}.tilelang.target must be cuda")
+            unknown_keys = sorted(
+                set(target.tilelang.pass_configs) - set(TILELANG_PASS_CONFIG_KEYS)
+            )
+            if unknown_keys:
+                allowed = ", ".join(TILELANG_PASS_CONFIG_KEYS)
+                raise XQTConfigError(
+                    f"{location}.tilelang.pass_configs contains unknown keys {unknown_keys}. "
+                    f"Allowed: {allowed}"
+                )
+        if target.backend == "cutile":
+            if target.cutile.target != "cuda":
+                raise XQTConfigError(f"{location}.cutile.target must be cuda")
+            unknown_keys = sorted(
+                set(target.cutile.pass_configs) - set(CUTILE_PASS_CONFIG_KEYS)
+            )
+            if unknown_keys:
+                allowed = ", ".join(CUTILE_PASS_CONFIG_KEYS)
+                raise XQTConfigError(
+                    f"{location}.cutile.pass_configs contains unknown keys {unknown_keys}. "
+                    f"Allowed: {allowed}"
+                )
+        if target.backend == "cutlass":
+            if len(target.cutlass.tile_shape) != 3:
+                raise XQTConfigError(f"{location}.cutlass.tile_shape must contain three integers")
+            if any(not isinstance(value, int) or value <= 0 for value in target.cutlass.tile_shape):
+                raise XQTConfigError(f"{location}.cutlass.tile_shape must contain positive integers")
+            if target.cutlass.cluster_shape is not None:
+                if len(target.cutlass.cluster_shape) != 3:
+                    raise XQTConfigError(f"{location}.cutlass.cluster_shape must contain three integers")
+                if any(not isinstance(value, int) or value <= 0 for value in target.cutlass.cluster_shape):
+                    raise XQTConfigError(f"{location}.cutlass.cluster_shape must contain positive integers")
+            unknown_keys = sorted(
+                set(target.cutlass.pass_configs) - set(CUTLASS_PASS_CONFIG_KEYS)
+            )
+            if unknown_keys:
+                allowed = ", ".join(CUTLASS_PASS_CONFIG_KEYS)
+                raise XQTConfigError(
+                    f"{location}.cutlass.pass_configs contains unknown keys {unknown_keys}. "
+                    f"Allowed: {allowed}"
+                )
 
 
 def _validate_config(config: XQTConfig) -> None:
@@ -48,35 +232,64 @@ def _validate_config(config: XQTConfig) -> None:
         raise XQTConfigError("analysis.top_k must be positive when provided")
     if not config.analysis.metrics:
         raise XQTConfigError("analysis.metrics must not be empty")
+    _validate_quant_config(config.compression.quant)
+    _validate_operator_optimization_config(config)
     if config.compression.prune.target_sparsity < 0 or config.compression.prune.target_sparsity > 1:
         raise XQTConfigError("compression.prune.target_sparsity must be in [0, 1]")
+    prune_config = config.compression.prune
+    if prune_config.granularity is not None and prune_config.granularity not in PRUNE_GRANULARITIES:
+        allowed = ", ".join(PRUNE_GRANULARITIES)
+        raise XQTConfigError(
+            "compression.prune.granularity must be one of: "
+            f"{allowed}"
+        )
+    if prune_config.scope not in PRUNE_SCOPES:
+        allowed = ", ".join(PRUNE_SCOPES)
+        raise XQTConfigError(f"compression.prune.scope must be one of: {allowed}")
+    if prune_config.method == "structured" and prune_config.granularity is None:
+        raise XQTConfigError(
+            "compression.prune.granularity is required when "
+            "compression.prune.method=structured"
+        )
+    importance_type = prune_config.importance.get(
+        "type",
+        prune_config.importance.get("metric"),
+    )
+    if importance_type is not None and str(importance_type) not in _STRUCTURED_IMPORTANCE_TYPES:
+        allowed = ", ".join(sorted(_STRUCTURED_IMPORTANCE_TYPES))
+        raise XQTConfigError(
+            "compression.prune.importance.type or compression.prune.importance.metric "
+            f"must be one of: {allowed}"
+        )
+    keep_indices = prune_config.selection.get("keep_indices")
+    if keep_indices is not None:
+        if not isinstance(keep_indices, Mapping):
+            raise XQTConfigError("compression.prune.selection.keep_indices must be a mapping")
+        for module_name, indices in keep_indices.items():
+            if not isinstance(module_name, str):
+                raise XQTConfigError(
+                    "compression.prune.selection.keep_indices keys must be strings"
+                )
+            if not isinstance(indices, list) or not indices:
+                raise XQTConfigError(
+                    "compression.prune.selection.keep_indices values must be non-empty lists"
+                )
+            if any(not isinstance(index, int) for index in indices):
+                raise XQTConfigError(
+                    "compression.prune.selection.keep_indices values must contain only integers"
+                )
     if config.compression.diffusion_distill.teacher_steps <= 0:
         raise XQTConfigError("compression.diffusion_distill.teacher_steps must be positive")
     if config.compression.diffusion_distill.student_steps <= 0:
         raise XQTConfigError("compression.diffusion_distill.student_steps must be positive")
-    def validate_pre_export_fusion(config_value: Any, location: str) -> None:
-        if config_value is None:
-            return
-        if not isinstance(config_value, Mapping):
-            raise XQTConfigError(f"{location} must be a mapping")
-        mode = str(config_value.get("mode", "eager"))
-        if mode not in {"eager", "fx"}:
-            raise XQTConfigError(f"{location}.mode must be eager or fx")
-        if mode == "eager" and bool(config_value.get("enabled", False)):
-            groups = config_value.get("modules_to_fuse")
-            if not isinstance(groups, list) or not groups:
-                raise XQTConfigError(
-                    f"{location}.modules_to_fuse must be a non-empty list "
-                    "when mode=eager and enabled=true"
-                )
 
     for index, target in enumerate(config.export.targets):
-        validate_pre_export_fusion(
+        _validate_pre_export_fusion(
             target.params.get("pre_export_fusion"),
             f"export.targets.{index}.params.pre_export_fusion",
         )
 
-    validate_pre_export_fusion(
+    _validate_pre_export_fusion(
         config.compression.quant.policy.get("pre_export_fusion"),
         "compression.quant.policy.pre_export_fusion",
     )

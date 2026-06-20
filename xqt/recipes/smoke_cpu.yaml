@@ -25,6 +25,8 @@ compression:
   quant:
     enabled: false
     backend: torchao
+    strategy: dynamic_int8
+    skip_quantize: [head]
     policy:
       dtype: int8
       include_module_types:

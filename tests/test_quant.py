@@ -11,6 +11,8 @@ from xqt.quant import (
     analyze_layer_errors,
     analyze_layer_sensitivity,
     calibrate_activation_statistics,
+    describe_quant_backend_capability,
+    list_quant_backend_capabilities,
     list_quantizable_modules,
     quantize_onnx_qdq_static,
     recommend_high_precision_modules,
@@ -56,6 +58,26 @@ def test_quantization_policy_selects_expected_modules() -> None:
     assert should_quantize_module("manual", nn.Linear(2, 2), policy) is True
 
 
+def test_quant_backend_capability_matrix_describes_supported_and_planned_paths() -> None:
+    torchao_fp8 = describe_quant_backend_capability(
+        "torchao",
+        strategy="fp8_dynamic",
+    )
+    qdq = describe_quant_backend_capability("onnxruntime_qdq")
+    available = list_quant_backend_capabilities(include_planned=False)
+    full_matrix = list_quant_backend_capabilities()
+
+    assert torchao_fp8.runtime == "pytorch"
+    assert torchao_fp8.requires_cuda is True
+    assert torchao_fp8.primary_module_types == ("Linear",)
+    assert "LayerNorm" in torchao_fp8.default_high_precision
+    assert qdq.requires_calibration is True
+    assert qdq.requires_exportable_graph is True
+    assert "Conv2d" in qdq.primary_module_types
+    assert "gptq" not in available
+    assert full_matrix["gptq"]["status"] == "planned"
+
+
 def test_quantization_policy_include_name_overrides_default_filters() -> None:
     policy = QuantizationPolicy(include_module_names=("head",))
 
@@ -75,6 +97,20 @@ def test_calibrate_activation_statistics_collects_ranges() -> None:
     assert [stat.name for stat in stats] == ["features.0", "head"]
     assert all(stat.samples > 0 for stat in stats)
     assert all(stat.maximum >= stat.minimum for stat in stats)
+
+
+def test_quant_analysis_defaults_to_quantizable_modules_only() -> None:
+    reference = TinyModel()
+    candidate = TinyModel()
+    candidate.load_state_dict(reference.state_dict())
+
+    stats = calibrate_activation_statistics(reference, [torch.ones(2, 3)])
+    sensitivity_records = analyze_layer_sensitivity(reference, candidate, torch.ones(2, 3))
+    drift_records = analyze_activation_drift(reference, candidate, [torch.ones(2, 3)])
+
+    assert [stat.name for stat in stats] == ["features.0", "features.2"]
+    assert {record.name for record in sensitivity_records} == {"features.0", "features.2"}
+    assert {record.name for record in drift_records} == {"features.0", "features.2"}
 
 
 def test_analyze_activation_drift_reports_stat_deltas() -> None:
@@ -348,6 +384,24 @@ def test_iterable_calibration_data_reader_supports_tuple_multi_input_names() -> 
                 torch.ones(1, 3),
                 torch.zeros(1, 3),
                 torch.tensor([1]),
+            )
+        ],
+        input_names=["left", "right"],
+    )
+
+    record = reader.get_next()
+    assert record is not None
+    assert set(record.keys()) == {"left", "right"}
+    assert record["left"].shape == (1, 3)
+    assert record["right"].shape == (1, 3)
+
+
+def test_iterable_calibration_data_reader_supports_unlabeled_tuple_multi_input_names() -> None:
+    reader = IterableCalibrationDataReader(
+        [
+            (
+                torch.ones(1, 3),
+                torch.zeros(1, 3),
             )
         ],
         input_names=["left", "right"],

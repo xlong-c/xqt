@@ -69,8 +69,16 @@ def _shared_module_names(
     candidate_model: nn.Module,
     policy: Optional[QuantizationPolicy] = None,
 ) -> list[str]:
-    reference_candidates = list_quantizable_modules(reference_model, policy)
-    candidate_names = {candidate.name for candidate in list_quantizable_modules(candidate_model, policy)}
+    reference_candidates = [
+        candidate
+        for candidate in list_quantizable_modules(reference_model, policy)
+        if candidate.quantize
+    ]
+    candidate_names = {
+        candidate.name
+        for candidate in list_quantizable_modules(candidate_model, policy)
+        if candidate.quantize
+    }
     return [
         candidate.name
         for candidate in reference_candidates
@@ -152,7 +160,10 @@ def _get_module_weight(module: nn.Module) -> Optional[torch.Tensor]:
     if weight is None:
         return None
     if hasattr(weight, "dequantize"):
-        weight = weight.dequantize()
+        try:
+            weight = weight.dequantize()
+        except (NotImplementedError, RuntimeError, TypeError):
+            return None
     if not isinstance(weight, torch.Tensor):
         return None
     return weight.detach().to(dtype=torch.float32, device="cpu")

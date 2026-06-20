@@ -16,6 +16,8 @@ from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
 from xqt.data import (
     build_data_split,
+    extract_model_inputs,
+    infer_model_input_count,
     prompt_summary,
 )
 from xqt.distill import (
@@ -41,36 +43,35 @@ from xqt.export import (
     export_torch_program,
     export_torchscript,
 )
+from xqt.operator_opt import (
+    build_operator_optimization_plan,
+    execute_operator_optimization_plan,
+    summarize_operator_optimization_reports,
+)
 from xqt.export.input_utils import default_input_names, first_tensor_output
 from xqt.prune import (
     collect_module_importance,
+    prune_runtime_capability_from_report,
     PruningSchedule,
+    apply_block_sparse_pruning,
     apply_global_l1_unstructured_pruning,
+    apply_nm_structured_sparsity,
+    apply_structured_pruning,
     rank_prune_candidates,
     remove_pruning_reparameterization,
     run_prune_kd_loop,
+    run_structured_prune_kd_loop,
     summarize_pruning,
 )
-from xqt.quant import analyze_layer_errors, quantize_with_torchao
-from xqt.quant import analyze_activation_drift, recommend_high_precision_modules
+from xqt.quant import (
+    analyze_activation_drift,
+    analyze_layer_errors,
+    build_quantization_plan,
+    execute_quantization_plan,
+    recommend_high_precision_modules,
+    summarize_quantization_reports,
+)
 from xqt.quant.onnx_qdq import quantize_onnx_qdq_static
-
-
-def _split_inputs_from_batch(batch: Any) -> Any:
-    """Best-effort extraction of model inputs from a loader batch."""
-
-    if isinstance(batch, Mapping):
-        inputs = batch.get("inputs", batch.get("input", batch.get("x")))
-        if inputs is not None:
-            return inputs
-        return {
-            key: value
-            for key, value in batch.items()
-            if key not in {"targets", "target", "y", "labels", "label"}
-        }
-    if isinstance(batch, (tuple, list)) and len(batch) >= 2:
-        return batch[0] if len(batch) == 2 else tuple(batch[:-1])
-    return batch
 
 
 def _move_to_device(data: Any, device: torch.device) -> Any:
@@ -95,6 +96,82 @@ def _call_model(model: nn.Module, inputs: Any) -> Any:
     if isinstance(inputs, tuple):
         return model(*inputs)
     return model(inputs)
+
+
+def _resolve_export_model(context: XQTContext) -> tuple[nn.Module, dict[str, object]]:
+    """Choose an export-friendly model when runtime optimization wrapped the current module."""
+
+    model = context.require_model()
+    operator_metrics = context.metrics.get("operator_optimization")
+    if not isinstance(operator_metrics, dict):
+        return model, {"guarded": False}
+
+    targets = operator_metrics.get("targets")
+    if not isinstance(targets, list) or not any(
+        isinstance(item, Mapping) and bool(item.get("applied")) for item in targets
+    ):
+        return model, {"guarded": False}
+
+    if hasattr(model, "_orig_mod") and isinstance(getattr(model, "_orig_mod"), nn.Module):
+        return getattr(model, "_orig_mod"), {
+            "guarded": True,
+            "reason": "compiled_runtime_unwrapped",
+        }
+    if isinstance(context.reference_model, nn.Module):
+        return context.reference_model, {
+            "guarded": True,
+            "reason": "reference_model_fallback",
+        }
+    return model, {"guarded": False}
+
+
+def _update_structured_prune_export_status(context: XQTContext, exported: list[dict[str, object]]) -> None:
+    prune_metrics = context.metrics.get("prune")
+    if not isinstance(prune_metrics, dict) or prune_metrics.get("method") != "structured":
+        return
+    checked_values = [
+        bool(item.get("checked"))
+        for item in exported
+        if isinstance(item.get("checked"), bool)
+    ]
+    prune_metrics["export_status"] = {
+        "attempted": bool(exported),
+        "passed": all(checked_values) if checked_values else (True if exported else None),
+        "artifact_count": len(exported),
+        "formats": [str(item.get("format")) for item in exported if item.get("format") is not None],
+        "artifacts": [dict(item) for item in exported],
+    }
+
+
+def _update_structured_prune_benchmark_status(
+    context: XQTContext,
+    benchmark_metrics: dict[str, object],
+) -> None:
+    prune_metrics = context.metrics.get("prune")
+    if not isinstance(prune_metrics, dict) or prune_metrics.get("method") != "structured":
+        return
+    prune_metrics["benchmark_status"] = {
+        "attempted": True,
+        "passed": True,
+        "latency": dict(benchmark_metrics.get("latency", {})),
+        "memory": benchmark_metrics.get("memory"),
+        "capability": benchmark_metrics.get("capability"),
+    }
+
+
+def _prune_module_types(include_module_types: object) -> tuple[type[nn.Module], ...]:
+    names = include_module_types
+    if not isinstance(names, list):
+        names = ["Linear", "Conv2d"]
+    module_types = tuple(
+        module_type
+        for module_type_name, module_type in (
+            ("Linear", nn.Linear),
+            ("Conv2d", nn.Conv2d),
+        )
+        if module_type_name in names
+    )
+    return module_types or (nn.Linear, nn.Conv2d)
 
 
 @register_pass("load_model")
@@ -293,8 +370,9 @@ class AnalyzePass:
         if dataloader is None:
             raise ValueError("validation data is required for analyze pass")
         batch = next(iter(dataloader))
+        expected_input_count = infer_model_input_count(model)
         inputs = _move_to_device(
-            _split_inputs_from_batch(batch),
+            extract_model_inputs(batch, expected_input_count=expected_input_count),
             torch.device(context.config.model.device),
         )
         model = model.to(context.config.model.device)
@@ -408,7 +486,7 @@ class AnalyzePass:
 
 @register_pass("prune")
 class PrunePass:
-    """Apply global L1 unstructured pruning when enabled."""
+    """Apply built-in pruning methods when enabled."""
 
     name = "prune"
 
@@ -417,10 +495,168 @@ class PrunePass:
         prune_config = context.config.compression.prune
         if not prune_config.enabled:
             return context
+        if prune_config.method == "nm_structured":
+            pattern = prune_config.selection.get("pattern") or prune_config.params.get("pattern")
+            if not isinstance(pattern, (list, tuple)) or len(pattern) != 2:
+                raise ValueError(
+                    "compression.prune.selection.pattern or compression.prune.params.pattern "
+                    "must be a two-item list like [2, 4] for method=nm_structured"
+                )
+            pattern_n = int(pattern[0])
+            pattern_m = int(pattern[1])
+            module_types = _prune_module_types(prune_config.params.get("include_module_types"))
+            report = apply_nm_structured_sparsity(
+                model,
+                pattern_n=pattern_n,
+                pattern_m=pattern_m,
+                module_types=module_types,
+            )
+            context.metrics["prune"] = report.to_dict()
+            if context.manifest is not None:
+                context.manifest.add_metric(
+                    MetricRecord(
+                        name="prune.sparsity",
+                        value=report.sparsity,
+                        metadata={
+                            "method": prune_config.method,
+                            "granularity": "nm",
+                            "pattern": [pattern_n, pattern_m],
+                            "compliance_ratio": report.compliance_ratio,
+                        },
+                    )
+                )
+            return context
+        if prune_config.method == "block_sparse":
+            block_shape = (
+                prune_config.selection.get("block_shape")
+                or prune_config.params.get("block_shape")
+                or [4, 4]
+            )
+            if not isinstance(block_shape, (list, tuple)) or len(block_shape) != 2:
+                raise ValueError(
+                    "compression.prune.selection.block_shape or "
+                    "compression.prune.params.block_shape must be a two-item list like [4, 4] "
+                    "for method=block_sparse"
+                )
+            report = apply_block_sparse_pruning(
+                model,
+                target_sparsity=prune_config.target_sparsity,
+                block_shape=(int(block_shape[0]), int(block_shape[1])),
+                module_types=_prune_module_types(prune_config.params.get("include_module_types")),
+            )
+            context.metrics["prune"] = report.to_dict()
+            if context.manifest is not None:
+                context.manifest.add_metric(
+                    MetricRecord(
+                        name="prune.block_sparsity",
+                        value=report.sparsity,
+                        threshold=prune_config.target_sparsity,
+                        passed=report.sparsity >= prune_config.target_sparsity,
+                        metadata={
+                            "method": prune_config.method,
+                            "granularity": "block_sparse",
+                            "block_shape": list(report.block_shape),
+                            "parameter_sparsity": report.parameter_sparsity,
+                        },
+                    )
+                )
+            return context
+        if prune_config.method == "structured":
+            validation_loader = context.data.get("validation")
+            example_input = None
+            if validation_loader is not None:
+                expected_input_count = infer_model_input_count(model)
+                example_input = _move_to_device(
+                    extract_model_inputs(
+                        next(iter(validation_loader)),
+                        expected_input_count=expected_input_count,
+                    ),
+                    torch.device(context.config.model.device),
+                )
+            if prune_config.schedule in {"linear", "one_shot"} and bool(
+                prune_config.params.get("finetune", False)
+            ):
+                dataloader = context.data.get("train")
+                optimizer = None
+                if dataloader is not None:
+                    optimizer = torch.optim.AdamW(
+                        model.parameters(),
+                        lr=float(prune_config.params.get("lr", 1e-3)),
+                        weight_decay=float(prune_config.params.get("weight_decay", 0.0)),
+                    )
+                report = run_structured_prune_kd_loop(
+                    model,
+                    context.teacher,
+                    dataloader,
+                    schedule=PruningSchedule(
+                        target_sparsity=prune_config.target_sparsity,
+                        steps=int(prune_config.params.get("steps", 1)),
+                        start_sparsity=float(prune_config.params.get("start_sparsity", 0.0)),
+                        schedule=prune_config.schedule,
+                    ),
+                    granularity=prune_config.granularity or "channel",
+                    scope=prune_config.scope,
+                    importance=dict(prune_config.importance),
+                    selection=dict(prune_config.selection),
+                    optimizer=optimizer,
+                    temperature=context.config.compression.distill.temperature,
+                    alpha=context.config.compression.distill.alpha,
+                    device=context.config.model.device,
+                    kd_steps_per_prune=prune_config.params.get("kd_steps_per_prune"),
+                    example_input=example_input,
+                )
+                context.metrics["prune"] = report.to_dict()
+                if context.manifest is not None:
+                    context.manifest.add_metric(
+                        MetricRecord(
+                            name="prune.sparsity",
+                            value=report.final_sparsity,
+                            threshold=prune_config.target_sparsity,
+                            passed=report.final_sparsity >= prune_config.target_sparsity,
+                            metadata={
+                                "method": prune_config.method,
+                                "granularity": prune_config.granularity,
+                                "schedule": prune_config.schedule,
+                                "steps": len(report.steps),
+                                "finetune": optimizer is not None,
+                                "kd": context.teacher is not None,
+                            },
+                        )
+                    )
+                return context
+            report = apply_structured_pruning(
+                model,
+                prune_config.target_sparsity,
+                granularity=prune_config.granularity or "channel",
+                scope=prune_config.scope,
+                importance=prune_config.importance,
+                selection=prune_config.selection,
+                example_input=example_input,
+            )
+            context.metrics["prune"] = report.to_dict()
+            if context.manifest is not None:
+                context.manifest.add_metric(
+                    MetricRecord(
+                        name="prune.sparsity",
+                        value=report.sparsity,
+                        threshold=prune_config.target_sparsity,
+                        passed=report.sparsity >= prune_config.target_sparsity,
+                        metadata={
+                            "method": prune_config.method,
+                            "granularity": prune_config.granularity,
+                            "parameter_count_before": report.parameter_count_before,
+                            "parameter_count_after": report.parameter_count_after,
+                            "parameter_reduction_ratio": report.parameter_reduction_ratio,
+                        },
+                    )
+                )
+            return context
         if prune_config.method != "global_l1_unstructured":
             raise ValueError(
-                "Only compression.prune.method=global_l1_unstructured is supported "
-                "by the built-in prune pass"
+                "Only compression.prune.method=global_l1_unstructured or "
+                "compression.prune.method=structured or "
+                "compression.prune.method=block_sparse or "
+                "compression.prune.method=nm_structured is supported by the built-in prune pass"
             )
         if prune_config.schedule in {"linear", "one_shot"} and (
             int(prune_config.params.get("steps", 1)) > 1
@@ -496,110 +732,115 @@ class QuantPass:
         quant_config = context.config.compression.quant
         if not quant_config.enabled:
             return context
-        if quant_config.backend == "onnxruntime_qdq":
-            # QDQ path needs an exportable ONNX graph before calibration can run.
-            dataloader = context.data.get("calibration") or context.data.get("validation")
-            if dataloader is None:
-                raise ValueError("calibration or validation data is required for ONNX QDQ")
-            policy = quant_config.policy
-            onnx_path = policy.get("onnx_path") or context.artifacts.get("last_onnx")
-            export_metadata: dict[str, Any] = {}
-            batch = next(iter(dataloader))
-            example_input = _split_inputs_from_batch(batch)
-            input_names = list(policy.get("input_names") or default_input_names(example_input))
-            if onnx_path is None:
-                onnx_path = (
-                    Path(context.config.project.artifact_dir)
-                    / str(policy.get("source_name", "quant_source.onnx"))
-                )
-                export_result = export_onnx(
-                    model,
-                    example_input,
-                    onnx_path,
-                    opset=policy.get("opset"),
-                    input_names=input_names,
-                    output_names=policy.get("output_names"),
-                    dynamo=bool(policy.get("dynamo", True)),
-                    validate=bool(policy.get("validate", True)),
-                    pre_export_fusion=policy.get("pre_export_fusion"),
-                )
-                export_metadata = dict(export_result.metadata)
-                context.artifacts["last_onnx"] = Path(onnx_path)
-            output_path = policy.get("output_path")
-            if output_path is None:
-                output_path = str(
-                    Path(context.config.project.artifact_dir) / "model_qdq.onnx"
-                )
-            result = quantize_onnx_qdq_static(
-                onnx_path,
-                output_path,
-                dataloader,
-                input_names=input_names,
-                sample_limit=policy.get("sample_limit"),
-                activation_type=str(policy.get("activation_type", "QUInt8")),
-                weight_type=str(policy.get("weight_type", "QInt8")),
-                per_channel=bool(policy.get("per_channel", False)),
-                reduce_range=bool(policy.get("reduce_range", False)),
-                op_types_to_quantize=policy.get("op_types_to_quantize"),
-                extra_options=policy.get("extra_options"),
-            )
-            if export_metadata.get("pre_export_fusion") is not None:
-                result.metadata["pre_export_fusion"] = dict(
-                    export_metadata["pre_export_fusion"]
-                )
-            context.artifacts["quant_onnx"] = result.path
-            context.artifacts["last_onnx"] = result.path
-            context.metrics["quant"] = {
-                "backend": quant_config.backend,
-                "path": str(result.path),
-                "checksum": result.checksum,
-                "calibration_samples": result.calibration_samples,
-                "calibration_summary": result.metadata.get("calibration_summary"),
-                "metadata": result.metadata,
-            }
-            if context.manifest is not None:
-                context.manifest.add_artifact(
-                    ArtifactRecord(
-                        path=str(result.path),
-                        format="onnx",
-                        runtime="onnxruntime",
-                        checksum=result.checksum,
-                        metadata={"quantization": "qdq", **result.metadata},
+        plan = build_quantization_plan(quant_config)
+        execution = execute_quantization_plan(
+            context,
+            plan,
+            export_onnx_fn=export_onnx,
+            quantize_onnx_qdq_static_fn=quantize_onnx_qdq_static,
+        )
+        context.model = execution.model
+        context.artifacts.update(execution.artifacts)
+        context.metrics["quant"] = summarize_quantization_reports(execution.reports)
+        if context.manifest is not None:
+            for report in execution.reports:
+                if report.runtime == "onnxruntime" and "path" in report.metadata:
+                    context.manifest.add_artifact(
+                        ArtifactRecord(
+                            path=str(report.metadata["path"]),
+                            format="onnx",
+                            runtime="onnxruntime",
+                            checksum=report.metadata.get("checksum"),
+                            metadata={
+                                "quantization": "qdq",
+                                "component_name": report.component_name,
+                                **report.metadata,
+                            },
+                        )
                     )
-                )
                 context.manifest.add_metric(
                     MetricRecord(
-                        name="quant.calibration_samples",
-                        value=result.calibration_samples,
-                        metadata={"backend": quant_config.backend},
+                        name=f"quant.{report.component_name}.quantized_module_count",
+                        value=len(report.quantized_modules),
+                        metadata={
+                            "backend": report.backend,
+                            "strategy": report.strategy,
+                        },
                     )
                 )
+                if report.calibration_samples is not None:
+                    context.manifest.add_metric(
+                        MetricRecord(
+                            name=f"quant.{report.component_name}.calibration_samples",
+                            value=report.calibration_samples,
+                            metadata={
+                                "backend": report.backend,
+                                "source_split": report.source_split,
+                            },
+                        )
+                    )
+        return context
+
+
+@register_pass("operator_optimization")
+class OperatorOptimizationPass:
+    """Apply configured operator optimization backend."""
+
+    name = "operator_optimization"
+
+    def run(self, context: XQTContext) -> XQTContext:
+        model = context.require_model()
+        operator_config = context.config.operator_optimization
+        if not operator_config.enabled:
             return context
-        if quant_config.backend != "torchao":
-            raise ValueError(
-                "compression.quant.backend must be torchao or onnxruntime_qdq"
-            )
-        result = quantize_with_torchao(
-            model,
-            policy=quant_config.policy,
-            strategy=quant_config.policy.get("strategy"),
-            inplace=True,
+        plan = build_operator_optimization_plan(operator_config)
+        execution = execute_operator_optimization_plan(context, plan)
+        context.model = execution.model
+        context.artifacts.update(execution.artifacts)
+        context.metrics["operator_optimization"] = summarize_operator_optimization_reports(
+            execution.reports,
+            candidate_reports=execution.artifacts.get("operator_optimization_candidates"),
         )
-        context.model = result.model
-        context.metrics["quant"] = {
-            "backend": result.backend,
-            "strategy": result.strategy,
-            "quantized_modules": result.quantized_modules,
-            "quantized_module_count": len(result.quantized_modules),
-        }
         if context.manifest is not None:
-            context.manifest.add_metric(
-                MetricRecord(
-                    name="quant.quantized_module_count",
-                    value=len(result.quantized_modules),
-                    metadata={"strategy": result.strategy},
-                )
+            context.manifest.operator_optimization = dict(
+                context.metrics["operator_optimization"]
             )
+        if context.manifest is not None:
+            report_artifact = execution.artifacts.get("operator_optimization_report")
+            if isinstance(report_artifact, Path) and report_artifact.is_file():
+                context.manifest.add_artifact(
+                    ArtifactRecord.from_file(
+                        report_artifact,
+                        format="json",
+                        runtime="pytorch",
+                        metadata={"kind": "operator_optimization_report"},
+                    )
+                )
+            for report in execution.reports:
+                context.manifest.add_metric(
+                    MetricRecord(
+                        name=f"operator_optimization.{report.target_name}.applied",
+                        value=report.applied,
+                        metadata={
+                            "backend": report.backend,
+                            "runtime": report.runtime,
+                            "fallback": report.fallback,
+                            "skip_reason": report.skip_reason,
+                            "speedup": report.speedup,
+                            "compile_time_ms": report.compile_time_ms,
+                            "exportable": report.exportable,
+                        },
+                    )
+                )
+                if report.compile_time_ms is not None:
+                    context.manifest.add_metric(
+                        MetricRecord(
+                            name=f"operator_optimization.{report.target_name}.compile_time_ms",
+                            value=report.compile_time_ms,
+                            metadata={"backend": report.backend},
+                        )
+                    )
+        del model
         return context
 
 
@@ -613,16 +854,20 @@ class ExportPass:
         model = context.require_model()
         if not context.config.export.targets:
             return context
+        export_model, export_guard = _resolve_export_model(context)
 
         dataloader = context.data.get("validation")
         if dataloader is None:
             raise ValueError("validation data is required for export")
         batch = next(iter(dataloader))
-        example_input = _split_inputs_from_batch(batch)
+        example_input = extract_model_inputs(
+            batch,
+            expected_input_count=infer_model_input_count(export_model),
+        )
 
         exported: list[dict[str, object]] = []
         with torch.no_grad():
-            reference_output = first_tensor_output(_call_model(model, example_input))
+            reference_output = first_tensor_output(_call_model(export_model, example_input))
 
         for index, target in enumerate(context.config.export.targets):
             if target.format == "torch_export":
@@ -633,7 +878,7 @@ class ExportPass:
                         / f"model_{index}.pt2"
                     )
                 result = export_torch_program(
-                    model,
+                    export_model,
                     example_input,
                     output_path,
                     dynamic_shapes=target.dynamic_shapes,
@@ -654,6 +899,7 @@ class ExportPass:
                             if result.output_diff is not None
                             else None
                         ),
+                        "export_guard": dict(export_guard),
                         **result.metadata,
                     },
                 )
@@ -671,6 +917,7 @@ class ExportPass:
                             if result.output_diff is not None
                             else None
                         ),
+                        "export_guard": dict(export_guard),
                     }
                 )
                 continue
@@ -683,7 +930,7 @@ class ExportPass:
                         / f"model_{index}.pt"
                     )
                 result = export_torchscript(
-                    model,
+                    export_model,
                     example_input,
                     output_path,
                     method=str(target.params.get("method", "trace")),
@@ -702,6 +949,7 @@ class ExportPass:
                             if result.output_diff is not None
                             else None
                         ),
+                        "export_guard": dict(export_guard),
                         **result.metadata,
                     },
                 )
@@ -719,6 +967,7 @@ class ExportPass:
                             if result.output_diff is not None
                             else None
                         ),
+                        "export_guard": dict(export_guard),
                     }
                 )
                 continue
@@ -731,7 +980,7 @@ class ExportPass:
                         / f"model_{index}.onnx"
                     )
                 result = export_onnx(
-                    model,
+                    export_model,
                     example_input,
                     output_path,
                     opset=target.opset,
@@ -763,6 +1012,7 @@ class ExportPass:
                         "opset": result.opset,
                         "checked": result.checked,
                         "output_diff": diff.to_dict() if diff is not None else None,
+                        "export_guard": dict(export_guard),
                         **result_metadata,
                     },
                 )
@@ -778,6 +1028,7 @@ class ExportPass:
                         "checksum": result.checksum,
                         "output_diff": diff.to_dict() if diff is not None else None,
                         "pre_export_fusion": result_metadata.get("pre_export_fusion"),
+                        "export_guard": dict(export_guard),
                     }
                 )
                 continue
@@ -858,7 +1109,7 @@ class ExportPass:
                         / f"model_{index}.pte"
                     )
                 result = export_executorch_program(
-                    model,
+                    export_model,
                     example_input,
                     output_path,
                     dry_run=bool(target.params.get("dry_run", False)),
@@ -984,6 +1235,7 @@ class ExportPass:
 
             raise ValueError(f"Unsupported export format: {target.format}")
         context.metrics["export"] = {"artifacts": exported}
+        _update_structured_prune_export_status(context, exported)
         return context
 
 
@@ -1000,7 +1252,10 @@ class BenchmarkPass:
             raise ValueError("validation data is required for benchmark")
         batch = next(iter(dataloader))
         inputs = _move_to_device(
-            _split_inputs_from_batch(batch),
+            extract_model_inputs(
+                batch,
+                expected_input_count=infer_model_input_count(model),
+            ),
             torch.device(context.config.model.device),
         )
 
@@ -1041,6 +1296,18 @@ class BenchmarkPass:
                 ],
                 metric_delta_key="baseline.metrics.top1",
             )
+        prune_metrics = context.metrics.get("prune")
+        if isinstance(prune_metrics, dict) and prune_metrics.get("method") in {
+            "nm_structured",
+            "block_sparse",
+        }:
+            benchmark_metrics["capability"] = {
+                "prune": prune_runtime_capability_from_report(
+                    prune_metrics,
+                    device=context.config.model.device,
+                )
+            }
+        _update_structured_prune_benchmark_status(context, benchmark_metrics)
         if context.manifest is not None:
             context.manifest.add_metric(
                 MetricRecord(

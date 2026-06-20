@@ -1,0 +1,127 @@
+"""Structured execution types for XQT operator optimization passes."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from torch import nn
+
+
+@dataclass
+class OperatorOptimizationTargetPlan:
+    """Resolved operator optimization plan for one model or submodule target."""
+
+    name: str
+    backend: str
+    target_path: Optional[str] = None
+    mode: Optional[str] = None
+    fullgraph: bool = False
+    dynamic: Optional[bool] = None
+    options: dict[str, Any] = field(default_factory=dict)
+    patterns: list[str] = field(default_factory=list)
+    fallback: str = "eager"
+    min_speedup: float = 1.01
+    validate: dict[str, float] = field(default_factory=dict)
+    tilelang: dict[str, Any] = field(default_factory=dict)
+    cutile: dict[str, Any] = field(default_factory=dict)
+    cutlass: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "backend": self.backend,
+            "target_path": self.target_path,
+            "mode": self.mode,
+            "fullgraph": self.fullgraph,
+            "dynamic": self.dynamic,
+            "options": dict(self.options),
+            "patterns": list(self.patterns),
+            "fallback": self.fallback,
+            "min_speedup": self.min_speedup,
+            "validate": dict(self.validate),
+            "tilelang": dict(self.tilelang),
+            "cutile": dict(self.cutile),
+            "cutlass": dict(self.cutlass),
+        }
+
+
+@dataclass
+class OperatorOptimizationExecutionPlan:
+    """Operator optimization pass execution plan."""
+
+    targets: list[OperatorOptimizationTargetPlan] = field(default_factory=list)
+    default_backend: str = "torch_compile"
+    stage: str = "after_compression"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "targets": [target.to_dict() for target in self.targets],
+            "default_backend": self.default_backend,
+            "stage": self.stage,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
+class OperatorOptimizationReport:
+    """Unified backend-agnostic operator optimization result for one target."""
+
+    target_name: str
+    module_path: Optional[str]
+    backend: str
+    runtime: str
+    applied: bool
+    fallback: str
+    skip_reason: Optional[str] = None
+    compile_time_ms: Optional[float] = None
+    latency_before: Optional[dict[str, Any]] = None
+    latency_after: Optional[dict[str, Any]] = None
+    speedup: Optional[float] = None
+    numeric_diff: Optional[dict[str, Any]] = None
+    device: Optional[str] = None
+    dtype: Optional[str] = None
+    shape_signature: Optional[dict[str, Any]] = None
+    exportable: bool = True
+    artifact_paths: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target_name": self.target_name,
+            "module_path": self.module_path,
+            "backend": self.backend,
+            "runtime": self.runtime,
+            "applied": self.applied,
+            "fallback": self.fallback,
+            "skip_reason": self.skip_reason,
+            "compile_time_ms": self.compile_time_ms,
+            "latency_before": dict(self.latency_before or {}),
+            "latency_after": dict(self.latency_after or {}),
+            "speedup": self.speedup,
+            "numeric_diff": dict(self.numeric_diff or {}),
+            "device": self.device,
+            "dtype": self.dtype,
+            "shape_signature": dict(self.shape_signature or {}),
+            "exportable": self.exportable,
+            "artifact_paths": dict(self.artifact_paths),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
+class OperatorOptimizationExecutionResult:
+    """Executed operator optimization result across one or more targets."""
+
+    model: nn.Module
+    reports: list[OperatorOptimizationReport] = field(default_factory=list)
+    artifacts: dict[str, Any] = field(default_factory=dict)
+
+
+__all__ = [
+    "OperatorOptimizationExecutionPlan",
+    "OperatorOptimizationExecutionResult",
+    "OperatorOptimizationReport",
+    "OperatorOptimizationTargetPlan",
+]

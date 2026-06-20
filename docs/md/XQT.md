@@ -3,6 +3,13 @@
 本文档负责定义 `xqt/` 的目标边界, 模块拆分和建设任务. 它是规划文档, 不是已实现 API 承诺. 当前 `xqt/` 仍是实验目录, 公共接口稳定前不要把本文中的模块名视为可导入契约.
 
 `xqt/` 内分析,诊断和优化建议能力的细化规划见 [XQT_ANALYSIS.md](XQT_ANALYSIS.md). 导出前前置融合的边界和配置见 [XQT_PRE_EXPORT_FUSION.md](XQT_PRE_EXPORT_FUSION.md). `xqt` 中蒸馏数据集,校准数据集,验证数据和 prompt 数据的角色边界与实现任务见 [XQT_DATA.md](XQT_DATA.md).
+`xqt.quant` 的模块边界,模型族量化路线和验收要求见 [XQT_QUANTIZATION_REQUIREMENTS.md](XQT_QUANTIZATION_REQUIREMENTS.md).
+`xqt.quant` 的实现任务清单,代码改动面和开发顺序见 [XQT_QUANTIZATION_IMPLEMENTATION_PLAN.md](XQT_QUANTIZATION_IMPLEMENTATION_PLAN.md).
+结构化剪枝的分类,能力边界和阶段需求见 [XQT_PRUNING_REQUIREMENTS.md](XQT_PRUNING_REQUIREMENTS.md).
+结构化剪枝的模块拆解,pass 改造和测试顺序见 [XQT_PRUNING_IMPLEMENTATION_PLAN.md](XQT_PRUNING_IMPLEMENTATION_PLAN.md).
+复杂结构和可扩展剪枝的专项需求边界见 [XQT_PRUNING_EXTENSION_REQUIREMENTS.md](XQT_PRUNING_EXTENSION_REQUIREMENTS.md).
+复杂结构剪枝的 backlog 和优先级建议见 [XQT_PRUNING_TODO.md](XQT_PRUNING_TODO.md).
+算子优化的场景,后端选择,常见算子和验收口径见 [XQT_OPERATOR_OPTIMIZATION_REQUIREMENTS.md](XQT_OPERATOR_OPTIMIZATION_REQUIREMENTS.md). 算子优化,megakernel,Triton,TileLang,CuTile,CUTLASS 和 custom CUDA 后端的 TODO 与实施边界见 [XQT_OPERATOR_OPTIMIZATION_TODO.md](XQT_OPERATOR_OPTIMIZATION_TODO.md).
 
 ## 1. 项目定位
 
@@ -13,6 +20,7 @@ PyTorch checkpoint
     -> 可选蒸馏
     -> 可选剪枝
     -> 可选量化
+    -> 可选算子优化
     -> 可选扩散少步蒸馏
     -> 导出部署格式
     -> 精度验证和性能基准
@@ -76,6 +84,8 @@ PyTorch checkpoint
 - `research/rtdetrv4-m-int8-deploy/`: ONNX Q/DQ, NVIDIA ModelOpt, SmoothQuant 和 TensorRT 部署实验资料.
 - `learn/quant/`: Stable Diffusion 3.5 量化实验和量化理论笔记.
 - `learn/math/Hessian.md`: GPTQ/OBS 类二阶量化和剪枝的理论背景.
+- `learn/tilelang/`: TileLang 学习实验,当前有 FlashAttention forward 示例.
+- `learn/rwkv/rwkv8/rwkv8_tilelang.py`: TileLang ROSA suffix-match 教学 kernel.
 - `research/diffusion-models-survey-2025/`: 扩散模型少步推理, RL 后训练和蒸馏相关研究资料.
 - `pyproject.toml`: `optimization` 可选依赖已有 `torchao`, `triton`, `tilelang`.
 
@@ -130,6 +140,14 @@ xqt/
 │   ├── sensitivity.py     # 逐层误差和混合精度建议
 │   ├── calibration.py     # observer, 校准循环, 校准报告
 │   └── policy.py          # allowlist, denylist, dtype, granularity
+├── operator_opt/
+│   ├── capability.py      # torch.compile,Triton,TileLang,CuTile,CUTLASS,custom CUDA 能力矩阵
+│   ├── compile_backend.py # torch.compile/Inductor/CUDA Graphs adapter
+│   ├── patterns.py        # FX/torch.export graph pattern 发现
+│   ├── backends/          # Triton,TileLang,CuTile,CUTLASS 等后端 adapter
+│   ├── kernels/           # 算子 reference,guarded entry 和 backend-specific kernel
+│   ├── executor.py        # 组件级 operator optimization 执行器
+│   └── report.py          # graph break,kernel count,latency 和 manifest 报告
 ├── export/
 │   ├── onnx_exporter.py   # torch.onnx.export, dynamo=True 优先
 │   ├── torch_exporter.py  # torch.export.ExportedProgram 和 TorchScript 兼容
@@ -295,7 +313,7 @@ Recipe 必须声明 `compression_axes`, 例如 `["precision"]`, `["width", "prec
 首期任务:
 
 - 非结构化剪枝 baseline: 使用 PyTorch pruning 工具验证 mask, sparsity 和恢复训练流程.
-- 结构化剪枝 MVP: channel/filter/head 粒度, 支持 Conv2d/Linear 的基础改写.
+- 结构化剪枝 MVP: 已支持 CNN channel/filter, ViT/Transformer 的 MLP neuron, attention head, block pruning, 以及 N:M structured sparsity 报告与 recipe 验证.
 - 深度剪枝预研: layer/block dropping, 保留残差和 normalization 结构一致性.
 - 重要性评估: L1/L2, BN gamma, gradient * weight. Taylor 和 OBS 放到第二阶段.
 - 剪枝计划: 一次性剪枝, 迭代剪枝和线性稀疏率 schedule 都通过 YAML 描述.

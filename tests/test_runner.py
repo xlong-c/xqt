@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import onnx
+import pytest
 import torch
 
 from xqt.core.artifact import load_manifest
 from xqt.core.config import load_xqt_config
+from xqt.core.errors import XQTPipelineError
 from xqt.core.registry import XQTRegistry
 from xqt.core.types import XQTContext
 from xqt.export import TensorRTBuildResult
@@ -36,11 +39,25 @@ def test_enabled_pass_names_follow_default_order() -> None:
                 "quant": {"enabled": True},
                 "prune": {"enabled": True},
                 "diffusion_distill": {"enabled": True},
-            }
+            },
+            "operator_optimization": {
+                "enabled": True,
+                "targets": [
+                    {
+                        "name": "model",
+                        "backend": "torch_compile",
+                    }
+                ],
+            },
         }
     )
 
-    assert enabled_pass_names(config) == ["prune", "quant", "diffusion_distill"]
+    assert enabled_pass_names(config) == [
+        "prune",
+        "quant",
+        "operator_optimization",
+        "diffusion_distill",
+    ]
 
 
 def test_default_pass_names_include_core_pipeline_and_enabled_compression() -> None:
@@ -49,7 +66,16 @@ def test_default_pass_names_include_core_pipeline_and_enabled_compression() -> N
             "compression": {
                 "quant": {"enabled": True},
                 "prune": {"enabled": False},
-            }
+            },
+            "operator_optimization": {
+                "enabled": True,
+                "targets": [
+                    {
+                        "name": "model",
+                        "backend": "torch_compile",
+                    }
+                ],
+            },
         }
     )
 
@@ -58,6 +84,7 @@ def test_default_pass_names_include_core_pipeline_and_enabled_compression() -> N
         "load_data",
         "baseline_eval",
         "quant",
+        "operator_optimization",
         "benchmark",
         "write_reports",
     ]
@@ -248,6 +275,179 @@ def test_smoke_cpu_recipe_runs_builtin_default_pipeline(tmp_path) -> None:
     )
 
 
+def test_operator_compile_smoke_recipe_records_manifest_metrics(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/operator_compile_smoke_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "operator_compile_smoke")},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.manifest is not None
+    assert "operator_optimization" in context.manifest.passes
+    assert any(
+        metric.name == "operator_optimization.model.applied"
+        for metric in context.manifest.metrics
+    )
+    assert any(
+        artifact.metadata.get("kind") == "operator_optimization_report"
+        for artifact in context.manifest.artifacts
+    )
+    report_path = context.artifacts["operator_optimization_report"]
+    report_data = load_manifest(report_path)
+    assert "candidates" in report_data
+    assert "fx" in report_data["candidates"]
+
+
+def test_operator_quant_torchao_compile_recipe_runs(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/operator_quant_torchao_compile.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "operator_quant_torchao_compile")},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.metrics["quant"]["backend"] == "torchao"
+    assert "operator_optimization" in context.metrics
+    assert context.metrics["operator_optimization"]["target_count"] == 1
+    assert context.metrics["operator_optimization"]["targets"][0]["backend"] == "torch_compile"
+
+
+def test_operator_qdq_export_guard_recipe_skips_rewrite_and_preserves_export(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def fake_quantize_onnx_qdq_static(
+        onnx_path,
+        output_path_arg,
+        calibration_data,
+        **kwargs,
+    ):
+        from xqt.quant.onnx_qdq import ONNXQDQQuantizationResult
+
+        del onnx_path, calibration_data, kwargs
+        output = Path(output_path_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"qdq")
+        return ONNXQDQQuantizationResult(
+            path=output,
+            source_path=output,
+            checksum="checksum",
+            calibration_samples=1,
+            metadata={},
+        )
+
+    def fake_export_onnx(*args, **kwargs):
+        from xqt.export.onnx_exporter import ONNXExportResult
+
+        output = Path(args[2])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"onnx")
+        return ONNXExportResult(
+            path=output,
+            opset=kwargs.get("opset"),
+            checksum="onnx_checksum",
+            checked=True,
+            metadata={"input_names": ["input"]},
+        )
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.quantize_onnx_qdq_static",
+        fake_quantize_onnx_qdq_static,
+    )
+    monkeypatch.setattr("xqt.pipeline.passes.export_onnx", fake_export_onnx)
+
+    config = load_xqt_config(
+        "xqt/recipes/operator_qdq_export_guard.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "operator_qdq_export_guard")},
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "output_path": str(tmp_path / "operator_qdq_export_guard" / "model.onnx"),
+                        "params": {"runtime_diff": False},
+                    }
+                ]
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.metrics["quant"]["backend"] == "onnxruntime_qdq"
+    target = context.metrics["operator_optimization"]["targets"][0]
+    assert target["applied"] is False
+    assert "onnxruntime_qdq" in target["skip_reason"]
+    assert context.metrics["export"]["artifacts"][0]["format"] == "onnx"
+
+
+def test_cnn_structured_prune_recipe_runs_default_pipeline(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/cnn_structured_prune.yaml",
+        overrides={
+            "project": {
+                "artifact_dir": str(tmp_path / "cnn_structured_prune"),
+            }
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert "validation" in context.data
+    assert "baseline" in context.metrics
+    assert "prune" in context.metrics
+    assert "benchmark" in context.metrics
+    assert context.metrics["prune"]["method"] == "structured"
+    assert context.metrics["prune"]["granularity"] == "channel"
+    assert context.metrics["prune"]["sparsity"] == pytest.approx(0.25)
+    assert context.metrics["prune"]["parameter_count_after"] < context.metrics["prune"]["parameter_count_before"]
+    assert len(context.metrics["prune"]["actions"]) == 2
+    assert context.metrics["prune"]["benchmark_status"]["attempted"] is True
+    assert context.metrics["prune"]["benchmark_status"]["latency"]["iterations"] == 1
+    assert context.artifacts["metrics_json"].is_file()
+    assert context.artifacts["metrics_markdown"].is_file()
+    assert context.artifacts["manifest"].is_file()
+    assert context.manifest is not None
+    assert "prune" in context.manifest.passes
+    assert any(metric.name == "prune.sparsity" for metric in context.manifest.metrics)
+
+
+def test_cnn_structured_prune_recipe_exports_onnx_with_reduced_channel_shapes(tmp_path) -> None:
+    output_path = tmp_path / "cnn_structured_prune" / "model.onnx"
+    config = load_xqt_config(
+        "xqt/recipes/cnn_structured_prune.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "cnn_structured_prune")},
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "output_path": str(output_path),
+                        "params": {"runtime_diff": False},
+                    }
+                ]
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.metrics["export"]["artifacts"][0]["format"] == "onnx"
+    assert context.metrics["prune"]["export_status"]["attempted"] is True
+    assert context.metrics["prune"]["export_status"]["formats"] == ["onnx"]
+    assert context.metrics["prune"]["export_status"]["artifact_count"] == 1
+    model = onnx.load(output_path)
+    initializers = {initializer.name: list(initializer.dims) for initializer in model.graph.initializer}
+    assert initializers["features.0.weight"][0] < 8
+    assert initializers["features.3.weight"][1] < 8
+
+
 def test_load_data_builds_prompts_and_records_summary(tmp_path) -> None:
     config = load_xqt_config(
         "xqt/recipes/smoke_cpu.yaml",
@@ -310,6 +510,14 @@ def test_smoke_cpu_recipe_runs_analysis_when_enabled(tmp_path) -> None:
             },
             "model": {
                 "device": "cpu",
+            },
+            "compression": {
+                "quant": {
+                    "strategy": "dynamic_int8",
+                    "policy": {
+                        "strategy": "dynamic_int8",
+                    },
+                },
             },
             "benchmark": {
                 "warmup": 0,
@@ -772,6 +980,32 @@ def test_builtin_distill_pass_runs_with_injected_teacher(tmp_path) -> None:
     assert "distill" in context.manifest.passes
 
 
+def test_builtin_quant_pass_rejects_planned_backend_until_adapter_exists(tmp_path) -> None:
+    config = load_xqt_config(
+        {
+            "project": {
+                "name": "planned_quant_backend",
+                "artifact_dir": str(tmp_path / "planned_quant_backend"),
+            },
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "gptq",
+                },
+                "prune": {"enabled": False},
+            },
+        }
+    )
+
+    with pytest.raises(XQTPipelineError, match="planned but not executable"):
+        run_xqt_recipe(
+            config,
+            model=torch.nn.Linear(4, 2),
+            pass_names=["quant"],
+            write_manifest=False,
+        )
+
+
 def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> None:
     output_path = tmp_path / "model_qdq.onnx"
     export_calls = {}
@@ -975,6 +1209,116 @@ def test_builtin_quant_pass_auto_exports_multi_input_onnx(monkeypatch, tmp_path)
     ]
 
 
+def test_builtin_quant_pass_auto_exports_unlabeled_multi_input_onnx(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class PairModel(torch.nn.Module):
+        def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+            return left + right
+
+    export_calls = {}
+
+    def fake_quantize_onnx_qdq_static(
+        onnx_path,
+        output_path_arg,
+        calibration_data,
+        **kwargs,
+    ):
+        from xqt.quant.onnx_qdq import ONNXQDQQuantizationResult
+
+        del onnx_path
+        first_batch = next(iter(calibration_data))
+        assert len(first_batch) == 2
+        assert first_batch[0].shape == (1, 4)
+        assert first_batch[1].shape == (1, 4)
+        output = Path(output_path_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"qdq")
+        return ONNXQDQQuantizationResult(
+            path=output,
+            source_path=output,
+            checksum="checksum",
+            calibration_samples=1,
+            metadata={
+                "input_names": list(kwargs["input_names"]),
+                "calibration_summary": {
+                    "input_names": list(kwargs["input_names"]),
+                    "batch_count": 1,
+                    "shapes": {"input_0": [[1, 4]], "input_1": [[1, 4]]},
+                    "dtypes": {"input_0": ["float32"], "input_1": ["float32"]},
+                },
+            },
+        )
+
+    def fake_export_onnx(*args, **kwargs):
+        from xqt.export.onnx_exporter import ONNXExportResult
+
+        export_calls["example_input"] = args[1]
+        export_calls["input_names"] = kwargs.get("input_names")
+        output = Path(args[2])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"onnx")
+        return ONNXExportResult(
+            path=output,
+            opset=kwargs.get("opset"),
+            checksum="onnx_checksum",
+            checked=True,
+            metadata={"input_names": list(kwargs.get("input_names") or [])},
+        )
+
+    monkeypatch.setattr("xqt.pipeline.passes.export_onnx", fake_export_onnx)
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.quantize_onnx_qdq_static",
+        fake_quantize_onnx_qdq_static,
+    )
+    calibration_loader = torch.utils.data.DataLoader(
+        [
+            (
+                torch.ones(1, 4),
+                torch.zeros(1, 4),
+            )
+        ],
+        batch_size=None,
+    )
+    config = load_xqt_config(
+        {
+            "project": {
+                "name": "multi_input_qdq_unlabeled",
+                "artifact_dir": str(tmp_path / "artifacts_unlabeled"),
+            },
+            "model": {"device": "cpu"},
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "onnxruntime_qdq",
+                    "policy": {
+                        "output_path": str(
+                            tmp_path / "artifacts_unlabeled" / "model_qdq.onnx"
+                        ),
+                    },
+                }
+            },
+        }
+    )
+
+    context = run_xqt_recipe(
+        config,
+        model=PairModel(),
+        data={"calibration": calibration_loader},
+        pass_names=["quant"],
+        write_manifest=False,
+    )
+
+    assert export_calls["input_names"] == ["input_0", "input_1"]
+    assert isinstance(export_calls["example_input"], tuple)
+    assert len(export_calls["example_input"]) == 2
+    assert context.metrics["quant"]["calibration_summary"]["input_names"] == [
+        "input_0",
+        "input_1",
+    ]
+
+
 def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> None:
     vit_config = load_xqt_config("xqt/recipes/image_vit_torchao_fp8.yaml")
     assert vit_config.project.name == "image_vit_torchao_fp8"
@@ -1068,6 +1412,180 @@ def test_image_vit_torchao_fp8_recipe_runs_on_cuda_when_available(tmp_path) -> N
     assert context.artifacts["manifest"].is_file()
 
 
+def test_builtin_quant_pass_supports_component_policies_for_torchao(tmp_path) -> None:
+    config = load_xqt_config(
+        {
+            "project": {
+                "name": "component_torchao_quant",
+                "artifact_dir": str(tmp_path / "component_torchao_quant"),
+            },
+            "model": {
+                "target": "torch.nn.Sequential",
+                "params": {},
+                "device": "cpu",
+            },
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "torchao",
+                    "strategy": "dynamic_int8",
+                    "component_policies": [
+                        {
+                            "name": "encoder",
+                            "target": "0",
+                            "backend": "torchao",
+                            "force_quantize": ["0"],
+                        },
+                        {
+                            "name": "decoder",
+                            "target": "2",
+                            "backend": "torchao",
+                            "skip_quantize": ["2"],
+                            "analysis_only": True,
+                        },
+                    ],
+                },
+                "prune": {"enabled": False},
+            },
+        }
+    )
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 4),
+        torch.nn.ReLU(),
+        torch.nn.Linear(4, 2),
+    )
+
+    context = run_xqt_recipe(
+        config,
+        model=model,
+        pass_names=["quant"],
+        write_manifest=False,
+    )
+
+    assert context.metrics["quant"]["mode"] == "multi_component"
+    assert context.metrics["quant"]["summary"]["component_count"] == 2
+    assert context.metrics["quant"]["backend"] == "torchao"
+    assert len(context.metrics["quant"]["components"]) == 2
+    by_name = {
+        component["component_name"]: component
+        for component in context.metrics["quant"]["components"]
+    }
+    assert by_name["encoder"]["backend"] == "torchao"
+    assert by_name["encoder"]["quantized_module_count"] >= 0
+    assert by_name["decoder"]["metadata"]["analysis_only"] is True
+    assert by_name["decoder"]["metadata"]["executed"] is False
+
+
+def test_multi_component_quant_smoke_recipe_runs_with_hetero_backends(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def fake_quantize_onnx_qdq_static(
+        onnx_path,
+        output_path_arg,
+        calibration_data,
+        **kwargs,
+    ):
+        from xqt.quant.onnx_qdq import ONNXQDQQuantizationResult
+
+        del onnx_path
+        first_batch = next(iter(calibration_data))
+        assert first_batch[0].shape == (1, 4)
+        output = Path(output_path_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"qdq")
+        return ONNXQDQQuantizationResult(
+            path=output,
+            source_path=output,
+            checksum="vision_checksum",
+            calibration_samples=1,
+            metadata={
+                "input_names": list(kwargs["input_names"]),
+                "calibration_summary": {
+                    "input_names": list(kwargs["input_names"]),
+                    "batch_count": 1,
+                    "shapes": {"input": [[1, 4]]},
+                    "dtypes": {"input": ["float32"]},
+                },
+            },
+        )
+
+    def fake_export_onnx(*args, **kwargs):
+        from xqt.export.onnx_exporter import ONNXExportResult
+
+        output = Path(args[2])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"onnx")
+        return ONNXExportResult(
+            path=output,
+            opset=kwargs.get("opset"),
+            checksum="onnx_checksum",
+            checked=True,
+            metadata={"input_names": list(kwargs.get("input_names") or [])},
+        )
+
+    def fake_quantize_with_torchao(model, **kwargs):
+        from xqt.quant.torchao_backend import TorchAOQuantizationResult
+
+        del kwargs
+        return TorchAOQuantizationResult(
+            model=model,
+            backend="torchao",
+            strategy="dynamic_int8",
+            quantized_modules=[""],
+            metadata={"policy": {"include_module_types": ["Linear"]}},
+        )
+
+    monkeypatch.setattr("xqt.pipeline.passes.export_onnx", fake_export_onnx)
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.quantize_onnx_qdq_static",
+        fake_quantize_onnx_qdq_static,
+    )
+    monkeypatch.setattr("xqt.quant.executor.quantize_with_torchao", fake_quantize_with_torchao)
+
+    config = load_xqt_config(
+        "xqt/recipes/multi_component_quant_smoke.yaml",
+        overrides={
+            "project": {
+                "artifact_dir": str(tmp_path / "multi_component_quant_smoke"),
+            }
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.metrics["quant"]["mode"] == "multi_component"
+    assert context.metrics["quant"]["summary"]["component_count"] == 3
+    assert context.metrics["quant"]["summary"]["backends"] == [
+        "onnxruntime_qdq",
+        "torchao",
+        "torchao",
+    ]
+    components = {
+        component["component_name"]: component
+        for component in context.metrics["quant"]["components"]
+    }
+    assert components["vision_encoder"]["runtime"] == "onnxruntime"
+    assert components["vision_encoder"]["artifacts"]["onnx"].endswith("vision_encoder_qdq.onnx")
+    assert components["projector"]["metadata"]["analysis_only"] is True
+    assert components["decoder"]["runtime"] == "pytorch"
+    assert "quant_onnx_vision_encoder" in context.artifacts
+    assert context.artifacts["manifest"].is_file()
+    assert context.manifest is not None
+    assert any(
+        metric.name == "quant.vision_encoder.calibration_samples"
+        for metric in context.manifest.metrics
+    )
+    assert any(
+        metric.name == "quant.decoder.quantized_module_count"
+        for metric in context.manifest.metrics
+    )
+    assert any(
+        artifact.metadata.get("component_name") == "vision_encoder"
+        for artifact in context.manifest.artifacts
+    )
+
+
 def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
     teacher = torch.nn.Linear(4, 2)
     config = load_xqt_config(
@@ -1083,6 +1601,47 @@ def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
     assert len(context.metrics["prune"]["steps"]) == 2
     assert context.metrics["prune"]["steps"][0]["distillation"]["steps"] == 1
     assert context.metrics["prune"]["steps"][1]["distillation"]["steps"] == 1
+    assert context.manifest is not None
+    assert "prune" in context.manifest.passes
+
+
+def test_structured_prune_kd_recipe_runs_with_teacher_and_exports(tmp_path) -> None:
+    teacher = torch.nn.Linear(5, 5)
+    config = load_xqt_config(
+        "xqt/recipes/structured_prune_kd_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "structured_prune_kd")},
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "output_path": str(tmp_path / "structured_prune_kd" / "model.onnx"),
+                        "params": {"runtime_diff": False},
+                    }
+                ]
+            },
+        },
+    )
+
+    class TeacherWrapper(torch.nn.Module):
+        def __init__(self, num_classes: int = 5) -> None:
+            super().__init__()
+            self.num_classes = num_classes
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            batch_size = x.shape[0]
+            return torch.zeros(batch_size, self.num_classes, device=x.device)
+
+    context = run_xqt_recipe(config, teacher=TeacherWrapper())
+
+    assert context.metrics["prune"]["method"] == "structured"
+    assert context.metrics["prune"]["final_sparsity"] == pytest.approx(0.25)
+    assert len(context.metrics["prune"]["steps"]) == 1
+    assert context.metrics["prune"]["steps"][0]["distillation"]["steps"] == 1
+    assert context.metrics["prune"]["steps"][0]["pruning"]["granularity"] == "mlp_neuron"
+    assert context.metrics["export"]["artifacts"][0]["format"] == "onnx"
+    assert context.metrics["benchmark"]["latency"]["iterations"] == 1
+    assert context.artifacts["manifest"].is_file()
     assert context.manifest is not None
     assert "prune" in context.manifest.passes
 
@@ -1155,3 +1714,226 @@ def test_cifar100_qdq_recipe_loads_real_local_data_and_quantizes(monkeypatch, tm
     assert context.metrics["baseline"]["samples"] == 2
     assert context.metrics["quant"]["backend"] == "onnxruntime_qdq"
     assert context.metrics["quant"]["calibration_summary"]["batch_count"] == 1
+
+
+def test_vit_mnist_prune_recipe_runs_with_small_torchvision_split(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = []
+
+    def fake_build_torchvision_image_classification_loader(spec):
+        calls.append(spec)
+        inputs = torch.randn(2, 1, 224, 224)
+        targets = torch.tensor([0, 1], dtype=torch.long)
+        return torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(inputs, targets),
+            batch_size=1,
+        )
+
+    monkeypatch.setattr(
+        "xqt.data.builders.build_torchvision_image_classification_loader",
+        fake_build_torchvision_image_classification_loader,
+    )
+    config = load_xqt_config(
+        "xqt/recipes/image_vit_mnist_prune_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "vit_mnist_prune")},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert len(calls) == 2
+    assert calls[0].dataset_name == "MNIST"
+    assert calls[0].download is True
+    assert calls[0].sample_limit == 32
+    assert calls[1].sample_limit == 16
+    assert "calibration" in context.data
+    assert "validation" in context.data
+    assert context.metrics["baseline"]["samples"] == 2
+    assert context.metrics["prune"]["sparsity"] == 0.5
+    assert "benchmark" in context.metrics
+    assert context.manifest is not None
+    assert "prune" in context.manifest.passes
+
+
+def test_vit_structured_prune_recipe_runs_with_mlp_neuron_pruning(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/vit_structured_prune.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "vit_structured_prune")},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert "validation" in context.data
+    assert "baseline" in context.metrics
+    assert "prune" in context.metrics
+    assert "benchmark" in context.metrics
+    assert context.metrics["prune"]["method"] == "structured"
+    assert context.metrics["prune"]["granularity"] == "mlp_neuron"
+    assert context.metrics["prune"]["importance_metric"] == "l2"
+    assert context.metrics["prune"]["parameter_count_after"] < context.metrics["prune"]["parameter_count_before"]
+    assert len(context.metrics["prune"]["targets"]) == 4
+    assert len(context.metrics["prune"]["actions"]) == 4
+    assert context.artifacts["metrics_json"].is_file()
+    assert context.artifacts["metrics_markdown"].is_file()
+    assert context.artifacts["manifest"].is_file()
+    assert context.manifest is not None
+    assert any(metric.name == "prune.sparsity" for metric in context.manifest.metrics)
+
+
+def test_vit_structured_prune_recipe_supports_block_pruning_via_overrides(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/vit_structured_prune.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "vit_block_prune")},
+            "compression": {
+                "prune": {
+                    "granularity": "block",
+                    "scope": "per_layer",
+                    "target_sparsity": 0.5,
+                    "importance": {"metric": "l1"},
+                    "selection": {"min_keep": 1},
+                }
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert context.metrics["prune"]["granularity"] == "block"
+    assert len(context.metrics["prune"]["targets"]) == 1
+    assert len(context.metrics["prune"]["actions"]) == 1
+    assert context.metrics["prune"]["actions"][0]["module_name"] == "blocks"
+    assert context.metrics["prune"]["parameter_count_after"] < context.metrics["prune"]["parameter_count_before"]
+    assert context.manifest is not None
+    assert "prune" in context.manifest.passes
+
+
+def test_vit_structured_prune_recipe_supports_head_pruning_via_overrides(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/vit_structured_prune.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "vit_head_prune")},
+            "compression": {
+                "prune": {
+                    "granularity": "head",
+                    "scope": "per_layer",
+                    "target_sparsity": 0.5,
+                    "importance": {"metric": "l2"},
+                    "selection": {"min_keep": 1},
+                }
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert context.metrics["prune"]["granularity"] == "head"
+    assert len(context.metrics["prune"]["targets"]) == 4
+    assert len(context.metrics["prune"]["actions"]) == 4
+    assert context.metrics["prune"]["actions"][0]["action_type"] == "attention_heads"
+    assert context.metrics["prune"]["parameter_count_after"] < context.metrics["prune"]["parameter_count_before"]
+    assert context.manifest is not None
+    assert "prune" in context.manifest.passes
+
+
+def test_smoke_cpu_recipe_supports_nm_structured_pruning_via_overrides(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/smoke_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "nm_structured_prune")},
+            "compression": {
+                "prune": {
+                    "enabled": True,
+                    "method": "nm_structured",
+                    "selection": {"pattern": [2, 4]},
+                    "params": {"include_module_types": ["Linear"]},
+                }
+            },
+            "export": {"targets": []},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert context.metrics["prune"]["method"] == "nm_structured"
+    assert context.metrics["prune"]["granularity"] == "nm"
+    assert context.metrics["prune"]["pattern_n"] == 2
+    assert context.metrics["prune"]["pattern_m"] == 4
+    assert context.metrics["prune"]["sparsity"] == pytest.approx(0.4)
+    assert context.metrics["prune"]["compliance_ratio"] == pytest.approx(1.0)
+    assert context.metrics["prune"]["layers"][0]["sparsity"] == pytest.approx(0.5)
+    assert context.metrics["benchmark"]["capability"]["prune"]["supported"] is False
+    assert context.metrics["benchmark"]["capability"]["prune"]["runtime"] == "pytorch_eager"
+    assert context.metrics["benchmark"]["capability"]["prune"]["pattern_present"] is True
+    assert context.metrics["benchmark"]["capability"]["prune"]["speedup_verified"] is False
+    assert context.manifest is not None
+    assert any(metric.name == "prune.sparsity" for metric in context.manifest.metrics)
+
+
+def test_smoke_cpu_recipe_supports_block_sparse_pruning_via_overrides(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/smoke_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "block_sparse_prune")},
+            "compression": {
+                "prune": {
+                    "enabled": True,
+                    "method": "block_sparse",
+                    "target_sparsity": 0.5,
+                    "selection": {"block_shape": [2, 2]},
+                    "params": {"include_module_types": ["Linear"]},
+                }
+            },
+            "export": {"targets": []},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert context.metrics["prune"]["method"] == "block_sparse"
+    assert context.metrics["prune"]["granularity"] == "block_sparse"
+    assert context.metrics["prune"]["block_shape"] == [2, 2]
+    assert context.metrics["prune"]["sparsity"] >= 0.5
+    assert context.metrics["prune"]["parameter_sparsity"] > 0.0
+    assert context.metrics["prune"]["layers"][0]["block_shape"] == [2, 2]
+    assert context.metrics["benchmark"]["capability"]["prune"]["supported"] is False
+    assert context.metrics["benchmark"]["capability"]["prune"]["runtime"] == "pytorch_eager"
+    assert context.metrics["benchmark"]["capability"]["prune"]["pattern_present"] is True
+    assert context.metrics["benchmark"]["capability"]["prune"]["speedup_verified"] is False
+    assert context.manifest is not None
+    assert any(metric.name == "prune.block_sparsity" for metric in context.manifest.metrics)
+
+
+def test_sparse_benchmark_recipe_runs_and_reports_capability(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/sparse_benchmark_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "sparse_benchmark_cpu")},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.model is not None
+    assert "prune" in context.metrics
+    assert "benchmark" in context.metrics
+    assert context.metrics["prune"]["method"] == "block_sparse"
+    assert context.metrics["prune"]["block_shape"] == [2, 2]
+    assert context.metrics["benchmark"]["latency"]["iterations"] == 2
+    assert context.metrics["benchmark"]["capability"]["prune"]["method"] == "block_sparse"
+    assert context.metrics["benchmark"]["capability"]["prune"]["pattern_present"] is True
+    assert context.metrics["benchmark"]["capability"]["prune"]["speedup_verified"] is False
+    assert context.artifacts["metrics_json"].is_file()
+    assert context.artifacts["metrics_markdown"].is_file()
+    assert context.manifest is not None
+    assert any(metric.name == "prune.block_sparsity" for metric in context.manifest.metrics)
