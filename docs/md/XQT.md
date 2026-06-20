@@ -1,15 +1,8 @@
-# XQT 架构草案
+# XQT 压缩与部署工具链
 
-本文档负责定义 `xqt/` 的目标边界, 模块拆分和建设任务. 它是规划文档, 不是已实现 API 承诺. 当前 `xqt/` 仍是实验目录, 公共接口稳定前不要把本文中的模块名视为可导入契约.
+本文档是 `docs/md/` 中唯一保留的 XQT 长期工作文档. 它负责定义 `xqt/` 的目标边界, 当前模块状态, 数据角色, 量化, 剪枝, 蒸馏, 导出, 算子优化, recipe 和仍有效任务. 已完成或失效的阶段性 `XQT_*.md` 专项文档不再保留; 后续临时调研优先放到 `research/`, 只有长期有效结论回写到本文.
 
-`xqt/` 内分析,诊断和优化建议能力的细化规划见 [XQT_ANALYSIS.md](XQT_ANALYSIS.md). 导出前前置融合的边界和配置见 [XQT_PRE_EXPORT_FUSION.md](XQT_PRE_EXPORT_FUSION.md). `xqt` 中蒸馏数据集,校准数据集,验证数据和 prompt 数据的角色边界与实现任务见 [XQT_DATA.md](XQT_DATA.md).
-`xqt.quant` 的模块边界,模型族量化路线和验收要求见 [XQT_QUANTIZATION_REQUIREMENTS.md](XQT_QUANTIZATION_REQUIREMENTS.md).
-`xqt.quant` 的实现任务清单,代码改动面和开发顺序见 [XQT_QUANTIZATION_IMPLEMENTATION_PLAN.md](XQT_QUANTIZATION_IMPLEMENTATION_PLAN.md).
-结构化剪枝的分类,能力边界和阶段需求见 [XQT_PRUNING_REQUIREMENTS.md](XQT_PRUNING_REQUIREMENTS.md).
-结构化剪枝的模块拆解,pass 改造和测试顺序见 [XQT_PRUNING_IMPLEMENTATION_PLAN.md](XQT_PRUNING_IMPLEMENTATION_PLAN.md).
-复杂结构和可扩展剪枝的专项需求边界见 [XQT_PRUNING_EXTENSION_REQUIREMENTS.md](XQT_PRUNING_EXTENSION_REQUIREMENTS.md).
-复杂结构剪枝的 backlog 和优先级建议见 [XQT_PRUNING_TODO.md](XQT_PRUNING_TODO.md).
-算子优化的场景,后端选择,常见算子和验收口径见 [XQT_OPERATOR_OPTIMIZATION_REQUIREMENTS.md](XQT_OPERATOR_OPTIMIZATION_REQUIREMENTS.md). 算子优化,megakernel,Triton,TileLang,CuTile,CUTLASS 和 custom CUDA 后端的 TODO 与实施边界见 [XQT_OPERATOR_OPTIMIZATION_TODO.md](XQT_OPERATOR_OPTIMIZATION_TODO.md).
+本文不是稳定 API 承诺. 当前 `xqt/` 仍是实验包, 只有 `xqt` 顶层导出的配置, runner, manifest 和 XDL adapter 入口按 Provisional API 管理; 子模块细节仍按 Internal 处理.
 
 ## 1. 项目定位
 
@@ -63,20 +56,24 @@ PyTorch checkpoint
 
 ## 2. 当前仓库现状
 
-`xqt/` 目前只有实验脚本:
+`xqt/` 已经从零散实验脚本收敛成包化实验工具链. 当前源码包含:
 
-- `xqt/torchao_vit.py`: 使用 `torchao.quantization.quantize_` 对 ViT Linear 层做 FP8 量化实验, 包含逐层误差分析和性能测试.
-- `xqt/bf16_clein.py`: FLUX.2 klein BF16 推理实验.
-- `xqt/sdnq_clein.py`: FLUX.2 klein SDNQ 4bit 动态量化推理实验.
-- `xqt/README.md`: 当前只是占位说明.
+- `xqt/core`: structured config schema, OmegaConf 加载, artifact manifest, checksum, registry, dotted target import 和错误类型.
+- `xqt/data`: synthetic samples, calibration dataloader, prompt 数据, torchvision image classification loader, HuggingFace 文本数据和 `xdl.dataset` bridge.
+- `xqt/pipeline`: pass manager, built-in passes, preflight 和 YAML runner.
+- `xqt/quant`: torchao adapter, ONNX Runtime QDQ static quantization, calibration, policy, sensitivity, component quantization plan 和 backend capability.
+- `xqt/prune`: global L1 pruning, structured pruning, importance ranking, pruning schedule, prune + KD helper, N:M 和 block sparse 报告.
+- `xqt/distill`: logit KD, feature/relation loss, feature hook, teacher cache, HuggingFace text bundle 和基础训练 helper.
+- `xqt/diffusion_distill`: timestep schedule, prompt/latent/trajectory cache, consistency/LCM style loss 和 sampling report metadata.
+- `xqt/export`: `torch.export`, TorchScript fallback, ONNX export/checker/runtime diff, TensorRT `trtexec` adapter, OpenVINO adapter, ExecuTorch/ncnn/MNN mobile adapter 和导出前融合 helper.
+- `xqt/operator_opt`: `torch.compile`, Triton, TileLang, CuTile, CUTLASS 和 custom CUDA 的 capability, plan, executor, pattern 和 fallback report.
+- `xqt/eval`, `xqt/benchmark`: metric flatten, output diff, JSON/CSV/Markdown 报告, latency 和 memory benchmark.
+- `xqt/xdl_adapter.py`: 从 XDL TrainSetup-like 对象或 checkpoint 创建 XQT context.
+- `xqt/recipes`: CPU smoke, ONNX QDQ, CIFAR-100 QDQ, ViT torchao FP8, structured prune, KD prune 和 operator optimization recipes.
 
-现有脚本依赖和约束盘点:
+当前仍保留的独立实验脚本:
 
-| 脚本 | 主要依赖 | 硬件/运行要求 | 数据和权重路径 | 当前收敛方向 |
-| --- | --- | --- | --- | --- |
-| `torchao_vit.py` | `torch`, `torchao`, `timm`, `torchvision`, `pandas`, `numpy`, `tqdm` | 明确断言 CUDA, 面向 NVIDIA FP8/BF16 路径, 注释以 4070Ti Super 为基准 | `timm.create_model(..., pretrained=True)` 下载 ViT 权重, `IMAGE_NET_ROOT = E:\dataset\imagenet`, 输出 `layer_error_analysis.csv` | 已抽出 `quant/torchao_backend.py`, `quant/sensitivity.py`, `benchmark/latency.py`, 后续真实 recipe 需要参数化权重和 ImageNet 路径 |
-| `bf16_clein.py` | `torch`, `diffusers` 中 `Flux2KleinPipeline` | `device = "cuda"`, BF16, `enable_model_cpu_offload()` 降显存 | HF 权重 `black-forest-labs/FLUX.2-klein-4B`, 固定 prompt, 输出 `others/flux-klein.png` | 作为扩散 baseline 和少步对照, 需要改为 YAML 配置, prompt cache 和 sampling report |
-| `sdnq_clein.py` | `torch`, `diffusers`, `sdnq`, 可选 `triton`/`torch.compile` | CUDA 或 XPU 可用时开启 quantized matmul, CPU offload | HF 权重 `Disty0/FLUX.2-klein-4B-SDNQ-4bit-dynamic`, 固定 prompt, 输出 `others/flux-klein-sdnq-4bit-dynamic.png` | 作为扩散量化和少步对照, 需要纳入 `quant` + `diffusion_distill.report` 的统一 manifest |
+- `xqt/torchao_vit.py`: ViT + torchao FP8 量化, 逐层误差分析和性能测试实验. 长期方向是继续以 recipe 和 `xqt.quant` helper 承载可复用能力.
 
 相关资料:
 
@@ -99,9 +96,9 @@ PyTorch checkpoint
 - 渐进稳定. `xqt` 初期全部视为实验 API. 只有经过测试, 文档和真实 recipe 验证后, 才考虑进入稳定边界.
 - 实用优先. 优先实现对真实推理延迟, 显存, 吞吐或采样步数有确定收益的方案; 论文指标好但缺少后端支持的方案先放 research.
 
-## 4. 推荐模块划分
+## 4. 当前模块划分
 
-建议最终把 `xqt/` 从脚本目录推进为包目录:
+`xqt/` 当前已经是包化实验工具链,核心目录如下:
 
 ```text
 xqt/
@@ -110,36 +107,46 @@ xqt/
 │   ├── artifact.py        # artifact manifest, checksum, metadata
 │   ├── config.py          # OmegaConf 加载, structured config
 │   ├── registry.py        # xqt 内部 recipe/pass/exporter 注册
-│   └── types.py           # ModelSpec, DataSpec, ShapeSpec, MetricResult
+│   ├── errors.py          # XQT 异常类型
+│   ├── imports.py         # dotted target 构建
+│   ├── schema.py          # XQTConfig structured schema
+│   └── types.py           # XQTContext 等运行态类型
 ├── data/
+│   ├── builders.py        # split target 构建入口
 │   ├── calibration.py     # calibration dataloader 和样本抽取
-│   └── samples.py         # example input, input signature, synthetic data
+│   ├── hf_text.py         # HuggingFace 文本数据支架
+│   ├── prompts.py         # prompt 数据
+│   ├── samples.py         # example input, input signature, synthetic data
+│   └── torchvision.py     # torchvision image classification loader
 ├── distill/
 │   ├── losses.py          # logit KD, feature KD, relation KD
 │   ├── hooks.py           # teacher/student 中间层对齐
 │   ├── cache.py           # teacher logits/features 缓存
 │   ├── hf_text.py         # HuggingFace 文本分类 KD/prune recipe 支架
-│   └── recipes.py         # 离线蒸馏, 自蒸馏, feature distill
+│   └── training.py        # 小型 teacher -> student 训练 helper
 ├── diffusion_distill/
 │   ├── trajectory.py      # teacher 轨迹, 噪声, timestep 和 scheduler 采样
-│   ├── consistency.py     # consistency/LCM 类少步蒸馏损失
-│   ├── rectified_flow.py  # flow matching/rectified flow 少步训练
-│   ├── adapters.py        # LoRA/student UNet/DiT adapter
-│   └── sampler.py         # 1/2/4/8 step 采样和质量评估入口
+│   ├── losses.py          # consistency/LCM 类少步蒸馏损失
+│   ├── cache.py           # prompt, latent 和 trajectory cache
+│   ├── report.py          # 固定 seed 图片网格和采样报告
+│   └── spec.py            # diffusion few-step spec
 ├── prune/
-│   ├── masks.py           # mask 管理和持久化
+│   ├── capability.py      # runtime/export/稀疏能力描述
 │   ├── importance.py      # L1/L2, BN gamma, Taylor, gradient * weight
-│   ├── structured.py      # channel/filter/head 等结构化剪枝
-│   ├── unstructured.py    # 非结构化剪枝和稀疏度报告
-│   └── rewrite.py         # 结构化剪枝后的模块重写
+│   ├── masks.py           # mask 管理和持久化
+│   ├── rewrite.py         # 结构化剪枝后的模块重写
+│   ├── schedule.py        # pruning schedule 和 KD helper
+│   └── structured.py      # channel/filter/head/block 等结构化剪枝
 ├── quant/
+│   ├── capability.py      # quant backend 能力矩阵
 │   ├── torchao_backend.py # torchao PTQ/QAT/weight-only/FP8 adapter
-│   ├── pt2e_backend.py    # PyTorch 2 export quantization adapter
 │   ├── onnx_qdq.py        # ONNX Runtime static QDQ quantization adapter
-│   ├── modelopt_backend.py # NVIDIA ModelOpt/SmoothQuant adapter
 │   ├── sensitivity.py     # 逐层误差和混合精度建议
 │   ├── calibration.py     # observer, 校准循环, 校准报告
-│   └── policy.py          # allowlist, denylist, dtype, granularity
+│   ├── executor.py        # component quantization plan 执行
+│   ├── plan.py            # 量化执行计划
+│   ├── policy.py          # allowlist, denylist, dtype, granularity
+│   └── types.py           # quant report 数据类型
 ├── operator_opt/
 │   ├── capability.py      # torch.compile,Triton,TileLang,CuTile,CUTLASS,custom CUDA 能力矩阵
 │   ├── compile_backend.py # torch.compile/Inductor/CUDA Graphs adapter
@@ -147,8 +154,10 @@ xqt/
 │   ├── backends/          # Triton,TileLang,CuTile,CUTLASS 等后端 adapter
 │   ├── kernels/           # 算子 reference,guarded entry 和 backend-specific kernel
 │   ├── executor.py        # 组件级 operator optimization 执行器
-│   └── report.py          # graph break,kernel count,latency 和 manifest 报告
+│   └── types.py           # graph break,kernel count,latency 和 manifest 报告
 ├── export/
+│   ├── capability.py      # 部署格式能力矩阵
+│   ├── fusion.py          # 导出前前置融合
 │   ├── onnx_exporter.py   # torch.onnx.export, dynamo=True 优先
 │   ├── torch_exporter.py  # torch.export.ExportedProgram 和 TorchScript 兼容
 │   ├── tensorrt.py        # ONNX -> TensorRT engine
@@ -164,14 +173,14 @@ xqt/
 │   └── profiler.py        # torch profiler 和后端 profiler 接入
 ├── pipeline/
 │   ├── pass_manager.py    # 串联 quant/distill/prune/diffusion_distill/export/eval
+│   ├── passes.py          # 内置 pass 实现
 │   ├── preflight.py       # recipe target,可选依赖和后端命令检查
 │   └── runner.py          # 从 YAML 执行 recipe
 ├── xdl_adapter.py         # XDL TrainSetup/checkpoint 到 XQT context 的桥接
-├── recipes/
-│   ├── smoke_cpu.yaml
-│   └── hf_text_kd_prune.yaml
+├── recipes/               # smoke, quant, prune, distill, operator optimization recipes
 └── entrypoints/
-    └── run_recipe.py      # 读取 XQT_CONFIG 或默认 YAML, 不做 argparse
+    ├── preflight.py       # xqt-preflight
+    └── run_recipe.py      # xqt-run-recipe,读取 XQT_CONFIG 或默认 YAML
 ```
 
 测试放在 `tests/xqt/`, 长期工作文档放在 `docs/md/`, 阶段性研究继续放在 `research/`.
@@ -364,6 +373,55 @@ Recipe 必须声明 `compression_axes`, 例如 `["precision"]`, `["width", "prec
 - 同一 prompt 集合下, teacher 多步结果和 student 少步结果可复现实验.
 - 报告包含 teacher steps, student steps, scheduler, guidance scale, latency, VRAM 和图片网格.
 - 少步 student 可单独保存 LoRA 或完整权重, 并能通过推理脚本加载.
+
+### 7.5 分析与误差诊断
+
+`analyze` pass 是 XQT 内用于压缩前后诊断的长期入口. 早期单独维护的通用误差分析文档已经收拢到本文; 后续若要沉淀框架级通用函数,先在源码中形成稳定 API,再同步到对应长期文档.
+
+XQT 中误差分析优先覆盖这些场景:
+
+- 量化,剪枝,蒸馏和少步蒸馏前后的模型对比.
+- PyTorch eager,`torch.compile`,`torch.export`,ONNX Runtime,TensorRT 和 OpenVINO 等执行路径对齐.
+- 导出前融合,算子替换或 custom kernel 替换后的数值回归.
+- 校准数据,验证数据,prompt 数据或预处理链路变化后的输入和中间表示漂移.
+- teacher / student feature 对齐,敏感层排序,混合精度豁免层和剪枝候选层筛选.
+
+优先记录的误差类型:
+
+- 有效性: shape,dtype,device,NaN,Inf,empty tensor 和 `requires_grad` 状态.
+- 数值误差: max abs,mean abs,median abs,p95/p99 abs,relative error,MSE,RMSE 和 allclose.
+- 相似性: cosine similarity,Pearson correlation,Spearman rank correlation.
+- 分布漂移: mean,std,min,max,quantile,histogram,zero ratio,saturation ratio,clipping ratio,outlier ratio.
+- 结构化误差: per-channel,per-head,per-token,per-time-step,spatial heatmap diff 和 attention map diff.
+- 离散决策: argmax mismatch,top-k overlap,sign mismatch,threshold flip 和 token mismatch.
+- 任务级指标: accuracy,F1,perplexity,mAP,PSNR,SSIM,BLEU,ROUGE 等 delta. 任务指标只能说明后果,不能替代中间误差定位.
+
+当前源码映射:
+
+- `xqt/eval/compare.py`: 基础 tensor 输出对比.
+- `xqt/quant/sensitivity.py`: 逐层输出误差,weight diff 和混合精度建议.
+- `xqt/quant/calibration.py`: activation summary 和 activation drift.
+- `xqt/distill/hooks.py`: teacher / student feature alignment.
+- `xqt/prune/importance.py`: importance + sensitivity 组合排序.
+- `xqt/eval/report.py`: analysis records 到 JSON/CSV/Markdown/DataFrame 友好行的转换.
+- `xdl/callbacks/layer_monitor.py`: 训练期权重和梯度统计的参考实现,不是 XQT API.
+
+`analyze` pass 的报告应尽量保持这些字段稳定:
+
+- `records`: 逐层 `LayerAnalysisRecord`,包含 module name,type,reference/candidate summary,diff,weight diff 和 recommendation.
+- `activation_drift`: reference/candidate activation distribution summary 和 drift delta.
+- `importance`: pruning importance 统计.
+- `prune_candidates`: 结合 importance 和 sensitivity 的候选层排序.
+- `recommended_high_precision_modules`: 建议保留高精度的模块名.
+- `teacher_student_alignment`: teacher / student 中间特征对齐报告.
+- `pareto_points`: benchmark 后用于精度/延迟/内存折中展示的数据点.
+
+推荐分析顺序:
+
+1. 先做有效性检查,排除 shape,dtype,NaN,Inf 等硬错误.
+2. 再看整体输出 diff 和任务指标 delta,判断是否存在真实回归.
+3. 再做逐层排序,定位最敏感层,漂移层或候选豁免层.
+4. 最后只对需要解释的层做结构化可视化,例如 heatmap,per-token 图,直方图或时序曲线.
 
 ## 8. 导出和部署格式
 
@@ -650,7 +708,7 @@ benchmark:
 ### 阶段 9: XDL 集成和稳定化
 
 - [x] 提供从 XDL `TrainSetup` 或 checkpoint 构建 XQT context 的 adapter. 当前文件为 `xqt/xdl_adapter.py`, 支持 TrainSetup-like 对象和 PyTorch/XDL-style checkpoint.
-- [x] 决定哪些 API 可以进入 `docs/md/API.md` 的 Provisional 区. 当前只把 `xqt` 顶层配置,runner,manifest 和 XDL adapter 入口列为 Provisional,子模块仍按 Internal 处理.
+- [x] 决定哪些 API 可以进入 `docs/md/README.md#xdl-api-稳定边界` 的 Provisional 区. 当前只把 `xqt` 顶层配置,runner,manifest 和 XDL adapter 入口列为 Provisional,子模块仍按 Internal 处理.
 - [x] 增加不使用 argparse 的 recipe 运行入口. 当前入口为 `xqt-run-recipe`,读取 `XQT_CONFIG` 和 `XQT_WRITE_MANIFEST`.
 - [x] 增加 recipe preflight 检查. 当前 `xqt.preflight_xqt_config` 和 `xqt-preflight` 会检查 target,数据 root,可选依赖,后端命令和 torchao FP8 CUDA 可用性.
 - [x] 增加 CPU smoke tests, 至少覆盖不依赖 GPU 的 PyTorch native export,ONNX export 和 manifest. 当前由 `tests/xqt/test_runner.py` 等覆盖, 是否接入仓库 CI 配置另行决定.
