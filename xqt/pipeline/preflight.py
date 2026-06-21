@@ -13,7 +13,12 @@ import torch
 
 from xqt.core.config import ConfigInput, load_xqt_config
 from xqt.core.imports import resolve_target
-from xqt.core.schema import QuantComponentPolicyConfig, QuantConfig, XQTConfig
+from xqt.core.schema import (
+    QuantComponentPolicyConfig,
+    QuantConfig,
+    TASK_TYPES,
+    XQTConfig,
+)
 from xqt.operator_opt.capability import describe_operator_backend_capability
 from xqt.operator_opt.cuda_extension import describe_custom_cuda_extension_capability
 from xqt.prune import describe_prune_runtime_capability
@@ -117,6 +122,51 @@ def _check_executable(report: PreflightReport, executable: str, name: str) -> No
     )
 
 
+def _check_optional_executable(
+    report: PreflightReport,
+    executable: str,
+    name: str,
+    *,
+    dry_run: bool,
+) -> None:
+    path = shutil.which(executable)
+    if path is not None:
+        report.add(name, True, f"found: {path}", executable=executable, dry_run=dry_run)
+        return
+    report.add(
+        name,
+        bool(dry_run),
+        "missing optional executable; dry-run command construction only"
+        if dry_run
+        else "missing optional executable",
+        level="warning" if dry_run else "info",
+        executable=executable,
+        dry_run=dry_run,
+    )
+
+
+def _check_optional_dependency(
+    report: PreflightReport,
+    package_name: str,
+    name: str,
+    *,
+    dry_run: bool,
+) -> None:
+    available = _package_available(package_name)
+    report.add(
+        name,
+        available or bool(dry_run),
+        "available"
+        if available
+        else "missing optional dependency; dry-run command construction only"
+        if dry_run
+        else "missing optional dependency",
+        level="info" if available else "warning" if dry_run else "info",
+        package=package_name,
+        dry_run=dry_run,
+    )
+
+
 def _check_cuda(report: PreflightReport, name: str) -> None:
     available = torch.cuda.is_available()
     report.add(
@@ -212,13 +262,12 @@ def _check_qdq_data_source(
     component_name: str | None = None,
 ) -> None:
     calibration_name = calibration_split or "calibration"
-    validation_name = validation_split or "validation"
     calibration = getattr(loaded.data, calibration_name, None)
-    validation = getattr(loaded.data, validation_name, None)
     metadata: dict[str, Any] = {
         "calibration_split": calibration_name,
-        "validation_split": validation_name,
     }
+    if validation_split is not None:
+        metadata["validation_split"] = validation_split
     if component_name is not None:
         metadata["component"] = component_name
     if calibration is not None:
@@ -230,24 +279,13 @@ def _check_qdq_data_source(
             source="calibration",
         )
         return
-    if validation is not None:
-        report.add(
-            name,
-            True,
-            "calibration data missing; validation fallback will be used",
-            level="warning",
-            **metadata,
-            source="validation",
-            fallback="validation",
-        )
-        return
     report.add(
         name,
         False,
-        "calibration or validation data is required for ONNX QDQ",
+        "explicit calibration data is required for ONNX QDQ",
         level="error",
         **metadata,
-        missing=[calibration_name, validation_name],
+        missing=[calibration_name],
     )
 
 
@@ -356,11 +394,12 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         "torch.compile available" if torch_compile_available else "torch.compile unavailable",
         torch_version=torch.__version__,
     )
-    _check_cuda(report, "operator_optimization.hardware.cuda")
     target_backends = {
         target.backend or operator_config.default_backend
         for target in operator_config.targets
     }
+    if target_backends & {"triton", "tilelang", "cutile", "cutlass", "custom_cuda"}:
+        _check_cuda(report, "operator_optimization.hardware.cuda")
     for package_backend in ("triton", "tilelang", "cutile", "cutlass"):
         if package_backend in target_backends:
             _check_dependency(report, package_backend)
@@ -477,6 +516,67 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             )
 
 
+def _is_ultralytics_detection_recipe(loaded: XQTConfig) -> bool:
+    if loaded.task.type != "detection":
+        return False
+    model_target = (loaded.model.target or "").lower()
+    return "ultralytics" in model_target or bool(
+        loaded.task.params.get("ultralytics_model")
+    )
+
+
+def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) -> None:
+    prune = loaded.compression.prune
+    if not prune.enabled or loaded.task.type != "detection":
+        return
+    metadata = {
+        "method": prune.method,
+        "target_sparsity": prune.target_sparsity,
+        "granularity": prune.granularity,
+        "scope": prune.scope,
+    }
+    if prune.method == "global_l1_unstructured":
+        report.add(
+            "compression.prune.detection_safety",
+            True,
+            "unstructured detection pruning records sparsity only; speedup is not claimed",
+            **metadata,
+        )
+        return
+    if prune.method != "structured":
+        report.add(
+            "compression.prune.detection_safety",
+            True,
+            "detection pruning method does not rewrite YOLO channel topology",
+            **metadata,
+        )
+        return
+    if not _is_ultralytics_detection_recipe(loaded):
+        report.add(
+            "compression.prune.detection_safety",
+            True,
+            "structured detection pruning requires model-specific dependency checks at plan time",
+            level="warning",
+            **metadata,
+        )
+        return
+
+    supported_matrix = {
+        "adapter": "ultralytics_detection",
+        "safe_granularities": [],
+        "blocked_topology": ["residual", "CSP/C2f", "concat", "SPPF", "detect_head"],
+        "max_safe_sparsity": 0.0,
+    }
+    report.add(
+        "compression.prune.detection_safety",
+        False,
+        "Ultralytics YOLO structured channel/filter pruning is blocked until dependency graph rewrite support is implemented",
+        level="error",
+        support_matrix=supported_matrix,
+        **metadata,
+    )
+
+
 def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
     """Run lightweight dependency and target checks for a recipe."""
 
@@ -488,6 +588,30 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
         "artifact directory configured",
         path=loaded.project.artifact_dir,
     )
+    report.add(
+        "task.type",
+        loaded.task.type in TASK_TYPES,
+        "task type configured",
+        task_type=loaded.task.type,
+    )
+    if loaded.task.type == "detection":
+        report.add(
+            "task.detection_postprocess",
+            True,
+            "detection postprocess configured",
+            **{
+                "format": loaded.task.detection_postprocess.format,
+                "box_format": loaded.task.detection_postprocess.box_format,
+                "score_threshold": loaded.task.detection_postprocess.score_threshold,
+                "iou_threshold": loaded.task.detection_postprocess.iou_threshold,
+                "max_detections": loaded.task.detection_postprocess.max_detections,
+            },
+        )
+        if (
+            loaded.model.target
+            and "ultralytics" in loaded.model.target.lower()
+        ) or bool(loaded.task.params.get("ultralytics_model")):
+            _check_dependency(report, "ultralytics")
     _check_target(report, "model.target", loaded.model.target)
     _check_model_device(report, loaded.model.device)
 
@@ -499,9 +623,12 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             "prompt_file",
             "prompt_list",
             "synthetic_classification",
+            "synthetic_detection",
             "hf_text_classification",
             "torchvision_image_classification",
+            "ultralytics_detection",
             "xdl_dataset",
+            "xdl_detection",
         }:
             _check_target(report, f"data.{split_name}.target", split.target)
         else:
@@ -510,6 +637,21 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 True,
                 "built-in data target",
                 target=split.target,
+            )
+        if loaded.task.type == "detection" and split.target in {
+            "synthetic_detection",
+            "ultralytics_detection",
+            "xdl_detection",
+            "xdl_dataset",
+        }:
+            params = dict(getattr(split, "params", {}) or {})
+            report.add(
+                f"data.{split_name}.detection",
+                True,
+                "detection data split configured",
+                batch_size=getattr(split, "batch_size", None),
+                sample_limit=getattr(split, "sample_limit", None),
+                params=params,
             )
         if split.root is not None:
             root = Path(split.root).expanduser()
@@ -605,6 +747,7 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 "block_sparse pruning requires selection.block_shape=[rows, cols]",
                 level="error",
             )
+    _check_detection_prune_safety(report, loaded)
 
     if loaded.model.target == "xqt.distill.build_hf_text_classification_bundle_from_params" or any(
         getattr(getattr(loaded.data, split_name), "target", None) == "hf_text_classification"
@@ -622,13 +765,19 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             if bool(target.params.get("runtime_diff", True)):
                 _check_dependency(report, "onnxruntime")
         elif target.format == "tensorrt":
-            _check_executable(
+            _check_optional_executable(
                 report,
                 str(target.params.get("trtexec_path", "trtexec")),
                 f"{prefix}.trtexec",
+                dry_run=bool(target.params.get("dry_run", False)),
             )
         elif target.format == "openvino":
-            _check_dependency(report, "openvino")
+            _check_optional_dependency(
+                report,
+                "openvino",
+                "dependency.openvino",
+                dry_run=bool(target.params.get("dry_run", False)),
+            )
         elif target.format == "executorch":
             _check_dependency(report, "executorch")
         elif target.format == "ncnn":

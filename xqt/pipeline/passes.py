@@ -27,6 +27,7 @@ from xqt.distill import (
 )
 from xqt.eval import (
     build_pareto_points,
+    evaluate_detection_model,
     evaluate_pytorch_model,
     records_to_rows,
     write_csv_report,
@@ -35,11 +36,13 @@ from xqt.eval import (
 )
 from xqt.export import (
     build_tensorrt_engine,
+    compare_openvino_outputs,
     compare_onnxruntime_outputs,
     export_executorch_program,
     export_mnn_from_onnx,
     export_ncnn_from_onnx,
     export_onnx,
+    export_openvino_ir,
     export_torch_program,
     export_torchscript,
 )
@@ -250,6 +253,14 @@ class LoadDataPass:
                 context,
                 default_seed=0,
             )
+            if context.config.task.type == "detection":
+                first_batch = next(iter(context.data["validation"]))
+                if isinstance(first_batch, Mapping):
+                    class_names = first_batch.get("class_names")
+                    if isinstance(class_names, list) and not context.config.task.class_names:
+                        context.config.task.class_names = [str(name) for name in class_names]
+                        if context.manifest is not None and context.manifest.task is not None:
+                            context.manifest.task["class_names"] = list(context.config.task.class_names)
         if prompts is not None and "prompts" not in context.data:
             built_prompts = self._build_data_split(
                 "prompts",
@@ -332,11 +343,20 @@ class BaselineEvalPass:
         dataloader = context.data.get("validation")
         if dataloader is None:
             raise ValueError("validation data is required for baseline_eval")
-        report = evaluate_pytorch_model(
-            model,
-            dataloader,
-            device=context.config.model.device,
-        )
+        if context.config.task.type == "detection":
+            report = evaluate_detection_model(
+                model,
+                dataloader,
+                postprocess=context.config.task.detection_postprocess,
+                metric_config=context.config.task.detection_metric,
+                device=context.config.model.device,
+            )
+        else:
+            report = evaluate_pytorch_model(
+                model,
+                dataloader,
+                device=context.config.model.device,
+            )
         context.metrics["baseline"] = report.to_dict()
         if context.manifest is not None:
             for metric_name, value in report.metrics.items():
@@ -1057,22 +1077,25 @@ class ExportPass:
                     performance_thresholds=target.params.get("performance_thresholds"),
                 )
                 context.artifacts[f"export_{index}"] = result.engine_path
-                if context.manifest is not None and result.checksum is not None:
+                tensorrt_metadata = {
+                    "precision": target.precision,
+                    "dry_run": result.dry_run,
+                    "command": result.command,
+                    "profiles": result.metadata.get("profiles", dict(target.profiles or {})),
+                    "source_onnx": str(onnx_path),
+                    "performance": result.metadata.get("performance"),
+                    "performance_threshold_report": result.metadata.get(
+                        "performance_threshold_report"
+                    ),
+                }
+                if context.manifest is not None:
                     context.manifest.add_artifact(
                         ArtifactRecord(
                             path=str(result.engine_path),
                             format="tensorrt",
                             runtime="tensorrt",
                             checksum=result.checksum,
-                            metadata={
-                                "precision": target.precision,
-                                "dry_run": result.dry_run,
-                                "command": result.command,
-                                "performance": result.metadata.get("performance"),
-                                "performance_threshold_report": result.metadata.get(
-                                    "performance_threshold_report"
-                                ),
-                            },
+                            metadata=tensorrt_metadata,
                         )
                     )
                     threshold_report = result.metadata.get("performance_threshold_report")
@@ -1093,10 +1116,90 @@ class ExportPass:
                         "dry_run": result.dry_run,
                         "command": result.command,
                         "checksum": result.checksum,
+                        "precision": target.precision,
+                        "profiles": result.metadata.get("profiles", dict(target.profiles or {})),
+                        "source_onnx": str(onnx_path),
                         "performance": result.metadata.get("performance"),
                         "performance_threshold_report": result.metadata.get(
                             "performance_threshold_report"
                         ),
+                    }
+                )
+                continue
+
+            if target.format == "openvino":
+                source = target.params.get("onnx_path") or context.artifacts.get(
+                    "last_onnx"
+                )
+                if source is None:
+                    source = export_model
+                output_path = target.output_path
+                if output_path is None:
+                    output_path = str(
+                        Path(context.config.project.artifact_dir)
+                        / f"model_{index}.xml"
+                    )
+                result = export_openvino_ir(
+                    source,
+                    output_path,
+                    example_input=example_input if isinstance(source, nn.Module) else None,
+                    input_shape=target.params.get("input_shape"),
+                    dry_run=bool(target.params.get("dry_run", False)),
+                )
+                diff = None
+                if (
+                    not result.dry_run
+                    and bool(target.params.get("runtime_diff", True))
+                    and result.xml_path.is_file()
+                ):
+                    diff = compare_openvino_outputs(
+                        result.xml_path,
+                        reference_output,
+                        example_input,
+                        device=str(target.params.get("device", "CPU")),
+                        atol=context.config.validation.output_diff.atol,
+                        rtol=context.config.validation.output_diff.rtol,
+                    )
+                    result.output_diff = diff
+                metadata = {
+                    "precision": target.precision,
+                    "dry_run": result.dry_run,
+                    "source_path": (
+                        str(result.source_path)
+                        if result.source_path is not None
+                        else None
+                    ),
+                    "input_shape": result.metadata.get("input_shape"),
+                    "output_diff": diff.to_dict() if diff is not None else None,
+                    **result.metadata,
+                }
+                context.artifacts[f"export_{index}"] = result.xml_path
+                if context.manifest is not None:
+                    context.manifest.add_artifact(
+                        ArtifactRecord(
+                            path=str(result.xml_path),
+                            format="openvino",
+                            runtime="openvino",
+                            checksum=result.checksum,
+                            metadata=metadata,
+                        )
+                    )
+                exported.append(
+                    {
+                        "path": str(result.xml_path),
+                        "bin_path": (
+                            str(result.bin_path)
+                            if result.bin_path is not None
+                            else None
+                        ),
+                        "format": "openvino",
+                        "dry_run": result.dry_run,
+                        "checksum": result.checksum,
+                        "precision": target.precision,
+                        "source_path": metadata.get("source_path"),
+                        "input_shape": metadata.get("input_shape"),
+                        "output_diff": diff.to_dict() if diff is not None else None,
+                        "command": metadata.get("command"),
                     }
                 )
                 continue

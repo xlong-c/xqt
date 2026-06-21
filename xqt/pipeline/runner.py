@@ -94,6 +94,26 @@ def create_manifest(config: XQTConfig) -> ArtifactManifest:
         source_checkpoint=config.model.checkpoint,
         source_checksum=source_checksum,
         compression_axes=list(config.compression.axes),
+        task={
+            "type": config.task.type,
+            "class_names": list(config.task.class_names),
+            "detection_postprocess": {
+                "format": config.task.detection_postprocess.format,
+                "box_format": config.task.detection_postprocess.box_format,
+                "score_threshold": config.task.detection_postprocess.score_threshold,
+                "iou_threshold": config.task.detection_postprocess.iou_threshold,
+                "max_detections": config.task.detection_postprocess.max_detections,
+                "score_activation": config.task.detection_postprocess.score_activation,
+                "has_objectness": config.task.detection_postprocess.has_objectness,
+                "class_agnostic_nms": config.task.detection_postprocess.class_agnostic_nms,
+                "rescale_to_original": config.task.detection_postprocess.rescale_to_original,
+            },
+            "detection_metric": {
+                "iou_thresholds": list(config.task.detection_metric.iou_thresholds),
+                "max_detections": config.task.detection_metric.max_detections,
+            },
+            "params": dict(config.task.params),
+        },
         config_snapshot=xqt_config_to_dict(config),
     )
 
