@@ -21,8 +21,10 @@ class OpenVINOExportResult:
 
     xml_path: Path
     bin_path: Optional[Path]
-    checksum: str
+    checksum: Optional[str]
     output_diff: Optional[TensorDiff] = None
+    dry_run: bool = False
+    source_path: Optional[Path] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -40,12 +42,33 @@ def export_openvino_ir(
     *,
     example_input: Optional[Any] = None,
     input_shape: Optional[list[int]] = None,
+    dry_run: bool = False,
 ) -> OpenVINOExportResult:
     """Convert a PyTorch module or ONNX path to OpenVINO IR."""
 
-    ov = _import_openvino()
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    source_path = None if isinstance(model, nn.Module) else Path(model)
+
+    if dry_run:
+        return OpenVINOExportResult(
+            xml_path=output,
+            bin_path=output.with_suffix(".bin"),
+            checksum=None,
+            dry_run=True,
+            source_path=source_path,
+            metadata={
+                "input_shape": input_shape,
+                "source_path": str(source_path) if source_path is not None else None,
+                "command": [
+                    "openvino.convert_model",
+                    str(source_path) if source_path is not None else "<torch.nn.Module>",
+                    f"--output={output}",
+                ],
+            },
+        )
+
+    ov = _import_openvino()
 
     if isinstance(model, nn.Module):
         if example_input is None:
@@ -60,6 +83,8 @@ def export_openvino_ir(
         xml_path=output,
         bin_path=bin_path if bin_path.is_file() else None,
         checksum=file_sha256(output),
+        dry_run=False,
+        source_path=source_path,
         metadata={"input_shape": input_shape},
     )
 

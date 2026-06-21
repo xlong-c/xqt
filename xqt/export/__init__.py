@@ -20,6 +20,7 @@ from .mobile import (
 from .onnx_exporter import (
     ONNXExportResult,
     compare_onnxruntime_outputs,
+    convert_onnx_to_fp16,
     export_onnx,
     validate_onnx,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "apply_pre_export_fusion",
     "compare_openvino_outputs",
     "compare_onnxruntime_outputs",
+    "convert_onnx_to_fp16",
     "deployment_capability_matrix",
     "evaluate_tensorrt_performance_thresholds",
     "export_executorch_program",

@@ -107,6 +107,50 @@ def validate_onnx(path: str | Path) -> bool:
     return True
 
 
+def convert_onnx_to_fp16(
+    onnx_path: str | Path,
+    output_path: str | Path,
+    *,
+    keep_io_types: bool = False,
+    validate: bool = True,
+) -> ONNXExportResult:
+    """Convert an ONNX model to FP16 using onnxconverter-common."""
+
+    try:
+        import onnx
+        from onnxconverter_common import float16
+    except ImportError as exc:
+        raise XQTBackendError(
+            "onnx and onnxconverter-common are required for ONNX FP16 conversion"
+        ) from exc
+
+    source = Path(onnx_path)
+    if not source.is_file():
+        raise XQTBackendError(f"ONNX file not found: {source}")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    model = onnx.load(str(source))
+    fp16_model = float16.convert_float_to_float16(
+        model,
+        keep_io_types=keep_io_types,
+    )
+    onnx.save(fp16_model, str(output))
+    checked = validate_onnx(output) if validate else False
+    return ONNXExportResult(
+        path=output,
+        opset=None,
+        checksum=file_sha256(output),
+        checked=checked,
+        metadata={
+            "precision": "fp16",
+            "source_path": str(source),
+            "keep_io_types": keep_io_types,
+            "converter": "onnxconverter_common.float16",
+        },
+    )
+
+
 def compare_onnxruntime_outputs(
     onnx_path: str | Path,
     reference_output: torch.Tensor,
@@ -135,6 +179,7 @@ def compare_onnxruntime_outputs(
 __all__ = [
     "ONNXExportResult",
     "compare_onnxruntime_outputs",
+    "convert_onnx_to_fp16",
     "export_onnx",
     "validate_onnx",
 ]
