@@ -133,6 +133,49 @@ def test_operator_optimization_pass_emits_candidate_reports(tmp_path) -> None:
     assert output.metrics["operator_optimization"]["candidates"]["fx"]["candidate_count"] >= 1
 
 
+def test_operator_optimization_pass_preserves_candidate_scan_errors(tmp_path) -> None:
+    class FxUntraceableToy(torch.nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            chunks = list(x.chunk(2, dim=1))
+            return chunks[0] + chunks[1]
+
+    model = FxUntraceableToy()
+    config = load_xqt_config(
+        {
+            "project": {"artifact_dir": str(tmp_path / "operator_opt_candidate_error")},
+            "model": {"device": "cpu"},
+            "benchmark": {"warmup": 0, "iterations": 1},
+            "operator_optimization": {
+                "enabled": True,
+                "targets": [
+                    {
+                        "name": "model",
+                        "backend": "torch_compile",
+                        "min_speedup": 10.0,
+                    }
+                ],
+            },
+        }
+    )
+    context = XQTContext(
+        config=config,
+        model=model,
+        data={"validation": [(torch.randn(2, 4), torch.zeros(2, dtype=torch.long))]},
+        manifest=ArtifactManifest(project_name=config.project.name),
+    )
+
+    output = OperatorOptimizationPass().run(context)
+
+    candidates = output.artifacts["operator_optimization_candidates"]
+    assert candidates["fx"]["status"] == "error"
+    assert candidates["fx"]["candidate_count"] == 0
+    assert "Proxy object cannot be iterated" in candidates["fx"]["error"]
+    assert candidates["fx"]["candidates"] == []
+    assert candidates["torch_export"]["status"] in {"ok", "error"}
+    assert output.metrics["operator_optimization"]["target_count"] == 1
+    assert output.artifacts["operator_optimization_report"].is_file()
+
+
 def test_operator_optimization_pass_records_custom_backend_metadata(tmp_path) -> None:
     model = torch.nn.Linear(4, 2)
     config = load_xqt_config(

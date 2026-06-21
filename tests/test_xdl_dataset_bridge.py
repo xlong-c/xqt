@@ -2,7 +2,8 @@ import json
 
 import torch
 
-from xqt.data import build_data_split
+from xqt.data import build_data_split, split_batch
+from xqt.data.detection import SyntheticDetectionSpec, build_synthetic_detection_loader
 from xqt.pipeline.runner import run_xqt_recipe
 
 
@@ -97,3 +98,56 @@ def test_builtin_pipeline_consumes_xdl_dataset_validation_split(tmp_path) -> Non
     assert "validation" in context.data
     assert context.metrics["baseline"]["samples"] == 2
     assert "top1" in context.metrics["baseline"]["metrics"]
+
+
+def test_build_data_split_supports_synthetic_detection_target() -> None:
+    split = {
+        "target": "synthetic_detection",
+        "sample_limit": 2,
+        "batch_size": 2,
+        "params": {
+            "image_shape": [3, 32, 32],
+            "num_classes": 4,
+            "boxes_per_image": 2,
+        },
+    }
+
+    loader = build_data_split("validation", split)
+    batch = next(iter(loader))
+
+    assert batch["image"].shape == (2, 3, 32, 32)
+    assert len(batch["boxes"]) == 2
+    assert len(batch["labels"]) == 2
+    assert batch["orig_size"].shape == (2, 2)
+
+
+def test_synthetic_detection_loader_preserves_variable_targets() -> None:
+    loader = build_synthetic_detection_loader(
+        SyntheticDetectionSpec(
+            sample_limit=2,
+            batch_size=2,
+            image_shape=[3, 16, 16],
+            num_classes=3,
+            boxes_per_image=2,
+        )
+    )
+    batch = next(iter(loader))
+
+    assert batch["image"].shape == (2, 3, 16, 16)
+    assert all(item.shape == (2, 4) for item in batch["boxes"])
+
+
+def test_split_batch_uses_detection_image_key_as_inputs() -> None:
+    batch = {
+        "image": torch.randn(2, 3, 32, 32),
+        "boxes": [torch.tensor([[1.0, 1.0, 2.0, 2.0]]) for _ in range(2)],
+        "labels": [torch.tensor([0]) for _ in range(2)],
+        "orig_size": [torch.tensor([32, 32]) for _ in range(2)],
+    }
+
+    split = split_batch(batch)
+
+    assert isinstance(split.inputs, torch.Tensor)
+    assert split.inputs.shape == (2, 3, 32, 32)
+    assert isinstance(split.targets, dict)
+    assert "boxes" in split.targets

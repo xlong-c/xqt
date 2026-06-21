@@ -4,6 +4,15 @@ from torch import nn
 
 from xqt.eval.accuracy import evaluate_pytorch_model, topk_accuracy
 from xqt.eval.compare import compare_tensors, summarize_tensor
+from xqt.eval.detection import (
+    compare_decoded_detections,
+    decode_detection_output,
+    evaluate_detection_model,
+    evaluate_detection_runtime_model,
+    evaluate_onnx_detection_model,
+    evaluate_detection_predictions,
+)
+from xqt.export import convert_onnx_to_fp16, export_onnx
 from xqt.eval.report import (
     build_pareto_points,
     flatten_metrics,
@@ -13,6 +22,7 @@ from xqt.eval.report import (
     write_json_report,
     write_markdown_report,
 )
+from xqt.core.schema import DetectionMetricConfig, DetectionPostprocessConfig
 from xqt.quant.sensitivity import LayerAnalysisRecord
 
 
@@ -24,6 +34,24 @@ class FixedLogitModel(nn.Module):
 class PairLogitModel(nn.Module):
     def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
         return left + right
+
+
+class FixedDetectionModel(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        anchor = x.mean() * 0.0
+        return anchor + torch.tensor(
+            [
+                [
+                    [10.0],
+                    [10.0],
+                    [30.0],
+                    [30.0],
+                    [0.95],
+                    [0.05],
+                ]
+            ],
+            dtype=torch.float32,
+        )
 
 
 def test_compare_tensors_reports_common_diff_metrics() -> None:
@@ -256,6 +284,231 @@ def test_evaluate_pytorch_model_rejects_unsupported_output() -> None:
 
     with pytest.raises(TypeError, match="model output must be"):
         evaluate_pytorch_model(BadModel(), [(torch.zeros(1, 2), torch.zeros(1))])
+
+
+def test_decode_detection_output_supports_end2end_shape() -> None:
+    output = torch.tensor([[[10.0, 10.0, 20.0, 20.0, 0.9, 1.0]]], dtype=torch.float32)
+    predictions = decode_detection_output(
+        output,
+        DetectionPostprocessConfig(format="end2end", max_detections=10),
+    )
+
+    assert len(predictions) == 1
+    assert predictions[0].boxes.shape == (1, 4)
+    assert predictions[0].scores.tolist() == [pytest.approx(0.9)]
+    assert predictions[0].labels.tolist() == [1]
+
+
+def test_decode_detection_output_supports_yolo_raw_shape() -> None:
+    output = torch.tensor(
+        [
+            [
+                [20.0],  # cx
+                [20.0],  # cy
+                [20.0],  # w
+                [20.0],  # h
+                [0.1],   # cls0
+                [0.9],   # cls1
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    predictions = decode_detection_output(
+        output,
+        DetectionPostprocessConfig(
+            format="yolo_raw",
+            box_format="cxcywh",
+            score_threshold=0.2,
+            score_activation="sigmoid",
+            max_detections=10,
+        ),
+    )
+
+    assert len(predictions) == 1
+    assert predictions[0].boxes.shape == (1, 4)
+    assert predictions[0].labels.tolist() == [1]
+
+
+def test_evaluate_detection_predictions_reports_map() -> None:
+    predictions = decode_detection_output(
+        torch.tensor([[[10.0, 10.0, 20.0, 20.0, 0.9, 1.0]]], dtype=torch.float32),
+        DetectionPostprocessConfig(format="end2end", max_detections=10),
+    )
+    targets = [
+        {
+            "boxes": torch.tensor([[10.0, 10.0, 20.0, 20.0]], dtype=torch.float32),
+            "labels": torch.tensor([1], dtype=torch.long),
+        }
+    ]
+    metrics = evaluate_detection_predictions(
+        predictions,
+        targets,
+        DetectionMetricConfig(iou_thresholds=[0.5, 0.75], max_detections=10),
+    )
+
+    assert metrics["map50_95"] == pytest.approx(1.0)
+    assert metrics["map50"] == pytest.approx(1.0)
+    assert metrics["map75"] == pytest.approx(1.0)
+
+
+def test_compare_decoded_detections_reports_diff_summary() -> None:
+    reference = decode_detection_output(
+        torch.tensor([[[10.0, 10.0, 20.0, 20.0, 0.9, 1.0]]], dtype=torch.float32),
+        DetectionPostprocessConfig(format="end2end", max_detections=10),
+    )
+    candidate = decode_detection_output(
+        torch.tensor([[[11.0, 10.0, 20.0, 21.0, 0.8, 1.0]]], dtype=torch.float32),
+        DetectionPostprocessConfig(format="end2end", max_detections=10),
+    )
+    diff = compare_decoded_detections(reference, candidate)
+
+    assert diff.box_mae > 0.0
+    assert diff.score_mae > 0.0
+    assert diff.label_match_rate == pytest.approx(1.0)
+
+
+def test_evaluate_detection_model_uses_detection_targets() -> None:
+    dataloader = [
+        {
+            "image": torch.randn(1, 3, 32, 32),
+            "boxes": [torch.tensor([[10.0, 10.0, 30.0, 30.0]], dtype=torch.float32)],
+            "labels": [torch.tensor([0], dtype=torch.long)],
+            "orig_size": [torch.tensor([32, 32], dtype=torch.long)],
+        }
+    ]
+
+    report = evaluate_detection_model(
+        FixedDetectionModel(),
+        dataloader,
+        postprocess=DetectionPostprocessConfig(format="yolo_raw", box_format="xyxy", max_detections=10),
+        metric_config=DetectionMetricConfig(iou_thresholds=[0.5], max_detections=10),
+    )
+
+    assert report.samples == 1
+    assert report.metrics["map50"] == pytest.approx(1.0)
+
+
+def test_evaluate_onnx_detection_model_reports_runtime_metrics(tmp_path) -> None:
+    dataloader = [
+        {
+            "image": torch.randn(1, 3, 32, 32),
+            "boxes": [torch.tensor([[10.0, 10.0, 30.0, 30.0]], dtype=torch.float32)],
+            "labels": [torch.tensor([0], dtype=torch.long)],
+            "orig_size": [torch.tensor([32, 32], dtype=torch.long)],
+            "image_path": ["demo.jpg"],
+            "class_names": [["a"]],
+        }
+    ]
+    model = FixedDetectionModel().eval()
+    onnx_result = export_onnx(
+        model,
+        torch.randn(1, 3, 32, 32),
+        tmp_path / "fixed_detection.onnx",
+        dynamo=False,
+        input_names=["input"],
+        output_names=["predictions"],
+    )
+
+    report = evaluate_onnx_detection_model(
+        str(onnx_result.path),
+        dataloader,
+        postprocess=DetectionPostprocessConfig(format="yolo_raw", box_format="xyxy", max_detections=10),
+        metric_config=DetectionMetricConfig(iou_thresholds=[0.5], max_detections=10),
+        input_names=["input"],
+        reference_model=model,
+        benchmark_warmup=0,
+        benchmark_iterations=1,
+    )
+
+    assert report.runtime == "onnxruntime"
+    assert report.samples == 1
+    assert report.metrics["map50"] == pytest.approx(1.0)
+    assert report.raw_output_diff is not None
+    assert report.raw_output_diff.allclose is True
+    assert report.decoded_diff is not None
+    assert report.decoded_diff.label_match_rate == pytest.approx(1.0)
+    assert report.latency is not None
+    assert report.latency["iterations"] == 1
+
+
+def test_evaluate_onnx_detection_model_casts_fp16_inputs(tmp_path) -> None:
+    dataloader = [
+        {
+            "image": torch.randn(1, 3, 32, 32),
+            "boxes": [torch.tensor([[10.0, 10.0, 30.0, 30.0]], dtype=torch.float32)],
+            "labels": [torch.tensor([0], dtype=torch.long)],
+            "orig_size": [torch.tensor([32, 32], dtype=torch.long)],
+        }
+    ]
+    model = FixedDetectionModel().eval()
+    fp32 = export_onnx(
+        model,
+        torch.randn(1, 3, 32, 32),
+        tmp_path / "fixed_detection_fp32.onnx",
+        dynamo=False,
+        input_names=["input"],
+        output_names=["predictions"],
+    )
+    fp16 = convert_onnx_to_fp16(
+        fp32.path,
+        tmp_path / "fixed_detection_fp16.onnx",
+        keep_io_types=False,
+    )
+
+    report = evaluate_onnx_detection_model(
+        str(fp16.path),
+        dataloader,
+        postprocess=DetectionPostprocessConfig(
+            format="yolo_raw",
+            box_format="xyxy",
+            max_detections=10,
+        ),
+        metric_config=DetectionMetricConfig(iou_thresholds=[0.5], max_detections=10),
+        input_names=["input"],
+        reference_model=model,
+        benchmark_warmup=0,
+        benchmark_iterations=1,
+    )
+
+    assert report.runtime == "onnxruntime"
+    assert report.metrics["map50"] == pytest.approx(1.0)
+    assert report.raw_output_diff is not None
+    assert report.raw_output_diff.candidate_summary is not None
+    assert report.raw_output_diff.candidate_summary.dtype == "torch.float16"
+    assert report.latency is not None
+    assert report.latency["iterations"] == 1
+
+
+def test_evaluate_detection_runtime_model_reports_runtime_metrics() -> None:
+    dataloader = [
+        {
+            "image": torch.randn(1, 3, 32, 32),
+            "boxes": [torch.tensor([[10.0, 10.0, 30.0, 30.0]], dtype=torch.float32)],
+            "labels": [torch.tensor([0], dtype=torch.long)],
+            "orig_size": [torch.tensor([32, 32], dtype=torch.long)],
+        }
+    ]
+    model = FixedDetectionModel().eval()
+
+    report = evaluate_detection_runtime_model(
+        model,
+        dataloader,
+        postprocess=DetectionPostprocessConfig(format="yolo_raw", box_format="xyxy", max_detections=10),
+        metric_config=DetectionMetricConfig(iou_thresholds=[0.5], max_detections=10),
+        reference_model=model,
+        benchmark_warmup=0,
+        benchmark_iterations=1,
+    )
+
+    assert report.runtime == "pytorch"
+    assert report.samples == 1
+    assert report.metrics["map50"] == pytest.approx(1.0)
+    assert report.raw_output_diff is not None
+    assert report.raw_output_diff.allclose is True
+    assert report.decoded_diff is not None
+    assert report.decoded_diff.label_match_rate == pytest.approx(1.0)
+    assert report.latency is not None
+    assert report.latency["iterations"] == 1
 
 
 def test_report_writers_create_json_csv_and_markdown(tmp_path) -> None:

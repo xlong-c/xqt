@@ -275,6 +275,27 @@ def test_smoke_cpu_recipe_runs_builtin_default_pipeline(tmp_path) -> None:
     )
 
 
+def test_yolo_detection_smoke_recipe_runs_builtin_default_pipeline(tmp_path) -> None:
+    config = load_xqt_config(
+        "xqt/recipes/yolo_detection_smoke.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "yolo_detection_smoke")},
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    assert context.metrics["baseline"]["samples"] == 2
+    assert context.metrics["baseline"]["metrics"]["map50"] == pytest.approx(1.0)
+    assert context.metrics["prune"]["sparsity"] >= 0.0
+    assert context.metrics["export"]["artifacts"][0]["format"] == "onnx"
+    assert context.metrics["benchmark"]["latency"]["iterations"] == 1
+    assert context.artifacts["manifest"].is_file()
+    assert context.manifest is not None
+    assert context.manifest.task is not None
+    assert context.manifest.task["type"] == "detection"
+
+
 def test_operator_compile_smoke_recipe_records_manifest_metrics(tmp_path) -> None:
     config = load_xqt_config(
         "xqt/recipes/operator_compile_smoke_cpu.yaml",
@@ -747,6 +768,60 @@ def test_builtin_pipeline_supports_tensorrt_dry_run_after_onnx(tmp_path) -> None
     assert "--fp16" in artifacts[1]["command"]
 
 
+def test_builtin_pipeline_supports_openvino_dry_run_after_onnx(tmp_path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    xml_path = tmp_path / "model.xml"
+    artifact_dir = tmp_path / "openvino_artifacts"
+    config = load_xqt_config(
+        "xqt/recipes/smoke_cpu.yaml",
+        overrides={
+            "project": {
+                "artifact_dir": str(artifact_dir),
+            },
+            "compression": {
+                "prune": {"enabled": False},
+            },
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "output_path": str(onnx_path),
+                        "params": {
+                            "runtime_diff": False,
+                        },
+                    },
+                    {
+                        "format": "openvino",
+                        "output_path": str(xml_path),
+                        "precision": "fp32",
+                        "params": {
+                            "dry_run": True,
+                            "input_shape": [1, 4],
+                        },
+                    },
+                ]
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    artifacts = context.metrics["export"]["artifacts"]
+    assert artifacts[0]["format"] == "onnx"
+    assert artifacts[1]["format"] == "openvino"
+    assert artifacts[1]["dry_run"] is True
+    assert artifacts[1]["input_shape"] == [1, 4]
+    assert artifacts[1]["command"][0] == "openvino.convert_model"
+
+    manifest = load_manifest(artifact_dir / "manifest.json")
+    openvino_artifacts = [
+        item for item in manifest["artifacts"] if item["format"] == "openvino"
+    ]
+    assert openvino_artifacts
+    assert openvino_artifacts[0]["metadata"]["dry_run"] is True
+    assert openvino_artifacts[0]["metadata"]["input_shape"] == [1, 4]
+
+
 def test_builtin_pipeline_exports_torch_native_formats(tmp_path) -> None:
     config = load_xqt_config(
         "xqt/recipes/smoke_cpu.yaml",
@@ -1020,7 +1095,47 @@ def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> N
 
         del onnx_path, calibration_data
         output = Path(output_path_arg)
-        output.write_bytes(b"qdq")
+        graph = onnx.helper.make_graph(
+            [
+                onnx.helper.make_node(
+                    "QuantizeLinear",
+                    ["input", "scale", "zero_point"],
+                    ["input_q"],
+                ),
+                onnx.helper.make_node(
+                    "DequantizeLinear",
+                    ["input_q", "scale", "zero_point"],
+                    ["input_dq"],
+                ),
+                onnx.helper.make_node("Conv", ["input_dq", "weight"], ["output"]),
+            ],
+            "qdq_test_graph",
+            [
+                onnx.helper.make_tensor_value_info(
+                    "input",
+                    onnx.TensorProto.FLOAT,
+                    [1, 1, 4, 4],
+                )
+            ],
+            [
+                onnx.helper.make_tensor_value_info(
+                    "output",
+                    onnx.TensorProto.FLOAT,
+                    [1, 1, 2, 2],
+                )
+            ],
+            [
+                onnx.helper.make_tensor("scale", onnx.TensorProto.FLOAT, [], [0.1]),
+                onnx.helper.make_tensor("zero_point", onnx.TensorProto.UINT8, [], [0]),
+                onnx.helper.make_tensor(
+                    "weight",
+                    onnx.TensorProto.FLOAT,
+                    [1, 1, 3, 3],
+                    [1.0] * 9,
+                ),
+            ],
+        )
+        onnx.save(onnx.helper.make_model(graph), output)
         return ONNXQDQQuantizationResult(
             path=output,
             source_path=output,
@@ -1070,6 +1185,13 @@ def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> N
             "project": {
                 "artifact_dir": str(tmp_path / "qdq_artifacts"),
             },
+            "data": {
+                "calibration": {
+                    "target": "synthetic_classification",
+                    "sample_limit": 2,
+                    "batch_size": 1,
+                }
+            },
             "compression": {
                 "prune": {"enabled": False},
                 "quant": {
@@ -1078,6 +1200,7 @@ def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> N
                     "policy": {
                         "output_path": str(output_path),
                         "input_names": ["input"],
+                        "op_types_to_quantize": ["Conv", "Gemm"],
                         "runtime_diff": False,
                         "pre_export_fusion": {
                             "enabled": True,
@@ -1097,6 +1220,14 @@ def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> N
     assert context.metrics["quant"]["backend"] == "onnxruntime_qdq"
     assert context.metrics["quant"]["calibration_samples"] == 1
     assert context.metrics["quant"]["calibration_summary"]["batch_count"] == 1
+    assert context.metrics["quant"]["quantized_modules"] == ["onnx::Conv"]
+    assert context.metrics["quant"]["metadata"]["quantized_op_types"] == ["Conv"]
+    assert context.metrics["quant"]["metadata"]["qdq_node_count"] == 2
+    assert context.metrics["quant"]["metadata"]["qdq_graph"]["op_type_counts"] == {
+        "Conv": 1,
+        "DequantizeLinear": 1,
+        "QuantizeLinear": 1,
+    }
     assert export_calls["pre_export_fusion"]["mode"] == "eager"
     assert context.metrics["quant"]["metadata"]["pre_export_fusion"]["mode"] == "eager"
     assert (
@@ -1317,6 +1448,41 @@ def test_builtin_quant_pass_auto_exports_unlabeled_multi_input_onnx(
         "input_0",
         "input_1",
     ]
+
+
+def test_builtin_quant_pass_requires_explicit_calibration_split_for_onnx_qdq(tmp_path) -> None:
+    config = load_xqt_config(
+        {
+            "project": {
+                "name": "qdq_requires_calibration",
+                "artifact_dir": str(tmp_path / "qdq_requires_calibration"),
+            },
+            "model": {"device": "cpu"},
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "onnxruntime_qdq",
+                    "policy": {
+                        "output_path": str(tmp_path / "qdq_requires_calibration" / "model_qdq.onnx"),
+                    },
+                }
+            },
+        }
+    )
+
+    with pytest.raises(XQTPipelineError, match="calibration data is required"):
+        run_xqt_recipe(
+            config,
+            model=torch.nn.Linear(4, 2),
+            data={
+                "validation": torch.utils.data.DataLoader(
+                    [(torch.ones(1, 4), torch.tensor([1]))],
+                    batch_size=None,
+                )
+            },
+            pass_names=["quant"],
+            write_manifest=False,
+        )
 
 
 def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> None:

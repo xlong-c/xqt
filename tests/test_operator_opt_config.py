@@ -52,6 +52,32 @@ def test_load_xqt_config_supports_operator_optimization_fields() -> None:
     }
 
 
+def test_load_xqt_config_allows_deployment_backend_without_module_target() -> None:
+    config = load_xqt_config(
+        {
+            "operator_optimization": {
+                "enabled": True,
+                "targets": [
+                    {
+                        "name": "postprocess",
+                        "backend": "deployment_backend",
+                        "options": {
+                            "runtime": "onnxruntime",
+                            "stage": "decode_nms",
+                        },
+                    },
+                ],
+            }
+        }
+    )
+
+    target = config.operator_optimization.targets[0]
+    assert target.name == "postprocess"
+    assert target.target is None
+    assert target.backend == "deployment_backend"
+    assert target.options["stage"] == "decode_nms"
+
+
 @pytest.mark.parametrize(
     ("raw_config", "message"),
     [

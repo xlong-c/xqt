@@ -54,9 +54,8 @@ def test_preflight_checks_targets_dependencies_and_export_commands(tmp_path) -> 
     assert checks["data.validation.target"].passed is True
     assert checks["data.validation.root"].passed is False
     assert checks["dependency.onnxruntime"].passed is True
-    assert checks["data.calibration"].passed is True
-    assert checks["data.calibration"].level == "warning"
-    assert checks["data.calibration"].metadata["fallback"] == "validation"
+    assert checks["data.calibration"].passed is False
+    assert checks["data.calibration"].level == "error"
     assert checks["export.targets.0.tensorrt.trtexec"].passed is False
     assert checks["export.targets.1.mnn.MNNConvert"].passed is False
 
@@ -217,7 +216,38 @@ def test_preflight_treats_xdl_dataset_as_builtin_target() -> None:
     assert checks["data.validation.target"].message == "built-in data target"
 
 
-def test_preflight_fails_without_calibration_or_validation_for_qdq() -> None:
+def test_preflight_treats_ultralytics_detection_as_builtin_target() -> None:
+    config = {
+        "model": {
+            "target": "xqt.model.build_ultralytics_detection_module",
+            "params": {"weights": "yolo11n.pt"},
+        },
+        "task": {
+            "type": "detection",
+            "params": {"ultralytics_model": "yolo11n.pt"},
+        },
+        "data": {
+            "validation": {
+                "target": "ultralytics_detection",
+                "batch_size": 1,
+                "params": {
+                    "dataset": "coco8.yaml",
+                    "autodownload": False,
+                },
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["task.type"].passed is True
+    assert checks["dependency.ultralytics"].passed is True
+    assert checks["data.validation.target"].passed is True
+    assert checks["data.validation.detection"].passed is True
+
+
+def test_preflight_fails_without_calibration_for_qdq() -> None:
     config = {
         "model": {
             "target": "torch.nn.Linear",
@@ -237,6 +267,66 @@ def test_preflight_fails_without_calibration_or_validation_for_qdq() -> None:
     assert report.passed is False
     assert checks["data.calibration"].passed is False
     assert checks["data.calibration"].level == "error"
+
+
+def test_preflight_blocks_ultralytics_structured_detection_pruning() -> None:
+    config = {
+        "model": {
+            "target": "xqt.model.build_ultralytics_detection_module",
+            "params": {"weights": "yolo11n.pt"},
+        },
+        "task": {
+            "type": "detection",
+            "params": {"ultralytics_model": "yolo11n.pt"},
+        },
+        "data": {
+            "validation": {
+                "target": "ultralytics_detection",
+                "batch_size": 1,
+                "params": {"dataset": "coco8.yaml", "autodownload": False},
+            }
+        },
+        "compression": {
+            "prune": {
+                "enabled": True,
+                "method": "structured",
+                "granularity": "channel",
+                "target_sparsity": 0.2,
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert report.passed is False
+    assert checks["compression.prune.detection_safety"].passed is False
+    assert checks["compression.prune.detection_safety"].level == "error"
+    assert checks["compression.prune.detection_safety"].metadata["target_sparsity"] == 0.2
+    assert "detect_head" in checks["compression.prune.detection_safety"].metadata["support_matrix"]["blocked_topology"]
+
+
+def test_preflight_allows_unstructured_detection_pruning_as_sparsity_only() -> None:
+    config = {
+        "model": {
+            "target": "xqt.model.build_ultralytics_detection_module",
+            "params": {"weights": "yolo11n.pt"},
+        },
+        "task": {"type": "detection"},
+        "compression": {
+            "prune": {
+                "enabled": True,
+                "method": "global_l1_unstructured",
+                "target_sparsity": 0.2,
+            }
+        },
+    }
+
+    report = preflight_xqt_config(config)
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["compression.prune.detection_safety"].passed is True
+    assert "sparsity only" in checks["compression.prune.detection_safety"].message
 
 
 def test_preflight_reports_component_level_quantization_checks() -> None:
