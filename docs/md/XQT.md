@@ -37,6 +37,7 @@ PyTorch checkpoint
 
 - 基础 ONNX/QDQ/torchao 路径: `pip install -e ".[xqt]"`.
 - HuggingFace 文本 KD/prune 路径: `pip install -e ".[xqt-hf]"`.
+- Ultralytics YOLO detection 路径: `pip install -e ".[xqt-yolo]"`.
 - diffusion/Flux/SD 类路径: `pip install -e ".[xqt-diffusion]"`.
 - XQT 全量可选依赖: `pip install -e ".[xqt-all]"`.
 - TensorRT, OpenVINO, ncnn, MNN 和 ExecuTorch 仍以目标机器官方安装方式为准, XQT 只做 adapter 和 preflight 检查.
@@ -59,7 +60,8 @@ PyTorch checkpoint
 `xqt/` 已经从零散实验脚本收敛成包化实验工具链. 当前源码包含:
 
 - `xqt/core`: structured config schema, OmegaConf 加载, artifact manifest, checksum, registry, dotted target import 和错误类型.
-- `xqt/data`: synthetic samples, calibration dataloader, prompt 数据, torchvision image classification loader, HuggingFace 文本数据和 `xdl.dataset` bridge.
+- `xqt/data`: synthetic classification/detection samples, calibration dataloader, prompt 数据, torchvision image classification loader, Ultralytics detection loader, HuggingFace 文本数据和 `xdl.dataset` bridge.
+- `xqt/model`: 外部模型 adapter, 当前包含 Ultralytics YOLO detection wrapper, 数据集解析和参考导出 helper.
 - `xqt/pipeline`: pass manager, built-in passes, preflight 和 YAML runner.
 - `xqt/quant`: torchao adapter, ONNX Runtime QDQ static quantization, calibration, policy, sensitivity, component quantization plan 和 backend capability.
 - `xqt/prune`: global L1 pruning, structured pruning, importance ranking, pruning schedule, prune + KD helper, N:M 和 block sparse 报告.
@@ -67,13 +69,11 @@ PyTorch checkpoint
 - `xqt/diffusion_distill`: timestep schedule, prompt/latent/trajectory cache, consistency/LCM style loss 和 sampling report metadata.
 - `xqt/export`: `torch.export`, TorchScript fallback, ONNX export/checker/runtime diff, TensorRT `trtexec` adapter, OpenVINO adapter, ExecuTorch/ncnn/MNN mobile adapter 和导出前融合 helper.
 - `xqt/operator_opt`: `torch.compile`, Triton, TileLang, CuTile, CUTLASS 和 custom CUDA 的 capability, plan, executor, pattern 和 fallback report.
-- `xqt/eval`, `xqt/benchmark`: metric flatten, output diff, JSON/CSV/Markdown 报告, latency 和 memory benchmark.
+- `xqt/eval`, `xqt/benchmark`: detection decode/mAP, metric flatten, output diff, JSON/CSV/Markdown 报告, latency 和 memory benchmark.
 - `xqt/xdl_adapter.py`: 从 XDL TrainSetup-like 对象或 checkpoint 创建 XQT context.
-- `xqt/recipes`: CPU smoke, ONNX QDQ, CIFAR-100 QDQ, ViT torchao FP8, structured prune, KD prune 和 operator optimization recipes.
+- `xqt/recipes`: CPU smoke, ONNX QDQ, CIFAR-100 QDQ, YOLO detection practice, 多组件量化, structured prune, KD prune 和 operator optimization recipes.
 
-当前仍保留的独立实验脚本:
-
-- `xqt/torchao_vit.py`: ViT + torchao FP8 量化, 逐层误差分析和性能测试实验. 长期方向是继续以 recipe 和 `xqt.quant` helper 承载可复用能力.
+顶层独立脚本只作为手动实验或示例入口保留,不计入 XQT 的长期模块状态,recipe backlog 或 API 边界. 理解和修改 XQT 时,以包模块,`xqt/recipes/*.yaml`,runner/preflight,测试和本文为事实源;不要从某个示例脚本反推项目架构.
 
 相关资料:
 
@@ -84,7 +84,7 @@ PyTorch checkpoint
 - `learn/tilelang/`: TileLang 学习实验,当前有 FlashAttention forward 示例.
 - `learn/rwkv/rwkv8/rwkv8_tilelang.py`: TileLang ROSA suffix-match 教学 kernel.
 - `research/diffusion-models-survey-2025/`: 扩散模型少步推理, RL 后训练和蒸馏相关研究资料.
-- `pyproject.toml`: `optimization` 可选依赖已有 `torchao`, `triton`, `tilelang`.
+- `pyproject.toml`: XQT extras 当前包含 `xqt`, `xqt-hf`, `xqt-yolo`, `xqt-diffusion`, `xqt-all`; `optimization` 额外保留 `torchao`, `triton`, `tilelang`.
 
 ## 3. 设计原则
 
@@ -95,6 +95,15 @@ PyTorch checkpoint
 - 结构化产物. 每个产物目录包含模型文件, 配置快照, 版本信息, 指标报告和 manifest.
 - 渐进稳定. `xqt` 初期全部视为实验 API. 只有经过测试, 文档和真实 recipe 验证后, 才考虑进入稳定边界.
 - 实用优先. 优先实现对真实推理延迟, 显存, 吞吐或采样步数有确定收益的方案; 论文指标好但缺少后端支持的方案先放 research.
+
+给 agents 和开发者的阅读顺序:
+
+1. `xqt/core/schema.py` 和 `xqt/core/config.py`: 看 recipe schema,默认值,OmegaConf 加载和校验边界.
+2. `xqt/pipeline/runner.py` 和 `xqt/pipeline/passes.py`: 看 `config -> context -> pass pipeline -> artifacts/metrics/manifest` 主链路和真实执行顺序.
+3. 按任务进入 `xqt/quant`,`xqt/prune`,`xqt/distill`,`xqt/diffusion_distill`,`xqt/export`,`xqt/operator_opt`,`xqt/eval`,`xqt/benchmark`: 看可复用 helper 和后端 adapter.
+4. `xqt/recipes/*.yaml` 和 `tests/xqt/`: 看当前哪些路径已经有可运行闭环,哪些依赖本地数据,CUDA 或外部后端命令.
+
+新增能力时优先落在包模块,再通过 recipe,preflight 和测试暴露. 顶层示例脚本只能是薄入口,不能成为长期事实源.
 
 ## 4. 当前模块划分
 
@@ -244,11 +253,12 @@ Recipe 必须声明 `compression_axes`, 例如 `["precision"]`, `["width", "prec
 首期任务:
 
 - `torchao` adapter: weight-only INT4/INT8, FP8 dynamic activation + weight, allowlist/denylist.
-- ONNX Q/DQ adapter: 复用 ONNX Runtime quantization 的 static calibration, 以 TensorRT/OpenVINO 友好图为目标. 当前已有 `quant/onnx_qdq.py` 和 `backend: onnxruntime_qdq` 内置 pass.
+- ONNX Q/DQ adapter: 复用 ONNX Runtime quantization 的 static calibration, 以 TensorRT/OpenVINO 友好图为目标. 当前已有 `quant/onnx_qdq.py` 和 `backend: onnxruntime_qdq` 内置 pass;执行后会读取生成的 ONNX 图,在 quant metadata 中记录 `qdq_graph`,`qdq_node_count` 和实际命中的 `quantized_op_types`.
+- FP16 ONNX baseline: `xqt.export.convert_onnx_to_fp16()` 使用 `onnxconverter-common` 把 FP32 ONNX 转为 FP16 ONNX,用于检测和分类部署对照. 该依赖在 `xqt` extra 中提供;检测评估会按 ONNX Runtime 输入 dtype 自动 cast feed.
 - NVIDIA ModelOpt adapter: 从 `research/rtdetrv4-m-int8-deploy/` 现有实验收敛 SmoothQuant/INT8 Q/DQ 路径.
 - PTQ 校准: 校准 dataloader, calibration sample limit, observer 统计, 校准报告.
 - KV cache quantization 预研: 先定义接口和报告字段, 不作为首期强依赖.
-- 敏感层分析: 复用 `xqt/torchao_vit.py` 的逐层激活误差和权重误差思路, 收敛为通用报告.
+- 敏感层分析: 以 `xqt/quant/sensitivity.py` 为通用入口,输出逐层激活 diff,weight diff,summary 和混合精度建议.
 - 混合精度策略: 首层, 末层, normalization, embedding, small matmul, attention projection 等可配置保留高精度.
 - QAT 预留: fake quant 插入和微调流程先设计接口, 不作为首期阻塞项.
 
@@ -323,6 +333,7 @@ Recipe 必须声明 `compression_axes`, 例如 `["precision"]`, `["width", "prec
 
 - 非结构化剪枝 baseline: 使用 PyTorch pruning 工具验证 mask, sparsity 和恢复训练流程.
 - 结构化剪枝 MVP: 已支持 CNN channel/filter, ViT/Transformer 的 MLP neuron, attention head, block pruning, 以及 N:M structured sparsity 报告与 recipe 验证.
+- YOLO/Ultralytics 检测模型的结构化剪枝默认在 preflight 阶段被 guard: residual,CSP/C2f,concat,SPPF 和 detect head 拓扑需要 dependency graph + rewrite 支持后才能开放. 当前 YOLO practice 只使用 `global_l1_unstructured` 作为 sparsity/report baseline,不把非结构化剪枝描述成真实部署加速.
 - 深度剪枝预研: layer/block dropping, 保留残差和 normalization 结构一致性.
 - 重要性评估: L1/L2, BN gamma, gradient * weight. Taylor 和 OBS 放到第二阶段.
 - 剪枝计划: 一次性剪枝, 迭代剪枝和线性稀疏率 schedule 都通过 YAML 描述.
@@ -432,7 +443,7 @@ XQT 中误差分析优先覆盖这些场景:
 | P0 | `torch.export.ExportedProgram` | PyTorch 2 AOT 图和后续导出中间层 | 已实现 `torch.export.export` + `torch.export.save/load` adapter |
 | P0 | ONNX | 跨框架交换, TensorRT/OpenVINO/ONNX Runtime 入口 | `torch.onnx.export(..., dynamo=True)` 优先 |
 | P0 | TensorRT engine | NVIDIA GPU 高性能推理 | ONNX -> TensorRT, 支持 FP16/INT8 profile, `trtexec` 性能摘要解析和阈值报告 |
-| P1 | OpenVINO IR | Intel CPU/GPU/NPU 推理 | `openvino.convert_model` 或 ONNX -> IR |
+| P1 | OpenVINO IR | Intel CPU/GPU/NPU 推理 | `openvino.convert_model` 或 ONNX -> IR,支持 dry-run 命令构造 |
 | P1 | TorchScript | 旧 PyTorch 部署兼容 | 已实现 trace/script fallback,主要服务旧部署和 pnnx 输入 |
 | P2 | ExecuTorch | PyTorch 移动端/边缘端 | 等核心 pipeline 稳定后接入 |
 | P2 | ncnn/MNN | 手机和边缘部署 | 通过 ONNX 转换, 作为可选 exporter |
@@ -452,6 +463,12 @@ XQT 中误差分析优先覆盖这些场景:
 - PyTorch 原模型和导出模型输出 diff 达标.
 - 目标硬件基准测试达标.
 - manifest 写入导出参数, 依赖版本, opset, backend, profile 和校准信息.
+
+当前导出边界:
+
+- TensorRT adapter 以 `trtexec` 为主,支持 `dry_run: true` 时只构造命令,记录 precision,profile shape,source ONNX 和性能阈值配置;真实 engine 生成仍依赖目标机器安装 TensorRT 和可用 NVIDIA GPU.
+- OpenVINO adapter 支持从 PyTorch module 或 ONNX path 转 IR;`dry_run: true` 时不要求安装 `openvino`,只记录 `openvino.convert_model` 命令,输入 shape,source path 和预期 `.xml/.bin` 路径.
+- `ExportPass` 会优先使用 `params.onnx_path` 或上游 `last_onnx` 作为 TensorRT/OpenVINO 输入. 在 QDQ 场景中,TensorRT/OpenVINO dry-run 会指向量化后的 QDQ ONNX,不是重新导出 FP32 图.
 
 ## 9. 统一 pipeline
 
@@ -530,9 +547,11 @@ Manifest 必填字段:
 
 | ID | 目标 | 模块 | 价值 | 退出条件 |
 | --- | --- | --- | --- | --- |
-| `image_vit_torchao_fp8` | XDL/timm ViT 分类 | quant + eval + benchmark | 收敛 `xqt/torchao_vit.py` | 已有 CUDA recipe, 可在支持 FP8 的 NVIDIA GPU 上直接跑 quant + benchmark; pretrained/timm 权重和真实任务精度仍待补 |
 | `image_resnet_onnx_qdq_int8` | ResNet/CNN 分类 | quant + export | 打通 ONNX Q/DQ 和 ONNX Runtime diff | 已有 YAML smoke recipe, synthetic image runner 测试和 TensorRT 阈值解析测试,真实 TensorRT engine 待目标机器验证 |
 | `image_resnet_cifar100_qdq_cpu` | ResNet/CIFAR-100 | quant + eval + benchmark | 在本地真实数据上验证 ONNX Runtime QDQ CPU 路径 | 已用本地 CIFAR-100 生成真实 QDQ ONNX, manifest 和 benchmark |
+| `yolo_detection_smoke` | synthetic detection + toy model | detection eval + prune + export | 用最小依赖验证 detection schema,baseline eval,prune,ONNX export 和 manifest | 已有 recipe 和 runner 测试覆盖 |
+| `yolo_detection_practice` | Ultralytics YOLO 检测 | detection eval + quant + operator + export | 验证 detection task schema,Ultralytics adapter,mAP,ONNX QDQ 和部署 report | 已用 `yolo11n.pt` + `coco8.yaml` 跑通 baseline,FP32/FP16 ONNX,QDQ INT8,global L1 unstructured prune,torch.compile candidate,TensorRT/OpenVINO dry-run 和 scenario matrix manifest |
+| `multi_component_quant_smoke` | 异构 toy 模型 | quant + manifest | 验证 component policy,多 backend report 和 manifest 表达 | 已有 CPU smoke recipe 和 runner 测试覆盖 |
 | `hf_text_kd_prune` | HF 文本分类 | distill + prune | 复用知乎示例但改为 YAML | 已有 recipe 支架和 fake HF pipeline 测试, 真实 checkpoint 运行待补 |
 | `cnn_structured_prune` | Conv2d-heavy 模型 | prune + export | 验证真实宽度压缩 | ONNX 图 channel/filter 真实减少 |
 | `sd_lcm_lora_4step` | Stable Diffusion 类模型 | diffusion_distill | 打通少步蒸馏最小闭环 | 4-step sampler, 图片网格和 LoRA 保存 |
@@ -547,35 +566,51 @@ Recipe 文件放在 `xqt/recipes/`, 示例数据和大模型权重不进入 git.
 - 可运行的最小样本数.
 - 预期产物和验收阈值.
 
+实践示例 TODO:
+
+- [../../research/xqt-practice-examples/vit-classification-todo.md](../../research/xqt-practice-examples/vit-classification-todo.md): ViT 分类实践示例,同时检验 XQT 量化,剪枝,算子优化和组合 pipeline.
+- [../../research/xqt-practice-examples/yolo-detection-todo.md](../../research/xqt-practice-examples/yolo-detection-todo.md): YOLO 检测实践示例,同时检验 XQT detection data,mAP,postprocess,量化,剪枝,算子优化和部署链路.
+
+这两个 TODO 属于实践计划,不是已实现事实. 示例编写时如果发现 XQT 功能实现错误,优先修复或破坏性重构 `xqt` 内部实现,不要在示例脚本中绕开错误或降低验收标准.
+
+当前已提供 `xqt/recipes/yolo_detection_smoke.yaml` 作为最小 detection smoke,以及 `xqt/recipes/yolo_detection_practice.yaml` + `examples/yolo_detection_practice.py` 作为 detection practice 入口. Practice example 现在会按 scenario matrix 运行多个 recipe override,包括 `baseline`,`quant_only`,`prune_only`,`operator_only`,`quant_export`,`prune_quant`,`full_chain`;每个场景都会写出 `detection_runtime_scenarios.json`,并把 runtime metric/diff 追加回对应 manifest. 根 `scenario_matrix.json` 汇总 runtime coverage,实际 QDQ op types,calibration,export formats,operator fallback 和 prune sparsity.
+
+已验证的 YOLO practice 边界:
+
+- baseline 场景会评估 PyTorch,FP32 ONNX Runtime 和 FP16 ONNX Runtime,并记录 raw output diff,decoded detection diff,mAP50-95/mAP50/mAP75 和 latency.
+- QDQ 场景使用 explicit calibration split,生成 XQT 自己的 ONNX Runtime QDQ INT8 产物,记录 calibration sample count,activation/weight dtype,QDQ 节点数和实际图中命中的量化 op types.
+- TensorRT 和 OpenVINO 当前在默认 recipe 中是 dry-run. preflight 会在缺少 `trtexec` 或 `openvino` 时给 warning 而不是失败;如果关闭 dry-run,目标机器仍需要安装对应后端并自行承担真实 engine/IR 生成和性能验收.
+- operator 场景会实际评估 `torch_compile` candidate;`deployment_backend` targets 用于记录 backbone/neck/head/postprocess 等部署阶段语义和 fallback reason,不伪装成 PyTorch 内核替换.
+- YOLO 结构化剪枝仍被 preflight guard. 当前 practice 只跑 global L1 unstructured pruning,报告 sparsity,mAP 和 latency,不声称结构化 channel/filter 已对 YOLO 拓扑生效.
+
+上面的 YOLO TODO 仍保留,用于继续推进真实 TensorRT engine,真实 OpenVINO IR,YOLO 结构化剪枝 dependency graph/rewrite 和 postprocess custom kernel 等更完整的部署验收.
+
 ## 12. 配置草案
 
 示例 YAML 只描述结构, 不是已实现字段:
 
 ```yaml
 project:
-  name: vit_small_deploy
-  artifact_dir: artifacts/xqt/vit_small_deploy
+  name: image_resnet_onnx_qdq_int8
+  artifact_dir: artifacts/xqt/image_resnet_onnx_qdq_int8
 
 model:
-  target: timm.create_model
+  target: xdl.model.resnet18
   params:
-    model_name: vit_small_patch16_224
-    pretrained: true
+    num_classes: 10
   checkpoint: null
-  dtype: bfloat16
-  device: cuda
+  dtype: float32
+  device: cpu
 
 data:
-  calibration:
-    target: imagefolder
-    root: data/imagenet/val
-    sample_limit: 512
-    batch_size: 32
   validation:
-    target: imagefolder
-    root: data/imagenet/val
-    sample_limit: 5000
-    batch_size: 64
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 1
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+      seed: 7
 
 compression:
   axes:
@@ -586,32 +621,29 @@ compression:
     enabled: false
   quant:
     enabled: true
-    backend: torchao
+    backend: onnxruntime_qdq
+    strategy: static_int8
+    calibration_split: calibration
+    keep_high_precision: [head]
     policy:
-      dtype: fp8
-      include:
-        - Linear
-      exclude_name_regex:
-        - "head"
+      source_name: resnet18_source.onnx
+      output_path: artifacts/xqt/image_resnet_onnx_qdq_int8/resnet18_qdq.onnx
+      input_names: [input]
+      output_names: [output]
+      sample_limit: 2
+      activation_type: QUInt8
+      weight_type: QInt8
+      op_types_to_quantize: [Conv, MatMul, Gemm]
 
 export:
   targets:
-    - format: onnx
-      opset: 18
-      dynamic_shapes:
-        input:
-          batch: true
     - format: tensorrt
-      precision: fp16
-      profiles:
-        input:
-          min: [1, 3, 224, 224]
-          opt: [8, 3, 224, 224]
-          max: [64, 3, 224, 224]
+      output_path: artifacts/xqt/image_resnet_onnx_qdq_int8/resnet18_int8.engine
+      precision: int8
       params:
         dry_run: true
         performance_thresholds:
-          throughput_qps_min: 1000.0
+          throughput_qps_min: 1.0
           latency_p99_ms_max: 10.0
           gpu_compute_time_p99_ms_max: 10.0
 
@@ -637,7 +669,7 @@ benchmark:
 - [x] 确认 `xqt` 是否长期作为独立包, 或未来并入 `xdl` 子模块. 当前决策是保持仓库顶层实验包,不并入 `xdl/` 主框架子模块.
 - [x] 把 `xqt/README.md` 改成入口文档, 链接本文.
 - [x] 盘点现有实验脚本, 标注依赖, 硬件和数据路径.
-- [x] 定义首个支持场景: image classification + ResNet/CNN ONNX QDQ INT8 为主线, ViT torchao FP8 为并行线.
+- [x] 定义首个支持场景: image classification + ResNet/CNN ONNX QDQ INT8 为主线, PyTorch runtime torchao 量化为并行后端能力.
 
 ### 阶段 1: 基础设施
 
@@ -658,13 +690,13 @@ benchmark:
 
 ### 阶段 3: 量化 MVP
 
-- [x] 把 `xqt/torchao_vit.py` 收敛为 `quant/torchao_backend.py` + `quant/sensitivity.py` 的基础能力. ViT 专用 recipe 仍待补.
-- [x] 支持 allowlist/denylist, dtype policy 和逐层误差报告的基础 helper. 真实模型 recipe 仍待接入.
+- [x] 实现 `quant/torchao_backend.py` 和 `quant/sensitivity.py`,承载 torchao adapter,allowlist/denylist,dtype policy,逐层激活 diff,weight diff 和混合精度建议.
+- [x] 支持 allowlist/denylist, dtype policy 和逐层误差报告的基础 helper.
 - [x] 支持 calibration dataloader 的基础 activation statistics helper.
 - [x] 实现 ONNX Runtime static QDQ INT8 adapter, 支持 PyTorch iterable 到 `CalibrationDataReader` 的桥接和内置 `onnxruntime_qdq` pass.
-- [x] 跑通一个 ViT 或 ResNet 的 PTQ smoke recipe. 当前 `image_resnet_onnx_qdq_int8.yaml` 可在测试中通过 synthetic image + QDQ adapter + TensorRT dry-run 路径.
+- [x] 跑通一个 ResNet/CNN 的 PTQ smoke recipe. 当前 `image_resnet_onnx_qdq_int8.yaml` 可在测试中通过 synthetic image + ONNX Runtime QDQ adapter + TensorRT dry-run 路径.
 - [x] 跑通真实本地数据的 ONNX Runtime QDQ CPU recipe. 当前 `image_resnet_cifar100_qdq_cpu.yaml` 已使用本地 CIFAR-100 生成真实 QDQ ONNX, manifest 和 benchmark.
-- [ ] 跑通 `image_resnet_onnx_qdq_int8` 的 TensorRT 真实 engine 生成. 当前 XQT 已可在支持 FP8 的 NVIDIA CUDA 环境上直接运行 `image_vit_torchao_fp8`, `xqt-preflight` 也会校验 `model.device` 和 FP8 所需 CUDA. 但本环境仍缺少 `trtexec`, 因此 TensorRT 路径暂时只能完成 dry-run,输出解析,性能阈值判定和 manifest metric 的测试覆盖. `hf_text_kd_prune` 的真实 HF 数据运行还需要安装 `datasets`.
+- [ ] 跑通 `image_resnet_onnx_qdq_int8` 的 TensorRT 真实 engine 生成. 当前 XQT 的 preflight 已会校验 target,data root,可选依赖,后端命令和 CUDA 需求. 但本环境仍缺少 `trtexec`, 因此 TensorRT 路径暂时只能完成 dry-run,输出解析,性能阈值判定和 manifest metric 的测试覆盖. `hf_text_kd_prune` 的真实 HF 数据运行还需要安装 `datasets`.
 
 ### 阶段 4: PyTorch native,ONNX 和 TensorRT 导出
 
@@ -710,7 +742,7 @@ benchmark:
 - [x] 提供从 XDL `TrainSetup` 或 checkpoint 构建 XQT context 的 adapter. 当前文件为 `xqt/xdl_adapter.py`, 支持 TrainSetup-like 对象和 PyTorch/XDL-style checkpoint.
 - [x] 决定哪些 API 可以进入 `docs/md/README.md#xdl-api-稳定边界` 的 Provisional 区. 当前只把 `xqt` 顶层配置,runner,manifest 和 XDL adapter 入口列为 Provisional,子模块仍按 Internal 处理.
 - [x] 增加不使用 argparse 的 recipe 运行入口. 当前入口为 `xqt-run-recipe`,读取 `XQT_CONFIG` 和 `XQT_WRITE_MANIFEST`.
-- [x] 增加 recipe preflight 检查. 当前 `xqt.preflight_xqt_config` 和 `xqt-preflight` 会检查 target,数据 root,可选依赖,后端命令和 torchao FP8 CUDA 可用性.
+- [x] 增加 recipe preflight 检查. 当前 `xqt.preflight_xqt_config` 和 `xqt-preflight` 会检查 target,数据 root,可选依赖,后端命令和 CUDA 硬件需求.
 - [x] 增加 CPU smoke tests, 至少覆盖不依赖 GPU 的 PyTorch native export,ONNX export 和 manifest. 当前由 `tests/xqt/test_runner.py` 等覆盖, 是否接入仓库 CI 配置另行决定.
 - [x] 为首批 recipe 补用户阅读页或示例文档. 当前阅读页为 `docs/html/xqt.html`,事实源仍以本文和源码为准.
 
@@ -719,13 +751,12 @@ benchmark:
 建议第一轮只做一条闭环, 不同时追所有方向:
 
 ```text
-timm image classification model
+PyTorch image classification model
     -> baseline eval
-    -> torchao quantization
-    -> sensitivity report
     -> ONNX export
-    -> ONNX Runtime diff
-    -> TensorRT FP16 engine
+    -> ONNX Runtime QDQ INT8 quantization
+    -> output diff
+    -> TensorRT INT8 engine or dry-run report
     -> benchmark report
     -> manifest
 ```
