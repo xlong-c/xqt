@@ -82,16 +82,11 @@ def _resolve_loader(
     component: QuantizationComponentPlan,
 ) -> tuple[Iterable[Any], str]:
     calibration_split = component.calibration_split or "calibration"
-    validation_split = component.validation_split or "validation"
     dataloader = context.data.get(calibration_split)
     if dataloader is not None:
         return dataloader, calibration_split
-    if validation_split != calibration_split:
-        dataloader = context.data.get(validation_split)
-        if dataloader is not None:
-            return dataloader, validation_split
     raise ValueError(
-        f"{calibration_split} or {validation_split} data is required for component "
+        f"{calibration_split} data is required for component "
         f"'{component.name}' backend '{component.backend}'"
     )
 
@@ -128,6 +123,40 @@ def _artifact_key(prefix: str, component_name: str) -> str:
     if component_name == "model":
         return prefix
     return f"{prefix}_{component_name}"
+
+
+def _onnx_qdq_graph_summary(path: str | Path) -> dict[str, Any]:
+    try:
+        import onnx
+    except ImportError:
+        return {}
+    try:
+        model = onnx.load(str(path))
+    except Exception:
+        return {}
+    op_type_counts: dict[str, int] = {}
+    for node in model.graph.node:
+        op_type_counts[node.op_type] = op_type_counts.get(node.op_type, 0) + 1
+    return {
+        "node_count": len(model.graph.node),
+        "op_type_counts": op_type_counts,
+        "qdq_node_count": op_type_counts.get("QuantizeLinear", 0)
+        + op_type_counts.get("DequantizeLinear", 0),
+        "quantize_linear_count": op_type_counts.get("QuantizeLinear", 0),
+        "dequantize_linear_count": op_type_counts.get("DequantizeLinear", 0),
+    }
+
+
+def _infer_qdq_quantized_op_types(qdq_graph: dict[str, Any]) -> list[str]:
+    op_type_counts = qdq_graph.get("op_type_counts", {})
+    if not isinstance(op_type_counts, dict):
+        return []
+    wrapper_op_types = {"QuantizeLinear", "DequantizeLinear", "Constant"}
+    return sorted(
+        str(op_type)
+        for op_type in op_type_counts
+        if str(op_type) not in wrapper_op_types
+    )
 
 
 def _execute_torchao_component(
@@ -226,6 +255,20 @@ def _execute_onnx_qdq_component(
         extra_options=policy.get("extra_options"),
     )
     metadata = dict(result.metadata)
+    qdq_graph = _onnx_qdq_graph_summary(result.path)
+    if qdq_graph:
+        metadata["qdq_graph"] = qdq_graph
+        requested_op_types = [
+            str(item) for item in policy.get("op_types_to_quantize") or []
+        ]
+        op_type_counts = qdq_graph.get("op_type_counts", {})
+        if requested_op_types:
+            metadata["quantized_op_types"] = [
+                op_type for op_type in requested_op_types if op_type in op_type_counts
+            ]
+        else:
+            metadata["quantized_op_types"] = _infer_qdq_quantized_op_types(qdq_graph)
+        metadata["qdq_node_count"] = qdq_graph["qdq_node_count"]
     metadata.update(
         {
             "component_name": component.name,
@@ -242,6 +285,10 @@ def _execute_onnx_qdq_component(
         runtime="onnxruntime",
         strategy=component.strategy,
         target_path=component.target_path,
+        quantized_modules=[
+            f"onnx::{op_type}"
+            for op_type in metadata.get("quantized_op_types", [])
+        ],
         skipped_modules=_prefix_module_names(component.skip_quantize, component.target_path),
         high_precision_modules=_prefix_module_names(
             component.keep_high_precision,

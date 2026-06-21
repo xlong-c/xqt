@@ -34,6 +34,7 @@ from .backends.cutlass import (
 from .executor import (
     build_operator_optimization_plan,
     execute_operator_optimization_plan,
+    materialize_operator_candidate_model,
     summarize_operator_optimization_reports,
 )
 from .patterns import (
@@ -97,6 +98,7 @@ __all__ = [
     "list_operator_backend_capabilities",
     "list_tilelang_kernel_specs",
     "list_triton_kernel_specs",
+    "materialize_operator_candidate_model",
     "run_tilelang_kernel",
     "run_triton_kernel",
     "run_cutile_kernel",

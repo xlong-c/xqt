@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 import torch
 from torch import nn
@@ -162,6 +162,13 @@ def _backend_metadata(
     dtype: str | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
+    if target.backend == "deployment_backend":
+        metadata["deployment_target"] = {
+            "runtime": target.options.get("runtime"),
+            "stage": target.options.get("stage"),
+            "semantic_target": target.options.get("semantic_target") or target.name,
+            "fallback_reason": target.options.get("fallback_reason"),
+        }
     if target.backend == "triton":
         metadata["kernel_registry"] = list_triton_kernel_specs()
     if target.backend == "tilelang":
@@ -251,6 +258,48 @@ def _artifact_paths_from_backend_metadata(metadata: dict[str, Any]) -> dict[str,
                 continue
             artifact_paths[f"{backend}.{pattern}"] = str(artifact_path)
     return artifact_paths
+
+
+def _scan_candidate_report(
+    scanner: Callable[[nn.Module, Any], list[Any]],
+    model: nn.Module,
+    example_input: Any,
+) -> dict[str, Any]:
+    try:
+        report = summarize_candidate_report(scanner(model, example_input))
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "candidate_count": 0,
+            "patterns": [],
+            "recommended_backends": [],
+            "candidates": [],
+        }
+    report["status"] = "ok"
+    report["error"] = None
+    return report
+
+
+def materialize_operator_candidate_model(
+    model: nn.Module,
+    target: OperatorOptimizationTargetPlan,
+) -> tuple[nn.Module, float | None]:
+    """Build one candidate root model with the target optimization applied."""
+
+    candidate_root = copy.deepcopy(model)
+    candidate_target = _resolve_component_model(candidate_root, target.target_path)
+    if target.backend == "torch_compile":
+        compiled_candidate, compile_time_ms = compile_with_torch(candidate_target, target)
+        candidate_root = _replace_component_model(
+            candidate_root,
+            target.target_path,
+            compiled_candidate,
+        )
+        return candidate_root, compile_time_ms
+    raise XQTBackendError(
+        f"Operator optimization backend '{target.backend}' is not executable yet"
+    )
 
 
 def build_operator_optimization_plan(
@@ -349,11 +398,11 @@ def execute_operator_optimization_plan(
         target_device,
     )
     candidate_reports = {
-        "fx": summarize_candidate_report(
-            scan_fx_candidates(current_model, root_inputs)
-        ),
-        "torch_export": summarize_candidate_report(
-            scan_export_candidates(current_model, root_inputs)
+        "fx": _scan_candidate_report(scan_fx_candidates, current_model, root_inputs),
+        "torch_export": _scan_candidate_report(
+            scan_export_candidates,
+            current_model,
+            root_inputs,
         ),
     }
     artifacts["operator_optimization_candidates"] = candidate_reports
@@ -603,5 +652,6 @@ def summarize_operator_optimization_reports(
 __all__ = [
     "build_operator_optimization_plan",
     "execute_operator_optimization_plan",
+    "materialize_operator_candidate_model",
     "summarize_operator_optimization_reports",
 ]
