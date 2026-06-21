@@ -19,6 +19,7 @@ from .schema import (
     PRUNE_SCOPES,
     QuantComponentPolicyConfig,
     QuantConfig,
+    TASK_TYPES,
     TILELANG_PASS_CONFIG_KEYS,
     XQTConfig,
     XQT_CONFIG_VERSION,
@@ -139,9 +140,14 @@ def _validate_operator_optimization_config(config: XQTConfig) -> None:
         if target.backend not in OPERATOR_OPT_BACKENDS:
             allowed = ", ".join(OPERATOR_OPT_BACKENDS)
             raise XQTConfigError(f"{location}.backend must be one of: {allowed}")
-        if target.target is None and target.name != "model":
+        if (
+            target.target is None
+            and target.name != "model"
+            and target.backend != "deployment_backend"
+        ):
             raise XQTConfigError(
-                f"{location}.target is required unless {location}.name=model"
+                f"{location}.target is required unless {location}.name=model "
+                "or backend=deployment_backend"
             )
         if target.fallback not in {"eager"}:
             raise XQTConfigError(f"{location}.fallback must be eager")
@@ -232,6 +238,38 @@ def _validate_config(config: XQTConfig) -> None:
         raise XQTConfigError("analysis.top_k must be positive when provided")
     if not config.analysis.metrics:
         raise XQTConfigError("analysis.metrics must not be empty")
+    if config.task.type not in TASK_TYPES:
+        allowed = ", ".join(TASK_TYPES)
+        raise XQTConfigError(f"task.type must be one of: {allowed}")
+    postprocess = config.task.detection_postprocess
+    if postprocess.score_threshold < 0 or postprocess.score_threshold > 1:
+        raise XQTConfigError("task.detection_postprocess.score_threshold must be in [0, 1]")
+    if postprocess.iou_threshold < 0 or postprocess.iou_threshold > 1:
+        raise XQTConfigError("task.detection_postprocess.iou_threshold must be in [0, 1]")
+    if postprocess.max_detections <= 0:
+        raise XQTConfigError("task.detection_postprocess.max_detections must be positive")
+    if postprocess.format not in {"auto", "end2end", "yolo_raw"}:
+        raise XQTConfigError(
+            "task.detection_postprocess.format must be auto, end2end, or yolo_raw"
+        )
+    if postprocess.box_format not in {"xyxy", "cxcywh"}:
+        raise XQTConfigError(
+            "task.detection_postprocess.box_format must be xyxy or cxcywh"
+        )
+    if postprocess.score_activation not in {"identity", "sigmoid", "softmax"}:
+        raise XQTConfigError(
+            "task.detection_postprocess.score_activation must be identity, sigmoid, or softmax"
+        )
+    metric_config = config.task.detection_metric
+    if metric_config.max_detections <= 0:
+        raise XQTConfigError("task.detection_metric.max_detections must be positive")
+    if not metric_config.iou_thresholds:
+        raise XQTConfigError("task.detection_metric.iou_thresholds must not be empty")
+    for threshold in metric_config.iou_thresholds:
+        if threshold < 0 or threshold > 1:
+            raise XQTConfigError(
+                "task.detection_metric.iou_thresholds must contain values in [0, 1]"
+            )
     _validate_quant_config(config.compression.quant)
     _validate_operator_optimization_config(config)
     if config.compression.prune.target_sparsity < 0 or config.compression.prune.target_sparsity > 1:

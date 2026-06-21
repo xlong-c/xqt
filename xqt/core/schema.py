@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 XQT_CONFIG_VERSION = 1
 
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps")
+TASK_TYPES = ("classification", "detection")
 PRUNE_GRANULARITIES = (
     "channel",
     "filter",
@@ -86,6 +87,44 @@ class DataConfig:
     train: Optional[DataSplitConfig] = None
     validation: Optional[DataSplitConfig] = None
     prompts: Optional[DataSplitConfig] = None
+
+
+@dataclass
+class DetectionPostprocessConfig:
+    """Postprocess settings for detection model outputs."""
+
+    format: str = "auto"
+    box_format: str = "xyxy"
+    score_threshold: float = 0.25
+    iou_threshold: float = 0.45
+    max_detections: int = 300
+    score_activation: str = "identity"
+    has_objectness: bool = False
+    class_agnostic_nms: bool = False
+    rescale_to_original: bool = True
+
+
+@dataclass
+class DetectionMetricConfig:
+    """Detection metric settings."""
+
+    iou_thresholds: List[float] = field(
+        default_factory=lambda: [0.5 + 0.05 * index for index in range(10)]
+    )
+    max_detections: int = 100
+
+
+@dataclass
+class TaskConfig:
+    """Task metadata and task-specific runtime settings."""
+
+    type: str = "classification"
+    class_names: List[str] = field(default_factory=list)
+    detection_postprocess: DetectionPostprocessConfig = field(
+        default_factory=DetectionPostprocessConfig
+    )
+    detection_metric: DetectionMetricConfig = field(default_factory=DetectionMetricConfig)
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -358,6 +397,7 @@ class XQTConfig:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    task: TaskConfig = field(default_factory=TaskConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     operator_optimization: OperatorOptimizationConfig = field(
         default_factory=OperatorOptimizationConfig
@@ -375,6 +415,7 @@ __all__ = [
     "OPERATOR_OPT_BACKENDS",
     "PRUNE_GRANULARITIES",
     "PRUNE_SCOPES",
+    "TASK_TYPES",
     "TILELANG_PASS_CONFIG_KEYS",
     "XQT_CONFIG_VERSION",
     "AnalysisConfig",
@@ -388,6 +429,8 @@ __all__ = [
     "CutlassKernelConfig",
     "DataConfig",
     "DataSplitConfig",
+    "DetectionMetricConfig",
+    "DetectionPostprocessConfig",
     "DiffusionDistillConfig",
     "DistillConfig",
     "ExportConfig",
@@ -402,6 +445,7 @@ __all__ = [
     "PruneConfig",
     "QuantComponentPolicyConfig",
     "QuantConfig",
+    "TaskConfig",
     "TileLangKernelConfig",
     "ValidationConfig",
     "XQTConfig",

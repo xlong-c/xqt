@@ -103,6 +103,7 @@ class ArtifactManifest:
     source_checkpoint: Optional[str] = None
     source_checksum: Optional[str] = None
     compression_axes: List[str] = field(default_factory=list)
+    task: Optional[Dict[str, Any]] = None
     passes: List[str] = field(default_factory=list)
     config_snapshot: Dict[str, Any] = field(default_factory=dict)
     dependencies: Dict[str, Optional[str]] = field(default_factory=collect_dependency_versions)
