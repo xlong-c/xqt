@@ -1,0 +1,45 @@
+config_version: 1
+
+project:
+  name: operator_cutile_mlp
+  artifact_dir: artifacts/xqt/operator/cutile/mlp
+
+model:
+  target: xqt.operator_opt.toy_models.build_toy_llm_mlp_classifier
+  params:
+    hidden_dim: 8
+    intermediate_dim: 16
+    num_classes: 2
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 2
+    params:
+      input_shape: [8]
+      num_classes: 2
+
+operator_optimization:
+  enabled: true
+  targets:
+    - name: mlp_cutile
+      target: mlp
+      backend: cutile
+      patterns: [bias_silu]
+      fallback: eager
+      min_speedup: 1.10
+      validate:
+        atol: 1e-4
+        rtol: 1e-4
+      cutile:
+        target: cuda
+        target_arch: sm_89
+        cache_dir: /tmp/xqt-cutile-cache
+        pass_configs:
+          CUTILE_ENABLE_FAST_MATH: true
+
+benchmark:
+  warmup: 0
+  iterations: 1

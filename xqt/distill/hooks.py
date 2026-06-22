@@ -185,6 +185,7 @@ def _invalid_diff(
         max_abs=0.0,
         mean_abs=0.0,
         mean_squared=0.0,
+        sqnr_db=None,
         relative_error=None,
         cosine_similarity=None,
         correlation=None,

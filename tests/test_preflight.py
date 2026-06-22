@@ -84,7 +84,7 @@ def test_preflight_marks_torchao_fp8_as_cuda_requirement(monkeypatch) -> None:
     monkeypatch.setattr("torch.cuda.is_available", lambda: False)
     monkeypatch.setattr("torch.cuda.device_count", lambda: 0)
 
-    report = preflight_xqt_config("xqt/recipes/image_vit_torchao_fp8.yaml")
+    report = preflight_xqt_config("xqt/recipes/quant/fp8/image_vit_torchao_fp8.yaml")
     checks = {check.name: check for check in report.checks}
 
     assert report.passed is False
@@ -216,23 +216,24 @@ def test_preflight_treats_xdl_dataset_as_builtin_target() -> None:
     assert checks["data.validation.target"].message == "built-in data target"
 
 
-def test_preflight_treats_ultralytics_detection_as_builtin_target() -> None:
+def test_preflight_treats_synthetic_detection_as_builtin_target() -> None:
     config = {
         "model": {
-            "target": "xqt.model.build_ultralytics_detection_module",
-            "params": {"weights": "yolo11n.pt"},
+            "target": "xqt.model.build_toy_detection_module",
+            "params": {"num_classes": 80, "input_channels": 3},
         },
         "task": {
             "type": "detection",
-            "params": {"ultralytics_model": "yolo11n.pt"},
         },
         "data": {
             "validation": {
-                "target": "ultralytics_detection",
+                "target": "synthetic_detection",
                 "batch_size": 1,
                 "params": {
-                    "dataset": "coco8.yaml",
-                    "autodownload": False,
+                    "image_shape": [3, 640, 640],
+                    "num_classes": 80,
+                    "boxes_per_image": 3,
+                    "seed": 0,
                 },
             }
         },
@@ -242,7 +243,6 @@ def test_preflight_treats_ultralytics_detection_as_builtin_target() -> None:
     checks = {check.name: check for check in report.checks}
 
     assert checks["task.type"].passed is True
-    assert checks["dependency.ultralytics"].passed is True
     assert checks["data.validation.target"].passed is True
     assert checks["data.validation.detection"].passed is True
 
@@ -269,21 +269,20 @@ def test_preflight_fails_without_calibration_for_qdq() -> None:
     assert checks["data.calibration"].level == "error"
 
 
-def test_preflight_blocks_ultralytics_structured_detection_pruning() -> None:
+def test_preflight_warns_structured_detection_pruning() -> None:
     config = {
         "model": {
-            "target": "xqt.model.build_ultralytics_detection_module",
-            "params": {"weights": "yolo11n.pt"},
+            "target": "xqt.model.build_toy_detection_module",
+            "params": {"num_classes": 80, "input_channels": 3},
         },
         "task": {
             "type": "detection",
-            "params": {"ultralytics_model": "yolo11n.pt"},
         },
         "data": {
             "validation": {
-                "target": "ultralytics_detection",
+                "target": "synthetic_detection",
                 "batch_size": 1,
-                "params": {"dataset": "coco8.yaml", "autodownload": False},
+                "params": {"image_shape": [3, 640, 640], "num_classes": 80, "boxes_per_image": 3, "seed": 0},
             }
         },
         "compression": {
@@ -299,18 +298,16 @@ def test_preflight_blocks_ultralytics_structured_detection_pruning() -> None:
     report = preflight_xqt_config(config)
     checks = {check.name: check for check in report.checks}
 
-    assert report.passed is False
-    assert checks["compression.prune.detection_safety"].passed is False
-    assert checks["compression.prune.detection_safety"].level == "error"
+    assert checks["compression.prune.detection_safety"].passed is True
+    assert checks["compression.prune.detection_safety"].level == "warning"
     assert checks["compression.prune.detection_safety"].metadata["target_sparsity"] == 0.2
-    assert "detect_head" in checks["compression.prune.detection_safety"].metadata["support_matrix"]["blocked_topology"]
 
 
 def test_preflight_allows_unstructured_detection_pruning_as_sparsity_only() -> None:
     config = {
         "model": {
-            "target": "xqt.model.build_ultralytics_detection_module",
-            "params": {"weights": "yolo11n.pt"},
+            "target": "xqt.model.build_toy_detection_module",
+            "params": {"num_classes": 80, "input_channels": 3},
         },
         "task": {"type": "detection"},
         "compression": {

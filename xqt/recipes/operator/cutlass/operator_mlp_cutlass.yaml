@@ -1,0 +1,45 @@
+config_version: 1
+
+project:
+  name: operator_cutlass_mlp
+  artifact_dir: artifacts/xqt/operator/cutlass/mlp
+
+model:
+  target: xqt.operator_opt.toy_models.build_toy_llm_mlp_classifier
+  params:
+    hidden_dim: 8
+    intermediate_dim: 16
+    num_classes: 2
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 2
+    params:
+      input_shape: [8]
+      num_classes: 2
+
+operator_optimization:
+  enabled: true
+  targets:
+    - name: mlp_cutlass
+      target: mlp
+      backend: cutlass
+      patterns: [gemm_epilogue]
+      fallback: eager
+      min_speedup: 1.10
+      validate:
+        atol: 1e-4
+        rtol: 1e-4
+      cutlass:
+        target_arch: sm_89
+        cache_dir: /tmp/xqt-cutlass-cache
+        tile_shape: [128, 128, 64]
+        pass_configs:
+          CUTLASS_ENABLE_EPILOGUE_FUSION: true
+
+benchmark:
+  warmup: 0
+  iterations: 1

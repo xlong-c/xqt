@@ -1,0 +1,65 @@
+config_version: 1
+
+project:
+  name: prune_unstructured_vit_mnist
+  artifact_dir: artifacts/xqt/prune/unstructured/vit_mnist
+
+model:
+  target: xdl.model.vit_tiny_patch16_224
+  params:
+    num_classes: 10
+    in_channels: 1
+    dropout: 0.0
+    attn_dropout: 0.0
+  dtype: float32
+  device: cpu
+
+data:
+  calibration:
+    target: torchvision_image_classification
+    root: data
+    sample_limit: 32
+    batch_size: 8
+    params:
+      dataset_name: MNIST
+      train: false
+      download: true
+      transform_params:
+        image_size: 224
+        mean: [0.1307]
+        std: [0.3081]
+  validation:
+    target: torchvision_image_classification
+    root: data
+    sample_limit: 16
+    batch_size: 4
+    params:
+      dataset_name: MNIST
+      train: false
+      download: true
+      transform_params:
+        image_size: 224
+        mean: [0.1307]
+        std: [0.3081]
+
+compression:
+  axes:
+    - sparsity
+  prune:
+    enabled: true
+    method: global_l1_unstructured
+    target_sparsity: 0.5
+    schedule: one_shot
+
+validation:
+  output_diff:
+    atol: 1.0e-5
+    rtol: 1.0e-5
+  metric:
+    name: top1
+    max_drop: 0.2
+
+benchmark:
+  warmup: 0
+  iterations: 1
+  percentiles: [50, 90, 99]

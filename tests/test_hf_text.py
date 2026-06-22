@@ -86,9 +86,9 @@ def test_hf_text_bundle_target_populates_context_and_runs_distill(tmp_path) -> N
 
 
 def test_hf_text_recipe_schema_loads() -> None:
-    config = load_xqt_config("xqt/recipes/hf_text_kd_prune.yaml")
+    config = load_xqt_config("xqt/recipes/distill/hf_text_kd_prune.yaml")
 
-    assert config.project.name == "hf_text_kd_prune"
+    assert config.project.name == "distill_hf_text_kd_prune"
     assert config.model.target == "xqt.distill.build_hf_text_classification_bundle_from_params"
     assert config.compression.distill.enabled is True
     assert config.compression.prune.enabled is True

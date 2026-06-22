@@ -1,0 +1,74 @@
+config_version: 1
+
+project:
+  name: quant_int8_resnet_onnx_qdq
+  artifact_dir: artifacts/xqt/quant/int8/resnet_onnx_qdq
+
+model:
+  target: xdl.model.resnet18
+  params:
+    num_classes: 10
+  dtype: float32
+  device: cpu
+
+data:
+  calibration:
+    target: synthetic_classification
+    sample_limit: 2
+    batch_size: 1
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+      seed: 17
+  validation:
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 1
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+      seed: 7
+
+compression:
+  axes:
+    - precision
+  quant:
+    enabled: true
+    backend: onnxruntime_qdq
+    strategy: static_int8
+    calibration_split: calibration
+    keep_high_precision: [head]
+    policy:
+      source_name: resnet18_source.onnx
+      output_path: artifacts/xqt/quant/int8/resnet_onnx_qdq/resnet18_qdq.onnx
+      input_names: [input]
+      output_names: [output]
+      sample_limit: 2
+      activation_type: QUInt8
+      weight_type: QInt8
+      op_types_to_quantize: [Conv, MatMul, Gemm]
+
+export:
+  targets:
+    - format: tensorrt
+      output_path: artifacts/xqt/quant/int8/resnet_onnx_qdq/resnet18_int8.engine
+      precision: int8
+      params:
+        dry_run: true
+        performance_thresholds:
+          throughput_qps_min: 1.0
+          latency_p99_ms_max: 10.0
+          gpu_compute_time_p99_ms_max: 10.0
+
+validation:
+  output_diff:
+    atol: 1.0e-3
+    rtol: 1.0e-3
+  metric:
+    name: top1
+    max_drop: 0.02
+
+benchmark:
+  warmup: 0
+  iterations: 1
+  percentiles: [50, 90, 99]

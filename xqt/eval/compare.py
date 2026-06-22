@@ -49,6 +49,7 @@ class TensorDiff:
     max_abs: float
     mean_abs: float
     mean_squared: float
+    sqnr_db: Optional[float]
     relative_error: Optional[float]
     cosine_similarity: Optional[float]
     correlation: Optional[float]
@@ -69,6 +70,7 @@ class TensorDiff:
             "max_abs": self.max_abs,
             "mean_abs": self.mean_abs,
             "mean_squared": self.mean_squared,
+            "sqnr_db": self.sqnr_db,
             "relative_error": self.relative_error,
             "cosine_similarity": self.cosine_similarity,
             "correlation": self.correlation,
@@ -230,6 +232,17 @@ def compare_tensors(
     delta = ref - cand
     flat_ref = ref.flatten()
     flat_cand = cand.flatten()
+    signal_power = float(torch.dot(flat_ref, flat_ref).item()) if flat_ref.numel() else 0.0
+    noise_power = float(torch.dot(delta.flatten(), delta.flatten()).item()) if delta.numel() else 0.0
+    sqnr_db: Optional[float]
+    if delta.numel() == 0:
+        sqnr_db = None
+    elif noise_power == 0.0:
+        sqnr_db = float("inf") if signal_power > 0.0 else None
+    elif signal_power == 0.0:
+        sqnr_db = None
+    else:
+        sqnr_db = float(10.0 * torch.log10(torch.tensor(signal_power / noise_power)).item())
 
     cosine_similarity: Optional[float]
     if flat_ref.numel() == 0:
@@ -267,6 +280,7 @@ def compare_tensors(
         max_abs=float(delta.abs().max().item()) if delta.numel() else 0.0,
         mean_abs=float(delta.abs().mean().item()) if delta.numel() else 0.0,
         mean_squared=float((delta * delta).mean().item()) if delta.numel() else 0.0,
+        sqnr_db=sqnr_db,
         relative_error=relative_error,
         cosine_similarity=cosine_similarity,
         correlation=correlation,

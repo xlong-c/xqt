@@ -58,6 +58,31 @@ benchmark:
     assert config.compression.prune.target_sparsity == 0.5
 
 
+def test_load_xqt_config_ignores_local_report_extension_block(tmp_path) -> None:
+    config_path = tmp_path / "xqt_with_report.yaml"
+    config_path.write_text(
+        """
+project:
+  name: report_extension_case
+report:
+  enabled: true
+  outputs:
+    report: report.txt
+compression:
+  axes: [precision]
+benchmark:
+  warmup: 0
+  iterations: 1
+""",
+        encoding="utf-8",
+    )
+
+    config = load_xqt_config(config_path)
+
+    assert config.project.name == "report_extension_case"
+    assert config.compression.axes == ["precision"]
+
+
 def test_load_xqt_config_supports_structured_prune_fields() -> None:
     config = load_xqt_config(
         {

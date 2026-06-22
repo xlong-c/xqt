@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import torch
 from torch import nn
@@ -86,25 +86,94 @@ def _shared_module_names(
     ]
 
 
-def analyze_layer_sensitivity(
+def _parameter_count(module: nn.Module) -> int:
+    return sum(parameter.numel() for parameter in module.parameters(recurse=False))
+
+
+def _get_submodule_or_key_error(model: nn.Module, name: str) -> nn.Module:
+    try:
+        return model.get_submodule(name)
+    except AttributeError as exc:
+        raise KeyError(f"Modules not found: ['{name}']") from exc
+
+
+def _first_tensor_output(output: object) -> torch.Tensor:
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, Mapping) and isinstance(output.get("logits"), torch.Tensor):
+        return output["logits"]
+    if isinstance(output, (tuple, list)) and output and isinstance(output[0], torch.Tensor):
+        return output[0]
+    raise TypeError(
+        "layer sensitivity requires a Tensor, tuple/list Tensor[0], or logits mapping output"
+    )
+
+
+def _sample_tensor_pair(
+    reference: torch.Tensor,
+    candidate: torch.Tensor,
+    *,
+    sample_budget: Optional[int],
+    sample_seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if reference.shape != candidate.shape:
+        raise ValueError(
+            f"Tensor shapes differ: reference={tuple(reference.shape)} "
+            f"candidate={tuple(candidate.shape)}"
+        )
+    if sample_budget is None or sample_budget <= 0 or reference.numel() <= sample_budget:
+        return reference, candidate
+
+    flat_reference = reference.detach().reshape(-1)
+    flat_candidate = candidate.detach().reshape(-1)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(sample_seed)
+    indices = torch.randperm(int(flat_reference.numel()), generator=generator)[:sample_budget]
+    indices = indices.to(device=flat_reference.device)
+    return (
+        flat_reference.index_select(0, indices),
+        flat_candidate.index_select(0, indices),
+    )
+
+
+def _compare_sampled_tensors(
+    reference: torch.Tensor,
+    candidate: torch.Tensor,
+    *,
+    atol: float,
+    rtol: float,
+    sample_budget: Optional[int],
+    sample_seed: int,
+) -> TensorDiff:
+    sampled_reference, sampled_candidate = _sample_tensor_pair(
+        reference,
+        candidate,
+        sample_budget=sample_budget,
+        sample_seed=sample_seed,
+    )
+    return compare_tensors(
+        sampled_reference,
+        sampled_candidate,
+        atol=atol,
+        rtol=rtol,
+    )
+
+
+def _collect_shared_tensor_outputs(
     reference_model: nn.Module,
     candidate_model: nn.Module,
     *forward_args: object,
     forward_kwargs: Optional[Mapping[str, object]] = None,
     module_names: Optional[Sequence[str]] = None,
     policy: Optional[QuantizationPolicy] = None,
-    atol: float = 1e-5,
-    rtol: float = 1e-5,
-) -> list[LayerSensitivityRecord]:
-    """Compare named layer outputs between two models."""
-
+) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
     names = list(module_names) if module_names is not None else _shared_module_names(
         reference_model,
         candidate_model,
         policy,
     )
     if not names:
-        return []
+        return [], {}, {}
 
     reference_outputs = collect_module_outputs(
         reference_model,
@@ -118,6 +187,31 @@ def analyze_layer_sensitivity(
         module_names=names,
         forward_kwargs=forward_kwargs,
     )
+    return names, reference_outputs, candidate_outputs
+
+
+def _analyze_layer_output_drift(
+    reference_model: nn.Module,
+    candidate_model: nn.Module,
+    *forward_args: object,
+    forward_kwargs: Optional[Mapping[str, object]] = None,
+    module_names: Optional[Sequence[str]] = None,
+    policy: Optional[QuantizationPolicy] = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+    sample_budget: Optional[int] = None,
+    sample_seed: int = 0,
+) -> list[LayerSensitivityRecord]:
+    names, reference_outputs, candidate_outputs = _collect_shared_tensor_outputs(
+        reference_model,
+        candidate_model,
+        *forward_args,
+        forward_kwargs=forward_kwargs,
+        module_names=module_names,
+        policy=policy,
+    )
+    if not names:
+        return []
 
     records: list[LayerSensitivityRecord] = []
     for name in names:
@@ -134,23 +228,60 @@ def analyze_layer_sensitivity(
                 f"Layer '{name}' shape mismatch: {tuple(reference_output.shape)} vs "
                 f"{tuple(candidate_output.shape)}"
             )
-        diff = compare_tensors(reference_output, candidate_output, atol=atol, rtol=rtol)
-        module_type = type(reference_model.get_submodule(name)).__name__
-        parameter_count = sum(
-            parameter.numel()
-            for parameter in reference_model.get_submodule(name).parameters(recurse=False)
+        diff = _compare_sampled_tensors(
+            reference_output,
+            candidate_output,
+            atol=atol,
+            rtol=rtol,
+            sample_budget=sample_budget,
+            sample_seed=sample_seed,
         )
+        reference_module = reference_model.get_submodule(name)
         records.append(
             LayerSensitivityRecord(
                 name=name,
-                module_type=module_type,
+                module_type=type(reference_module).__name__,
                 diff=diff,
-                parameter_count=parameter_count,
+                parameter_count=_parameter_count(reference_module),
             )
         )
 
-    records.sort(key=lambda record: record.diff.max_abs, reverse=True)
+    records.sort(key=lambda record: record.diff.mean_abs, reverse=True)
     return records
+
+
+def _run_model_output(
+    model: nn.Module,
+    *forward_args: object,
+    forward_kwargs: Optional[Mapping[str, object]] = None,
+) -> torch.Tensor:
+    with torch.no_grad():
+        output = model(*forward_args, **dict(forward_kwargs or {}))
+    return _first_tensor_output(output)
+
+
+def _run_with_isolated_module(
+    reference_model: nn.Module,
+    candidate_module: nn.Module,
+    target_name: str,
+    *forward_args: object,
+    forward_kwargs: Optional[Mapping[str, object]] = None,
+) -> torch.Tensor:
+    reference_module = reference_model.get_submodule(target_name)
+
+    def hook(_module: nn.Module, inputs: tuple[Any, ...], _output: Any) -> Any:
+        with torch.no_grad():
+            return candidate_module(*inputs)
+
+    handle = reference_module.register_forward_hook(hook)
+    try:
+        return _run_model_output(
+            reference_model,
+            *forward_args,
+            forward_kwargs=forward_kwargs,
+        )
+    finally:
+        handle.remove()
 
 
 def _get_module_weight(module: nn.Module) -> Optional[torch.Tensor]:
@@ -169,6 +300,86 @@ def _get_module_weight(module: nn.Module) -> Optional[torch.Tensor]:
     return weight.detach().to(dtype=torch.float32, device="cpu")
 
 
+def analyze_layer_sensitivity(
+    reference_model: nn.Module,
+    candidate_model: nn.Module,
+    *forward_args: object,
+    forward_kwargs: Optional[Mapping[str, object]] = None,
+    module_names: Optional[Sequence[str]] = None,
+    policy: Optional[QuantizationPolicy] = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+    sample_budget: Optional[int] = None,
+    sample_seed: int = 0,
+) -> list[LayerSensitivityRecord]:
+    """Measure isolated final-output drift when replacing one module at a time."""
+
+    names = list(module_names) if module_names is not None else _shared_module_names(
+        reference_model,
+        candidate_model,
+        policy,
+    )
+    if not names:
+        return []
+
+    if reference_model is candidate_model:
+        records: list[LayerSensitivityRecord] = []
+        for name in names:
+            reference_module = _get_submodule_or_key_error(reference_model, name)
+            zero_diff = compare_tensors(
+                torch.zeros(1, dtype=torch.float32),
+                torch.zeros(1, dtype=torch.float32),
+                atol=atol,
+                rtol=rtol,
+            )
+            records.append(
+                LayerSensitivityRecord(
+                    name=name,
+                    module_type=type(reference_module).__name__,
+                    diff=zero_diff,
+                    parameter_count=_parameter_count(reference_module),
+                )
+            )
+        return records
+
+    reference_output = _run_model_output(
+        reference_model,
+        *forward_args,
+        forward_kwargs=forward_kwargs,
+    )
+
+    records: list[LayerSensitivityRecord] = []
+    for name in names:
+        reference_module = _get_submodule_or_key_error(reference_model, name)
+        candidate_module = _get_submodule_or_key_error(candidate_model, name)
+        isolated_output = _run_with_isolated_module(
+            reference_model,
+            candidate_module,
+            name,
+            *forward_args,
+            forward_kwargs=forward_kwargs,
+        )
+        diff = _compare_sampled_tensors(
+            reference_output,
+            isolated_output,
+            atol=atol,
+            rtol=rtol,
+            sample_budget=sample_budget,
+            sample_seed=sample_seed,
+        )
+        records.append(
+            LayerSensitivityRecord(
+                name=name,
+                module_type=type(reference_module).__name__,
+                diff=diff,
+                parameter_count=_parameter_count(reference_module),
+            )
+        )
+
+    records.sort(key=lambda record: record.diff.mean_abs, reverse=True)
+    return records
+
+
 def analyze_layer_errors(
     reference_model: nn.Module,
     candidate_model: nn.Module,
@@ -179,10 +390,12 @@ def analyze_layer_errors(
     atol: float = 1e-5,
     rtol: float = 1e-5,
     include_weight_diff: bool = True,
+    sample_budget: Optional[int] = None,
+    sample_seed: int = 0,
 ) -> list[LayerAnalysisRecord]:
-    """Build a richer per-layer error table for reports and optimization hints."""
+    """Build a richer per-layer cumulative error table for reports."""
 
-    sensitivity_records = analyze_layer_sensitivity(
+    drift_records = _analyze_layer_output_drift(
         reference_model,
         candidate_model,
         *forward_args,
@@ -191,11 +404,13 @@ def analyze_layer_errors(
         policy=policy,
         atol=atol,
         rtol=rtol,
+        sample_budget=sample_budget,
+        sample_seed=sample_seed,
     )
-    if not sensitivity_records:
+    if not drift_records:
         return []
 
-    names = [record.name for record in sensitivity_records]
+    names = [record.name for record in drift_records]
     reference_outputs = collect_module_outputs(
         reference_model,
         *forward_args,
@@ -210,7 +425,7 @@ def analyze_layer_errors(
     )
 
     analysis_records: list[LayerAnalysisRecord] = []
-    for record in sensitivity_records:
+    for record in drift_records:
         reference_output = reference_outputs[record.name]
         candidate_output = candidate_outputs[record.name]
         if not isinstance(reference_output, torch.Tensor) or not isinstance(
@@ -258,6 +473,7 @@ def analyze_layer_errors(
             )
         )
 
+    analysis_records.sort(key=lambda record: record.diff.mean_abs, reverse=True)
     return analysis_records
 
 

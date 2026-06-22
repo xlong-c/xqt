@@ -516,15 +516,6 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             )
 
 
-def _is_ultralytics_detection_recipe(loaded: XQTConfig) -> bool:
-    if loaded.task.type != "detection":
-        return False
-    model_target = (loaded.model.target or "").lower()
-    return "ultralytics" in model_target or bool(
-        loaded.task.params.get("ultralytics_model")
-    )
-
-
 def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) -> None:
     prune = loaded.compression.prune
     if not prune.enabled or loaded.task.type != "detection":
@@ -547,32 +538,15 @@ def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) ->
         report.add(
             "compression.prune.detection_safety",
             True,
-            "detection pruning method does not rewrite YOLO channel topology",
+            "detection pruning method does not rewrite detection head topology",
             **metadata,
         )
         return
-    if not _is_ultralytics_detection_recipe(loaded):
-        report.add(
-            "compression.prune.detection_safety",
-            True,
-            "structured detection pruning requires model-specific dependency checks at plan time",
-            level="warning",
-            **metadata,
-        )
-        return
-
-    supported_matrix = {
-        "adapter": "ultralytics_detection",
-        "safe_granularities": [],
-        "blocked_topology": ["residual", "CSP/C2f", "concat", "SPPF", "detect_head"],
-        "max_safe_sparsity": 0.0,
-    }
     report.add(
         "compression.prune.detection_safety",
-        False,
-        "Ultralytics YOLO structured channel/filter pruning is blocked until dependency graph rewrite support is implemented",
-        level="error",
-        support_matrix=supported_matrix,
+        True,
+        "structured detection pruning requires model-specific dependency checks at plan time",
+        level="warning",
         **metadata,
     )
 
@@ -607,11 +581,6 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 "max_detections": loaded.task.detection_postprocess.max_detections,
             },
         )
-        if (
-            loaded.model.target
-            and "ultralytics" in loaded.model.target.lower()
-        ) or bool(loaded.task.params.get("ultralytics_model")):
-            _check_dependency(report, "ultralytics")
     _check_target(report, "model.target", loaded.model.target)
     _check_model_device(report, loaded.model.device)
 
@@ -626,7 +595,6 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             "synthetic_detection",
             "hf_text_classification",
             "torchvision_image_classification",
-            "ultralytics_detection",
             "xdl_dataset",
             "xdl_detection",
         }:
@@ -640,7 +608,6 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             )
         if loaded.task.type == "detection" and split.target in {
             "synthetic_detection",
-            "ultralytics_detection",
             "xdl_detection",
             "xdl_dataset",
         }:

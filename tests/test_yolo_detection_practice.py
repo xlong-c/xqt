@@ -1,278 +1,306 @@
-import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
-from examples.yolo_detection_practice import main
+from xqt.model import build_toy_detection_module
+from xqt.workflows import load_optimization_config, optimize_model
 
 
-def test_yolo_detection_practice_example_emits_scenario_matrix(
-    monkeypatch,
-    tmp_path,
-    capsys,
-) -> None:
-    recipe = tmp_path / "recipe.yaml"
-    artifact_dir = tmp_path / "artifacts"
-    recipe.write_text(
-        f"""
-project:
-  name: yolo_detection_practice
-  artifact_dir: {artifact_dir}
-model:
-  target: xqt.model.build_ultralytics_detection_module
-  params:
-    weights: yolo11n.pt
-task:
-  type: detection
-  params:
-    dataset_yaml: coco8.yaml
-data:
-  calibration:
-    target: synthetic_detection
-    sample_limit: 1
-    batch_size: 1
-    params:
-      image_shape: [3, 32, 32]
-  validation:
-    target: synthetic_detection
-    sample_limit: 1
-    batch_size: 1
-    params:
-      image_shape: [3, 32, 32]
-compression:
-  quant:
-    enabled: false
-operator_optimization:
-  enabled: false
-benchmark:
-  warmup: 0
-  iterations: 1
-""",
-        encoding="utf-8",
-    )
+class TinyClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 2)
 
-    monkeypatch.setenv("XQT_YOLO_PRACTICE_CONFIG", str(recipe))
-    monkeypatch.setenv("XQT_YOLO_PRACTICE_SCENARIOS", "baseline,quant_only")
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
 
-    def fake_resolve_ultralytics_dataset(dataset: str, *, autodownload: bool = True):
-        del autodownload
-        return SimpleNamespace(
-            to_dict=lambda: {
-                "yaml_path": dataset,
-                "root": str(tmp_path / "datasets" / "coco8"),
-                "train": "train",
-                "val": "val",
-                "names": ["a", "b"],
-                "nc": 2,
+
+def _classification_loader(*, seed: int = 0, samples: int = 8) -> DataLoader:
+    generator = torch.Generator().manual_seed(seed)
+    inputs = torch.randn(samples, 4, generator=generator)
+    targets = torch.randint(0, 2, (samples,), generator=generator)
+    return DataLoader(TensorDataset(inputs, targets), batch_size=4)
+
+
+def test_stage_workflow_prunes_evaluates_benchmarks_and_exports(tmp_path: Path) -> None:
+    model = TinyClassifier()
+    export_path = tmp_path / "model.pt"
+    config = {
+        "project": {
+            "name": "stage_workflow",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        "task": {"type": "classification"},
+        "stages": [
+            {
+                "name": "baseline_eval",
+                "kind": "eval",
+                "split": "validation",
+                "params": {"baseline": True},
             },
-            names=["a", "b"],
-        )
-
-    def fake_run_xqt_recipe(config):
-        artifact_dir_for_config = Path(config.project.artifact_dir)
-        if config.export.targets:
-            for index, target in enumerate(config.export.targets):
-                if target.format == "onnx":
-                    output_path = Path(
-                        target.output_path
-                        or artifact_dir_for_config / f"model_{index}.onnx"
-                    )
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    output_path.write_bytes(b"onnx")
-        return SimpleNamespace(
-            config=config,
-            metrics={
-                "baseline": {"metrics": {"map50_95": 0.5}},
-                "quant": (
-                    {
-                        "backend": "onnxruntime_qdq",
-                        "path": str(
-                            Path(config.project.artifact_dir) / "model_qdq.onnx"
-                        ),
-                        "metadata": {
-                            "op_types_to_quantize": ["Conv", "Gemm"],
-                            "quantized_op_types": ["Conv"],
-                            "qdq_node_count": 2,
-                            "calibration_summary": {"batch_count": 1},
-                        },
-                    }
-                    if "quant_only" in config.project.name
-                    else None
-                ),
-                "export": (
-                    {
-                        "artifacts": [
-                            {
-                                "format": "onnx",
-                                "path": str(
-                                    Path(config.project.artifact_dir)
-                                    / "model_fp32.onnx"
-                                ),
-                                "checked": True,
-                            },
-                            {
-                                "format": "tensorrt",
-                                "path": str(
-                                    Path(config.project.artifact_dir) / "model.engine"
-                                ),
-                                "dry_run": True,
-                                "precision": "int8",
-                                "profiles": {"images": {"opt": [1, 3, 32, 32]}},
-                            },
-                            {
-                                "format": "openvino",
-                                "path": str(
-                                    Path(config.project.artifact_dir) / "model.xml"
-                                ),
-                                "dry_run": True,
-                                "precision": "int8",
-                            },
-                        ]
-                    }
-                    if config.export.targets
-                    else None
-                ),
-                "benchmark": {"mean_ms": 1.0},
-                "operator_optimization": {
-                    "target_count": len(config.operator_optimization.targets),
+            {
+                "name": "prune_sparse",
+                "kind": "prune",
+                "split": "validation",
+                "params": {
+                    "method": "global_l1_unstructured",
+                    "target_sparsity": 0.5,
+                },
+            },
+            {
+                "name": "prune_eval",
+                "kind": "eval",
+                "split": "validation",
+                "compare_to": "baseline_eval",
+                "accept": {"metric": "top1", "max_drop": 1.0},
+            },
+            {
+                "name": "latency",
+                "kind": "benchmark",
+                "split": "validation",
+                "params": {"warmup": 0, "iterations": 1},
+            },
+            {
+                "name": "export_torchscript",
+                "kind": "export",
+                "split": "validation",
+                "save_model": False,
+                "params": {
                     "targets": [
                         {
-                            "target_name": target.name,
-                            "backend": target.backend,
-                            "applied": False,
-                            "skip_reason": "metadata-only",
-                            "metadata": {
-                                "deployment_target": {"semantic_target": target.name}
+                            "format": "torchscript",
+                            "output_path": str(export_path),
+                            "params": {
+                                "method": "trace",
+                                "check_trace": False,
                             },
                         }
-                        for target in config.operator_optimization.targets
-                    ],
+                    ]
                 },
-                "prune": None,
             },
-            manifest=SimpleNamespace(passes=["load_data", "baseline_eval"]),
-            data={"validation": [object()]},
-            artifacts={},
-            reference_model="baseline_model",
-            model="current_model",
-        )
+        ],
+    }
 
-    def fake_evaluate_detection_runtime_model(*args, **kwargs):
-        del args, kwargs
-        return SimpleNamespace(
-            to_dict=lambda: {
-                "runtime": "pytorch",
-                "metrics": {"map50_95": 0.5},
-                "raw_output_diff": {"max_abs": 0.0, "mean_abs": 0.0},
-                "decoded_diff": {"box_mae": 0.0},
-                "latency": {"iterations": 1, "mean_ms": 2.0},
-            }
-        )
+    result = optimize_model(
+        config,
+        model=model,
+        data={"validation": _classification_loader()},
+    )
 
-    def fake_evaluate_onnx_detection_model(*args, **kwargs):
-        onnx_path = str(args[0])
-        del kwargs
-        metric = 0.45 if "fp16" in onnx_path else 0.4
+    assert [stage.name for stage in result.stages] == [
+        "baseline_eval",
+        "prune_sparse",
+        "prune_eval",
+        "latency",
+        "export_torchscript",
+    ]
+    assert result.baseline_stage == "baseline_eval"
+    assert result.best_stage == "prune_sparse"
+    assert result.best_model is result.models["prune_sparse"]
+    assert result.stages[1].metrics["prune"]["sparsity"] >= 0.0
+    assert result.stages[2].accepted is True
+    assert result.stages[3].metrics["benchmark"]["iterations"] == 1
+    assert export_path.is_file()
+    assert result.stages[4].metrics["export"]["artifacts"][0]["format"] == "torchscript"
+
+
+def test_stage_workflow_runtime_eval_uses_artifact_metrics_and_latency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    onnx_path = tmp_path / "toy.onnx"
+    onnx_path.write_bytes(b"fake")
+    calls: list[str] = []
+
+    def fake_evaluate_onnx_detection_model(
+        path: str,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        calls.append(path)
         return SimpleNamespace(
             to_dict=lambda: {
                 "runtime": "onnxruntime",
-                "metrics": {"map50_95": metric},
-                "raw_output_diff": {"max_abs": 0.2, "mean_abs": 0.1},
-                "decoded_diff": {"box_mae": 0.1, "label_match_rate": 1.0},
-                "latency": {"iterations": 1, "mean_ms": 1.0},
+                "samples": 1,
+                "metrics": {"map50_95": 0.95},
+                "raw_output_diff": {"mean_abs": 0.01, "max_abs": 0.02},
+                "decoded_diff": {"box_mae": 0.0},
+                "latency": {"mean_ms": 0.5, "iterations": 1},
             }
         )
 
-    def fake_convert_onnx_to_fp16(onnx_path, output_path, **kwargs):
-        del onnx_path, kwargs
-        output = Path(output_path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"fp16")
-        return SimpleNamespace(
-            path=output,
-            checksum="abc",
-            metadata={"precision": "fp16", "keep_io_types": False},
-        )
-
     monkeypatch.setattr(
-        "examples.yolo_detection_practice.resolve_ultralytics_dataset",
-        fake_resolve_ultralytics_dataset,
-    )
-    monkeypatch.setattr(
-        "examples.yolo_detection_practice.run_xqt_recipe",
-        fake_run_xqt_recipe,
-    )
-    monkeypatch.setattr(
-        "examples.yolo_detection_practice.evaluate_detection_runtime_model",
-        fake_evaluate_detection_runtime_model,
-    )
-    monkeypatch.setattr(
-        "examples.yolo_detection_practice.evaluate_onnx_detection_model",
+        "xqt.workflows.optimization.evaluate_onnx_detection_model",
         fake_evaluate_onnx_detection_model,
     )
-    monkeypatch.setattr(
-        "examples.yolo_detection_practice.convert_onnx_to_fp16",
-        fake_convert_onnx_to_fp16,
+    config = {
+        "project": {
+            "name": "runtime_eval_case",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        "task": {
+            "type": "detection",
+            "class_names": ["a", "b", "c"],
+            "detection_postprocess": {
+                "format": "yolo_raw",
+                "box_format": "xyxy",
+                "score_activation": "sigmoid",
+            },
+        },
+        "data_splits": {
+            "validation": {
+                "target": "synthetic_detection",
+                "sample_limit": 1,
+                "batch_size": 1,
+                "params": {
+                    "image_shape": [3, 32, 32],
+                    "num_classes": 3,
+                    "boxes_per_image": 2,
+                },
+            }
+        },
+        "stages": [
+            {
+                "name": "baseline_eval",
+                "kind": "eval",
+                "split": "validation",
+                "params": {"baseline": True},
+            },
+            {
+                "name": "runtime_eval",
+                "kind": "runtime_eval",
+                "split": "validation",
+                "compare_to": "baseline_eval",
+                "params": {
+                    "path": str(onnx_path),
+                    "input_names": ["image"],
+                    "warmup": 0,
+                    "iterations": 1,
+                },
+                "accept": {
+                    "metric": "map50_95",
+                    "max_drop": 1.0,
+                    "max_mean_abs": 0.1,
+                    "max_max_abs": 0.1,
+                },
+            },
+        ],
+    }
+
+    result = optimize_model(config, model=build_toy_detection_module())
+
+    assert calls == [str(onnx_path)]
+    runtime_stage = result.stages[1]
+    assert runtime_stage.accepted is True
+    assert runtime_stage.metrics["metrics"]["map50_95"] == 0.95
+    assert runtime_stage.metrics["latency"]["mean_ms"] == 0.5
+    assert runtime_stage.metrics["acceptance"]["mean_abs"] == 0.01
+
+
+def test_stage_workflow_finetune_and_distill_use_train_split(tmp_path: Path) -> None:
+    config = {
+        "project": {
+            "name": "train_stage_case",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        "task": {"type": "classification"},
+        "stages": [
+            {
+                "name": "finetune",
+                "kind": "finetune",
+                "train_split": "train",
+                "params": {"max_steps": 1, "lr": 0.01},
+            },
+            {
+                "name": "distill",
+                "kind": "distill",
+                "from_stage": "finetune",
+                "train_split": "train",
+                "params": {"max_steps": 1, "temperature": 2.0, "alpha": 0.5},
+            },
+        ],
+    }
+    teacher = TinyClassifier()
+
+    result = optimize_model(
+        config,
+        model=TinyClassifier(),
+        teacher=teacher,
+        data={"train": _classification_loader(seed=3)},
     )
 
-    assert main() == 0
+    assert result.stages[0].metrics["finetune"]["steps"] == 1
+    assert result.stages[1].metrics["distill"]["steps"] == 1
+    assert result.best_stage == "distill"
 
-    console_output = json.loads(capsys.readouterr().out)
-    assert console_output["project"] == "yolo_detection_practice"
-    assert console_output["scenario_count"] == 2
-    assert console_output["scenario_order"] == ["baseline", "quant_only"]
-    assert set(console_output["outputs"]) == {"matrix_json", "text_report", "log"}
-    assert "scenarios" not in console_output
 
-    matrix_path = Path(console_output["outputs"]["matrix_json"])
-    report_path = Path(console_output["outputs"]["text_report"])
-    log_path = Path(console_output["outputs"]["log"])
-    output = json.loads(matrix_path.read_text(encoding="utf-8"))
-    assert output["project"] == "yolo_detection_practice"
-    assert output["dataset"]["yaml_path"] == "coco8.yaml"
-    assert output["scenario_order"] == ["baseline", "quant_only"]
-    assert output["outputs"]["matrix_json"] == str(matrix_path)
-    assert output["outputs"]["text_report"] == str(report_path)
-    assert output["outputs"]["log"] == str(log_path)
-    assert matrix_path.is_file()
-    assert report_path.is_file()
-    assert log_path.is_file()
-    assert "YOLO Detection Practice Report" in report_path.read_text(encoding="utf-8")
-    assert "Selected scenarios: baseline, quant_only" in log_path.read_text(
-        encoding="utf-8"
+def test_stage_workflow_supervised_finetune_without_teacher(tmp_path: Path) -> None:
+    config = {
+        "project": {
+            "name": "supervised_finetune_case",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        "task": {"type": "classification"},
+        "stages": [
+            {
+                "name": "finetune",
+                "kind": "finetune",
+                "train_split": "train",
+                "params": {"max_steps": 1, "lr": 0.01},
+            }
+        ],
+    }
+
+    result = optimize_model(
+        config,
+        model=TinyClassifier(),
+        data={"train": _classification_loader(seed=5)},
     )
 
-    baseline = output["scenarios"]["baseline"]
-    assert baseline["baseline"]["metrics"]["map50_95"] == 0.5
-    assert baseline["benchmark"]["mean_ms"] == 1.0
-    assert baseline["operator_optimization"]["target_count"] == 0
-    assert (
-        baseline["runtime_scenarios"]["baseline_pytorch"]["metrics"]["map50_95"] == 0.5
-    )
-    assert baseline["runtime_scenarios"]["fp32_onnx"]["metrics"]["map50_95"] == 0.4
-    assert baseline["runtime_scenarios"]["fp16_onnx"]["metrics"]["map50_95"] == 0.45
-    assert baseline["metrics"]["drops"]["fp16_onnx"]["map50_95_drop"] == pytest.approx(
-        0.05
-    )
-    assert (
-        baseline["metrics"]["latency_speedups"]["fp32_onnx"][
-            "speedup_vs_baseline_pytorch"
-        ]
-        == 2.0
-    )
-    assert Path(baseline["runtime_scenarios_path"]).is_file()
+    assert result.stages[0].metrics["finetune"]["mode"] == "supervised"
+    assert result.stages[0].metrics["finetune"]["steps"] == 1
+    assert result.best_stage == "finetune"
 
-    quant_only = output["scenarios"]["quant_only"]
-    assert quant_only["quant"]["backend"] == "onnxruntime_qdq"
-    assert (
-        quant_only["runtime_scenarios"]["quant_onnx_qdq"]["metrics"]["map50_95"] == 0.4
-    )
-    assert output["summary"]["runtime_coverage"]["baseline"] == [
-        "baseline_pytorch",
-        "current_pytorch",
-        "fp16_onnx",
-        "fp32_onnx",
+
+def test_load_optimization_config_rejects_forward_from_stage() -> None:
+    with pytest.raises(ValueError, match="unknown previous from_stage future"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "prune",
+                        "kind": "prune",
+                        "from_stage": "future",
+                    },
+                    {"name": "future", "kind": "eval"},
+                ]
+            }
+        )
+
+
+def test_yolo_detection_practice_recipe_uses_stage_schema() -> None:
+    config = load_optimization_config("xqt/recipes/detection/yolo_detection_practice.yaml")
+
+    assert "validation" in config.data_splits
+    assert "calibration" in config.data_splits
+    assert [stage.kind for stage in config.stages] == [
+        "eval",
+        "benchmark",
+        "export",
+        "runtime_eval",
+        "quant",
+        "runtime_eval",
+        "prune",
+        "eval",
+        "benchmark",
+        "operator",
+        "benchmark",
+        "deploy",
     ]
-    assert output["summary"]["quantized_op_types"] == ["Conv"]
-    assert output["summary"]["calibration"]["quant_only"]["batch_count"] == 1
+    assert config.stages[3].name == "fp32_onnx_runtime"
+    assert config.stages[5].name == "qdq_onnx_runtime"

@@ -48,7 +48,7 @@ def test_operator_optimization_compile_smoke_runs(tmp_path) -> None:
 
 def test_operator_compile_smoke_recipe_runs_in_runner(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/operator_compile_smoke_cpu.yaml",
+        "xqt/recipes/operator/torch_compile/operator_compile_smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "recipe_operator_compile")},
         },

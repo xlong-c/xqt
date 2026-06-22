@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from xqt.core.config import load_xqt_config
 from xqt.core.errors import XQTBackendError
 from xqt.quant import (
     IterableCalibrationDataReader,
@@ -10,6 +13,7 @@ from xqt.quant import (
     analyze_activation_drift,
     analyze_layer_errors,
     analyze_layer_sensitivity,
+    build_fake_qdq_surrogate,
     calibrate_activation_statistics,
     describe_quant_backend_capability,
     list_quant_backend_capabilities,
@@ -42,6 +46,18 @@ class TinyModel(nn.Module):
         x = self.features(x)
         x = self.norm(x)
         return self.head(x)
+
+
+class TinyChainModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(2, 2, bias=False),
+            nn.Linear(2, 2, bias=False),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x)
 
 
 def test_quantization_policy_selects_expected_modules() -> None:
@@ -200,6 +216,29 @@ def test_analyze_layer_sensitivity_and_suggestions() -> None:
     ]
 
 
+def test_analyze_layer_sensitivity_isolated_mode_measures_final_output_effect() -> None:
+    reference = TinyChainModel()
+    candidate = TinyChainModel()
+    with torch.no_grad():
+        reference.features[0].weight.copy_(torch.eye(2))
+        reference.features[1].weight.copy_(torch.eye(2))
+        candidate.load_state_dict(reference.state_dict())
+        candidate.features[0].weight.mul_(2.0)
+        candidate.features[1].weight.mul_(3.0)
+
+    records = analyze_layer_sensitivity(
+        reference,
+        candidate,
+        torch.tensor([[1.0, 2.0]]),
+        module_names=["features.0", "features.1"],
+    )
+
+    by_name = {record.name: record for record in records}
+    assert by_name["features.1"].diff.mean_abs > by_name["features.0"].diff.mean_abs
+    assert by_name["features.1"].diff.mean_abs == pytest.approx(3.0)
+    assert by_name["features.0"].diff.mean_abs == pytest.approx(1.5)
+
+
 def test_analyze_layer_errors_collects_summaries_and_weight_diff() -> None:
     reference = TinyModel()
     candidate = TinyModel()
@@ -217,8 +256,7 @@ def test_analyze_layer_errors_collects_summaries_and_weight_diff() -> None:
     )
 
     assert {record.name for record in records} == {"features.0", "features.2"}
-    assert records[0].diff.max_abs >= records[1].diff.max_abs
-    assert records[0].diff.max_abs >= records[1].diff.max_abs
+    assert records[0].diff.mean_abs >= records[1].diff.mean_abs
     by_name = {record.name: record for record in records}
     assert by_name["features.0"].reference_summary["shape"] == [2, 4]
     assert by_name["features.0"].candidate_summary["shape"] == [2, 4]
@@ -227,6 +265,35 @@ def test_analyze_layer_errors_collects_summaries_and_weight_diff() -> None:
     assert "high_error" in by_name["features.0"].tags
     assert by_name["features.0"].recommendation == "consider_higher_precision"
     assert by_name["features.0"].to_dict()["weight_diff"] is not None
+
+
+def test_analyze_layer_errors_respects_sample_budget() -> None:
+    reference = TinyModel()
+    candidate = TinyModel()
+    candidate.load_state_dict(reference.state_dict())
+    with torch.no_grad():
+        candidate.features[0].bias[0] += 2.0
+
+    full_records = analyze_layer_errors(
+        reference,
+        candidate,
+        torch.ones(2, 3),
+        module_names=["features.0"],
+        sample_budget=None,
+    )
+    sampled_records = analyze_layer_errors(
+        reference,
+        candidate,
+        torch.ones(2, 3),
+        module_names=["features.0"],
+        sample_budget=1,
+        sample_seed=0,
+    )
+
+    assert full_records[0].reference_summary["shape"] == [2, 4]
+    assert sampled_records[0].diff.reference_summary is not None
+    assert sampled_records[0].diff.reference_summary.shape == (1,)
+    assert sampled_records[0].diff.mean_abs != full_records[0].diff.mean_abs
 
 
 def test_recommend_high_precision_modules_uses_analysis_records() -> None:
@@ -271,6 +338,76 @@ def test_analyze_layer_sensitivity_rejects_shape_mismatch() -> None:
             torch.ones(1, 3),
             module_names=["features.0"],
         )
+
+
+def test_build_fake_qdq_surrogate_introduces_weight_and_activation_drift() -> None:
+    class TinyConvModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.features = nn.Sequential(
+                nn.Conv2d(1, 1, kernel_size=2, bias=False),
+                nn.ReLU(),
+            )
+            with torch.no_grad():
+                self.features[0].weight.copy_(
+                    torch.tensor([[[[0.1234, 0.0510], [0.2000, -0.1700]]]])
+                )
+
+        def forward(self, image: torch.Tensor) -> torch.Tensor:
+            return self.features(image)
+
+    model = TinyConvModel()
+    config = load_xqt_config(
+        {
+            "project": {"artifact_dir": "artifacts/xqt/test_fake_qdq_surrogate"},
+            "model": {"device": "cpu"},
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "onnxruntime_qdq",
+                    "calibration_split": "calibration",
+                    "policy": {
+                        "sample_limit": 1,
+                        "activation_type": "QUInt8",
+                        "weight_type": "QInt8",
+                        "op_types_to_quantize": ["Conv"],
+                        "include_module_types": ["Conv2d"],
+                        "exclude_name_patterns": [],
+                    },
+                }
+            },
+        }
+    )
+    calibration_loader = [
+        {"image": torch.full((1, 1, 2, 2), 0.75), "labels": torch.tensor([0])}
+    ]
+    context = SimpleNamespace(
+        config=config,
+        model=model,
+        data={"calibration": calibration_loader},
+    )
+
+    surrogate = build_fake_qdq_surrogate(context)
+
+    assert surrogate is not None
+    assert surrogate.source_split == "calibration"
+    assert surrogate.sample_count == 1
+    assert "features.0" in surrogate.quantized_modules
+    reference_weight = model.features[0].weight.detach().clone()
+    candidate_weight = surrogate.model.features[0].weight.detach().clone()
+    assert not torch.allclose(reference_weight, candidate_weight)
+
+    records = analyze_layer_errors(
+        model,
+        surrogate.model,
+        torch.full((1, 1, 2, 2), 0.75),
+        module_names=["features.0"],
+        sample_budget=None,
+    )
+    assert records
+    assert records[0].diff.mean_abs > 0.0
+    assert records[0].weight_diff is not None
+    assert records[0].weight_diff.mean_abs > 0.0
 
 
 def test_quantize_with_torchao_quantizes_selected_modules() -> None:

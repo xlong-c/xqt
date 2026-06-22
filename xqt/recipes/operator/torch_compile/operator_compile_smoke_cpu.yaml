@@ -1,0 +1,54 @@
+config_version: 1
+
+project:
+  name: operator_torch_compile_smoke_cpu
+  artifact_dir: artifacts/xqt/operator/torch_compile/smoke_cpu
+
+model:
+  target: torch.nn.Linear
+  params:
+    in_features: 4
+    out_features: 2
+  dtype: float32
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 2
+    params:
+      input_shape: [4]
+      num_classes: 2
+
+compression:
+  axes:
+    - precision
+
+operator_optimization:
+  enabled: true
+  stage: after_compression
+  default_backend: torch_compile
+  targets:
+    - name: model
+      backend: torch_compile
+      mode: reduce-overhead
+      fullgraph: false
+      dynamic: false
+      options:
+        backend: inductor
+      fallback: eager
+      min_speedup: 1.000001
+      validate:
+        atol: 1.0e-5
+        rtol: 1.0e-5
+
+validation:
+  output_diff:
+    atol: 1.0e-5
+    rtol: 1.0e-5
+
+benchmark:
+  warmup: 0
+  iterations: 1
+  percentiles: [50, 90, 99]

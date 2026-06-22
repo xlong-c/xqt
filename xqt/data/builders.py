@@ -12,7 +12,6 @@ from xdl.config.builder import build_collate_fn, build_dataloader, build_dataset
 from .detection import (
     SyntheticDetectionSpec,
     build_synthetic_detection_loader,
-    build_ultralytics_detection_loader,
     build_xdl_detection_loader,
 )
 from .hf_text import build_hf_text_classification_loader
@@ -157,8 +156,6 @@ def build_data_split(
         return _build_xdl_dataset_split(split)
     if target == "xdl_detection":
         return build_xdl_detection_loader(split)
-    if target == "ultralytics_detection":
-        return build_ultralytics_detection_loader(split)
     if target == "prompt_list":
         params = _as_mapping(_read_split_field(split, "params", {}))
         return build_prompt_list(

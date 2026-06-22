@@ -1,0 +1,51 @@
+config_version: 1
+
+project:
+  name: quant_fp8_vit_torchao
+  artifact_dir: artifacts/xqt/quant/fp8/vit_torchao
+
+model:
+  target: xdl.model.vit_tiny_patch16_224
+  params:
+    num_classes: 10
+    dropout: 0.0
+    attn_dropout: 0.0
+  dtype: float32
+  device: cuda:0
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 1
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+      seed: 11
+
+compression:
+  axes:
+    - precision
+  quant:
+    enabled: true
+    backend: torchao
+    strategy: fp8_dynamic
+    skip_quantize: [head, norm]
+    keep_high_precision: [head, norm]
+    policy:
+      strategy: fp8_dynamic
+      include_module_types: [Linear]
+      exclude_name_patterns: [head]
+
+validation:
+  output_diff:
+    atol: 1.0e-3
+    rtol: 1.0e-3
+  metric:
+    name: top1
+    max_drop: 0.02
+
+benchmark:
+  warmup: 5
+  iterations: 20
+  percentiles: [50, 90, 99]

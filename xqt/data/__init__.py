@@ -12,7 +12,6 @@ from .detection import (
     SyntheticDetectionSpec,
     build_image_boxes_transform,
     build_synthetic_detection_loader,
-    build_ultralytics_detection_loader,
     build_xdl_detection_loader,
     load_image_tensor,
 )
@@ -51,7 +50,6 @@ __all__ = [
     "build_example_input",
     "build_hf_text_classification_loader",
     "build_image_boxes_transform",
-    "build_ultralytics_detection_loader",
     "build_prompt_list",
     "build_prompt_list_from_file",
     "build_synthetic_classification_loader",

@@ -2,7 +2,7 @@
 
 本文档是 `docs/md/` 中唯一保留的 XQT 长期工作文档. 它负责定义 `xqt/` 的目标边界, 当前模块状态, 数据角色, 量化, 剪枝, 蒸馏, 导出, 算子优化, recipe 和仍有效任务. 已完成或失效的阶段性 `XQT_*.md` 专项文档不再保留; 后续临时调研优先放到 `research/`, 只有长期有效结论回写到本文.
 
-本文不是稳定 API 承诺. 当前 `xqt/` 仍是实验包, 只有 `xqt` 顶层导出的配置, runner, manifest 和 XDL adapter 入口按 Provisional API 管理; 子模块细节仍按 Internal 处理.
+本文不是稳定 API 承诺. 当前 `xqt/` 仍是实验包, 只有 `xqt` 顶层导出的配置, runner, stage workflow, manifest 和 XDL adapter 入口按 Provisional API 管理; 子模块细节仍按 Internal 处理.
 
 ## 1. 项目定位
 
@@ -30,14 +30,13 @@ PyTorch checkpoint
 当前包边界决策:
 
 - `xqt` 继续作为仓库顶层实验包维护,不并入 `xdl/` 主框架子模块.
-- 只有 `xqt` 顶层导出的配置,runner,manifest 和 XDL adapter 入口进入 Provisional API.
+- 只有 `xqt` 顶层导出的配置,runner,stage workflow,manifest 和 XDL adapter 入口进入 Provisional API.
 - `xqt.core`, `xqt.pipeline`, `xqt.quant`, `xqt.prune`, `xqt.distill`, `xqt.diffusion_distill`, `xqt.export` 仍按 Internal 处理,先服务 recipe 验证.
 
 安装建议:
 
 - 基础 ONNX/QDQ/torchao 路径: `pip install -e ".[xqt]"`.
 - HuggingFace 文本 KD/prune 路径: `pip install -e ".[xqt-hf]"`.
-- Ultralytics YOLO detection 路径: `pip install -e ".[xqt-yolo]"`.
 - diffusion/Flux/SD 类路径: `pip install -e ".[xqt-diffusion]"`.
 - XQT 全量可选依赖: `pip install -e ".[xqt-all]"`.
 - TensorRT, OpenVINO, ncnn, MNN 和 ExecuTorch 仍以目标机器官方安装方式为准, XQT 只做 adapter 和 preflight 检查.
@@ -63,6 +62,7 @@ PyTorch checkpoint
 - `xqt/data`: synthetic classification/detection samples, calibration dataloader, prompt 数据, torchvision image classification loader, Ultralytics detection loader, HuggingFace 文本数据和 `xdl.dataset` bridge.
 - `xqt/model`: 外部模型 adapter, 当前包含 Ultralytics YOLO detection wrapper, 数据集解析和参考导出 helper.
 - `xqt/pipeline`: pass manager, built-in passes, preflight 和 YAML runner.
+- `xqt/workflows`: stage-based optimization workflow,把 eval/benchmark/prune/quant/finetune/distill/operator/export/deploy/runtime_eval 等阶段按配置编排.
 - `xqt/quant`: torchao adapter, ONNX Runtime QDQ static quantization, calibration, policy, sensitivity, component quantization plan 和 backend capability.
 - `xqt/prune`: global L1 pruning, structured pruning, importance ranking, pruning schedule, prune + KD helper, N:M 和 block sparse 报告.
 - `xqt/distill`: logit KD, feature/relation loss, feature hook, teacher cache, HuggingFace text bundle 和基础训练 helper.
@@ -550,14 +550,14 @@ Manifest 必填字段:
 | `image_resnet_onnx_qdq_int8` | ResNet/CNN 分类 | quant + export | 打通 ONNX Q/DQ 和 ONNX Runtime diff | 已有 YAML smoke recipe, synthetic image runner 测试和 TensorRT 阈值解析测试,真实 TensorRT engine 待目标机器验证 |
 | `image_resnet_cifar100_qdq_cpu` | ResNet/CIFAR-100 | quant + eval + benchmark | 在本地真实数据上验证 ONNX Runtime QDQ CPU 路径 | 已用本地 CIFAR-100 生成真实 QDQ ONNX, manifest 和 benchmark |
 | `yolo_detection_smoke` | synthetic detection + toy model | detection eval + prune + export | 用最小依赖验证 detection schema,baseline eval,prune,ONNX export 和 manifest | 已有 recipe 和 runner 测试覆盖 |
-| `yolo_detection_practice` | Ultralytics YOLO 检测 | detection eval + quant + operator + export | 验证 detection task schema,Ultralytics adapter,mAP,ONNX QDQ 和部署 report | 已用 `yolo11n.pt` + `coco8.yaml` 跑通 baseline,FP32/FP16 ONNX,QDQ INT8,global L1 unstructured prune,torch.compile candidate,TensorRT/OpenVINO dry-run 和 scenario matrix manifest |
+| `yolo_detection_practice` | Ultralytics YOLO 检测 | detection eval + quant + operator + export | 验证 detection task schema,Ultralytics adapter,mAP,ONNX QDQ 和部署 stage workflow | 当前 recipe 已改为 `data_splits + stages` schema,由 `xqt.workflows.optimize_model` 编排 baseline eval/latency,FP32 ONNX runtime eval,QDQ artifact/runtime eval,global L1 unstructured prune,torch.compile candidate 和 TensorRT/OpenVINO dry-run deploy. 示例入口只打印 stage result,不再维护 YOLO 专用场景矩阵或报告生成器 |
 | `multi_component_quant_smoke` | 异构 toy 模型 | quant + manifest | 验证 component policy,多 backend report 和 manifest 表达 | 已有 CPU smoke recipe 和 runner 测试覆盖 |
 | `hf_text_kd_prune` | HF 文本分类 | distill + prune | 复用知乎示例但改为 YAML | 已有 recipe 支架和 fake HF pipeline 测试, 真实 checkpoint 运行待补 |
 | `cnn_structured_prune` | Conv2d-heavy 模型 | prune + export | 验证真实宽度压缩 | ONNX 图 channel/filter 真实减少 |
 | `sd_lcm_lora_4step` | Stable Diffusion 类模型 | diffusion_distill | 打通少步蒸馏最小闭环 | 4-step sampler, 图片网格和 LoRA 保存 |
 | `diffusion_quant_linear` | DiT/UNet/text encoder | quant + diffusion eval | 验证扩散模型量化策略 | 固定 prompt 输出可比, VRAM/latency 有报告 |
 
-Recipe 文件放在 `xqt/recipes/`, 示例数据和大模型权重不进入 git. 每个 recipe 必须声明:
+Recipe 文件按技术栈分层放在 `xqt/recipes/` 下 (`quant/`, `prune/`, `distill/`, `operator/`, `detection/`, `smoke/`), 示例数据和大模型权重不进入 git. 每个 recipe 必须声明:
 
 - `compression_axes`.
 - 支持模型族和已验证 checkpoint.
@@ -573,21 +573,113 @@ Recipe 文件放在 `xqt/recipes/`, 示例数据和大模型权重不进入 git.
 
 这两个 TODO 属于实践计划,不是已实现事实. 示例编写时如果发现 XQT 功能实现错误,优先修复或破坏性重构 `xqt` 内部实现,不要在示例脚本中绕开错误或降低验收标准.
 
-当前已提供 `xqt/recipes/yolo_detection_smoke.yaml` 作为最小 detection smoke,以及 `xqt/recipes/yolo_detection_practice.yaml` + `examples/yolo_detection_practice.py` 作为 detection practice 入口. Practice example 现在会按 scenario matrix 运行多个 recipe override,包括 `baseline`,`quant_only`,`prune_only`,`operator_only`,`quant_export`,`prune_quant`,`full_chain`;每个场景都会写出 `detection_runtime_scenarios.json`,并把 runtime metric/diff 追加回对应 manifest. 根 `scenario_matrix.json` 汇总 runtime coverage,实际 QDQ op types,calibration,export formats,operator fallback 和 prune sparsity.
+当前已提供 `xqt/recipes/detection/yolo_detection_smoke.yaml` 作为最小 detection smoke,以及 `xqt/recipes/detection/yolo_detection_practice.yaml` + `examples/yolo_detection_practice.py` 作为 detection practice 入口. Practice recipe 使用通用 `OptimizationConfig` 风格,顶层是 `model`,`task`,`data_splits`,`stages`;入口只负责读取 `XQT_YOLO_PRACTICE_CONFIG` 并调用 `xqt.workflows.optimize_model`. 每个 stage 都有独立 `kind`,`split`,`from_stage`,`params`,`accept`,`revert_on_reject` 等编排字段,运行后进入 `OptimizedModelResult.stages`,同时返回当前模型,`best_model`,stage metrics 和 artifacts. 这条链路不再维护 YOLO 专用场景矩阵,也不再把报告生成逻辑写进示例脚本.
 
 已验证的 YOLO practice 边界:
 
-- baseline 场景会评估 PyTorch,FP32 ONNX Runtime 和 FP16 ONNX Runtime,并记录 raw output diff,decoded detection diff,mAP50-95/mAP50/mAP75 和 latency.
-- QDQ 场景使用 explicit calibration split,生成 XQT 自己的 ONNX Runtime QDQ INT8 产物,记录 calibration sample count,activation/weight dtype,QDQ 节点数和实际图中命中的量化 op types.
-- TensorRT 和 OpenVINO 当前在默认 recipe 中是 dry-run. preflight 会在缺少 `trtexec` 或 `openvino` 时给 warning 而不是失败;如果关闭 dry-run,目标机器仍需要安装对应后端并自行承担真实 engine/IR 生成和性能验收.
-- operator 场景会实际评估 `torch_compile` candidate;`deployment_backend` targets 用于记录 backbone/neck/head/postprocess 等部署阶段语义和 fallback reason,不伪装成 PyTorch 内核替换.
-- YOLO 结构化剪枝仍被 preflight guard. 当前 practice 只跑 global L1 unstructured pruning,报告 sparsity,mAP 和 latency,不声称结构化 channel/filter 已对 YOLO 拓扑生效.
+- `baseline_eval` 和 `baseline_latency` 阶段先记录 PyTorch mAP 和 latency,作为后续精度/速度验收参照.
+- `export_fp32_onnx` 和 `fp32_onnx_runtime` 阶段先转换部署格式,再通过 ONNX Runtime 评估 mAP,raw output diff,decoded detection diff 和 latency.
+- `quant_qdq` 使用 explicit calibration split 生成 XQT 自己的 ONNX Runtime QDQ INT8 产物,`qdq_onnx_runtime` 再对该产物跑同一套 runtime eval 和验收阈值.
+- `prune_sparse`,`prune_eval`,`prune_latency` 阶段只跑 global L1 unstructured pruning,报告 sparsity,mAP 和 latency,不声称结构化 channel/filter 已对 YOLO 拓扑生效.
+- `operator_compile` 阶段会实际评估 `torch_compile` candidate;`deployment_backend` targets 用于记录 backbone/neck/head/postprocess 等部署阶段语义和 fallback reason,不伪装成 PyTorch 内核替换.
+- `deploy_targets` 阶段导出 ONNX/TensorRT/OpenVINO 部署目标. TensorRT 和 OpenVINO 当前在默认 recipe 中是 dry-run;如果关闭 dry-run,目标机器仍需要安装对应后端并自行承担真实 engine/IR 生成和性能验收.
 
 上面的 YOLO TODO 仍保留,用于继续推进真实 TensorRT engine,真实 OpenVINO IR,YOLO 结构化剪枝 dependency graph/rewrite 和 postprocess custom kernel 等更完整的部署验收.
 
 ## 12. 配置草案
 
-示例 YAML 只描述结构, 不是已实现字段:
+XQT 现在保留两类 YAML:
+
+- `XQTConfig` pass recipe: 面向 `xqt-run-recipe`,用于固定 pass pipeline,preflight 和 manifest.
+- `OptimizationConfig` stage workflow: 面向 `xqt.workflows.optimize_model`,用于研究/实践入口按阶段组合 eval,benchmark,prune,quant,finetune,distill,operator,export,deploy 和 runtime_eval.
+
+stage workflow 示例:
+
+```yaml
+project:
+  name: image_resnet_stage_workflow
+  artifact_dir: artifacts/xqt/image_resnet_stage_workflow
+
+model:
+  target: xdl.model.resnet18
+  params:
+    num_classes: 10
+  device: cpu
+
+task:
+  type: classification
+
+data_splits:
+  calibration:
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 1
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+  validation:
+    target: synthetic_classification
+    sample_limit: 4
+    batch_size: 1
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+  train:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 2
+    params:
+      input_shape: [3, 224, 224]
+      num_classes: 10
+
+stages:
+  - name: baseline_eval
+    kind: eval
+    split: validation
+    params:
+      baseline: true
+  - name: baseline_latency
+    kind: benchmark
+    split: validation
+    params:
+      warmup: 10
+      iterations: 50
+  - name: prune_sparse
+    kind: prune
+    split: validation
+    params:
+      method: global_l1_unstructured
+      target_sparsity: 0.2
+  - name: prune_eval
+    kind: eval
+    split: validation
+    compare_to: baseline_eval
+    accept:
+      metric: top1
+      max_drop: 0.01
+  - name: qdq_quant
+    kind: quant
+    from_stage: prune_sparse
+    calibration_split: calibration
+    validation_split: validation
+    params:
+      backend: onnxruntime_qdq
+      strategy: static_int8
+      policy:
+        input_names: [input]
+        output_names: [output]
+  - name: deploy
+    kind: deploy
+    split: validation
+    params:
+      targets:
+        - format: onnx
+          output_path: artifacts/xqt/image_resnet_stage_workflow/model.onnx
+          params:
+            runtime_diff: true
+```
+
+底层 pass recipe 示例:
 
 ```yaml
 project:
@@ -711,9 +803,9 @@ benchmark:
 
 - [x] 实现非结构化 pruning baseline 和 sparsity 报告, 并接入内置 `prune` pass.
 - [x] 实现 Conv2d/Linear 结构化剪枝和模块改写的基础 helper.
-- [x] 增加剪枝后微调 recipe. 当前 `xqt/recipes/prune_finetune_cpu.yaml` 使用线性 sparsity schedule, teacher 注入和 KD 微调 smoke 测试.
+- [x] 增加剪枝后微调 recipe. 当前 `xqt/recipes/prune/unstructured/prune_finetune_cpu.yaml` 使用线性 sparsity schedule, teacher 注入和 KD 微调 smoke 测试.
 - [x] 验证剪枝模型可导出 ONNX.
-- [x] 增加 HF Transformer 文本分类的全局 L1 非结构化剪枝 recipe, 用 YAML 替代 argparse. 当前已提供 `xqt/recipes/hf_text_kd_prune.yaml`, HF bundle adapter 和 fake HF pipeline 测试, 真实 checkpoint 验证仍作为后续任务.
+- [x] 增加 HF Transformer 文本分类的全局 L1 非结构化剪枝 recipe, 用 YAML 替代 argparse. 当前已提供 `xqt/recipes/distill/hf_text_kd_prune.yaml`, HF bundle adapter 和 fake HF pipeline 测试, 真实 checkpoint 验证仍作为后续任务.
 
 ### 阶段 6: 蒸馏 MVP
 

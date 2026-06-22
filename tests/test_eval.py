@@ -12,6 +12,16 @@ from xqt.eval.detection import (
     evaluate_onnx_detection_model,
     evaluate_detection_predictions,
 )
+from xqt.eval.layer_analysis import (
+    build_avoid_list,
+    build_layer_analysis_events,
+    build_layer_analysis_payload,
+    collect_top_layer_errors,
+    layer_error_rows,
+    layer_statistics_rows,
+    layer_sensitivity_rows,
+    top_layer_error_for_scenario,
+)
 from xqt.export import convert_onnx_to_fp16, export_onnx
 from xqt.eval.report import (
     build_pareto_points,
@@ -23,7 +33,7 @@ from xqt.eval.report import (
     write_markdown_report,
 )
 from xqt.core.schema import DetectionMetricConfig, DetectionPostprocessConfig
-from xqt.quant.sensitivity import LayerAnalysisRecord
+from xqt.quant.sensitivity import LayerAnalysisRecord, LayerSensitivityRecord
 
 
 class FixedLogitModel(nn.Module):
@@ -64,6 +74,7 @@ def test_compare_tensors_reports_common_diff_metrics() -> None:
     assert diff.max_abs == pytest.approx(0.001, abs=1e-6)
     assert diff.mean_abs > 0.0
     assert diff.mean_squared > 0.0
+    assert diff.sqnr_db is not None
     assert diff.relative_error is not None and diff.relative_error > 0.0
     assert diff.cosine_similarity == pytest.approx(1.0, abs=1e-5)
     assert diff.correlation == pytest.approx(1.0, abs=1e-5)
@@ -73,6 +84,7 @@ def test_compare_tensors_reports_common_diff_metrics() -> None:
     assert diff.reference_summary is not None
     assert diff.candidate_summary is not None
     assert diff.to_dict()["allclose"] is True
+    assert diff.to_dict()["sqnr_db"] is not None
     assert diff.to_dict()["reference_summary"] is not None
 
 
@@ -174,6 +186,216 @@ def test_records_to_rows_and_dataframe_flatten_analysis_records() -> None:
     assert rows[0]["tags"] == ["high_error"]
     assert frame.loc[0, "name"] == "features.0"
     assert float(frame.loc[0, "diff.max_abs"]) == pytest.approx(diff.max_abs)
+
+
+def test_layer_analysis_helpers_build_rows_and_avoid_list() -> None:
+    reference = torch.tensor([1.0, 2.0, 3.0])
+    candidate = torch.tensor([1.0, 2.3, 2.5])
+    diff = compare_tensors(reference, candidate)
+    weight_diff = compare_tensors(torch.tensor([1.0, 2.0]), torch.tensor([1.1, 1.9]))
+    analysis_record = LayerAnalysisRecord(
+        name="features.0",
+        module_type="Linear",
+        diff=diff,
+        parameter_count=16,
+        reference_summary=diff.reference_summary.to_dict() if diff.reference_summary else {},
+        candidate_summary=diff.candidate_summary.to_dict() if diff.candidate_summary else {},
+        weight_diff=weight_diff,
+        recommendation="consider_higher_precision",
+        tags=("high_error",),
+    )
+    error_rows = layer_error_rows([analysis_record], top_k=1)
+    sensitivity_rows_value = layer_sensitivity_rows(
+        [
+            LayerSensitivityRecord(
+                name="features.0",
+                module_type="Linear",
+                diff=diff,
+                parameter_count=16,
+            )
+        ],
+        top_k=1,
+    )
+    avoid_rows = build_avoid_list(error_rows, sensitivity_rows_value, top_k=1)
+
+    assert error_rows[0]["activation"]["snr_db"] == diff.sqnr_db
+    assert error_rows[0]["weight"]["snr_db"] == weight_diff.sqnr_db
+    assert sensitivity_rows_value[0]["recommendation"] == "keep_fp32"
+    assert avoid_rows == [
+        {
+            "layer": "features.0",
+            "reason": "high_error",
+            "suggested_actions": ["distill_feature", "keep_fp32"],
+            "used_by": "quant_retry",
+        }
+    ]
+    assert sensitivity_rows_value[0]["recommendation"] == "keep_fp32"
+
+
+def test_layer_sensitivity_rows_only_marks_top_rank_keep_fp32() -> None:
+    first_diff = compare_tensors(torch.tensor([1.0, 2.0]), torch.tensor([1.0, 2.5]))
+    second_diff = compare_tensors(torch.tensor([1.0, 2.0]), torch.tensor([1.0, 2.2]))
+
+    rows = layer_sensitivity_rows(
+        [
+            LayerSensitivityRecord(
+                name="features.0",
+                module_type="Linear",
+                diff=first_diff,
+                parameter_count=4,
+            ),
+            LayerSensitivityRecord(
+                name="features.1",
+                module_type="Linear",
+                diff=second_diff,
+                parameter_count=4,
+            ),
+        ],
+        top_k=2,
+    )
+
+    assert rows[0]["recommendation"] == "keep_fp32"
+    assert rows[1]["recommendation"] is None
+
+
+def test_build_avoid_list_merges_sensitivity_rows_and_prune_actions() -> None:
+    avoid_rows = build_avoid_list(
+        [],
+        [
+            {
+                "rank": 1,
+                "layer": "features.2",
+                "type": "Linear",
+                "sensitivity": {"mse": 0.1},
+                "recommendation": None,
+            }
+        ],
+        top_k=1,
+        used_by="prune_quant_retry",
+    )
+
+    assert avoid_rows == [
+        {
+            "layer": "features.2",
+            "reason": "high_sensitivity",
+            "suggested_actions": ["distill_feature", "skip_prune"],
+            "used_by": "prune_quant_retry",
+        }
+    ]
+
+
+def test_build_layer_analysis_payload_and_events() -> None:
+    class TinyLayerModel(nn.Module):
+        def __init__(self, *, scale: float) -> None:
+            super().__init__()
+            self.features = nn.Sequential(
+                nn.Linear(3, 3, bias=False),
+                nn.Linear(3, 3, bias=False),
+            )
+            with torch.no_grad():
+                self.features[0].weight.copy_(torch.eye(3))
+                self.features[1].weight.copy_(torch.eye(3) * scale)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.features(x)
+
+    reference = TinyLayerModel(scale=1.0)
+    candidate = TinyLayerModel(scale=2.0)
+
+    payload = build_layer_analysis_payload(
+        reference,
+        candidate,
+        torch.ones(1, 3),
+        module_names=["features.0", "features.1"],
+        include_weight_diff=True,
+        include_sensitivity=True,
+        row_top_k=2,
+        avoid_top_k=1,
+        sample_budget=2,
+        runtime="current_pytorch",
+        avoid_used_by="quant_retry",
+    )
+    events = build_layer_analysis_events("quant_only", payload)
+    scenarios = {"quant_only": {"layer_analysis": payload}}
+
+    assert payload["sample_budget"] == 2
+    assert isinstance(payload["layer_errors"], list) and payload["layer_errors"]
+    assert isinstance(payload["layer_sensitivity"], list) and payload["layer_sensitivity"]
+    assert isinstance(payload["avoid_list"], list) and payload["avoid_list"]
+    assert [event["event"] for event in events] == [
+        "layer_errors",
+        "layer_sensitivity",
+        "avoid_list",
+    ]
+    assert events[0]["sample_budget"] == 2
+    assert events[1]["mode"] == "isolated"
+    top_rows = collect_top_layer_errors(scenarios, top_k=1)
+    assert len(top_rows) == 1
+    assert top_rows[0]["scenario"] == "quant_only"
+    assert top_layer_error_for_scenario(scenarios, "quant_only") is not None
+
+
+def test_layer_statistics_rows_and_events() -> None:
+    class TinyLayerModel(nn.Module):
+        def __init__(self, *, scale: float) -> None:
+            super().__init__()
+            self.features = nn.Sequential(nn.Linear(3, 3, bias=False))
+            with torch.no_grad():
+                self.features[0].weight.copy_(torch.eye(3) * scale)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.features(x)
+
+    reference = TinyLayerModel(scale=1.0)
+    candidate = TinyLayerModel(scale=2.0)
+    stats_rows = layer_statistics_rows(
+        reference,
+        candidate,
+        torch.ones(1, 3),
+        module_names=["features.0"],
+        sample_budget=2,
+    )
+    payload = build_layer_analysis_payload(
+        reference,
+        candidate,
+        torch.ones(1, 3),
+        module_names=["features.0"],
+        include_statistics=True,
+        sample_budget=2,
+    )
+    events = build_layer_analysis_events("quant_only", payload)
+
+    assert len(stats_rows) == 1
+    assert stats_rows[0]["layer"] == "features.0"
+    assert stats_rows[0]["error"]["histogram_bins"] == 32
+    stat_events = [event for event in events if event["event"] == "layer_statistics"]
+    assert len(stat_events) == 1
+    assert stat_events[0]["layer"] == "features.0"
+
+
+def test_build_layer_analysis_payload_respects_metrics_filter() -> None:
+    class TinyLayerModel(nn.Module):
+        def __init__(self, *, scale: float) -> None:
+            super().__init__()
+            self.features = nn.Sequential(nn.Linear(3, 3, bias=False))
+            with torch.no_grad():
+                self.features[0].weight.copy_(torch.eye(3) * scale)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.features(x)
+
+    payload = build_layer_analysis_payload(
+        TinyLayerModel(scale=1.0),
+        TinyLayerModel(scale=2.0),
+        torch.ones(1, 3),
+        module_names=["features.0"],
+        metrics=["mean_abs", "snr_db"],
+    )
+
+    activation = payload["layer_errors"][0]["activation"]
+    sensitivity = payload["layer_sensitivity"][0]["sensitivity"]
+    assert set(activation.keys()) == {"mae", "snr_db"}
+    assert set(sensitivity.keys()) == {"mae", "mse", "snr_db"}
 
 
 def test_build_pareto_points_extracts_nested_metrics() -> None:

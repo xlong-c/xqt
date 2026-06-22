@@ -468,7 +468,7 @@ def _require_cuda_for_fp8(config: TorchAOViTExperimentConfig) -> None:
     if torch.device(config.device).type != "cuda" or not torch.cuda.is_available():
         raise XQTBackendError(
             "The torchao FP8 ViT experiment requires CUDA-capable hardware. "
-            "Use xqt/recipes/image_vit_torchao_fp8.yaml on a supported NVIDIA GPU, "
+            "Use xqt/recipes/quant/fp8/image_vit_torchao_fp8.yaml on a supported NVIDIA GPU, "
             "or set a non-FP8 strategy for local CPU smoke work."
         )
 

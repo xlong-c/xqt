@@ -220,7 +220,7 @@ benchmark:
 
 
 def test_smoke_cpu_recipe_loads_and_runs_empty_pipeline(tmp_path) -> None:
-    recipe_path = "xqt/recipes/smoke_cpu.yaml"
+    recipe_path = "xqt/recipes/smoke/smoke_cpu.yaml"
 
     context = run_xqt_recipe(
         recipe_path,
@@ -228,7 +228,7 @@ def test_smoke_cpu_recipe_loads_and_runs_empty_pipeline(tmp_path) -> None:
         write_manifest=False,
     )
 
-    assert context.config.project.name == "xqt_smoke_cpu"
+    assert context.config.project.name == "smoke_cpu"
     assert context.config.model.device == "cpu"
     assert context.config.compression.axes == ["precision", "sparsity"]
     assert context.manifest is not None
@@ -237,7 +237,7 @@ def test_smoke_cpu_recipe_loads_and_runs_empty_pipeline(tmp_path) -> None:
 
 def test_smoke_cpu_recipe_runs_builtin_default_pipeline(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "smoke_artifacts"),
@@ -277,7 +277,7 @@ def test_smoke_cpu_recipe_runs_builtin_default_pipeline(tmp_path) -> None:
 
 def test_yolo_detection_smoke_recipe_runs_builtin_default_pipeline(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/yolo_detection_smoke.yaml",
+        "xqt/recipes/detection/yolo_detection_smoke.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "yolo_detection_smoke")},
         },
@@ -298,7 +298,7 @@ def test_yolo_detection_smoke_recipe_runs_builtin_default_pipeline(tmp_path) -> 
 
 def test_operator_compile_smoke_recipe_records_manifest_metrics(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/operator_compile_smoke_cpu.yaml",
+        "xqt/recipes/operator/torch_compile/operator_compile_smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "operator_compile_smoke")},
         },
@@ -324,7 +324,7 @@ def test_operator_compile_smoke_recipe_records_manifest_metrics(tmp_path) -> Non
 
 def test_operator_quant_torchao_compile_recipe_runs(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/operator_quant_torchao_compile.yaml",
+        "xqt/recipes/quant/int8/operator_quant_torchao_compile.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "operator_quant_torchao_compile")},
         },
@@ -383,7 +383,7 @@ def test_operator_qdq_export_guard_recipe_skips_rewrite_and_preserves_export(
     monkeypatch.setattr("xqt.pipeline.passes.export_onnx", fake_export_onnx)
 
     config = load_xqt_config(
-        "xqt/recipes/operator_qdq_export_guard.yaml",
+        "xqt/recipes/quant/int8/operator_qdq_export_guard.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "operator_qdq_export_guard")},
             "export": {
@@ -409,7 +409,7 @@ def test_operator_qdq_export_guard_recipe_skips_rewrite_and_preserves_export(
 
 def test_cnn_structured_prune_recipe_runs_default_pipeline(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/cnn_structured_prune.yaml",
+        "xqt/recipes/prune/structured/cnn_structured_prune.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "cnn_structured_prune"),
@@ -442,7 +442,7 @@ def test_cnn_structured_prune_recipe_runs_default_pipeline(tmp_path) -> None:
 def test_cnn_structured_prune_recipe_exports_onnx_with_reduced_channel_shapes(tmp_path) -> None:
     output_path = tmp_path / "cnn_structured_prune" / "model.onnx"
     config = load_xqt_config(
-        "xqt/recipes/cnn_structured_prune.yaml",
+        "xqt/recipes/prune/structured/cnn_structured_prune.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "cnn_structured_prune")},
             "export": {
@@ -471,7 +471,7 @@ def test_cnn_structured_prune_recipe_exports_onnx_with_reduced_channel_shapes(tm
 
 def test_load_data_builds_prompts_and_records_summary(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "prompt_artifacts"),
@@ -524,7 +524,7 @@ def test_load_data_builds_prompts_and_records_summary(tmp_path) -> None:
 
 def test_smoke_cpu_recipe_runs_analysis_when_enabled(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/image_vit_torchao_fp8.yaml",
+        "xqt/recipes/quant/fp8/image_vit_torchao_fp8.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "analysis_artifacts"),
@@ -581,7 +581,7 @@ def test_smoke_cpu_recipe_analysis_reports_teacher_student_alignment(tmp_path) -
     with torch.no_grad():
         model.bias.add_(0.25)
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "analysis_teacher_artifacts"),
@@ -604,7 +604,7 @@ def test_smoke_cpu_recipe_analysis_reports_teacher_student_alignment(tmp_path) -
 def test_builtin_pipeline_exports_onnx_when_configured(tmp_path) -> None:
     output_path = tmp_path / "model.onnx"
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "export_artifacts"),
@@ -729,7 +729,7 @@ def test_builtin_pipeline_supports_tensorrt_dry_run_after_onnx(tmp_path) -> None
     onnx_path = tmp_path / "model.onnx"
     engine_path = tmp_path / "model.engine"
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "trt_artifacts"),
@@ -773,7 +773,7 @@ def test_builtin_pipeline_supports_openvino_dry_run_after_onnx(tmp_path) -> None
     xml_path = tmp_path / "model.xml"
     artifact_dir = tmp_path / "openvino_artifacts"
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(artifact_dir),
@@ -824,7 +824,7 @@ def test_builtin_pipeline_supports_openvino_dry_run_after_onnx(tmp_path) -> None
 
 def test_builtin_pipeline_exports_torch_native_formats(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "torch_native_artifacts"),
@@ -974,7 +974,7 @@ def test_builtin_pipeline_records_tensorrt_performance_thresholds(
         fake_build_tensorrt_engine,
     )
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "trt_metrics")},
             "compression": {"prune": {"enabled": False}},
@@ -1019,7 +1019,7 @@ def test_builtin_pipeline_records_tensorrt_performance_thresholds(
 def test_builtin_distill_pass_runs_with_injected_teacher(tmp_path) -> None:
     teacher = torch.nn.Linear(4, 2)
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "distill_artifacts"),
@@ -1180,7 +1180,7 @@ def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> N
     )
     monkeypatch.setattr("xqt.pipeline.passes.export_onnx", fake_export_onnx)
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "qdq_artifacts"),
@@ -1486,8 +1486,8 @@ def test_builtin_quant_pass_requires_explicit_calibration_split_for_onnx_qdq(tmp
 
 
 def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> None:
-    vit_config = load_xqt_config("xqt/recipes/image_vit_torchao_fp8.yaml")
-    assert vit_config.project.name == "image_vit_torchao_fp8"
+    vit_config = load_xqt_config("xqt/recipes/quant/fp8/image_vit_torchao_fp8.yaml")
+    assert vit_config.project.name == "quant_fp8_vit_torchao"
     assert vit_config.data.validation is not None
     assert vit_config.data.validation.params["input_shape"] == [3, 224, 224]
     assert vit_config.model.device == "cuda:0"
@@ -1525,7 +1525,7 @@ def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> 
         fake_quantize_onnx_qdq_static,
     )
     resnet_config = load_xqt_config(
-        "xqt/recipes/image_resnet_onnx_qdq_int8.yaml",
+        "xqt/recipes/quant/int8/image_resnet_onnx_qdq_int8.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "resnet_qdq")},
             "compression": {
@@ -1551,7 +1551,7 @@ def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> 
 
     context = run_xqt_recipe(resnet_config)
 
-    assert context.config.project.name == "image_resnet_onnx_qdq_int8"
+    assert context.config.project.name == "quant_int8_resnet_onnx_qdq"
     assert context.metrics["quant"]["backend"] == "onnxruntime_qdq"
     assert context.metrics["export"]["artifacts"][0]["format"] == "tensorrt"
     assert context.metrics["export"]["artifacts"][0]["dry_run"] is True
@@ -1562,7 +1562,7 @@ def test_image_vit_torchao_fp8_recipe_runs_on_cuda_when_available(tmp_path) -> N
         return
 
     config = load_xqt_config(
-        "xqt/recipes/image_vit_torchao_fp8.yaml",
+        "xqt/recipes/quant/fp8/image_vit_torchao_fp8.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "vit_fp8_cuda")},
             "benchmark": {"warmup": 1, "iterations": 2},
@@ -1710,7 +1710,7 @@ def test_multi_component_quant_smoke_recipe_runs_with_hetero_backends(
     monkeypatch.setattr("xqt.quant.executor.quantize_with_torchao", fake_quantize_with_torchao)
 
     config = load_xqt_config(
-        "xqt/recipes/multi_component_quant_smoke.yaml",
+        "xqt/recipes/quant/int8/multi_component_quant_smoke.yaml",
         overrides={
             "project": {
                 "artifact_dir": str(tmp_path / "multi_component_quant_smoke"),
@@ -1755,7 +1755,7 @@ def test_multi_component_quant_smoke_recipe_runs_with_hetero_backends(
 def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
     teacher = torch.nn.Linear(4, 2)
     config = load_xqt_config(
-        "xqt/recipes/prune_finetune_cpu.yaml",
+        "xqt/recipes/prune/unstructured/prune_finetune_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "prune_finetune")},
         },
@@ -1774,7 +1774,7 @@ def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
 def test_structured_prune_kd_recipe_runs_with_teacher_and_exports(tmp_path) -> None:
     teacher = torch.nn.Linear(5, 5)
     config = load_xqt_config(
-        "xqt/recipes/structured_prune_kd_cpu.yaml",
+        "xqt/recipes/prune/structured/structured_prune_kd_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "structured_prune_kd")},
             "export": {
@@ -1861,7 +1861,7 @@ def test_cifar100_qdq_recipe_loads_real_local_data_and_quantizes(monkeypatch, tm
         fake_quantize_onnx_qdq_static,
     )
     config = load_xqt_config(
-        "xqt/recipes/image_resnet_cifar100_qdq_cpu.yaml",
+        "xqt/recipes/quant/int8/image_resnet_cifar100_qdq_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "cifar_qdq")},
             "compression": {
@@ -1902,7 +1902,7 @@ def test_vit_mnist_prune_recipe_runs_with_small_torchvision_split(
         fake_build_torchvision_image_classification_loader,
     )
     config = load_xqt_config(
-        "xqt/recipes/image_vit_mnist_prune_cpu.yaml",
+        "xqt/recipes/prune/unstructured/image_vit_mnist_prune_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "vit_mnist_prune")},
         },
@@ -1926,7 +1926,7 @@ def test_vit_mnist_prune_recipe_runs_with_small_torchvision_split(
 
 def test_vit_structured_prune_recipe_runs_with_mlp_neuron_pruning(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/vit_structured_prune.yaml",
+        "xqt/recipes/prune/structured/vit_structured_prune.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "vit_structured_prune")},
         },
@@ -1954,7 +1954,7 @@ def test_vit_structured_prune_recipe_runs_with_mlp_neuron_pruning(tmp_path) -> N
 
 def test_vit_structured_prune_recipe_supports_block_pruning_via_overrides(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/vit_structured_prune.yaml",
+        "xqt/recipes/prune/structured/vit_structured_prune.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "vit_block_prune")},
             "compression": {
@@ -1983,7 +1983,7 @@ def test_vit_structured_prune_recipe_supports_block_pruning_via_overrides(tmp_pa
 
 def test_vit_structured_prune_recipe_supports_head_pruning_via_overrides(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/vit_structured_prune.yaml",
+        "xqt/recipes/prune/structured/vit_structured_prune.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "vit_head_prune")},
             "compression": {
@@ -2012,7 +2012,7 @@ def test_vit_structured_prune_recipe_supports_head_pruning_via_overrides(tmp_pat
 
 def test_smoke_cpu_recipe_supports_nm_structured_pruning_via_overrides(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "nm_structured_prune")},
             "compression": {
@@ -2047,7 +2047,7 @@ def test_smoke_cpu_recipe_supports_nm_structured_pruning_via_overrides(tmp_path)
 
 def test_smoke_cpu_recipe_supports_block_sparse_pruning_via_overrides(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "block_sparse_prune")},
             "compression": {
@@ -2082,7 +2082,7 @@ def test_smoke_cpu_recipe_supports_block_sparse_pruning_via_overrides(tmp_path) 
 
 def test_sparse_benchmark_recipe_runs_and_reports_capability(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/sparse_benchmark_cpu.yaml",
+        "xqt/recipes/prune/block_sparse/sparse_benchmark_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "sparse_benchmark_cpu")},
         },

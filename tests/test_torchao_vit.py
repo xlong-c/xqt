@@ -19,6 +19,7 @@ def _diff(mean_abs: float, *, max_abs: float | None = None) -> TensorDiff:
         max_abs=max_abs if max_abs is not None else mean_abs,
         mean_abs=mean_abs,
         mean_squared=mean_abs * mean_abs,
+        sqnr_db=20.0,
         relative_error=None,
         cosine_similarity=0.99,
         correlation=None,

@@ -1,0 +1,53 @@
+config_version: 1
+
+project:
+  name: prune_structured_cnn
+  artifact_dir: artifacts/xqt/prune/structured/cnn
+
+model:
+  target: xqt.prune.StructuredPruningToyCNN
+  params:
+    in_channels: 3
+    hidden_channels: 8
+    out_channels: 16
+    num_classes: 4
+  dtype: float32
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 2
+    params:
+      input_shape: [3, 16, 16]
+      num_classes: 4
+      seed: 23
+
+compression:
+  axes:
+    - width
+    - sparsity
+  prune:
+    enabled: true
+    method: structured
+    granularity: channel
+    scope: global
+    target_sparsity: 0.25
+    importance:
+      metric: l1
+    selection:
+      min_keep: 1
+
+validation:
+  output_diff:
+    atol: 1.0e-5
+    rtol: 1.0e-5
+  metric:
+    name: top1
+    max_drop: 0.2
+
+benchmark:
+  warmup: 0
+  iterations: 1
+  percentiles: [50, 90, 99]

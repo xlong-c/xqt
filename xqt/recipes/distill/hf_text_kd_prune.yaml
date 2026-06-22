@@ -1,0 +1,68 @@
+config_version: 1
+
+project:
+  name: distill_hf_text_kd_prune
+  artifact_dir: artifacts/xqt/distill/hf_text_kd_prune
+
+model:
+  target: xqt.distill.build_hf_text_classification_bundle_from_params
+  params:
+    teacher_name_or_path: distilbert-base-uncased
+    student_name_or_path: distilbert-base-uncased
+    dataset_name: glue
+    dataset_config_name: sst2
+    text_column: sentence
+    label_column: label
+    max_length: 128
+    num_labels: 2
+    train_split: train
+    validation_split: validation
+    batch_size: 8
+    sample_limit: 128
+  dtype: float32
+  device: cpu
+
+data:
+  train:
+    target: hf_text_classification
+    sample_limit: 128
+    batch_size: 8
+  validation:
+    target: hf_text_classification
+    sample_limit: 128
+    batch_size: 8
+
+compression:
+  axes:
+    - sparsity
+    - depth
+  prune:
+    enabled: true
+    method: global_l1_unstructured
+    target_sparsity: 0.3
+    schedule: linear
+    params:
+      steps: 3
+      kd_steps_per_prune: 20
+  distill:
+    enabled: true
+    temperature: 2.0
+    alpha: 0.5
+    cache_teacher: true
+    params:
+      max_steps: 100
+      lr: 2.0e-5
+      weight_decay: 0.01
+
+validation:
+  output_diff:
+    atol: 1.0e-4
+    rtol: 1.0e-4
+  metric:
+    name: accuracy
+    max_drop: 0.02
+
+benchmark:
+  warmup: 5
+  iterations: 20
+  percentiles: [50, 90, 99]

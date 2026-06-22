@@ -33,14 +33,27 @@ _SUPPORTED_QUANT_BACKENDS = _AVAILABLE_QUANT_BACKENDS | _PLANNED_QUANT_BACKENDS
 ConfigInput = Union[str, Path, Mapping[str, Any]]
 
 
+def _strip_local_recipe_extensions(config_value: Any) -> Any:
+    if not OmegaConf.is_config(config_value):
+        return config_value
+    container = OmegaConf.to_container(
+        config_value,
+        resolve=False,
+        enum_to_str=True,
+    )
+    if isinstance(container, dict):
+        container.pop("report", None)
+    return OmegaConf.create(container)
+
+
 def _load_raw_config(config: ConfigInput) -> Any:
     if isinstance(config, (str, Path)):
         path = Path(config).expanduser()
         if not path.exists():
             raise XQTConfigError(f"Config file not found: {path}")
-        return OmegaConf.load(path)
+        return _strip_local_recipe_extensions(OmegaConf.load(path))
     if isinstance(config, Mapping):
-        return OmegaConf.create(dict(config))
+        return _strip_local_recipe_extensions(OmegaConf.create(dict(config)))
     raise XQTConfigError(f"Unsupported config input type: {type(config).__name__}")
 
 

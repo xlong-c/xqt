@@ -99,7 +99,7 @@ def test_executorch_dry_run_returns_pte_path(tmp_path) -> None:
 def test_pipeline_supports_mobile_dry_run_targets_after_onnx(tmp_path) -> None:
     onnx_path = tmp_path / "model.onnx"
     config = load_xqt_config(
-        "xqt/recipes/smoke_cpu.yaml",
+        "xqt/recipes/smoke/smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "artifacts")},
             "compression": {"prune": {"enabled": False}},

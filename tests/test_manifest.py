@@ -7,7 +7,7 @@ from xqt.pipeline.runner import run_xqt_recipe
 
 def test_manifest_records_operator_optimization_section_for_recipe(tmp_path) -> None:
     config = load_xqt_config(
-        "xqt/recipes/operator_compile_smoke_cpu.yaml",
+        "xqt/recipes/operator/torch_compile/operator_compile_smoke_cpu.yaml",
         overrides={
             "project": {"artifact_dir": str(tmp_path / "operator_manifest_recipe")},
         },

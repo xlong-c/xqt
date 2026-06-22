@@ -1,0 +1,58 @@
+config_version: 1
+
+project:
+  name: operator_torch_compile_vit
+  artifact_dir: artifacts/xqt/operator/torch_compile/vit
+
+model:
+  target: xqt.operator_opt.toy_models.build_toy_transformer_classifier
+  params:
+    input_dim: 8
+    hidden_dim: 8
+    num_heads: 2
+    dim_feedforward: 16
+    num_classes: 2
+  dtype: float32
+  device: cpu
+
+data:
+  validation:
+    target: synthetic_classification
+    sample_limit: 8
+    batch_size: 2
+    params:
+      input_shape: [4, 8]
+      num_classes: 2
+
+compression:
+  axes:
+    - precision
+
+operator_optimization:
+  enabled: true
+  stage: after_compression
+  default_backend: torch_compile
+  targets:
+    - name: encoder_compile
+      target: encoder
+      backend: torch_compile
+      mode: reduce-overhead
+      fullgraph: false
+      dynamic: false
+      options:
+        backend: inductor
+      fallback: eager
+      min_speedup: 1.000001
+      validate:
+        atol: 1.0e-5
+        rtol: 1.0e-5
+
+validation:
+  output_diff:
+    atol: 1.0e-5
+    rtol: 1.0e-5
+
+benchmark:
+  warmup: 0
+  iterations: 1
+  percentiles: [50, 90, 99]

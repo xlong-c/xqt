@@ -20,6 +20,7 @@
 - `data`: synthetic classification/detection samples, calibration dataloader utilities, torchvision image classification loader, Ultralytics detection loader, `xdl.dataset` bridge loader.
 - `model`: 外部模型 adapter, 当前包含 Ultralytics YOLO detection wrapper 和 dataset helper.
 - `pipeline`: sequential pass manager 和最小 YAML runner.
+- `workflows`: stage-based optimization workflow,把 eval/benchmark/prune/quant/finetune/distill/operator/export/deploy/runtime_eval 等阶段按配置编排.
 - `eval`: tensor output diff, detection decode/mAP 和 metric flatten helper.
 - `benchmark`: latency 和 memory benchmark helper.
 - `quant`: quantization policy, backend capability matrix, activation calibration, layer sensitivity helper.
@@ -55,7 +56,7 @@
 - `recipes/image_resnet_onnx_qdq_int8.yaml`: ResNet/CNN ONNX Runtime QDQ INT8 + TensorRT dry-run smoke recipe, 包含真实 `trtexec` 运行时使用的 `performance_thresholds` 示例.
 - `recipes/image_resnet_cifar100_qdq_cpu.yaml`: 使用本地 CIFAR-100 的 ResNet ONNX Runtime QDQ CPU recipe.
 - `recipes/yolo_detection_smoke.yaml`: synthetic detection + toy detection module smoke recipe, 用于验证 detection schema,baseline eval,prune,ONNX export 和 manifest.
-- `recipes/yolo_detection_practice.yaml`: Ultralytics YOLO detection baseline + FP32/FP16 ONNX + ONNX Runtime QDQ INT8 + operator/deployment target report + ONNX/TensorRT/OpenVINO export practice recipe. 默认 TensorRT/OpenVINO 为 dry-run.
+- `recipes/yolo_detection_practice.yaml`: Ultralytics YOLO detection stage workflow recipe,显式拆分 baseline eval/latency,ONNX export/runtime eval,QDQ artifact/runtime eval,global L1 pruning,operator compile 和 ONNX/TensorRT/OpenVINO deploy dry-run 阶段.
 - `recipes/multi_component_quant_smoke.yaml`: toy `vision_encoder -> projector -> decoder` 异构量化 smoke recipe, 用于验证 component policy,多 backend metrics 和 manifest 表达.
 - `recipes/prune_finetune_cpu.yaml`: 线性 sparsity schedule + teacher KD 微调的 CPU smoke recipe.
 - `recipes/cnn_structured_prune.yaml`: chain-like CNN 结构化 channel pruning CPU smoke recipe.
@@ -64,7 +65,7 @@
 
 示例入口:
 
-- `examples/yolo_detection_practice.py`: 读取 `XQT_YOLO_PRACTICE_CONFIG`, 先解析/下载 Ultralytics dataset, 再按 scenario matrix 运行 `baseline`,`quant_only`,`prune_only`,`operator_only`,`quant_export`,`prune_quant`,`full_chain` 组合场景,并把 runtime sidecar 写回各场景 manifest. 可用 `XQT_YOLO_PRACTICE_SCENARIOS=baseline,quant_export` 只跑子集.
+- `examples/yolo_detection_practice.py`: 读取 `XQT_YOLO_PRACTICE_CONFIG` 的薄入口,实际调用 `xqt.workflows.optimize_model`. 配置只描述可组合 stages,入口不再维护 YOLO 专用场景矩阵或报告生成器. 每个 stage 返回 accepted/message/metrics/artifacts,调用方可据此继续调阈值,回滚 rejected stage,或选择 `result.best_model`.
 
 量化 recipe 约定:
 
@@ -75,6 +76,7 @@
 - `gptq`,`awq`,`bitsandbytes` 目前只是 planned backend 接口预留,可进入 config/preflight,但 runner 不会执行.
 - `operator_optimization` 当前只有 `torch_compile` 会实际执行;`deployment_backend`,`triton`,`tilelang`,`custom_cuda` 当前进入 config/preflight 和 manifest,但不会在 built-in executor 里执行内核替换.
 - YOLO detection practice 当前只把 global L1 unstructured pruning 当作 sparsity/report baseline. Ultralytics YOLO structured pruning 会被 preflight guard,直到 residual,CSP/C2f,concat,SPPF 和 detect head 的 dependency graph/rewrite 支持补齐.
+- `xqt.workflows.optimize_model` 是 v0.x 的破坏性 stage workflow 入口. 新 practice/研究入口优先表达为 `data_splits + stages`,不要再新增一个任务一个 workflow 的专用配置模型.
 - TensorRT/OpenVINO dry-run 会构造部署命令并写入 manifest;真实 engine/IR 生成需要目标机器安装对应后端并关闭 dry-run.
 
 运行入口:

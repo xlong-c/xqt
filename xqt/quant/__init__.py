@@ -39,10 +39,12 @@ from .types import (
     QuantizationReport,
 )
 from .executor import execute_quantization_plan, summarize_quantization_reports
+from .fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
 
 __all__ = [
     "ActivationDriftRecord",
     "ActivationStatistic",
+    "FakeQDQSurrogateResult",
     "IterableCalibrationDataReader",
     "LayerAnalysisRecord",
     "LayerSensitivityRecord",
@@ -59,6 +61,7 @@ __all__ = [
     "analyze_layer_errors",
     "analyze_layer_sensitivity",
     "build_quantization_plan",
+    "build_fake_qdq_surrogate",
     "calibrate_activation_statistics",
     "describe_quant_backend_capability",
     "execute_quantization_plan",
