@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, cast
@@ -14,6 +15,7 @@ from torch import nn
 
 from xdl.config.resolver import register_default_resolvers
 from xqt.benchmark import benchmark_callable
+from xqt.core.artifact import ArtifactManifest, ArtifactRecord, MetricRecord, file_sha256
 from xqt.core.config import ConfigInput, load_xqt_config
 from xqt.core.errors import XQTBackendError
 from xqt.core.imports import build_target
@@ -36,6 +38,7 @@ from xqt.eval import (
     evaluate_detection_model,
     evaluate_onnx_detection_model,
     evaluate_pytorch_model,
+    evaluate_tensorrt_detection_model,
     topk_accuracy,
 )
 from xqt.export.input_utils import (
@@ -201,6 +204,42 @@ def _device(config: OptimizationConfig) -> str:
     return str(config.device or config.model.device or "cpu")
 
 
+def _stage_requires_model(stage: OptimizationStageConfig) -> bool:
+    if stage.kind in {"eval", "benchmark", "prune", "finetune", "distill", "operator", "analyze"}:
+        return True
+    if stage.kind == "quant":
+        params = stage.params
+        backend = str(params.get("backend", ""))
+        policy = params.get("policy", {})
+        if not isinstance(policy, Mapping):
+            policy = {}
+        if backend == "onnxruntime_qdq" and policy.get("onnx_path") is not None:
+            return False
+        return True
+    if stage.kind == "runtime_eval":
+        return False
+    if stage.kind not in {"export", "deploy"}:
+        return False
+    targets = stage.params.get("targets", [])
+    if not isinstance(targets, list) or not targets:
+        return True
+    for target in targets:
+        if not isinstance(target, Mapping):
+            return True
+        fmt = str(target.get("format", ""))
+        params = target.get("params", {})
+        if not isinstance(params, Mapping):
+            params = {}
+        if fmt in {"tensorrt", "openvino", "ncnn", "mnn"} and params.get("onnx_path") is not None:
+            continue
+        return True
+    return False
+
+
+def _workflow_requires_model(config: OptimizationConfig) -> bool:
+    return any(_stage_requires_model(stage) for stage in config.stages)
+
+
 def _base_xqt_config(config: OptimizationConfig, *, stage_name: str) -> Any:
     return load_xqt_config(
         {
@@ -217,9 +256,159 @@ def _base_xqt_config(config: OptimizationConfig, *, stage_name: str) -> Any:
     )
 
 
+def _create_workflow_manifest(config: OptimizationConfig) -> ArtifactManifest:
+    source_checksum: Optional[str] = None
+    if config.model.checkpoint:
+        checkpoint_path = Path(config.model.checkpoint).expanduser()
+        if checkpoint_path.is_file():
+            source_checksum = file_sha256(checkpoint_path)
+    return ArtifactManifest(
+        project_name=_project_name(config),
+        source_checkpoint=config.model.checkpoint,
+        source_checksum=source_checksum,
+        task={
+            "type": config.task.type,
+            "class_names": list(config.task.class_names),
+            "detection_postprocess": asdict(config.task.detection_postprocess),
+            "detection_metric": asdict(config.task.detection_metric),
+            "params": dict(config.task.params),
+        },
+        config_snapshot=asdict(config),
+    )
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _write_workflow_outputs(
+    result: OptimizedModelResult,
+    *,
+    summary_name: str = "workflow_result.json",
+    manifest_name: str = "workflow_manifest.json",
+) -> None:
+    artifact_dir = Path(result.context.config.project.artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    if result.context.manifest is not None:
+        seen_metric_names = {metric.name for metric in result.context.manifest.metrics}
+        seen_artifact_paths = {artifact.path for artifact in result.context.manifest.artifacts}
+        for stage in result.stages:
+            result.context.manifest.passes.append(stage.name)
+            result.context.manifest.add_metric(
+                MetricRecord(
+                    name=f"workflow.stage.{stage.name}.accepted",
+                    value=stage.accepted,
+                    metadata={"kind": stage.kind, "message": stage.message},
+                )
+            )
+            for top_key, payload in stage.metrics.items():
+                metric_name = f"workflow.stage.{stage.name}.{top_key}"
+                if metric_name in seen_metric_names:
+                    continue
+                result.context.manifest.add_metric(
+                    MetricRecord(
+                        name=metric_name,
+                        value=_json_safe(payload),
+                    )
+                )
+                seen_metric_names.add(metric_name)
+            detection_metadata = _stage_detection_manifest_metadata(stage.metrics)
+            if detection_metadata is not None:
+                dataset_metric_name = f"workflow.stage.{stage.name}.dataset_metadata"
+                if dataset_metric_name not in seen_metric_names:
+                    result.context.manifest.add_metric(
+                        MetricRecord(
+                            name=dataset_metric_name,
+                            value=_json_safe(detection_metadata.get("dataset")),
+                            metadata={"kind": stage.kind, "source": "detection_report"},
+                        )
+                    )
+                    seen_metric_names.add(dataset_metric_name)
+                batch_metric_name = f"workflow.stage.{stage.name}.batch_metadata"
+                if batch_metric_name not in seen_metric_names:
+                    result.context.manifest.add_metric(
+                        MetricRecord(
+                            name=batch_metric_name,
+                            value=_json_safe(detection_metadata.get("batches")),
+                            metadata={"kind": stage.kind, "source": "detection_report"},
+                        )
+                    )
+                    seen_metric_names.add(batch_metric_name)
+            for artifact_key, artifact_value in stage.artifacts.items():
+                if isinstance(artifact_value, (str, Path)):
+                    path = Path(artifact_value)
+                    if path.is_file() and str(path) not in seen_artifact_paths:
+                        result.context.manifest.add_artifact(
+                            ArtifactRecord.from_file(
+                                path,
+                                format=stage.kind,
+                                runtime=artifact_key,
+                                metadata={"stage": stage.name, "artifact_key": artifact_key},
+                            )
+                        )
+                        seen_artifact_paths.add(str(path))
+        manifest_path = artifact_dir / manifest_name
+        result.context.manifest.write_json(manifest_path)
+        result.context.artifacts["workflow_manifest"] = manifest_path
+
+    summary = {
+        "project": result.context.config.project.name,
+        "artifact_dir": str(artifact_dir),
+        "baseline_stage": result.baseline_stage,
+        "best_stage": result.best_stage,
+        "stages": [
+            {
+                "name": stage.name,
+                "kind": stage.kind,
+                "accepted": stage.accepted,
+                "message": stage.message,
+                "metrics": _json_safe(stage.metrics),
+                "artifacts": _json_safe(stage.artifacts),
+            }
+            for stage in result.stages
+        ],
+        "artifacts": _json_safe(result.context.artifacts),
+    }
+    summary_path = artifact_dir / summary_name
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    result.context.artifacts["workflow_result"] = summary_path
+
+
+def _stage_detection_manifest_metadata(stage_metrics: Mapping[str, Any]) -> dict[str, Any] | None:
+    for key in ("eval", "runtime_eval"):
+        payload = stage_metrics.get(key)
+        if not isinstance(payload, Mapping):
+            continue
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        dataset = metadata.get("dataset")
+        batches = metadata.get("batches")
+        if dataset is None and batches is None:
+            continue
+        return {
+            "dataset": dict(dataset) if isinstance(dataset, Mapping) else dataset,
+            "batches": list(batches) if isinstance(batches, list) else batches,
+        }
+    return None
+
+
 def _build_model(config: OptimizationConfig, model: Any | None) -> Any:
     if model is not None:
         return model
+    if not _workflow_requires_model(config):
+        return None
     if not config.model.target:
         raise ValueError("model.target is required when model is not provided")
     built = build_target(config.model.target, config.model.params)
@@ -686,6 +875,72 @@ def _resolve_runtime_artifact(
     return Path(path_value)
 
 
+def _runtime_eval_artifact_metadata(
+    context: XQTContext,
+    params: Mapping[str, Any],
+    resolved_path: Path,
+    *,
+    default_key: str = "last_onnx",
+) -> dict[str, Any]:
+    artifact_key = str(params.get("artifact") or params.get("artifact_key") or default_key)
+    explicit_path = params.get("path") or params.get("artifact_path")
+    source = "explicit_path" if explicit_path is not None else "artifact"
+    if source == "artifact":
+        context_value = context.artifacts.get(artifact_key)
+        source = "artifact" if context_value is not None else "artifact_missing"
+    return {
+        "artifact_key": artifact_key,
+        "source": source,
+        "resolved_path": str(resolved_path),
+    }
+
+
+def _detection_task_metadata(context: XQTContext) -> dict[str, Any]:
+    task = context.config.task
+    return {
+        "task_type": task.type,
+        "class_names": list(task.class_names),
+        "detection_postprocess": asdict(task.detection_postprocess),
+        "detection_metric": asdict(task.detection_metric),
+    }
+
+
+def _detection_runtime_boundary_metadata(
+    context: XQTContext,
+    *,
+    runtime: str,
+) -> dict[str, Any]:
+    quant_metrics = context.metrics.get("quant", {})
+    if not isinstance(quant_metrics, Mapping):
+        quant_metrics = {}
+    quant_metadata = quant_metrics.get("metadata", {})
+    if not isinstance(quant_metadata, Mapping):
+        quant_metadata = {}
+    qdq_graph = quant_metadata.get("qdq_graph", {})
+    if not isinstance(qdq_graph, Mapping):
+        qdq_graph = {}
+    return {
+        "runtime": runtime,
+        "quantized_runtime_scope": (
+            "onnx_graph_only" if quant_metrics.get("backend") == "onnxruntime_qdq" else "unknown"
+        ),
+        "decode_stage": "runtime_eval_postprocess",
+        "decode_execution": "outside_quantized_graph",
+        "postprocess_format": context.config.task.detection_postprocess.format,
+        "box_format": context.config.task.detection_postprocess.box_format,
+        "score_activation": context.config.task.detection_postprocess.score_activation,
+        "rescale_to_original": bool(context.config.task.detection_postprocess.rescale_to_original),
+        "quant_backend": quant_metrics.get("backend"),
+        "quantized_op_types": list(quant_metadata.get("quantized_op_types", [])),
+        "qdq_node_count": qdq_graph.get("qdq_node_count"),
+        "quantize_linear_count": qdq_graph.get("quantize_linear_count"),
+        "dequantize_linear_count": qdq_graph.get("dequantize_linear_count"),
+        "raw_model_output_contract": (
+            "logits+pred_boxes" if context.config.task.detection_postprocess.format == "auto" else "generic_detection"
+        ),
+    }
+
+
 def _onnx_input_type_map(session: Any) -> dict[str, str]:
     return {
         str(item.name): str(getattr(item, "type", ""))
@@ -810,8 +1065,6 @@ def _run_runtime_eval(
     _stage_context(config, stage, context=context, splits=splits)
     params = dict(stage.params)
     runtime = str(params.pop("runtime", "onnxruntime"))
-    if runtime != "onnxruntime":
-        raise ValueError("runtime_eval currently supports runtime=onnxruntime")
     split_name = _split_name(stage)
     dataloader = _require_split(splits, split_name)
     benchmark_params = {
@@ -824,12 +1077,53 @@ def _run_runtime_eval(
     max_batches = int(max_batches) if max_batches is not None else None
     input_names_value = params.pop("input_names", None)
     input_names = [str(name) for name in input_names_value] if input_names_value else None
+    output_names_value = params.pop("output_names", None)
+    output_names = [str(name) for name in output_names_value] if output_names_value else None
     reference_model = context.reference_model if params.pop("compare_reference", True) else None
-    onnx_path = _resolve_runtime_artifact(context, params)
 
     if context.config.task.type == "detection":
-        return evaluate_onnx_detection_model(
-            str(onnx_path),
+        runtime_default_key = "last_engine" if runtime == "tensorrt" else "last_onnx"
+        runtime_path = _resolve_runtime_artifact(
+            context,
+            params,
+            default_key=runtime_default_key,
+        )
+        artifact_metadata = _runtime_eval_artifact_metadata(
+            context,
+            stage.params,
+            runtime_path,
+            default_key=runtime_default_key,
+        )
+        if runtime == "tensorrt":
+            report = evaluate_tensorrt_detection_model(
+                str(runtime_path),
+                dataloader,
+                postprocess=context.config.task.detection_postprocess,
+                metric_config=context.config.task.detection_metric,
+                input_names=input_names,
+                output_names=output_names,
+                reference_model=reference_model if isinstance(reference_model, nn.Module) else None,
+                device=context.config.model.device,
+                max_batches=max_batches,
+                atol=context.config.validation.output_diff.atol,
+                rtol=context.config.validation.output_diff.rtol,
+                benchmark_warmup=benchmark_config.warmup,
+                benchmark_iterations=benchmark_config.iterations,
+                benchmark_sync_cuda=benchmark_config.sync_cuda,
+            ).to_dict()
+            report["path"] = str(runtime_path)
+            report["artifact"] = artifact_metadata
+            report["task"] = _detection_task_metadata(context)
+            report["quantization"] = dict(context.metrics.get("quant", {}))
+            report["runtime_boundary"] = _detection_runtime_boundary_metadata(
+                context,
+                runtime=runtime,
+            )
+            return report
+        if runtime != "onnxruntime":
+            raise ValueError("detection runtime_eval supports runtime=onnxruntime|tensorrt")
+        report = evaluate_onnx_detection_model(
+            str(runtime_path),
             dataloader,
             postprocess=context.config.task.detection_postprocess,
             metric_config=context.config.task.detection_metric,
@@ -842,9 +1136,22 @@ def _run_runtime_eval(
             benchmark_warmup=benchmark_config.warmup,
             benchmark_iterations=benchmark_config.iterations,
             benchmark_sync_cuda=benchmark_config.sync_cuda,
-        ).to_dict() | {"path": str(onnx_path)}
+        ).to_dict()
+        report["path"] = str(runtime_path)
+        report["artifact"] = artifact_metadata
+        report["task"] = _detection_task_metadata(context)
+        report["quantization"] = dict(context.metrics.get("quant", {}))
+        report["runtime_boundary"] = _detection_runtime_boundary_metadata(
+            context,
+            runtime=runtime,
+        )
+        return report
 
-    return _evaluate_onnx_classification_model(
+    if runtime != "onnxruntime":
+        raise ValueError("classification runtime_eval currently supports runtime=onnxruntime")
+    onnx_path = _resolve_runtime_artifact(context, params)
+    artifact_metadata = _runtime_eval_artifact_metadata(context, stage.params, onnx_path)
+    report = _evaluate_onnx_classification_model(
         context,
         onnx_path=onnx_path,
         dataloader=dataloader,
@@ -853,6 +1160,8 @@ def _run_runtime_eval(
         max_batches=max_batches,
         benchmark_config=benchmark_config,
     )
+    report["artifact"] = artifact_metadata
+    return report
 
 
 def optimize_model(
@@ -876,6 +1185,7 @@ def optimize_model(
         teacher=teacher,
         data=dict(splits),
         device=_device(loaded),
+        manifest=_create_workflow_manifest(loaded),
     )
 
     stage_results: list[OptimizationStageResult] = []
@@ -1028,14 +1338,16 @@ def optimize_model(
             )
         )
 
-    return OptimizedModelResult(
-        model=context.require_model(),
+    result = OptimizedModelResult(
+        model=context.model,
         context=context,
         stages=stage_results,
         best_stage=best_stage,
         baseline_stage=baseline_stage,
         models=model_snapshots,
     )
+    _write_workflow_outputs(result)
+    return result
 
 
 __all__ = [

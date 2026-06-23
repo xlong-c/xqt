@@ -44,6 +44,12 @@ def test_operator_optimization_compile_smoke_runs(tmp_path) -> None:
     assert target["latency_after"]["iterations"] == 1
     assert target["numeric_diff"]["allclose"] is True
     assert target["shape_signature"]["tensor_shapes"] == [[2, 4]]
+    graph_break_report = target["metadata"]["graph_break_report"]
+    assert graph_break_report["status"] in {"ok", "error", "unavailable"}
+    assert "graph_break_count" in graph_break_report
+    assert target["metadata"]["fallback_detail"]["graph_break_count"] == graph_break_report[
+        "graph_break_count"
+    ]
 
 
 def test_operator_compile_smoke_recipe_runs_in_runner(tmp_path) -> None:

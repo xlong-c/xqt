@@ -10,6 +10,7 @@ from xqt.core.config import load_xqt_config
 from xqt.core.errors import XQTPipelineError
 from xqt.core.registry import XQTRegistry
 from xqt.core.types import XQTContext
+from xqt.data import build_data_split
 from xqt.export import TensorRTBuildResult
 from xqt.pipeline.runner import (
     build_pipeline_from_config,
@@ -19,6 +20,7 @@ from xqt.pipeline.runner import (
     enabled_pass_names,
     run_xqt_recipe,
 )
+from xqt.workflows import optimize_model
 
 
 @dataclass
@@ -765,7 +767,602 @@ def test_builtin_pipeline_supports_tensorrt_dry_run_after_onnx(tmp_path) -> None
     assert artifacts[0]["format"] == "onnx"
     assert artifacts[1]["format"] == "tensorrt"
     assert artifacts[1]["dry_run"] is True
+    assert artifacts[1]["artifact_status"] == "command_only"
+    assert artifacts[1]["backend_execution"] == "dry_run"
     assert "--fp16" in artifacts[1]["command"]
+
+
+def test_builtin_pipeline_supports_tensorrt_python_api_dry_run_after_onnx(tmp_path) -> None:
+    onnx_path = tmp_path / "model_qdq.onnx"
+    engine_path = tmp_path / "model.engine"
+    config = load_xqt_config(
+        "xqt/recipes/smoke/smoke_cpu.yaml",
+        overrides={
+            "project": {
+                "artifact_dir": str(tmp_path / "trt_python_api_artifacts"),
+            },
+            "compression": {
+                "prune": {"enabled": False},
+            },
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "output_path": str(onnx_path),
+                        "params": {"runtime_diff": False},
+                    },
+                    {
+                        "format": "tensorrt",
+                        "output_path": str(engine_path),
+                        "precision": "int8",
+                        "profiles": {
+                            "input": {
+                                "min": [1, 4],
+                                "opt": [1, 4],
+                                "max": [1, 4],
+                            }
+                        },
+                        "params": {
+                            "backend": "python_api",
+                            "dry_run": True,
+                        },
+                    },
+                ]
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+
+    artifacts = context.metrics["export"]["artifacts"]
+    assert artifacts[1]["format"] == "tensorrt"
+    assert artifacts[1]["dry_run"] is True
+    assert artifacts[1]["artifact_status"] == "command_only"
+    assert artifacts[1]["backend_execution"] == "dry_run"
+    assert artifacts[1]["command"][0] == "tensorrt-python-api"
+
+
+def test_builtin_pipeline_records_tensorrt_runtime_benchmark_when_available(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    engine_path = tmp_path / "model.engine"
+    onnx_path.write_bytes(b"onnx")
+    engine_path.write_bytes(b"engine")
+
+    def fake_build_tensorrt_engine(*args, **kwargs):
+        del args, kwargs
+        return TensorRTBuildResult(
+            engine_path=engine_path,
+            command=["tensorrt-python-api", "--build"],
+            returncode=0,
+            checksum="checksum",
+            dry_run=False,
+            metadata={
+                "backend": "python_api",
+                "profiles": {"input": {"opt": [1, 4]}},
+                "profiling_verbosity": "DETAILED",
+                "engine_inspector": {
+                    "layer_count": 4,
+                    "has_quantization_layers": True,
+                    "has_fused_quantized_conv": True,
+                    "fusion_signatures": ["stem.weight_quantized + /stem/Conv"],
+                },
+            },
+        )
+
+    def fake_benchmark_tensorrt_engine(*args, **kwargs):
+        del args, kwargs
+
+        class _Result:
+            def to_dict(self):
+                return {
+                    "engine_path": str(engine_path),
+                    "backend": "python_api",
+                    "device": "cuda:0",
+                    "input_shapes": {"input": [1, 4]},
+                    "latency": {"mean_ms": 0.5, "iterations": 2, "warmup": 0},
+                    "output_shapes": {"output": [1, 2]},
+                    "metadata": {"fill_random": True},
+                }
+
+        return _Result()
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.build_tensorrt_engine",
+        fake_build_tensorrt_engine,
+    )
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.benchmark_tensorrt_engine",
+        fake_benchmark_tensorrt_engine,
+    )
+
+    config = load_xqt_config(
+        "xqt/recipes/smoke/smoke_cpu.yaml",
+        overrides={
+            "project": {"artifact_dir": str(tmp_path / "trt_runtime_benchmark_artifacts")},
+            "compression": {"prune": {"enabled": False}},
+            "export": {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "output_path": str(onnx_path),
+                        "params": {"runtime_diff": False},
+                    },
+                    {
+                        "format": "tensorrt",
+                        "output_path": str(engine_path),
+                        "precision": "fp16",
+                        "params": {
+                            "backend": "python_api",
+                            "runtime_benchmark": {
+                                "enabled": True,
+                                "input_shapes": {"input": [1, 4]},
+                                "warmup": 0,
+                                "iterations": 2,
+                            },
+                        },
+                    },
+                ]
+            },
+        },
+    )
+
+    context = run_xqt_recipe(config)
+    trt_artifact = context.metrics["export"]["artifacts"][1]
+    assert trt_artifact["backend_execution"] == "executed"
+    assert trt_artifact["profiling_verbosity"] == "DETAILED"
+    assert trt_artifact["engine_inspector"]["has_quantization_layers"] is True
+    assert trt_artifact["engine_inspector"]["has_fused_quantized_conv"] is True
+    assert trt_artifact["runtime_benchmark"]["latency"]["mean_ms"] == 0.5
+
+
+def test_export_pass_supports_external_onnx_without_loaded_model(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    onnx_path = tmp_path / "external.onnx"
+    engine_path = tmp_path / "external.engine"
+    onnx_path.write_bytes(b"onnx")
+
+    def fake_build_tensorrt_engine(*args, **kwargs):
+        assert Path(args[0]) == onnx_path
+        assert kwargs["backend"] == "python_api"
+        engine_path.write_bytes(b"engine")
+        return TensorRTBuildResult(
+            engine_path=engine_path,
+            command=["tensorrt-python-api", "--build"],
+            returncode=0,
+            checksum="checksum",
+            dry_run=False,
+            metadata={"backend": "python_api", "profiles": {"images": {"opt": [1, 3, 640, 640]}}},
+        )
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.build_tensorrt_engine",
+        fake_build_tensorrt_engine,
+    )
+
+    config = load_xqt_config(
+        {
+            "project": {"artifact_dir": str(tmp_path / "external_deploy_artifacts")},
+            "task": {"type": "detection"},
+            "export": {
+                "targets": [
+                    {
+                        "format": "tensorrt",
+                        "output_path": str(engine_path),
+                        "precision": "int8",
+                        "profiles": {
+                            "images": {
+                                "min": [1, 3, 640, 640],
+                                "opt": [1, 3, 640, 640],
+                                "max": [1, 3, 640, 640],
+                            }
+                        },
+                        "params": {
+                            "backend": "python_api",
+                            "onnx_path": str(onnx_path),
+                        },
+                    }
+                ]
+            },
+        }
+    )
+
+    context = run_xqt_recipe(
+        config,
+        pass_names=["export"],
+        write_manifest=False,
+    )
+
+    artifact = context.metrics["export"]["artifacts"][0]
+    assert artifact["format"] == "tensorrt"
+    assert artifact["source_onnx"] == str(onnx_path)
+    assert artifact["backend_execution"] == "executed"
+
+
+def test_stage_workflow_supports_external_onnx_deploy_without_loaded_model(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    onnx_path = tmp_path / "external.onnx"
+    engine_path = tmp_path / "external.engine"
+    onnx_path.write_bytes(b"onnx")
+
+    def fake_build_tensorrt_engine(*args, **kwargs):
+        assert Path(args[0]) == onnx_path
+        assert kwargs["backend"] == "python_api"
+        engine_path.write_bytes(b"engine")
+        return TensorRTBuildResult(
+            engine_path=engine_path,
+            command=["tensorrt-python-api", "--build"],
+            returncode=0,
+            checksum="checksum",
+            dry_run=False,
+            metadata={"backend": "python_api", "profiles": {"images": {"opt": [1, 3, 640, 640]}}},
+        )
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.build_tensorrt_engine",
+        fake_build_tensorrt_engine,
+    )
+
+    result = optimize_model(
+        {
+            "project": {"name": "external_workflow", "artifact_dir": str(tmp_path / "artifacts")},
+            "task": {"type": "detection"},
+            "data_splits": {
+                "validation": {
+                    "target": "synthetic_detection",
+                    "sample_limit": 1,
+                    "batch_size": 1,
+                    "params": {
+                        "image_shape": [3, 640, 640],
+                        "num_classes": 80,
+                        "boxes_per_image": 2,
+                    },
+                }
+            },
+            "stages": [
+                {
+                    "name": "build_trt",
+                    "kind": "deploy",
+                    "split": "validation",
+                    "save_model": False,
+                    "params": {
+                        "targets": [
+                            {
+                                "format": "tensorrt",
+                                "output_path": str(engine_path),
+                                "precision": "int8",
+                                "profiles": {
+                                    "images": {
+                                        "min": [1, 3, 640, 640],
+                                        "opt": [1, 3, 640, 640],
+                                        "max": [1, 3, 640, 640],
+                                    }
+                                },
+                                "params": {
+                                    "backend": "python_api",
+                                    "onnx_path": str(onnx_path),
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    )
+
+    assert result.model is None
+    artifact = result.stages[0].metrics["export"]["artifacts"][0]
+    assert artifact["format"] == "tensorrt"
+    assert artifact["source_onnx"] == str(onnx_path)
+    assert artifact["backend_execution"] == "executed"
+
+
+def test_stage_workflow_supports_external_onnx_quant_without_loaded_model(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_onnx = tmp_path / "external_detection.onnx"
+    output_path = tmp_path / "external_detection_qdq.onnx"
+    source_onnx.write_bytes(b"onnx")
+
+    def fake_quantize_onnx_qdq_static(
+        onnx_path,
+        output_path_arg,
+        calibration_data,
+        **kwargs,
+    ):
+        from xqt.quant.onnx_qdq import ONNXQDQQuantizationResult
+
+        assert Path(onnx_path) == source_onnx
+        assert kwargs["input_names"] == ["images", "orig_target_sizes"]
+        first_batch = next(iter(calibration_data))
+        assert isinstance(first_batch, dict)
+        assert first_batch["images"].shape == (1, 3, 640, 640)
+        assert first_batch["orig_target_sizes"].shape == (1, 2)
+        output = Path(output_path_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"qdq")
+        return ONNXQDQQuantizationResult(
+            path=output,
+            source_path=Path(onnx_path),
+            checksum="checksum",
+            calibration_samples=1,
+            metadata={
+                "input_names": list(kwargs["input_names"]),
+                "calibration_summary": {
+                    "input_names": list(kwargs["input_names"]),
+                    "batch_count": 1,
+                    "shapes": {
+                        "images": [[1, 3, 640, 640]],
+                        "orig_target_sizes": [[1, 2]],
+                    },
+                    "dtypes": {
+                        "images": ["float32"],
+                        "orig_target_sizes": ["int64"],
+                    },
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.quantize_onnx_qdq_static",
+        fake_quantize_onnx_qdq_static,
+    )
+
+    result = optimize_model(
+        {
+            "project": {"name": "external_qdq_workflow", "artifact_dir": str(tmp_path / "artifacts")},
+            "task": {"type": "detection"},
+            "data_splits": {
+                "calibration": {
+                    "target": "synthetic_detection",
+                    "sample_limit": 1,
+                    "batch_size": 1,
+                    "params": {
+                        "image_shape": [3, 640, 640],
+                        "num_classes": 80,
+                        "boxes_per_image": 2,
+                        "include_model_inputs": True,
+                        "input_image_key": "images",
+                        "input_size_key": "orig_target_sizes",
+                    },
+                },
+                "validation": {
+                    "target": "synthetic_detection",
+                    "sample_limit": 1,
+                    "batch_size": 1,
+                    "params": {
+                        "image_shape": [3, 640, 640],
+                        "num_classes": 80,
+                        "boxes_per_image": 2,
+                        "include_model_inputs": True,
+                        "input_image_key": "images",
+                        "input_size_key": "orig_target_sizes",
+                    },
+                },
+            },
+            "stages": [
+                {
+                    "name": "quant_qdq",
+                    "kind": "quant",
+                    "calibration_split": "calibration",
+                    "validation_split": "validation",
+                    "save_model": False,
+                    "params": {
+                        "backend": "onnxruntime_qdq",
+                        "strategy": "static_int8",
+                        "policy": {
+                            "onnx_path": str(source_onnx),
+                            "output_path": str(output_path),
+                            "input_names": ["images", "orig_target_sizes"],
+                            "sample_limit": 1,
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    assert result.model is None
+    assert result.context.artifacts["quant_onnx"] == output_path
+    assert result.context.artifacts["last_onnx"] == output_path
+    assert result.stages[0].metrics["quant"]["backend"] == "onnxruntime_qdq"
+    assert result.stages[0].metrics["quant"]["calibration_summary"]["input_names"] == [
+        "images",
+        "orig_target_sizes",
+    ]
+
+
+def test_coco8_detection_split_emits_targets_and_model_inputs() -> None:
+    loader = build_data_split(
+        "validation",
+        {
+            "target": "coco8_detection",
+            "root": "data/coco8",
+            "sample_limit": 1,
+            "batch_size": 1,
+            "params": {
+                "split": "val",
+                "include_model_inputs": True,
+                "input_image_key": "pixel_values",
+            },
+        },
+    )
+
+    batch = next(iter(loader))
+    assert batch["pixel_values"].shape[0] == 1
+    assert batch["pixel_values"].shape[1] == 3
+    assert len(batch["boxes"]) == 1
+    assert len(batch["labels"]) == 1
+    assert batch["orig_size"].shape == (1, 2)
+    assert loader.xqt_detection_metadata["resize_mode"] == "direct_resize"
+    assert loader.xqt_detection_metadata["letterbox"] is False
+
+
+def test_stage_workflow_supports_tensorrt_detection_runtime_eval(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    onnx_path = tmp_path / "external.onnx"
+    engine_path = tmp_path / "external.engine"
+    onnx_path.write_bytes(b"onnx")
+    engine_path.write_bytes(b"engine")
+
+    def fake_build_tensorrt_engine(*args, **kwargs):
+        assert Path(args[0]) == onnx_path
+        assert kwargs["backend"] == "python_api"
+        return TensorRTBuildResult(
+            engine_path=engine_path,
+            command=["tensorrt-python-api", "--build"],
+            returncode=0,
+            checksum="checksum",
+            dry_run=False,
+            metadata={
+                "backend": "python_api",
+                "profiles": {"pixel_values": {"opt": [1, 3, 640, 640]}},
+                "engine_inspector": {"has_quantization_layers": True},
+            },
+        )
+
+    def fake_create_tensorrt_runtime_session(engine_path_arg, *, device="cuda:0"):
+        return {"engine_path": Path(engine_path_arg), "device": device}
+
+    def fake_execute_tensorrt_session(session, *, inputs):
+        from xqt.export.tensorrt import TensorRTRuntimeExecutionResult
+
+        assert session["engine_path"] == engine_path
+        pixel_values = inputs["pixel_values"]
+        batch = int(pixel_values.shape[0])
+        logits = torch.full((batch, 2, 3), -8.0, dtype=torch.float32)
+        logits[:, 0, 0] = 8.0
+        logits[:, 1, 1] = 8.0
+        pred_boxes = torch.tensor(
+            [[[0.2, 0.2, 0.2, 0.2], [0.5, 0.5, 0.2, 0.2]]],
+            dtype=torch.float32,
+        ).repeat(batch, 1, 1)
+        return TensorRTRuntimeExecutionResult(
+            engine_path=session["engine_path"],
+            backend="python_api",
+            device=session["device"],
+            input_shapes={key: list(value.shape) for key, value in inputs.items()},
+            output_tensors={"logits": logits, "pred_boxes": pred_boxes},
+            output_shapes={"logits": list(logits.shape), "pred_boxes": list(pred_boxes.shape)},
+            metadata={"engine_inspector": {"has_quantization_layers": True}},
+        )
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.build_tensorrt_engine",
+        fake_build_tensorrt_engine,
+    )
+    monkeypatch.setattr(
+        "xqt.eval.detection.create_tensorrt_runtime_session",
+        fake_create_tensorrt_runtime_session,
+    )
+    monkeypatch.setattr(
+        "xqt.eval.detection.execute_tensorrt_session",
+        fake_execute_tensorrt_session,
+    )
+
+    result = optimize_model(
+        {
+            "project": {
+                "name": "external_trt_runtime_eval",
+                "artifact_dir": str(tmp_path / "artifacts"),
+            },
+            "task": {
+                "type": "detection",
+                "detection_postprocess": {
+                    "format": "auto",
+                    "box_format": "cxcywh",
+                    "score_threshold": 0.05,
+                    "iou_threshold": 0.5,
+                    "max_detections": 10,
+                    "score_activation": "sigmoid",
+                    "has_objectness": False,
+                },
+                "detection_metric": {
+                    "iou_thresholds": [0.5, 0.75],
+                },
+            },
+            "data_splits": {
+                "validation": {
+                    "target": "synthetic_detection",
+                    "sample_limit": 1,
+                    "batch_size": 1,
+                    "params": {
+                        "image_shape": [3, 640, 640],
+                        "num_classes": 3,
+                        "boxes_per_image": 2,
+                        "include_model_inputs": True,
+                        "input_image_key": "pixel_values",
+                    },
+                }
+            },
+            "stages": [
+                {
+                    "name": "build_trt",
+                    "kind": "deploy",
+                    "split": "validation",
+                    "save_model": False,
+                    "params": {
+                        "targets": [
+                            {
+                                "format": "tensorrt",
+                                "output_path": str(engine_path),
+                                "precision": "int8",
+                                "profiles": {
+                                    "pixel_values": {
+                                        "min": [1, 3, 640, 640],
+                                        "opt": [1, 3, 640, 640],
+                                        "max": [1, 3, 640, 640],
+                                    }
+                                },
+                                "params": {
+                                    "backend": "python_api",
+                                    "onnx_path": str(onnx_path),
+                                },
+                            }
+                        ]
+                    },
+                },
+                {
+                    "name": "eval_trt",
+                    "kind": "runtime_eval",
+                    "split": "validation",
+                    "params": {
+                        "runtime": "tensorrt",
+                        "artifact": "last_engine",
+                        "input_names": ["pixel_values"],
+                        "output_names": ["logits", "pred_boxes"],
+                        "compare_reference": False,
+                        "warmup": 0,
+                        "iterations": 1,
+                        "sync_cuda": False,
+                        "max_batches": 1,
+                    },
+                }
+            ],
+        },
+    )
+
+    assert result.stages[0].metrics["export"]["artifacts"][0]["format"] == "tensorrt"
+    report = result.stages[1].metrics["runtime_eval"]
+    assert report["runtime"] == "tensorrt"
+    assert report["path"] == str(engine_path)
+    assert report["samples"] == 1
+    assert report["metrics"]["map50"] >= 0.0
+    assert report["latency"]["iterations"] == 1
+    assert report["artifact"]["artifact_key"] == "last_engine"
+    assert report["artifact"]["source"] == "artifact"
+    assert report["runtime_boundary"]["decode_execution"] == "outside_quantized_graph"
+    assert report["runtime_boundary"]["postprocess_format"] == "auto"
+    assert report["runtime_boundary"]["quant_backend"] is None
 
 
 def test_builtin_pipeline_supports_openvino_dry_run_after_onnx(tmp_path) -> None:
@@ -810,6 +1407,8 @@ def test_builtin_pipeline_supports_openvino_dry_run_after_onnx(tmp_path) -> None
     assert artifacts[0]["format"] == "onnx"
     assert artifacts[1]["format"] == "openvino"
     assert artifacts[1]["dry_run"] is True
+    assert artifacts[1]["artifact_status"] == "command_only"
+    assert artifacts[1]["backend_execution"] == "dry_run"
     assert artifacts[1]["input_shape"] == [1, 4]
     assert artifacts[1]["command"][0] == "openvino.convert_model"
 
@@ -1236,6 +1835,133 @@ def test_builtin_quant_pass_supports_onnxruntime_qdq(monkeypatch, tmp_path) -> N
     )
 
 
+def test_builtin_quant_pass_supports_external_onnx_without_loaded_model(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source_onnx = tmp_path / "external_detection.onnx"
+    output_path = tmp_path / "external_detection_qdq.onnx"
+    source_onnx.write_bytes(b"onnx")
+
+    def fake_quantize_onnx_qdq_static(
+        onnx_path,
+        output_path_arg,
+        calibration_data,
+        **kwargs,
+    ):
+        from xqt.quant.onnx_qdq import ONNXQDQQuantizationResult
+
+        assert Path(onnx_path) == source_onnx
+        assert kwargs["input_names"] == ["images", "orig_target_sizes"]
+        first_batch = next(iter(calibration_data))
+        assert isinstance(first_batch, dict)
+        assert first_batch["images"].shape == (1, 3, 640, 640)
+        assert first_batch["orig_target_sizes"].shape == (1, 2)
+        output = Path(output_path_arg)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"qdq")
+        return ONNXQDQQuantizationResult(
+            path=output,
+            source_path=Path(onnx_path),
+            checksum="checksum",
+            calibration_samples=1,
+            metadata={
+                "input_names": list(kwargs["input_names"]),
+                "calibration_summary": {
+                    "input_names": list(kwargs["input_names"]),
+                    "batch_count": 1,
+                    "shapes": {
+                        "images": [[1, 3, 640, 640]],
+                        "orig_target_sizes": [[1, 2]],
+                    },
+                    "dtypes": {
+                        "images": ["float32"],
+                        "orig_target_sizes": ["int64"],
+                    },
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        "xqt.pipeline.passes.quantize_onnx_qdq_static",
+        fake_quantize_onnx_qdq_static,
+    )
+    config = load_xqt_config(
+        {
+            "project": {
+                "name": "external_detection_qdq",
+                "artifact_dir": str(tmp_path / "artifacts"),
+            },
+            "task": {"type": "detection"},
+            "compression": {
+                "quant": {
+                    "enabled": True,
+                    "backend": "onnxruntime_qdq",
+                    "policy": {
+                        "onnx_path": str(source_onnx),
+                        "output_path": str(output_path),
+                        "input_names": ["images", "orig_target_sizes"],
+                        "op_types_to_quantize": ["Conv", "MatMul"],
+                    },
+                }
+            },
+        }
+    )
+
+    calibration_loader = torch.utils.data.DataLoader(
+        [
+            {
+                "images": torch.ones(1, 3, 640, 640),
+                "orig_target_sizes": torch.tensor([[640, 640]], dtype=torch.int64),
+            }
+        ],
+        batch_size=None,
+    )
+
+    context = run_xqt_recipe(
+        config,
+        data={"calibration": calibration_loader},
+        pass_names=["quant"],
+        write_manifest=False,
+    )
+
+    assert context.model is None
+    assert context.artifacts["quant_onnx"] == output_path
+    assert context.artifacts["last_onnx"] == output_path
+    assert context.metrics["quant"]["backend"] == "onnxruntime_qdq"
+    assert context.metrics["quant"]["calibration_samples"] == 1
+    assert context.metrics["quant"]["metadata"]["policy"]["onnx_path"] == str(source_onnx)
+    assert context.metrics["quant"]["metadata"]["input_structure"] == "external_onnx"
+    assert context.metrics["quant"]["calibration_summary"]["input_names"] == [
+        "images",
+        "orig_target_sizes",
+    ]
+
+
+def test_synthetic_detection_split_can_emit_external_onnx_inputs() -> None:
+    loader = build_data_split(
+        "calibration",
+        {
+            "target": "synthetic_detection",
+            "sample_limit": 1,
+            "batch_size": 1,
+            "params": {
+                "image_shape": [3, 640, 640],
+                "num_classes": 80,
+                "boxes_per_image": 2,
+                "include_model_inputs": True,
+                "input_image_key": "images",
+                "input_size_key": "orig_target_sizes",
+            },
+        },
+    )
+
+    batch = next(iter(loader))
+    assert batch["images"].shape == (1, 3, 640, 640)
+    assert batch["orig_target_sizes"].shape == (1, 2)
+    assert len(batch["boxes"]) == 1
+
+
 def test_builtin_quant_pass_auto_exports_multi_input_onnx(monkeypatch, tmp_path) -> None:
     class PairModel(torch.nn.Module):
         def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
@@ -1555,6 +2281,7 @@ def test_image_recipes_load_and_resnet_qdq_smoke_runs(monkeypatch, tmp_path) -> 
     assert context.metrics["quant"]["backend"] == "onnxruntime_qdq"
     assert context.metrics["export"]["artifacts"][0]["format"] == "tensorrt"
     assert context.metrics["export"]["artifacts"][0]["dry_run"] is True
+    assert context.metrics["export"]["artifacts"][0]["artifact_status"] == "command_only"
 
 
 def test_image_vit_torchao_fp8_recipe_runs_on_cuda_when_available(tmp_path) -> None:

@@ -12,6 +12,7 @@ from .detection import (
     evaluate_detection_model,
     evaluate_detection_runtime_model,
     evaluate_onnx_detection_model,
+    evaluate_tensorrt_detection_model,
     evaluate_detection_predictions,
 )
 from .layer_analysis import (
@@ -49,6 +50,7 @@ __all__ = [
     "evaluate_detection_model",
     "evaluate_detection_runtime_model",
     "evaluate_onnx_detection_model",
+    "evaluate_tensorrt_detection_model",
     "evaluate_detection_predictions",
     "evaluate_pytorch_model",
     "flatten_metrics",

@@ -9,6 +9,8 @@ from .calibration import (
     extract_calibration_samples,
 )
 from .detection import (
+    Coco8DetectionSpec,
+    build_coco8_detection_loader,
     SyntheticDetectionSpec,
     build_image_boxes_transform,
     build_synthetic_detection_loader,
@@ -41,11 +43,13 @@ from .torchvision import (
 
 __all__ = [
     "BatchSplit",
+    "Coco8DetectionSpec",
     "DETECTION_TARGET_KEYS",
     "PromptBatch",
     "SyntheticClassificationSpec",
     "SyntheticDetectionSpec",
     "TorchvisionImageClassificationSpec",
+    "build_coco8_detection_loader",
     "build_data_split",
     "build_example_input",
     "build_hf_text_classification_loader",

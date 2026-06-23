@@ -16,11 +16,13 @@ class ToyDetectionModule(nn.Module):
         *,
         num_classes: int = 3,
         boxes_per_image: int = 2,
+        input_channels: int = 3,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.boxes_per_image = boxes_per_image
-        self.stem = nn.Conv2d(3, 3, kernel_size=1, bias=False)
+        self.input_channels = input_channels
+        self.stem = nn.Conv2d(input_channels, input_channels, kernel_size=1, bias=False)
         with torch.no_grad():
             self.stem.weight.zero_()
 
@@ -48,12 +50,14 @@ class ToyDetectionModule(nn.Module):
 def build_toy_detection_module(
     num_classes: int = 3,
     boxes_per_image: int = 2,
+    input_channels: int = 3,
 ) -> ToyDetectionModule:
     """Build a deterministic detection model for synthetic smoke tests."""
 
     return ToyDetectionModule(
         num_classes=num_classes,
         boxes_per_image=boxes_per_image,
+        input_channels=input_channels,
     )
 
 

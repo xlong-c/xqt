@@ -53,19 +53,23 @@ def _module_structure_name(example_input: Any) -> str:
 
 
 def _resolve_component_model(
-    model: nn.Module,
+    model: nn.Module | None,
     target_path: Optional[str],
 ) -> nn.Module:
+    if model is None:
+        raise ValueError("PyTorch model is required for this quantization component")
     if not target_path:
         return model
     return model.get_submodule(target_path)
 
 
 def _replace_component_model(
-    model: nn.Module,
+    model: nn.Module | None,
     target_path: Optional[str],
     replacement: nn.Module,
 ) -> nn.Module:
+    if model is None:
+        raise ValueError("PyTorch model is required to replace a quantized component")
     if not target_path:
         return replacement
     parent_path, _, attribute = target_path.rpartition(".")
@@ -202,21 +206,15 @@ def _execute_torchao_component(
 
 def _execute_onnx_qdq_component(
     context: XQTContext,
-    root_model: nn.Module,
+    root_model: nn.Module | None,
     component: QuantizationComponentPlan,
     *,
     export_onnx_fn: Any,
     quantize_onnx_qdq_static_fn: Any,
-) -> tuple[nn.Module, QuantizationReport, dict[str, Any]]:
-    component_model = _resolve_component_model(root_model, component.target_path)
+) -> tuple[nn.Module | None, QuantizationReport, dict[str, Any]]:
     dataloader, source_split = _resolve_loader(context, component)
     policy = dict(component.policy)
     batch = next(iter(dataloader))
-    example_input = extract_model_inputs(
-        batch,
-        expected_input_count=infer_model_input_count(component_model),
-    )
-    input_names = list(policy.get("input_names") or default_input_names(example_input))
     artifact_dir = Path(context.config.project.artifact_dir)
     onnx_key = _artifact_key("last_onnx", component.name)
     default_last_onnx = context.artifacts.get(onnx_key)
@@ -224,7 +222,17 @@ def _execute_onnx_qdq_component(
         default_last_onnx = context.artifacts.get("last_onnx")
     onnx_path = policy.get("onnx_path") or default_last_onnx
     export_metadata: dict[str, Any] = {}
+    input_names = list(policy.get("input_names") or [])
+    input_structure = "external_onnx"
     if onnx_path is None:
+        component_model = _resolve_component_model(root_model, component.target_path)
+        example_input = extract_model_inputs(
+            batch,
+            expected_input_count=infer_model_input_count(component_model),
+        )
+        if not input_names:
+            input_names = default_input_names(example_input)
+        input_structure = _module_structure_name(example_input)
         onnx_path = artifact_dir / str(policy.get("source_name", _component_source_name(component)))
         export_result = export_onnx_fn(
             component_model,
@@ -238,6 +246,10 @@ def _execute_onnx_qdq_component(
             pre_export_fusion=policy.get("pre_export_fusion"),
         )
         export_metadata = dict(export_result.metadata)
+    elif not input_names:
+        raise ValueError(
+            "onnxruntime_qdq with external onnx_path requires policy.input_names"
+        )
     output_path = policy.get("output_path")
     if output_path is None:
         output_path = str(artifact_dir / _component_output_name(component))
@@ -273,7 +285,7 @@ def _execute_onnx_qdq_component(
         {
             "component_name": component.name,
             "source_split": source_split,
-            "input_structure": _module_structure_name(example_input),
+            "input_structure": input_structure,
             "policy": policy,
         }
     )
@@ -312,7 +324,17 @@ def _execute_onnx_qdq_component(
     if component.name == "model":
         artifact_updates["quant_onnx"] = result.path
         artifact_updates["last_onnx"] = result.path
-    return context.require_model(), report, artifact_updates
+    return root_model, report, artifact_updates
+
+
+def _component_requires_model(component: QuantizationComponentPlan) -> bool:
+    if component.backend == "torchao":
+        return True
+    if component.backend != "onnxruntime_qdq":
+        return True
+    if component.policy.get("onnx_path") is not None:
+        return False
+    return True
 
 
 def execute_quantization_plan(
@@ -324,7 +346,7 @@ def execute_quantization_plan(
 ) -> QuantizationExecutionResult:
     """Execute a normalized quantization plan and return unified reports."""
 
-    current_model = context.require_model()
+    current_model = context.model if isinstance(context.model, nn.Module) else None
     reports: list[QuantizationReport] = []
     artifacts: dict[str, Any] = {}
     for component in plan.components:
@@ -347,6 +369,11 @@ def execute_quantization_plan(
                 )
             )
             continue
+        if _component_requires_model(component) and current_model is None:
+            raise ValueError(
+                f"PyTorch model is required for quantization component "
+                f"'{component.name}' backend '{component.backend}'"
+            )
         if component.backend == "torchao":
             current_model, report = _execute_torchao_component(current_model, component)
             reports.append(report)

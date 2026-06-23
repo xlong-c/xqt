@@ -301,6 +301,13 @@ def test_preflight_warns_structured_detection_pruning() -> None:
     assert checks["compression.prune.detection_safety"].passed is True
     assert checks["compression.prune.detection_safety"].level == "warning"
     assert checks["compression.prune.detection_safety"].metadata["target_sparsity"] == 0.2
+    assert (
+        checks["compression.prune.detection_safety"].metadata["support"]
+        == "unsupported_in_builtin_executor"
+    )
+    assert "dependency rewrite is not implemented" in checks[
+        "compression.prune.detection_safety"
+    ].message
 
 
 def test_preflight_allows_unstructured_detection_pruning_as_sparsity_only() -> None:

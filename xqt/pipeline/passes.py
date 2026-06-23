@@ -35,6 +35,7 @@ from xqt.eval import (
     write_markdown_report,
 )
 from xqt.export import (
+    benchmark_tensorrt_engine,
     build_tensorrt_engine,
     compare_openvino_outputs,
     compare_onnxruntime_outputs,
@@ -175,6 +176,72 @@ def _prune_module_types(include_module_types: object) -> tuple[type[nn.Module], 
         if module_type_name in names
     )
     return module_types or (nn.Linear, nn.Conv2d)
+
+
+def _prune_module_names(
+    model: nn.Module,
+    module_types: tuple[type[nn.Module], ...],
+) -> list[str]:
+    return [
+        name or "<root>"
+        for name, module in model.named_modules()
+        if isinstance(module, module_types)
+    ]
+
+
+def _detection_structured_prune_skip_report(
+    model: nn.Module,
+    *,
+    method: str,
+    granularity: str | None,
+    scope: str,
+    target_sparsity: float,
+    module_types: tuple[type[nn.Module], ...],
+) -> dict[str, object]:
+    summary = summarize_pruning(model, module_types=module_types).to_dict()
+    skip_reason = (
+        "structured detection pruning is skipped because residual/CSP/C2f/SPPF/"
+        "detect-head dependency rewrite is not implemented in the built-in executor"
+    )
+    return {
+        **summary,
+        "method": method,
+        "granularity": granularity or "channel",
+        "scope": scope,
+        "target_sparsity": target_sparsity,
+        "task_type": "detection",
+        "applied": False,
+        "execution_state": "skipped",
+        "skip_reason": skip_reason,
+        "skipped_modules": [
+            {
+                "module_name": module_name,
+                "reason": skip_reason,
+            }
+            for module_name in _prune_module_names(model, module_types)
+        ],
+        "speedup_claimed": False,
+        "baseline_kind": None,
+    }
+
+
+def _annotate_unstructured_prune_report(
+    report: dict[str, object],
+    *,
+    task_type: str,
+    target_sparsity: float,
+) -> dict[str, object]:
+    report["method"] = "global_l1_unstructured"
+    report["target_sparsity"] = target_sparsity
+    report["applied"] = True
+    report["execution_state"] = "applied"
+    report["task_type"] = task_type
+    if task_type == "detection":
+        report["baseline_kind"] = "unstructured_sparsity_report"
+        report["speedup_claimed"] = False
+        report["skip_reason"] = None
+        report["skipped_modules"] = []
+    return report
 
 
 @register_pass("load_model")
@@ -579,9 +646,39 @@ class PrunePass:
                             "parameter_sparsity": report.parameter_sparsity,
                         },
                     )
-                )
+            )
             return context
         if prune_config.method == "structured":
+            module_types = _prune_module_types(prune_config.params.get("include_module_types"))
+            if context.config.task.type == "detection":
+                report = _detection_structured_prune_skip_report(
+                    model,
+                    method=prune_config.method,
+                    granularity=prune_config.granularity,
+                    scope=prune_config.scope,
+                    target_sparsity=prune_config.target_sparsity,
+                    module_types=module_types,
+                )
+                context.metrics["prune"] = report
+                if context.manifest is not None:
+                    context.manifest.add_metric(
+                        MetricRecord(
+                            name="prune.sparsity",
+                            value=report["sparsity"],
+                            threshold=prune_config.target_sparsity,
+                            passed=False,
+                            metadata={
+                                "method": prune_config.method,
+                                "granularity": prune_config.granularity,
+                                "task_type": "detection",
+                                "execution_state": "skipped",
+                                "skip_reason": report["skip_reason"],
+                                "skipped_module_count": len(report["skipped_modules"]),
+                                "speedup_claimed": False,
+                            },
+                        )
+                    )
+                return context
             validation_loader = context.data.get("validation")
             example_input = None
             if validation_loader is not None:
@@ -728,7 +825,12 @@ class PrunePass:
         )
         remove_pruning_reparameterization(model)
         report = summarize_pruning(model)
-        context.metrics["prune"] = report.to_dict()
+        report_dict = _annotate_unstructured_prune_report(
+            report.to_dict(),
+            task_type=context.config.task.type,
+            target_sparsity=prune_config.target_sparsity,
+        )
+        context.metrics["prune"] = report_dict
         if context.manifest is not None:
             context.manifest.add_metric(
                 MetricRecord(
@@ -736,6 +838,12 @@ class PrunePass:
                     value=report.sparsity,
                     threshold=prune_config.target_sparsity,
                     passed=report.sparsity >= prune_config.target_sparsity,
+                    metadata={
+                        "method": prune_config.method,
+                        "task_type": context.config.task.type,
+                        "baseline_kind": report_dict.get("baseline_kind"),
+                        "speedup_claimed": report_dict.get("speedup_claimed"),
+                    },
                 )
             )
         return context
@@ -748,7 +856,6 @@ class QuantPass:
     name = "quant"
 
     def run(self, context: XQTContext) -> XQTContext:
-        model = context.require_model()
         quant_config = context.config.compression.quant
         if not quant_config.enabled:
             return context
@@ -871,26 +978,42 @@ class ExportPass:
     name = "export"
 
     def run(self, context: XQTContext) -> XQTContext:
-        model = context.require_model()
         if not context.config.export.targets:
             return context
-        export_model, export_guard = _resolve_export_model(context)
+        needs_model = False
+        for target in context.config.export.targets:
+            if target.format in {"torch_export", "torchscript", "onnx"}:
+                needs_model = True
+                break
+            if target.format == "openvino" and target.params.get("onnx_path") is None:
+                needs_model = True
+                break
 
-        dataloader = context.data.get("validation")
-        if dataloader is None:
-            raise ValueError("validation data is required for export")
-        batch = next(iter(dataloader))
-        example_input = extract_model_inputs(
-            batch,
-            expected_input_count=infer_model_input_count(export_model),
-        )
+        export_model = None
+        export_guard: dict[str, object] = {"guarded": False}
+        example_input = None
+        reference_output = None
+        if needs_model:
+            model = context.require_model()
+            del model
+            export_model, export_guard = _resolve_export_model(context)
+            dataloader = context.data.get("validation")
+            if dataloader is None:
+                raise ValueError("validation data is required for export")
+            batch = next(iter(dataloader))
+            example_input = extract_model_inputs(
+                batch,
+                expected_input_count=infer_model_input_count(export_model),
+            )
+            with torch.no_grad():
+                reference_output = first_tensor_output(_call_model(export_model, example_input))
 
         exported: list[dict[str, object]] = []
-        with torch.no_grad():
-            reference_output = first_tensor_output(_call_model(export_model, example_input))
 
         for index, target in enumerate(context.config.export.targets):
             if target.format == "torch_export":
+                if export_model is None or example_input is None:
+                    raise ValueError("torch_export requires a loaded model and validation data")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -943,6 +1066,8 @@ class ExportPass:
                 continue
 
             if target.format == "torchscript":
+                if export_model is None or example_input is None:
+                    raise ValueError("torchscript export requires a loaded model and validation data")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -993,6 +1118,8 @@ class ExportPass:
                 continue
 
             if target.format == "onnx":
+                if export_model is None or example_input is None:
+                    raise ValueError("onnx export requires a loaded model and validation data")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -1014,6 +1141,8 @@ class ExportPass:
                 )
                 diff = None
                 if bool(target.params.get("runtime_diff", True)):
+                    if reference_output is None or example_input is None:
+                        raise ValueError("onnx runtime_diff requires model reference output")
                     diff = compare_onnxruntime_outputs(
                         result.path,
                         reference_output,
@@ -1075,19 +1204,56 @@ class ExportPass:
                     timeout=target.params.get("timeout"),
                     dry_run=bool(target.params.get("dry_run", False)),
                     performance_thresholds=target.params.get("performance_thresholds"),
+                    backend=str(target.params.get("backend", "trtexec")),
+                    workspace_mib=int(target.params.get("workspace_mib", 4096)),
+                    builder_optimization_level=(
+                        int(target.params["builder_optimization_level"])
+                        if target.params.get("builder_optimization_level") is not None
+                        else None
+                    ),
+                    timing_cache_path=target.params.get("timing_cache_path"),
+                    log_level=target.params.get("log_level"),
                 )
                 context.artifacts[f"export_{index}"] = result.engine_path
+                context.artifacts["last_engine"] = result.engine_path
                 tensorrt_metadata = {
+                    "backend": result.metadata.get("backend", "trtexec"),
                     "precision": target.precision,
                     "dry_run": result.dry_run,
                     "command": result.command,
                     "profiles": result.metadata.get("profiles", dict(target.profiles or {})),
                     "source_onnx": str(onnx_path),
+                    "profiling_verbosity": result.metadata.get("profiling_verbosity"),
+                    "builder_flags": result.metadata.get("builder_flags"),
+                    "builder_notes": result.metadata.get("builder_notes"),
+                    "engine_inspector": result.metadata.get("engine_inspector"),
+                    "engine_inspector_error": result.metadata.get("engine_inspector_error"),
                     "performance": result.metadata.get("performance"),
                     "performance_threshold_report": result.metadata.get(
                         "performance_threshold_report"
                     ),
                 }
+                runtime_benchmark = None
+                runtime_benchmark_params = target.params.get("runtime_benchmark")
+                if (
+                    not result.dry_run
+                    and isinstance(runtime_benchmark_params, Mapping)
+                    and bool(runtime_benchmark_params.get("enabled", False))
+                ):
+                    input_shapes = runtime_benchmark_params.get("input_shapes")
+                    if not isinstance(input_shapes, Mapping):
+                        raise ValueError(
+                            "TensorRT runtime_benchmark.enabled=true requires params.runtime_benchmark.input_shapes"
+                        )
+                    runtime_benchmark = benchmark_tensorrt_engine(
+                        result.engine_path,
+                        input_shapes=input_shapes,
+                        warmup=int(runtime_benchmark_params.get("warmup", 10)),
+                        iterations=int(runtime_benchmark_params.get("iterations", 50)),
+                        device=str(runtime_benchmark_params.get("device", "cuda:0")),
+                        fill_random=bool(runtime_benchmark_params.get("fill_random", True)),
+                    ).to_dict()
+                    tensorrt_metadata["runtime_benchmark"] = runtime_benchmark
                 if context.manifest is not None:
                     context.manifest.add_artifact(
                         ArtifactRecord(
@@ -1114,12 +1280,20 @@ class ExportPass:
                         "path": str(result.engine_path),
                         "format": "tensorrt",
                         "dry_run": result.dry_run,
+                        "artifact_status": "command_only" if result.dry_run else "materialized",
+                        "backend_execution": "dry_run" if result.dry_run else "executed",
                         "command": result.command,
                         "checksum": result.checksum,
                         "precision": target.precision,
                         "profiles": result.metadata.get("profiles", dict(target.profiles or {})),
                         "source_onnx": str(onnx_path),
+                        "profiling_verbosity": result.metadata.get("profiling_verbosity"),
+                        "builder_flags": result.metadata.get("builder_flags"),
+                        "builder_notes": result.metadata.get("builder_notes"),
+                        "engine_inspector": result.metadata.get("engine_inspector"),
+                        "engine_inspector_error": result.metadata.get("engine_inspector_error"),
                         "performance": result.metadata.get("performance"),
+                        "runtime_benchmark": runtime_benchmark,
                         "performance_threshold_report": result.metadata.get(
                             "performance_threshold_report"
                         ),
@@ -1132,6 +1306,10 @@ class ExportPass:
                     "last_onnx"
                 )
                 if source is None:
+                    if export_model is None:
+                        raise ValueError(
+                            "OpenVINO export requires params.onnx_path or a loaded model"
+                        )
                     source = export_model
                 output_path = target.output_path
                 if output_path is None:
@@ -1152,6 +1330,10 @@ class ExportPass:
                     and bool(target.params.get("runtime_diff", True))
                     and result.xml_path.is_file()
                 ):
+                    if reference_output is None or example_input is None:
+                        raise ValueError(
+                            "OpenVINO runtime_diff requires a loaded model and validation data"
+                        )
                     diff = compare_openvino_outputs(
                         result.xml_path,
                         reference_output,
@@ -1194,6 +1376,8 @@ class ExportPass:
                         ),
                         "format": "openvino",
                         "dry_run": result.dry_run,
+                        "artifact_status": "command_only" if result.dry_run else "materialized",
+                        "backend_execution": "dry_run" if result.dry_run else "executed",
                         "checksum": result.checksum,
                         "precision": target.precision,
                         "source_path": metadata.get("source_path"),
@@ -1205,6 +1389,8 @@ class ExportPass:
                 continue
 
             if target.format == "executorch":
+                if export_model is None or example_input is None:
+                    raise ValueError("executorch export requires a loaded model and validation data")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -1234,6 +1420,8 @@ class ExportPass:
                         "path": str(result.pte_path),
                         "format": "executorch",
                         "dry_run": result.dry_run,
+                        "artifact_status": "command_only" if result.dry_run else "materialized",
+                        "backend_execution": "dry_run" if result.dry_run else "executed",
                         "checksum": result.checksum,
                     }
                 )
@@ -1283,6 +1471,8 @@ class ExportPass:
                         "paths": [str(path) for path in result.output_paths],
                         "format": "ncnn",
                         "dry_run": result.dry_run,
+                        "artifact_status": "command_only" if result.dry_run else "materialized",
+                        "backend_execution": "dry_run" if result.dry_run else "executed",
                         "command": result.command,
                         "checksums": result.checksums,
                     }
@@ -1330,6 +1520,8 @@ class ExportPass:
                         "path": str(result.output_paths[0]),
                         "format": "mnn",
                         "dry_run": result.dry_run,
+                        "artifact_status": "command_only" if result.dry_run else "materialized",
+                        "backend_execution": "dry_run" if result.dry_run else "executed",
                         "command": result.command,
                         "checksums": result.checksums,
                     }

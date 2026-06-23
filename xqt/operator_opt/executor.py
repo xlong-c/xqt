@@ -281,6 +281,51 @@ def _scan_candidate_report(
     return report
 
 
+def _torch_compile_explain_report(
+    module: nn.Module,
+    inputs: Any,
+) -> dict[str, Any]:
+    """Collect a stable subset of torch._dynamo.explain for report metadata."""
+
+    dynamo = getattr(torch, "_dynamo", None)
+    explain = getattr(dynamo, "explain", None) if dynamo is not None else None
+    if explain is None:
+        return {
+            "status": "unavailable",
+            "error": "torch._dynamo.explain is not available",
+            "graph_count": None,
+            "graph_break_count": None,
+            "break_reasons": [],
+            "op_count": None,
+            "compile_times": None,
+        }
+    normalized = split_example_input(inputs)
+    try:
+        explain_output = explain(module)(*normalized.args, **normalized.kwargs)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "graph_count": None,
+            "graph_break_count": None,
+            "break_reasons": [],
+            "op_count": None,
+            "compile_times": None,
+        }
+    break_reasons = []
+    for reason in getattr(explain_output, "break_reasons", []) or []:
+        break_reasons.append(str(reason))
+    return {
+        "status": "ok",
+        "error": None,
+        "graph_count": getattr(explain_output, "graph_count", None),
+        "graph_break_count": getattr(explain_output, "graph_break_count", None),
+        "break_reasons": break_reasons,
+        "op_count": getattr(explain_output, "op_count", None),
+        "compile_times": str(getattr(explain_output, "compile_times", "")) or None,
+    }
+
+
 def materialize_operator_candidate_model(
     model: nn.Module,
     target: OperatorOptimizationTargetPlan,
@@ -428,6 +473,19 @@ def execute_operator_optimization_plan(
             dtype = str(first_parameter.dtype)
         backend_metadata = _backend_metadata(target, dtype=dtype)
         artifact_paths = _artifact_paths_from_backend_metadata(backend_metadata)
+        compile_explain = (
+            _torch_compile_explain_report(target_model, module_inputs)
+            if target.backend == "torch_compile"
+            else {
+                "status": "not_applicable",
+                "error": None,
+                "graph_count": None,
+                "graph_break_count": None,
+                "break_reasons": [],
+                "op_count": None,
+                "compile_times": None,
+            }
+        )
 
         skip_reason = _quant_runtime_guard(context, target)
         if skip_reason is None and target.backend == "torch_compile" and not capability.available:
@@ -439,6 +497,15 @@ def execute_operator_optimization_plan(
                 skip_reason = f"{target.backend} backend is configured but not implemented in the built-in executor"
         if skip_reason is None and target.backend == "deployment_backend":
             skip_reason = "deployment_backend is metadata-only in the built-in executor"
+        fallback_detail = {
+            "backend": target.backend,
+            "fallback": target.fallback,
+            "reason": skip_reason,
+            "graph_break_count": compile_explain.get("graph_break_count"),
+            "graph_breaks": list(compile_explain.get("break_reasons", [])),
+            "compiled_regions": compile_explain.get("graph_count"),
+            "explain": compile_explain,
+        }
 
         baseline_output = first_tensor_output(
             _call_module_no_grad(target_model, module_inputs)
@@ -476,6 +543,9 @@ def execute_operator_optimization_plan(
                     exportable=capability.exportable,
                     artifact_paths=artifact_paths,
                     metadata={
+                        "execution_state": "skipped",
+                        "fallback_detail": fallback_detail,
+                        "graph_break_report": compile_explain,
                         "options": dict(target.options),
                         "mode": target.mode,
                         "patterns": list(target.patterns),
@@ -520,6 +590,17 @@ def execute_operator_optimization_plan(
                     exportable=capability.exportable,
                     artifact_paths=artifact_paths,
                     metadata={
+                        "execution_state": "fallback",
+                        "fallback_detail": {
+                            "backend": target.backend,
+                            "fallback": target.fallback,
+                            "reason": str(exc),
+                            "graph_break_count": compile_explain.get("graph_break_count"),
+                            "graph_breaks": list(compile_explain.get("break_reasons", [])),
+                            "compiled_regions": compile_explain.get("graph_count"),
+                            "explain": compile_explain,
+                        },
+                        "graph_break_report": compile_explain,
                         "options": dict(target.options),
                         "mode": target.mode,
                         "patterns": list(target.patterns),
@@ -573,6 +654,15 @@ def execute_operator_optimization_plan(
             )
         if applied:
             current_model = _replace_component_model(current_model, target.target_path, compiled_model)
+        fallback_detail = {
+            "backend": target.backend,
+            "fallback": target.fallback,
+            "reason": skip_reason,
+            "graph_break_count": compile_explain.get("graph_break_count"),
+            "graph_breaks": list(compile_explain.get("break_reasons", [])),
+            "compiled_regions": compile_explain.get("graph_count"),
+            "explain": compile_explain,
+        }
         reports.append(
             OperatorOptimizationReport(
                 target_name=target.name,
@@ -593,6 +683,9 @@ def execute_operator_optimization_plan(
                 exportable=capability.exportable,
                 artifact_paths=artifact_paths,
                 metadata={
+                    "execution_state": "executed" if applied else "fallback",
+                    "fallback_detail": fallback_detail,
+                    "graph_break_report": compile_explain,
                     "options": dict(target.options),
                     "mode": target.mode,
                     "patterns": list(target.patterns),

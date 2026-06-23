@@ -551,6 +551,27 @@ def test_decode_detection_output_supports_yolo_raw_shape() -> None:
     assert predictions[0].labels.tolist() == [1]
 
 
+def test_decode_detection_output_supports_hf_rtdetr_mapping() -> None:
+    output = {
+        "logits": torch.tensor([[[0.1, 5.0, -2.0]]], dtype=torch.float32),
+        "pred_boxes": torch.tensor([[[0.5, 0.5, 0.25, 0.25]]], dtype=torch.float32),
+    }
+    predictions = decode_detection_output(
+        output,
+        DetectionPostprocessConfig(
+            format="auto",
+            box_format="cxcywh",
+            score_threshold=0.2,
+            score_activation="sigmoid",
+            max_detections=10,
+        ),
+    )
+
+    assert len(predictions) == 1
+    assert predictions[0].boxes.shape == (1, 4)
+    assert predictions[0].labels.tolist() == [1]
+
+
 def test_evaluate_detection_predictions_reports_map() -> None:
     predictions = decode_detection_output(
         torch.tensor([[[10.0, 10.0, 20.0, 20.0, 0.9, 1.0]]], dtype=torch.float32),
@@ -608,6 +629,10 @@ def test_evaluate_detection_model_uses_detection_targets() -> None:
 
     assert report.samples == 1
     assert report.metrics["map50"] == pytest.approx(1.0)
+    assert report.metadata is not None
+    assert report.metadata["dataset"] == {}
+    assert report.metadata["batches"][0]["orig_sizes"] == [[32, 32]]
+    assert report.metadata["batches"][0]["input_image_sizes"] == [[32, 32]]
 
 
 def test_evaluate_onnx_detection_model_reports_runtime_metrics(tmp_path) -> None:
@@ -651,6 +676,43 @@ def test_evaluate_onnx_detection_model_reports_runtime_metrics(tmp_path) -> None
     assert report.decoded_diff.label_match_rate == pytest.approx(1.0)
     assert report.latency is not None
     assert report.latency["iterations"] == 1
+    assert report.metadata is not None
+    assert report.metadata["batches"][0]["image_paths"] == ["demo.jpg"]
+    assert report.metadata["batches"][0]["orig_sizes"] == [[32, 32]]
+
+
+def test_evaluate_detection_model_preserves_loader_resize_metadata() -> None:
+    class _Loader(list):
+        pass
+
+    dataloader = _Loader(
+        [
+            {
+                "image": torch.randn(1, 3, 32, 32),
+                "boxes": [torch.tensor([[10.0, 10.0, 30.0, 30.0]], dtype=torch.float32)],
+                "labels": [torch.tensor([0], dtype=torch.long)],
+                "orig_size": [torch.tensor([24, 40], dtype=torch.long)],
+            }
+        ]
+    )
+    dataloader.xqt_detection_metadata = {
+        "target": "synthetic_detection",
+        "resize": [32, 32],
+        "resize_mode": "direct_resize",
+        "letterbox": False,
+    }
+
+    report = evaluate_detection_model(
+        FixedDetectionModel(),
+        dataloader,
+        postprocess=DetectionPostprocessConfig(format="yolo_raw", box_format="xyxy", max_detections=10),
+        metric_config=DetectionMetricConfig(iou_thresholds=[0.5], max_detections=10),
+    )
+
+    assert report.metadata is not None
+    assert report.metadata["dataset"]["resize"] == [32, 32]
+    assert report.metadata["dataset"]["resize_mode"] == "direct_resize"
+    assert report.metadata["dataset"]["letterbox"] is False
 
 
 def test_evaluate_onnx_detection_model_casts_fp16_inputs(tmp_path) -> None:
@@ -731,6 +793,8 @@ def test_evaluate_detection_runtime_model_reports_runtime_metrics() -> None:
     assert report.decoded_diff.label_match_rate == pytest.approx(1.0)
     assert report.latency is not None
     assert report.latency["iterations"] == 1
+    assert report.metadata is not None
+    assert report.metadata["batches"][0]["orig_sizes"] == [[32, 32]]
 
 
 def test_report_writers_create_json_csv_and_markdown(tmp_path) -> None:

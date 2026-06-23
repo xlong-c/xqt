@@ -93,6 +93,13 @@ def test_operator_optimization_report_contains_expected_target_fields(tmp_path) 
     assert target["backend"] == "torch_compile"
     assert target["fallback"] == "eager"
     assert target["runtime"] == "pytorch"
+    assert target["metadata"]["execution_state"] in {"fallback", "executed", "skipped"}
+    assert isinstance(target["metadata"]["fallback_detail"], dict)
+    assert isinstance(target["metadata"]["graph_break_report"], dict)
+    assert "graph_break_count" in target["metadata"]["graph_break_report"]
+    assert target["metadata"]["fallback_detail"]["graph_break_count"] == target[
+        "metadata"
+    ]["graph_break_report"]["graph_break_count"]
     assert isinstance(target["latency_before"], dict)
     assert isinstance(target["latency_after"], dict)
     assert isinstance(target["numeric_diff"], dict)

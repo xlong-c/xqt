@@ -99,7 +99,7 @@ class QuantizationReport:
 class QuantizationExecutionResult:
     """Executed quantization result across one or more components."""
 
-    model: nn.Module
+    model: nn.Module | None
     reports: list[QuantizationReport] = field(default_factory=list)
     artifacts: dict[str, Any] = field(default_factory=dict)
 

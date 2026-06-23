@@ -1,0 +1,127 @@
+project:
+  name: yolo_detection_trt_qdq_practice
+  artifact_dir: artifacts/xqt/detection/yolo_trt_qdq_practice
+
+model:
+  target: xqt.model.build_toy_detection_module
+  params:
+    num_classes: 80
+    input_channels: 3
+  dtype: float32
+  device: cpu
+
+task:
+  type: detection
+  detection_postprocess:
+    format: yolo_raw
+    box_format: cxcywh
+    score_threshold: 0.25
+    iou_threshold: 0.45
+    max_detections: 300
+    score_activation: sigmoid
+    has_objectness: false
+    class_agnostic_nms: false
+  detection_metric:
+    iou_thresholds: [0.5, 0.75, 0.95]
+    max_detections: 100
+  params:
+    imgsz: 640
+
+data_splits:
+  calibration:
+    target: synthetic_detection
+    sample_limit: 4
+    batch_size: 1
+    params:
+      image_shape: [3, 640, 640]
+      num_classes: 80
+      boxes_per_image: 3
+      seed: 40
+  validation:
+    target: synthetic_detection
+    sample_limit: 4
+    batch_size: 1
+    params:
+      image_shape: [3, 640, 640]
+      num_classes: 80
+      boxes_per_image: 3
+      seed: 41
+
+stages:
+  - name: baseline_eval
+    kind: eval
+    split: validation
+    params:
+      baseline: true
+
+  - name: export_fp32_onnx
+    kind: export
+    split: validation
+    save_model: false
+    params:
+      targets:
+        - format: onnx
+          output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/export_fp32_onnx/toy_detection_fp32.onnx
+          opset: 18
+          params:
+            input_names: [images]
+            output_names: [predictions]
+            dynamo: false
+            runtime_diff: false
+
+  - name: quant_qdq
+    kind: quant
+    calibration_split: calibration
+    validation_split: validation
+    save_model: false
+    params:
+      backend: onnxruntime_qdq
+      strategy: static_int8
+      policy:
+        source_name: toy_detection_source.onnx
+        output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/toy_detection_qdq.onnx
+        input_names: [images]
+        output_names: [predictions]
+        dynamo: false
+        sample_limit: 4
+        activation_type: QUInt8
+        weight_type: QInt8
+        op_types_to_quantize: [Conv]
+
+  - name: qdq_runtime_eval
+    kind: runtime_eval
+    split: validation
+    compare_to: baseline_eval
+    save_model: false
+    params:
+      artifact: quant_onnx
+      input_names: [images]
+      max_batches: 2
+      warmup: 0
+      iterations: 1
+
+  - name: build_trt_int8_engine
+    kind: deploy
+    split: validation
+    save_model: false
+    params:
+      targets:
+        - format: tensorrt
+          output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/deploy/toy_detection_qdq.engine
+          precision: int8
+          profiles:
+            images:
+              min: [1, 3, 640, 640]
+              opt: [1, 3, 640, 640]
+              max: [1, 3, 640, 640]
+          params:
+            backend: python_api
+            dry_run: true
+            onnx_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/toy_detection_qdq.onnx
+            runtime_benchmark:
+              enabled: false
+              input_shapes:
+                images: [1, 3, 640, 640]
+              warmup: 10
+              iterations: 50
+              device: cuda:0

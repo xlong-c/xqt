@@ -10,6 +10,8 @@ from torch.utils.data import Subset
 from xdl.config.builder import build_collate_fn, build_dataloader, build_dataset
 
 from .detection import (
+    Coco8DetectionSpec,
+    build_coco8_detection_loader,
     SyntheticDetectionSpec,
     build_synthetic_detection_loader,
     build_xdl_detection_loader,
@@ -94,8 +96,31 @@ def _build_synthetic_detection_split(
         num_classes=int(params.get("num_classes", 3)),
         boxes_per_image=int(params.get("boxes_per_image", 2)),
         seed=int(params.get("seed", default_seed)),
+        include_model_inputs=bool(params.get("include_model_inputs", False)),
+        input_image_key=str(params.get("input_image_key", "images")),
+        input_size_key=str(params.get("input_size_key", "orig_target_sizes")),
     )
     return build_synthetic_detection_loader(spec)
+
+
+def _build_coco8_detection_split(split: Any) -> Any:
+    params = _as_mapping(_read_split_field(split, "params", {}))
+    spec = Coco8DetectionSpec(
+        root=str(_read_split_field(split, "root", "data/coco8")),
+        split=str(params.get("split", "val")),
+        batch_size=int(_read_split_field(split, "batch_size", 1)),
+        sample_limit=_read_split_field(split, "sample_limit", None),
+        include_model_inputs=bool(params.get("include_model_inputs", False)),
+        input_image_key=str(params.get("input_image_key", "images")),
+        input_size_key=str(params.get("input_size_key", "orig_target_sizes")),
+        normalize=bool(params.get("normalize", True)),
+        resize=(
+            tuple(int(value) for value in params["resize"])
+            if params.get("resize") is not None
+            else (640, 640)
+        ),
+    )
+    return build_coco8_detection_loader(spec)
 
 
 def _build_xdl_dataset_split(split: Any) -> Any:
@@ -144,6 +169,8 @@ def build_data_split(
             split,
             default_seed=default_seed,
         )
+    if target == "coco8_detection":
+        return _build_coco8_detection_split(split)
     if target == "hf_text_classification":
         return build_hf_text_classification_loader(
             split_name,

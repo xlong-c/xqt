@@ -545,8 +545,12 @@ def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) ->
     report.add(
         "compression.prune.detection_safety",
         True,
-        "structured detection pruning requires model-specific dependency checks at plan time",
+        (
+            "structured detection pruning is guarded; residual/CSP/C2f/SPPF/detect head "
+            "dependency rewrite is not implemented"
+        ),
         level="warning",
+        support="unsupported_in_builtin_executor",
         **metadata,
     )
 

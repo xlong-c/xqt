@@ -13,6 +13,7 @@ from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
 from xqt.core.schema import DetectionMetricConfig, DetectionPostprocessConfig
 from xqt.data.input_utils import split_batch
+from xqt.export import create_tensorrt_runtime_session, execute_tensorrt_engine, execute_tensorrt_session
 from xqt.export.input_utils import build_onnx_feed, default_input_names, first_tensor_output
 from xqt.eval.compare import TensorDiff, compare_tensors
 
@@ -40,12 +41,14 @@ class DetectionEvaluationReport:
     samples: int
     metrics: dict[str, float]
     predictions: list[DetectionPrediction]
+    metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "samples": self.samples,
             "metrics": dict(self.metrics),
             "prediction_count": len(self.predictions),
+            "metadata": dict(self.metadata or {}),
         }
 
 
@@ -60,6 +63,7 @@ class DetectionRuntimeEvaluationReport:
     raw_output_diff: Optional[TensorDiff] = None
     decoded_diff: Optional[DecodedDetectionDiff] = None
     latency: Optional[dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +78,7 @@ class DetectionRuntimeEvaluationReport:
                 self.decoded_diff.to_dict() if self.decoded_diff is not None else None
             ),
             "latency": dict(self.latency or {}),
+            "metadata": dict(self.metadata or {}),
         }
 
 
@@ -182,6 +187,23 @@ def _to_tensor_list(value: Any) -> list[torch.Tensor]:
     raise TypeError(f"expected tensor or list of tensors, got {type(value).__name__}")
 
 
+def _per_image_input_sizes(inputs: Any, batch_size: int) -> list[tuple[int, int]] | None:
+    tensor: torch.Tensor | None = None
+    if isinstance(inputs, torch.Tensor):
+        tensor = inputs
+    elif isinstance(inputs, Mapping):
+        for key in ("pixel_values", "images", "image", "input"):
+            candidate = inputs.get(key)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+    if tensor is None or tensor.ndim < 4:
+        return None
+    height = int(tensor.shape[-2])
+    width = int(tensor.shape[-1])
+    return [(height, width) for _ in range(batch_size)]
+
+
 def _normalize_detection_targets(targets: Any) -> list[dict[str, torch.Tensor]]:
     if not isinstance(targets, Mapping):
         raise TypeError("detection targets must be a mapping with boxes and labels")
@@ -200,6 +222,46 @@ def _normalize_detection_targets(targets: Any) -> list[dict[str, torch.Tensor]]:
             item["orig_size"] = orig_sizes[index].long()
         normalized.append(item)
     return normalized
+
+
+def _detection_loader_metadata(dataloader: Any) -> dict[str, Any]:
+    metadata = getattr(dataloader, "xqt_detection_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return {}
+    return {str(key): value for key, value in metadata.items()}
+
+
+def _image_paths_from_batch(batch: Any) -> list[str]:
+    if not isinstance(batch, Mapping):
+        return []
+    value = batch.get("image_path")
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def _batch_detection_metadata(
+    batch: Any,
+    inputs: Any,
+    targets: Sequence[Mapping[str, torch.Tensor]],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "batch_size": int(len(targets)),
+        "input_image_sizes": (
+            [list(item) for item in _per_image_input_sizes(inputs, len(targets))] or None
+        ),
+        "orig_sizes": [
+            [int(dim) for dim in target["orig_size"].tolist()]
+            for target in targets
+            if "orig_size" in target
+        ],
+    }
+    image_paths = _image_paths_from_batch(batch)
+    if image_paths:
+        metadata["image_paths"] = image_paths
+    return metadata
 
 
 def _score_activation(logits: torch.Tensor, activation: str) -> torch.Tensor:
@@ -247,6 +309,8 @@ def _apply_nms(
 def decode_detection_output(
     output: Any,
     config: DetectionPostprocessConfig,
+    *,
+    image_sizes: Optional[Sequence[tuple[int, int]]] = None,
 ) -> list[DetectionPrediction]:
     """Decode model outputs into per-image detections."""
 
@@ -259,6 +323,39 @@ def decode_detection_output(
                     labels=output["labels"].long(),
                 )
             ]
+        if {"logits", "pred_boxes"} <= set(output.keys()):
+            logits = output["logits"]
+            pred_boxes = output["pred_boxes"]
+            if not isinstance(logits, torch.Tensor) or not isinstance(pred_boxes, torch.Tensor):
+                raise TypeError("RT-DETR style detection output must use tensor logits/pred_boxes")
+            if logits.ndim != 3 or pred_boxes.ndim != 3:
+                raise TypeError("RT-DETR style detection output tensors must have shape [B, N, C]")
+            predictions: list[DetectionPrediction] = []
+            for batch_index, (image_logits, image_boxes) in enumerate(
+                zip(logits, pred_boxes, strict=False)
+            ):
+                scores_per_class = _score_activation(image_logits.float(), config.score_activation)
+                scores, labels = scores_per_class.max(dim=-1)
+                boxes_input = image_boxes.float()
+                if (
+                    image_sizes is not None
+                    and batch_index < len(image_sizes)
+                    and boxes_input.numel() > 0
+                    and float(boxes_input.max().item()) <= 1.5
+                ):
+                    height, width = image_sizes[batch_index]
+                    scale = torch.tensor(
+                        [float(width), float(height), float(width), float(height)],
+                        dtype=boxes_input.dtype,
+                        device=boxes_input.device,
+                    )
+                    boxes_input = boxes_input * scale
+                boxes = _boxes_to_xyxy(boxes_input, config.box_format)
+                keep = scores >= config.score_threshold
+                predictions.append(
+                    _apply_nms(boxes[keep], scores[keep], labels[keep], config)
+                )
+            return predictions
         if "logits" in output:
             output = output["logits"]
 
@@ -424,6 +521,7 @@ def evaluate_detection_model(
 
     decoded_predictions: list[DetectionPrediction] = []
     decoded_targets: list[dict[str, torch.Tensor]] = []
+    batch_metadata: list[dict[str, Any]] = []
     with torch.no_grad():
         for batch_index, batch in enumerate(dataloader):
             if max_batches is not None and batch_index >= max_batches:
@@ -432,8 +530,13 @@ def evaluate_detection_model(
             if split.targets is None:
                 raise ValueError("detection evaluation requires labeled targets")
             inputs = _move_to_device(split.inputs, torch_device)
+            normalized_targets = _normalize_detection_targets(split.targets)
             outputs = _call_model(model, inputs)
-            predictions = decode_detection_output(outputs, postprocess)
+            predictions = decode_detection_output(
+                outputs,
+                postprocess,
+                image_sizes=_per_image_input_sizes(inputs, len(normalized_targets)),
+            )
             decoded_predictions.extend(
                 DetectionPrediction(
                     boxes=item.boxes.detach().cpu(),
@@ -442,7 +545,10 @@ def evaluate_detection_model(
                 )
                 for item in predictions
             )
-            decoded_targets.extend(_normalize_detection_targets(split.targets))
+            decoded_targets.extend(normalized_targets)
+            batch_metadata.append(
+                _batch_detection_metadata(batch, inputs, normalized_targets)
+            )
 
     if was_training:
         model.train()
@@ -455,6 +561,10 @@ def evaluate_detection_model(
         samples=len(decoded_targets),
         metrics=metrics,
         predictions=decoded_predictions,
+        metadata={
+            "dataset": _detection_loader_metadata(dataloader),
+            "batches": batch_metadata,
+        },
     )
 
 
@@ -493,6 +603,7 @@ def evaluate_detection_runtime_model(
     raw_reference_tensors: list[torch.Tensor] = []
     raw_candidate_tensors: list[torch.Tensor] = []
     benchmark_inputs: Any = None
+    batch_metadata: list[dict[str, Any]] = []
 
     with torch.no_grad():
         for batch_index, batch in enumerate(dataloader):
@@ -502,10 +613,15 @@ def evaluate_detection_runtime_model(
             if split.targets is None:
                 raise ValueError("detection runtime evaluation requires labeled targets")
             inputs = _move_to_device(split.inputs, torch_device)
+            normalized_targets = _normalize_detection_targets(split.targets)
             benchmark_inputs = inputs if benchmark_inputs is None else benchmark_inputs
             outputs = _call_model(model, inputs)
             raw_candidate_tensors.append(first_tensor_output(outputs).detach().cpu())
-            predictions = decode_detection_output(outputs, postprocess)
+            predictions = decode_detection_output(
+                outputs,
+                postprocess,
+                image_sizes=_per_image_input_sizes(inputs, len(normalized_targets)),
+            )
             decoded_predictions.extend(
                 DetectionPrediction(
                     boxes=item.boxes.detach().cpu(),
@@ -514,7 +630,10 @@ def evaluate_detection_runtime_model(
                 )
                 for item in predictions
             )
-            decoded_targets.extend(_normalize_detection_targets(split.targets))
+            decoded_targets.extend(normalized_targets)
+            batch_metadata.append(
+                _batch_detection_metadata(batch, inputs, normalized_targets)
+            )
 
             if reference_model is not None:
                 reference_output = _call_model(reference_model, inputs)
@@ -527,7 +646,11 @@ def evaluate_detection_runtime_model(
                         scores=item.scores.detach().cpu(),
                         labels=item.labels.detach().cpu(),
                     )
-                    for item in decode_detection_output(reference_output, postprocess)
+                    for item in decode_detection_output(
+                        reference_output,
+                        postprocess,
+                        image_sizes=_per_image_input_sizes(inputs, len(normalized_targets)),
+                    )
                 )
 
     if was_training:
@@ -570,6 +693,10 @@ def evaluate_detection_runtime_model(
         raw_output_diff=raw_output_diff,
         decoded_diff=decoded_diff,
         latency=latency,
+        metadata={
+            "dataset": _detection_loader_metadata(dataloader),
+            "batches": batch_metadata,
+        },
     )
 
 
@@ -647,6 +774,7 @@ def evaluate_onnx_detection_model(
     raw_reference_tensors: list[torch.Tensor] = []
     raw_candidate_tensors: list[torch.Tensor] = []
     benchmark_inputs: Any = None
+    batch_metadata: list[dict[str, Any]] = []
 
     if reference_model is not None:
         reference_model.to(torch_device)
@@ -659,6 +787,7 @@ def evaluate_onnx_detection_model(
         if split.targets is None:
             raise ValueError("detection runtime evaluation requires labeled targets")
         inputs = _sanitize_runtime_inputs(split.inputs)
+        normalized_targets = _normalize_detection_targets(split.targets)
         normalized_names = (
             resolved_input_names or default_input_names(inputs)
         )
@@ -673,7 +802,14 @@ def evaluate_onnx_detection_model(
         )
         ort_tensor = torch.from_numpy(np.asarray(ort_outputs[0]))
         raw_candidate_tensors.append(ort_tensor.detach().cpu())
-        predictions = decode_detection_output(ort_tensor, postprocess)
+        image_sizes = _per_image_input_sizes(inputs, len(normalized_targets))
+        predictions = decode_detection_output(
+            {"logits": torch.from_numpy(np.asarray(ort_outputs[0])), "pred_boxes": torch.from_numpy(np.asarray(ort_outputs[1]))}
+            if len(ort_outputs) >= 2 and np.asarray(ort_outputs[0]).ndim == 3 and np.asarray(ort_outputs[1]).ndim == 3
+            else ort_tensor,
+            postprocess,
+            image_sizes=image_sizes,
+        )
         decoded_predictions.extend(
             DetectionPrediction(
                 boxes=item.boxes.detach().cpu(),
@@ -682,7 +818,10 @@ def evaluate_onnx_detection_model(
             )
             for item in predictions
         )
-        decoded_targets.extend(_normalize_detection_targets(split.targets))
+        decoded_targets.extend(normalized_targets)
+        batch_metadata.append(
+            _batch_detection_metadata(batch, inputs, normalized_targets)
+        )
 
         if reference_model is not None:
             moved_inputs = _move_to_device(inputs, torch_device)
@@ -695,7 +834,11 @@ def evaluate_onnx_detection_model(
                     scores=item.scores.detach().cpu(),
                     labels=item.labels.detach().cpu(),
                 )
-                for item in decode_detection_output(reference_output, postprocess)
+                for item in decode_detection_output(
+                    reference_output,
+                    postprocess,
+                    image_sizes=image_sizes,
+                )
             )
 
     metrics = evaluate_detection_predictions(
@@ -743,6 +886,173 @@ def evaluate_onnx_detection_model(
         raw_output_diff=raw_output_diff,
         decoded_diff=decoded_diff,
         latency=latency,
+        metadata={
+            "dataset": _detection_loader_metadata(dataloader),
+            "batches": batch_metadata,
+        },
+    )
+
+
+def evaluate_tensorrt_detection_model(
+    engine_path: str,
+    dataloader: Iterable[Any],
+    *,
+    postprocess: DetectionPostprocessConfig,
+    metric_config: DetectionMetricConfig,
+    input_names: Optional[Sequence[str]] = None,
+    output_names: Optional[Sequence[str]] = None,
+    reference_model: Optional[torch.nn.Module] = None,
+    device: str | torch.device = "cuda:0",
+    max_batches: Optional[int] = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+    benchmark_warmup: int = 0,
+    benchmark_iterations: int = 1,
+    benchmark_sync_cuda: bool = True,
+) -> DetectionRuntimeEvaluationReport:
+    """Run TensorRT detection evaluation and optional diff checks."""
+
+    torch_device = torch.device(device)
+    resolved_input_names = list(input_names or [])
+    resolved_output_names = [str(name) for name in output_names] if output_names else None
+    decoded_predictions: list[DetectionPrediction] = []
+    decoded_targets: list[dict[str, torch.Tensor]] = []
+    reference_predictions: list[DetectionPrediction] = []
+    raw_reference_tensors: list[torch.Tensor] = []
+    raw_candidate_tensors: list[torch.Tensor] = []
+    benchmark_inputs: dict[str, torch.Tensor] | None = None
+    batch_metadata: list[dict[str, Any]] = []
+
+    if reference_model is not None:
+        reference_model.to(torch_device)
+        reference_model.eval()
+
+    trt_session = create_tensorrt_runtime_session(engine_path, device=str(device))
+
+    for batch_index, batch in enumerate(dataloader):
+        if max_batches is not None and batch_index >= max_batches:
+            break
+        split = split_batch(batch)
+        if split.targets is None:
+            raise ValueError("detection runtime evaluation requires labeled targets")
+        inputs = _sanitize_runtime_inputs(split.inputs)
+        normalized_targets = _normalize_detection_targets(split.targets)
+        normalized_names = resolved_input_names or default_input_names(inputs)
+        tensor_inputs = {}
+        if isinstance(inputs, Mapping):
+            for name in normalized_names:
+                value = inputs.get(name)
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(f"TensorRT detection runtime input '{name}' must be a tensor")
+                tensor_inputs[str(name)] = value
+        elif isinstance(inputs, torch.Tensor):
+            if len(normalized_names) != 1:
+                raise TypeError("TensorRT tensor input requires exactly one input name")
+            tensor_inputs[str(normalized_names[0])] = inputs
+        else:
+            raise TypeError("TensorRT detection runtime expects tensor or mapping inputs")
+        benchmark_inputs = tensor_inputs if benchmark_inputs is None else benchmark_inputs
+
+        execution = execute_tensorrt_session(trt_session, inputs=tensor_inputs)
+        output_items = list(execution.output_tensors.items())
+        if resolved_output_names is not None:
+            output_items = [
+                (name, execution.output_tensors[name])
+                for name in resolved_output_names
+                if name in execution.output_tensors
+            ]
+        if not output_items:
+            raise XQTBackendError("TensorRT detection runtime produced no outputs")
+
+        candidate_output: Any
+        if len(output_items) >= 2:
+            candidate_output = {
+                "logits": output_items[0][1],
+                "pred_boxes": output_items[1][1],
+            }
+            raw_candidate_tensors.append(output_items[0][1].detach().cpu())
+        else:
+            candidate_output = output_items[0][1]
+            raw_candidate_tensors.append(output_items[0][1].detach().cpu())
+        image_sizes = _per_image_input_sizes(inputs, len(normalized_targets))
+        predictions = decode_detection_output(
+            candidate_output,
+            postprocess,
+            image_sizes=image_sizes,
+        )
+        decoded_predictions.extend(
+            DetectionPrediction(
+                boxes=item.boxes.detach().cpu(),
+                scores=item.scores.detach().cpu(),
+                labels=item.labels.detach().cpu(),
+            )
+            for item in predictions
+        )
+        decoded_targets.extend(normalized_targets)
+        batch_metadata.append(
+            _batch_detection_metadata(batch, inputs, normalized_targets)
+        )
+
+        if reference_model is not None:
+            moved_inputs = _move_to_device(inputs, torch_device)
+            with torch.no_grad():
+                reference_output = _call_model(reference_model, moved_inputs)
+            raw_reference_tensors.append(first_tensor_output(reference_output).detach().cpu())
+            reference_predictions.extend(
+                DetectionPrediction(
+                    boxes=item.boxes.detach().cpu(),
+                    scores=item.scores.detach().cpu(),
+                    labels=item.labels.detach().cpu(),
+                )
+                for item in decode_detection_output(
+                    reference_output,
+                    postprocess,
+                    image_sizes=image_sizes,
+                )
+            )
+
+    metrics = evaluate_detection_predictions(
+        decoded_predictions,
+        decoded_targets,
+        metric_config,
+    )
+    raw_output_diff = None
+    decoded_diff = None
+    if raw_reference_tensors and raw_candidate_tensors:
+        raw_output_diff = compare_tensors(
+            torch.cat([tensor.reshape(-1) for tensor in raw_reference_tensors]),
+            torch.cat([tensor.reshape(-1) for tensor in raw_candidate_tensors]),
+            atol=atol,
+            rtol=rtol,
+        )
+    if reference_predictions:
+        decoded_diff = compare_decoded_detections(reference_predictions, decoded_predictions)
+
+    latency = None
+    if benchmark_inputs is not None:
+        latency = benchmark_callable(
+            lambda: execute_tensorrt_session(
+                trt_session,
+                inputs=benchmark_inputs,
+            ).output_tensors,
+            warmup=benchmark_warmup,
+            iterations=benchmark_iterations,
+            sync_cuda=benchmark_sync_cuda,
+            device=str(device),
+        ).to_dict()
+
+    return DetectionRuntimeEvaluationReport(
+        runtime="tensorrt",
+        samples=len(decoded_targets),
+        metrics=metrics,
+        predictions=decoded_predictions,
+        raw_output_diff=raw_output_diff,
+        decoded_diff=decoded_diff,
+        latency=latency,
+        metadata={
+            "dataset": _detection_loader_metadata(dataloader),
+            "batches": batch_metadata,
+        },
     )
 
 
@@ -756,5 +1066,6 @@ __all__ = [
     "evaluate_detection_model",
     "evaluate_detection_runtime_model",
     "evaluate_onnx_detection_model",
+    "evaluate_tensorrt_detection_model",
     "evaluate_detection_predictions",
 ]
