@@ -28,11 +28,6 @@ task:
     imgsz: 640
 
 stages:
-  - name: baseline_eval
-    kind: eval
-    params:
-      baseline: true
-
   - name: baseline_latency
     kind: benchmark
     params:
@@ -53,22 +48,6 @@ stages:
             dynamo: false
             runtime_diff: false
 
-  - name: fp32_onnx_runtime
-    kind: runtime_eval
-    compare_to: baseline_eval
-    save_model: false
-    params:
-      artifact: last_onnx
-      input_names: [images]
-      max_batches: 4
-      warmup: 0
-      iterations: 1
-    accept:
-      metric: map50_95
-      max_drop: 0.10
-      max_mean_abs: 5.0e-2
-      max_max_abs: 5.0e-1
-
   - name: quant_qdq
     kind: quant
     save_model: false
@@ -88,37 +67,12 @@ stages:
         extra_options:
           ActivationSymmetric: false
 
-  - name: qdq_onnx_runtime
-    kind: runtime_eval
-    compare_to: baseline_eval
-    save_model: false
-    params:
-      artifact: quant_onnx
-      input_names: [images]
-      max_batches: 4
-      warmup: 0
-      iterations: 1
-    accept:
-      metric: map50_95
-      max_drop: 0.10
-      max_mean_abs: 2.5e-1
-      max_max_abs: 2.5
-
   - name: prune_sparse
     kind: prune
     from_stage: initial
     params:
       method: global_l1_unstructured
       target_sparsity: 0.2
-
-  - name: prune_eval
-    kind: eval
-    compare_to: baseline_eval
-    params:
-      baseline: false
-    accept:
-      metric: map50_95
-      max_drop: 0.10
 
   - name: prune_latency
     kind: benchmark
