@@ -11,7 +11,7 @@ from xdl.metric import DetectionMeanAveragePrecision
 from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
 from xqt.core.schema import DetectionMetricConfig, DetectionPostprocessConfig
-from xqt.data.input_utils import split_batch
+from xqt.core.inputs import split_batch
 from xqt.export import create_tensorrt_runtime_session, execute_tensorrt_engine, execute_tensorrt_session
 from xqt.export.input_utils import build_onnx_feed, default_input_names, first_tensor_output
 from xqt.eval.compare import TensorDiff, compare_tensors

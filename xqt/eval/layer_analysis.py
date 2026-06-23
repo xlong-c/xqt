@@ -276,7 +276,7 @@ def layer_statistics_rows(
     if not module_names:
         return []
 
-    from xqt.distill.hooks import collect_module_outputs
+    from xqt.model.hooks import collect_module_outputs
 
     forward_args, forward_kwargs = _split_example_input(example_input)
     reference_outputs = collect_module_outputs(
@@ -368,7 +368,7 @@ def build_avoid_list(
         rows_to_merge.append((layer_name, None, row))
 
     for layer_name, error_row, sensitivity_row in rows_to_merge:
-        suggested_actions: list[str] = ["distill_feature"]
+        suggested_actions: list[str] = ["review_model_transform"]
         recommendation = error_row.get("recommendation") if error_row is not None else None
         sensitivity_recommendation = sensitivity_row.get("recommendation")
         if (

@@ -1,4 +1,4 @@
-"""Adapters between XDL training objects and XQT contexts."""
+"""Adapters from XDL model artifacts to XQT contexts."""
 
 from __future__ import annotations
 
@@ -17,34 +17,15 @@ from xqt.pipeline.runner import create_context
 def xdl_setup_to_xqt_context(
     setup: Any,
     config: ConfigInput | XQTConfig,
-    *,
-    use_validation_loader: bool = True,
-    include_test_loader: bool = False,
-    teacher: Optional[nn.Module] = None,
 ) -> XQTContext:
-    """Create an XQT context from an XDL TrainSetup-like object."""
-
-    data: dict[str, Any] = {}
-    train_loader = getattr(setup, "train_loader", None)
-    if train_loader is not None:
-        data["train"] = train_loader
-    val_loader = getattr(setup, "val_loader", None)
-    if use_validation_loader and val_loader is not None:
-        data["validation"] = val_loader
-    test_loader = getattr(setup, "test_loader", None)
-    if include_test_loader and test_loader is not None:
-        data["test"] = test_loader
+    """Create an XQT context from the model in a TrainSetup-like object."""
 
     context = create_context(
         config,
         model=getattr(setup, "model", None),
-        teacher=teacher,
-        data=data,
         metrics={
             "xdl_setup": {
                 "device": getattr(setup, "device", None),
-                "batch_size": getattr(setup, "batch_size", None),
-                "num_epochs": getattr(setup, "num_epochs", None),
             }
         },
     )
@@ -90,8 +71,6 @@ def xdl_checkpoint_to_xqt_context(
     map_location: str | torch.device = "cpu",
     state_key: Optional[str] = None,
     strict: bool = True,
-    data: Optional[Mapping[str, Any]] = None,
-    teacher: Optional[nn.Module] = None,
 ) -> XQTContext:
     """Load a checkpoint and create an XQT context."""
 
@@ -107,8 +86,6 @@ def xdl_checkpoint_to_xqt_context(
     context = create_context(
         config,
         model=model,
-        teacher=teacher,
-        data=data,
     )
     if context.manifest is not None:
         context.manifest.source_checkpoint = str(Path(checkpoint_path))

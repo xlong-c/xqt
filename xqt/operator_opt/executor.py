@@ -12,9 +12,9 @@ from torch import nn
 
 from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
+from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import OperatorOptimizationConfig
 from xqt.core.types import XQTContext
-from xqt.data import extract_model_inputs, infer_model_input_count
 from xqt.eval.compare import compare_tensors
 from xqt.export.input_utils import first_tensor_output, split_example_input
 from xqt.quant.capability import describe_quant_backend_capability
@@ -431,10 +431,9 @@ def execute_operator_optimization_plan(
             artifacts={},
         )
 
-    dataloader = context.data.get("validation")
-    if dataloader is None:
-        raise ValueError("validation data is required for operator optimization")
-    root_batch = next(iter(dataloader))
+    if context.example_inputs is None:
+        raise ValueError("example_inputs are required for operator optimization")
+    root_batch = context.example_inputs
     root_inputs = _move_to_device(
         extract_model_inputs(
             root_batch,

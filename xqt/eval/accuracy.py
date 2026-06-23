@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from xdl.metric import TopKAccuracy as _XDLTopKAccuracy
-from xqt.data.input_utils import split_batch
+from xqt.core.inputs import split_batch
 
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
