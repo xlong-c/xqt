@@ -289,16 +289,6 @@ def _validate_config(config: XQTConfig) -> None:
         raise XQTConfigError(
             "task.detection_postprocess.score_activation must be identity, sigmoid, or softmax"
         )
-    metric_config = config.task.detection_metric
-    if metric_config.max_detections <= 0:
-        raise XQTConfigError("task.detection_metric.max_detections must be positive")
-    if not metric_config.iou_thresholds:
-        raise XQTConfigError("task.detection_metric.iou_thresholds must not be empty")
-    for threshold in metric_config.iou_thresholds:
-        if threshold < 0 or threshold > 1:
-            raise XQTConfigError(
-                "task.detection_metric.iou_thresholds must contain values in [0, 1]"
-            )
     _validate_quant_config(config.compression.quant)
     _validate_operator_optimization_config(config)
     if config.compression.prune.target_sparsity < 0 or config.compression.prune.target_sparsity > 1:

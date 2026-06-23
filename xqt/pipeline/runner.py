@@ -95,10 +95,6 @@ def create_manifest(config: XQTConfig) -> ArtifactManifest:
                 "class_agnostic_nms": config.task.detection_postprocess.class_agnostic_nms,
                 "rescale_to_original": config.task.detection_postprocess.rescale_to_original,
             },
-            "detection_metric": {
-                "iou_thresholds": list(config.task.detection_metric.iou_thresholds),
-                "max_detections": config.task.detection_metric.max_detections,
-            },
             "params": dict(config.task.params),
         },
         config_snapshot=xqt_config_to_dict(config),

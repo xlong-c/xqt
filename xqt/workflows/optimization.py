@@ -47,8 +47,6 @@ STAGE_KINDS = {
 class StageAcceptanceConfig:
     """Acceptance thresholds for one model-side stage."""
 
-    metric: str = ""
-    max_drop: Optional[float] = None
     min_speedup: Optional[float] = None
     max_mean_abs: Optional[float] = None
     max_max_abs: Optional[float] = None

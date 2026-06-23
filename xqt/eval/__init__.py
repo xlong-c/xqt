@@ -1,19 +1,11 @@
 """Evaluation helpers for XQT."""
 
-from .accuracy import EvaluationReport, evaluate_pytorch_model, topk_accuracy
 from .compare import TensorDiff, TensorSummary, compare_tensors, summarize_tensor
 from .detection import (
     DecodedDetectionDiff,
-    DetectionEvaluationReport,
-    DetectionRuntimeEvaluationReport,
     DetectionPrediction,
     compare_decoded_detections,
     decode_detection_output,
-    evaluate_detection_model,
-    evaluate_detection_runtime_model,
-    evaluate_onnx_detection_model,
-    evaluate_tensorrt_detection_model,
-    evaluate_detection_predictions,
 )
 from .layer_analysis import (
     build_avoid_list,
@@ -37,22 +29,13 @@ from .report import (
 
 __all__ = [
     "DecodedDetectionDiff",
-    "DetectionEvaluationReport",
-    "DetectionRuntimeEvaluationReport",
     "DetectionPrediction",
-    "EvaluationReport",
     "TensorDiff",
     "TensorSummary",
     "build_pareto_points",
     "compare_decoded_detections",
     "compare_tensors",
     "decode_detection_output",
-    "evaluate_detection_model",
-    "evaluate_detection_runtime_model",
-    "evaluate_onnx_detection_model",
-    "evaluate_tensorrt_detection_model",
-    "evaluate_detection_predictions",
-    "evaluate_pytorch_model",
     "flatten_metrics",
     "build_avoid_list",
     "build_layer_analysis_events",
@@ -65,7 +48,6 @@ __all__ = [
     "records_to_rows",
     "summarize_tensor",
     "top_layer_error_for_scenario",
-    "topk_accuracy",
     "write_csv_report",
     "write_json_report",
     "write_markdown_report",

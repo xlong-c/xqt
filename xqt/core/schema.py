@@ -86,16 +86,6 @@ class DetectionPostprocessConfig:
 
 
 @dataclass
-class DetectionMetricConfig:
-    """Detection metric settings."""
-
-    iou_thresholds: List[float] = field(
-        default_factory=lambda: [0.5 + 0.05 * index for index in range(10)]
-    )
-    max_detections: int = 100
-
-
-@dataclass
 class TaskConfig:
     """Task metadata and task-specific runtime settings."""
 
@@ -104,7 +94,6 @@ class TaskConfig:
     detection_postprocess: DetectionPostprocessConfig = field(
         default_factory=DetectionPostprocessConfig
     )
-    detection_metric: DetectionMetricConfig = field(default_factory=DetectionMetricConfig)
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -269,19 +258,10 @@ class OutputDiffConfig:
 
 
 @dataclass
-class MetricThresholdConfig:
-    """Task metric threshold."""
-
-    name: str = ""
-    max_drop: Optional[float] = None
-
-
-@dataclass
 class ValidationConfig:
-    """Validation thresholds."""
+    """Model output numeric validation thresholds."""
 
     output_diff: OutputDiffConfig = field(default_factory=OutputDiffConfig)
-    metric: MetricThresholdConfig = field(default_factory=MetricThresholdConfig)
 
 
 @dataclass
@@ -376,11 +356,9 @@ __all__ = [
     "CompressionConfig",
     "CuTileKernelConfig",
     "CutlassKernelConfig",
-    "DetectionMetricConfig",
     "DetectionPostprocessConfig",
     "ExportConfig",
     "ExportTargetConfig",
-    "MetricThresholdConfig",
     "ModelConfig",
     "OperatorOptimizationConfig",
     "OperatorOptimizationTargetConfig",
