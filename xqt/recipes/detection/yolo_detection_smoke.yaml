@@ -28,24 +28,6 @@ task:
     iou_thresholds: [0.5, 0.75]
     max_detections: 100
 
-data:
-  calibration:
-    target: synthetic_detection
-    sample_limit: 2
-    batch_size: 1
-    params:
-      image_shape: [3, 64, 64]
-      num_classes: 3
-      boxes_per_image: 2
-  validation:
-    target: synthetic_detection
-    sample_limit: 2
-    batch_size: 1
-    params:
-      image_shape: [3, 64, 64]
-      num_classes: 3
-      boxes_per_image: 2
-
 compression:
   axes:
     - precision

@@ -27,52 +27,20 @@ task:
   params:
     imgsz: 640
 
-data_splits:
-  calibration:
-    target: synthetic_detection
-    sample_limit: 8
-    batch_size: 2
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 42
-  train:
-    target: synthetic_detection
-    sample_limit: 8
-    batch_size: 2
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 1
-  validation:
-    target: synthetic_detection
-    sample_limit: 16
-    batch_size: 2
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 2
-
 stages:
   - name: baseline_eval
     kind: eval
-    split: validation
     params:
       baseline: true
 
   - name: baseline_latency
     kind: benchmark
-    split: validation
     params:
       warmup: 2
       iterations: 5
 
   - name: export_fp32_onnx
     kind: export
-    split: validation
     save_model: false
     params:
       targets:
@@ -87,7 +55,6 @@ stages:
 
   - name: fp32_onnx_runtime
     kind: runtime_eval
-    split: validation
     compare_to: baseline_eval
     save_model: false
     params:
@@ -104,14 +71,10 @@ stages:
 
   - name: quant_qdq
     kind: quant
-    calibration_split: calibration
-    validation_split: validation
     save_model: false
     params:
       backend: onnxruntime_qdq
       strategy: static_int8
-      calibration_split: calibration
-      validation_split: validation
       policy:
         source_name: smoke_detection_source.onnx
         output_path: artifacts/xqt/detection/yolo_practice/quant_qdq/smoke_detection_qdq.onnx
@@ -127,7 +90,6 @@ stages:
 
   - name: qdq_onnx_runtime
     kind: runtime_eval
-    split: validation
     compare_to: baseline_eval
     save_model: false
     params:
@@ -145,14 +107,12 @@ stages:
   - name: prune_sparse
     kind: prune
     from_stage: initial
-    split: validation
     params:
       method: global_l1_unstructured
       target_sparsity: 0.2
 
   - name: prune_eval
     kind: eval
-    split: validation
     compare_to: baseline_eval
     params:
       baseline: false
@@ -162,7 +122,6 @@ stages:
 
   - name: prune_latency
     kind: benchmark
-    split: validation
     compare_to: baseline_latency
     params:
       warmup: 1

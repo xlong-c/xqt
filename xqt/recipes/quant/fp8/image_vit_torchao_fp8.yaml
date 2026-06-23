@@ -13,16 +13,6 @@ model:
   dtype: float32
   device: cuda:0
 
-data:
-  validation:
-    target: synthetic_classification
-    sample_limit: 8
-    batch_size: 1
-    params:
-      input_shape: [3, 224, 224]
-      num_classes: 10
-      seed: 11
-
 compression:
   axes:
     - precision

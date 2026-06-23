@@ -14,34 +14,6 @@ model:
   dtype: float32
   device: cpu
 
-data:
-  calibration:
-    target: torchvision_image_classification
-    root: data
-    sample_limit: 32
-    batch_size: 8
-    params:
-      dataset_name: MNIST
-      train: false
-      download: true
-      transform_params:
-        image_size: 224
-        mean: [0.1307]
-        std: [0.3081]
-  validation:
-    target: torchvision_image_classification
-    root: data
-    sample_limit: 16
-    batch_size: 4
-    params:
-      dataset_name: MNIST
-      train: false
-      download: true
-      transform_params:
-        image_size: 224
-        mean: [0.1307]
-        std: [0.3081]
-
 compression:
   axes:
     - sparsity

@@ -13,22 +13,6 @@ model:
   dtype: float32
   device: cpu
 
-data:
-  calibration:
-    target: synthetic_classification
-    sample_limit: 2
-    batch_size: 1
-    params:
-      input_shape: [4]
-      num_classes: 2
-  validation:
-    target: synthetic_classification
-    sample_limit: 4
-    batch_size: 2
-    params:
-      input_shape: [4]
-      num_classes: 2
-
 compression:
   axes:
     - precision
@@ -36,7 +20,6 @@ compression:
     enabled: true
     backend: onnxruntime_qdq
     strategy: static_int8
-    calibration_split: calibration
     policy:
       input_names: [input]
       sample_limit: 1

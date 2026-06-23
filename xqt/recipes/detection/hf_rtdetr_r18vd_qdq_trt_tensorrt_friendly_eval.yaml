@@ -21,34 +21,9 @@ task:
   params:
     imgsz: 640
 
-data_splits:
-  calibration:
-    target: synthetic_detection
-    sample_limit: 2
-    batch_size: 1
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 62
-      include_model_inputs: true
-      input_image_key: pixel_values
-  validation:
-    target: coco8_detection
-    root: data/coco8
-    sample_limit: 4
-    batch_size: 1
-    params:
-      split: val
-      include_model_inputs: true
-      input_image_key: pixel_values
-      resize: [640, 640]
-
 stages:
   - name: quant_qdq
     kind: quant
-    calibration_split: calibration
-    validation_split: validation
     save_model: false
     params:
       backend: onnxruntime_qdq
@@ -65,22 +40,8 @@ stages:
           ActivationSymmetric: true
           WeightSymmetric: true
 
-  - name: runtime_eval_onnx
-    kind: runtime_eval
-    split: validation
-    save_model: false
-    params:
-      runtime: onnxruntime
-      artifact: quant_onnx
-      input_names: [pixel_values]
-      warmup: 0
-      iterations: 1
-      max_batches: 4
-      compare_reference: false
-
   - name: build_trt_int8_engine
     kind: deploy
-    split: validation
     save_model: false
     params:
       targets:
@@ -103,18 +64,3 @@ stages:
               warmup: 10
               iterations: 50
               device: cuda:0
-
-  - name: runtime_eval_trt
-    kind: runtime_eval
-    split: validation
-    save_model: false
-    params:
-      runtime: tensorrt
-      artifact: last_engine
-      input_names: [pixel_values]
-      output_names: [logits, pred_boxes]
-      warmup: 0
-      iterations: 10
-      sync_cuda: true
-      max_batches: 4
-      compare_reference: false

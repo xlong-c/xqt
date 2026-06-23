@@ -27,36 +27,9 @@ task:
   params:
     imgsz: 640
 
-data_splits:
-  calibration:
-    target: synthetic_detection
-    sample_limit: 4
-    batch_size: 1
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 40
-  validation:
-    target: synthetic_detection
-    sample_limit: 4
-    batch_size: 1
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 41
-
 stages:
-  - name: baseline_eval
-    kind: eval
-    split: validation
-    params:
-      baseline: true
-
   - name: export_fp32_onnx
     kind: export
-    split: validation
     save_model: false
     params:
       targets:
@@ -71,8 +44,6 @@ stages:
 
   - name: quant_qdq
     kind: quant
-    calibration_split: calibration
-    validation_split: validation
     save_model: false
     params:
       backend: onnxruntime_qdq
@@ -88,21 +59,8 @@ stages:
         weight_type: QInt8
         op_types_to_quantize: [Conv]
 
-  - name: qdq_runtime_eval
-    kind: runtime_eval
-    split: validation
-    compare_to: baseline_eval
-    save_model: false
-    params:
-      artifact: quant_onnx
-      input_names: [images]
-      max_batches: 2
-      warmup: 0
-      iterations: 1
-
   - name: build_trt_int8_engine
     kind: deploy
-    split: validation
     save_model: false
     params:
       targets:

@@ -19,21 +19,9 @@ task:
   params:
     imgsz: 640
 
-data_splits:
-  validation:
-    target: synthetic_detection
-    sample_limit: 1
-    batch_size: 1
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 52
-
 stages:
   - name: build_trt_engine
     kind: deploy
-    split: validation
     save_model: false
     params:
       targets:

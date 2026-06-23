@@ -19,37 +19,9 @@ task:
   params:
     imgsz: 640
 
-data_splits:
-  calibration:
-    target: synthetic_detection
-    sample_limit: 2
-    batch_size: 1
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 60
-      include_model_inputs: true
-      input_image_key: images
-      input_size_key: orig_target_sizes
-  validation:
-    target: synthetic_detection
-    sample_limit: 2
-    batch_size: 1
-    params:
-      image_shape: [3, 640, 640]
-      num_classes: 80
-      boxes_per_image: 3
-      seed: 61
-      include_model_inputs: true
-      input_image_key: images
-      input_size_key: orig_target_sizes
-
 stages:
   - name: quant_qdq
     kind: quant
-    calibration_split: calibration
-    validation_split: validation
     save_model: false
     params:
       backend: onnxruntime_qdq
@@ -65,7 +37,6 @@ stages:
 
   - name: build_trt_int8_engine
     kind: deploy
-    split: validation
     save_model: false
     params:
       targets:
