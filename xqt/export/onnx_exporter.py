@@ -12,7 +12,7 @@ from torch import nn
 
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
-from xqt.eval.compare import TensorDiff, compare_tensors
+from xqt.analysis.compare import TensorDiff, compare_tensors
 from xqt.export.fusion import apply_pre_export_fusion
 from xqt.export.input_utils import (
     build_onnx_feed,

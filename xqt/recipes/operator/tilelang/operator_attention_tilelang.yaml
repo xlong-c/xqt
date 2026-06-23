@@ -1,5 +1,3 @@
-config_version: 1
-
 project:
   name: operator_tilelang_attention
   artifact_dir: artifacts/xqt/operator/tilelang/attention
@@ -10,8 +8,6 @@ model:
     hidden_dim: 8
     num_heads: 2
     num_classes: 2
-  dtype: float32
-  device: cpu
 
 compression:
   axes:
@@ -19,7 +15,6 @@ compression:
 
 operator_optimization:
   enabled: true
-  stage: after_compression
   default_backend: tilelang
   targets:
     - name: attention_tilelang
@@ -28,14 +23,10 @@ operator_optimization:
       patterns:
         - attention
       tilelang:
-        target: cuda
         target_arch: null
-        threads: 128
-        num_stages: 2
         cache_dir: /tmp/xqt_tilelang_cache
         pass_configs:
           TL_ENABLE_FAST_MATH: true
-      fallback: eager
       min_speedup: 1.15
       validate:
         atol: 1.0e-3
@@ -49,4 +40,3 @@ validation:
 benchmark:
   warmup: 0
   iterations: 1
-  percentiles: [50, 90, 99]

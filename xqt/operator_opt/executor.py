@@ -15,7 +15,7 @@ from xqt.core.errors import XQTBackendError
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import OperatorOptimizationConfig
 from xqt.core.types import XQTContext
-from xqt.eval.compare import compare_tensors
+from xqt.analysis.compare import compare_tensors
 from xqt.export.input_utils import first_tensor_output, split_example_input
 from xqt.quant.capability import describe_quant_backend_capability
 
@@ -39,6 +39,7 @@ from .backends.cutlass import (
 from .backends.tilelang import (
     TileLangCompileSettings,
     build_tilelang_artifact_metadata,
+    run_tilelang_kernel,
     list_tilelang_kernel_specs,
     tilelang_validation_thresholds,
 )
@@ -190,6 +191,8 @@ def _backend_metadata(
         effective_thresholds = tilelang_validation_thresholds(dtype)
         effective_thresholds.update(dict(target.validate))
         metadata["validation_thresholds"] = effective_thresholds
+        metadata["execution_mode"] = "not_run"
+        metadata["execution_reason"] = None
         metadata["latency"] = {
             "compile_latency_ms": None,
             "execution_latency_ms": None,
@@ -258,6 +261,141 @@ def _artifact_paths_from_backend_metadata(metadata: dict[str, Any]) -> dict[str,
                 continue
             artifact_paths[f"{backend}.{pattern}"] = str(artifact_path)
     return artifact_paths
+
+
+class _TileLangAttentionWrapper(nn.Module):
+    """Minimal executable wrapper for attention-pattern TileLang targets."""
+
+    def __init__(
+        self,
+        attention: nn.MultiheadAttention,
+        *,
+        fallback: str,
+        settings: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.attention = attention
+        self.fallback = fallback
+        self.settings = dict(settings)
+        self.last_execution_mode = "not_run"
+        self.last_execution_reason: str | None = None
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        value: torch.Tensor | None = None,
+        *,
+        need_weights: bool = True,
+        average_attn_weights: bool = True,
+        attn_mask: torch.Tensor | None = None,
+        key_padding_mask: torch.Tensor | None = None,
+        is_causal: bool = False,
+        **_: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        del average_attn_weights
+        if attn_mask is not None or key_padding_mask is not None:
+            raise XQTBackendError(
+                "TileLang attention wrapper does not yet support attn_mask or key_padding_mask"
+            )
+        q = query if self.attention.batch_first else query.transpose(0, 1)
+        source_key = query if key is None else key
+        source_value = source_key if value is None else value
+        k = source_key if self.attention.batch_first else source_key.transpose(0, 1)
+        v = source_value if self.attention.batch_first else source_value.transpose(0, 1)
+        self.last_execution_mode = (
+            "cuda_tilelang_entry"
+            if q.is_cuda and k.is_cuda and v.is_cuda
+            else "reference_fallback"
+        )
+        self.last_execution_reason = (
+            None
+            if self.last_execution_mode == "cuda_tilelang_entry"
+            else "TileLang attention kernel requires CUDA tensors; using configured fallback."
+        )
+        attn_output = run_tilelang_kernel(
+            "attention",
+            q,
+            k,
+            v,
+            causal=is_causal,
+            dropout_p=float(self.attention.dropout),
+            block_m=int(self.settings.get("block_m", 64)),
+            block_n=int(self.settings.get("block_n", 64)),
+            threads=int(self.settings.get("threads", 128)),
+            num_stages=int(self.settings.get("num_stages", 2)),
+            fallback=self.fallback,
+        )
+        output = attn_output if self.attention.batch_first else attn_output.transpose(0, 1)
+        weights = None
+        if need_weights:
+            batch_size = int(output.shape[0]) if output.ndim >= 3 else 0
+            target_len = int(output.shape[1]) if output.ndim >= 3 else 0
+            source_len = int(k.shape[1]) if k.ndim >= 3 else 0
+            weights = output.new_zeros((batch_size, target_len, source_len))
+        return output, weights
+
+    def execution_metadata(self) -> dict[str, Any]:
+        return {
+            "execution_mode": self.last_execution_mode,
+            "execution_reason": self.last_execution_reason,
+            "fallback": self.fallback,
+            "settings": dict(self.settings),
+        }
+
+
+def _build_tilelang_candidate_model(
+    target_model: nn.Module,
+    target: OperatorOptimizationTargetPlan,
+) -> nn.Module:
+    if "attention" not in (target.patterns or ["attention"]):
+        raise XQTBackendError(
+            "built-in TileLang executor currently supports only the attention pattern"
+        )
+    if isinstance(target_model, nn.MultiheadAttention):
+        return _TileLangAttentionWrapper(
+            target_model,
+            fallback=target.fallback,
+            settings=target.tilelang,
+        )
+    attention = getattr(target_model, "attention", None)
+    if isinstance(attention, nn.MultiheadAttention):
+        target_model = copy.deepcopy(target_model)
+        target_model.attention = _TileLangAttentionWrapper(
+            attention,
+            fallback=target.fallback,
+            settings=target.tilelang,
+        )
+        return target_model
+    for child_name, child in target_model.named_children():
+        nested_attention = getattr(child, "attention", None)
+        if isinstance(nested_attention, nn.MultiheadAttention):
+            target_model = copy.deepcopy(target_model)
+            wrapped_child = target_model.get_submodule(child_name)
+            wrapped_child.attention = _TileLangAttentionWrapper(
+                nested_attention,
+                fallback=target.fallback,
+                settings=target.tilelang,
+            )
+            return target_model
+    raise XQTBackendError(
+        "TileLang attention target requires nn.MultiheadAttention or a module with an .attention submodule"
+    )
+
+
+def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
+    if isinstance(model, _TileLangAttentionWrapper):
+        return model.execution_metadata()
+    attention = getattr(model, "attention", None)
+    if isinstance(attention, _TileLangAttentionWrapper):
+        return attention.execution_metadata()
+    for module in model.modules():
+        if isinstance(module, _TileLangAttentionWrapper):
+            return module.execution_metadata()
+    return {
+        "execution_mode": "unknown",
+        "execution_reason": None,
+    }
 
 
 def _scan_candidate_report(
@@ -342,9 +480,21 @@ def materialize_operator_candidate_model(
             compiled_candidate,
         )
         return candidate_root, compile_time_ms
+    if target.backend == "tilelang":
+        tilelang_candidate = _build_tilelang_candidate_model(candidate_target, target)
+        candidate_root = _replace_component_model(
+            candidate_root,
+            target.target_path,
+            tilelang_candidate,
+        )
+        return candidate_root, None
     raise XQTBackendError(
         f"Operator optimization backend '{target.backend}' is not executable yet"
     )
+
+
+def _planned_operator_skip_reason(target: OperatorOptimizationTargetPlan) -> str | None:
+    return None
 
 
 def build_operator_optimization_plan(
@@ -489,11 +639,13 @@ def execute_operator_optimization_plan(
         skip_reason = _quant_runtime_guard(context, target)
         if skip_reason is None and target.backend == "torch_compile" and not capability.available:
             skip_reason = "torch.compile is not available in the current PyTorch build"
-        if skip_reason is None and target.backend in {"triton", "tilelang", "cutile", "cutlass", "custom_cuda"}:
+        if skip_reason is None and target.backend in {"triton", "cutile", "cutlass", "custom_cuda"}:
             if not torch.cuda.is_available():
                 skip_reason = f"{target.backend} requires CUDA-capable hardware"
             else:
-                skip_reason = f"{target.backend} backend is configured but not implemented in the built-in executor"
+                skip_reason = _planned_operator_skip_reason(target) or (
+                    f"{target.backend} backend is configured but not implemented in the built-in executor"
+                )
         if skip_reason is None and target.backend == "deployment_backend":
             skip_reason = "deployment_backend is metadata-only in the built-in executor"
         fallback_detail = {
@@ -560,6 +712,8 @@ def execute_operator_optimization_plan(
         try:
             if target.backend == "torch_compile":
                 compiled_model, compile_time_ms = compile_with_torch(target_model, target)
+            elif target.backend == "tilelang":
+                compiled_model = _build_tilelang_candidate_model(target_model, target)
             else:
                 raise XQTBackendError(
                     f"Operator optimization backend '{target.backend}' is not executable yet"
@@ -619,10 +773,19 @@ def execute_operator_optimization_plan(
                 target.target_path,
                 compiled_candidate,
             )
+        elif target.backend == "tilelang":
+            candidate_root = _replace_component_model(
+                candidate_root,
+                target.target_path,
+                _build_tilelang_candidate_model(candidate_target, target),
+            )
         candidate_target = _resolve_component_model(candidate_root, target.target_path)
         optimized_output = first_tensor_output(
             _call_module_no_grad(candidate_target, module_inputs)
         )
+        execution_detail: dict[str, Any] = {}
+        if target.backend == "tilelang":
+            execution_detail = _tilelang_execution_metadata(candidate_target)
         numeric_diff = compare_tensors(
             baseline_output,
             optimized_output,
@@ -691,6 +854,8 @@ def execute_operator_optimization_plan(
                     "min_speedup": target.min_speedup,
                     "capability": capability.to_dict(),
                     **backend_metadata,
+                    "execution_mode": execution_detail.get("execution_mode"),
+                    "execution_reason": execution_detail.get("execution_reason"),
                 },
             )
         )

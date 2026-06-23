@@ -10,7 +10,6 @@ model:
     hidden_dim: 8
     intermediate_dim: 16
     num_classes: 2
-  device: cpu
 
 operator_optimization:
   enabled: true
@@ -19,7 +18,6 @@ operator_optimization:
       target: mlp
       backend: cutlass
       patterns: [gemm_epilogue]
-      fallback: eager
       min_speedup: 1.10
       validate:
         atol: 1e-4
@@ -27,7 +25,6 @@ operator_optimization:
       cutlass:
         target_arch: sm_89
         cache_dir: /tmp/xqt-cutlass-cache
-        tile_shape: [128, 128, 64]
         pass_configs:
           CUTLASS_ENABLE_EPILOGUE_FUSION: true
 

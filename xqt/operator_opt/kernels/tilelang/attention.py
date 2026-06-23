@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -77,6 +78,66 @@ def _require_tilelang() -> object:
     return tilelang
 
 
+def _require_fp16_tensors(*tensors: torch.Tensor) -> None:
+    if not all(tensor.dtype == torch.float16 for tensor in tensors):
+        raise XQTBackendError("TileLang FlashAttention path currently supports only float16 tensors")
+
+
+def _validate_attention_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    dropout_p: float,
+) -> None:
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        raise XQTBackendError("TileLang attention expects 4D tensors shaped [batch, heads, seq, head_dim]")
+    if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
+        raise XQTBackendError("TileLang attention requires matching batch size for q, k, v")
+    if q.shape[1] != k.shape[1] or q.shape[1] != v.shape[1]:
+        raise XQTBackendError("TileLang attention requires matching head count for q, k, v")
+    if q.shape[3] != k.shape[3] or q.shape[3] != v.shape[3]:
+        raise XQTBackendError("TileLang attention requires matching head_dim for q, k, v")
+    if k.shape[2] != v.shape[2]:
+        raise XQTBackendError("TileLang attention requires matching key/value sequence length")
+    if k.shape[3] != v.shape[3]:
+        raise XQTBackendError("TileLang attention requires matching key/value head_dim")
+    if k.shape[2] < q.shape[2]:
+        raise XQTBackendError("TileLang attention currently requires seq_kv >= seq_q")
+    if dropout_p != 0.0:
+        raise XQTBackendError("TileLang attention kernel does not yet support dropout_p != 0")
+
+
+@lru_cache(maxsize=32)
+def _build_tilelang_flashatt_kernel(
+    batch: int,
+    heads: int,
+    seq_q: int,
+    seq_kv: int,
+    head_dim: int,
+    causal: bool,
+    block_m: int,
+    block_n: int,
+    num_stages: int,
+    threads: int,
+) -> Any:
+    _require_tilelang()
+    from learn.tilelang.flashatt import build_tilelang_flashatt
+
+    return build_tilelang_flashatt(
+        batch=batch,
+        heads=heads,
+        seq_q=seq_q,
+        seq_kv=seq_kv,
+        head_dim=head_dim,
+        causal=causal,
+        block_m=block_m,
+        block_n=block_n,
+        num_stages=num_stages,
+        threads=threads,
+    )
+
+
 def _sdpa_reference(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -136,16 +197,22 @@ def fused_attention_forward_tilelang(
 ) -> torch.Tensor:
     """CUDA-only TileLang attention entry point."""
 
-    del block_m, block_n, threads, num_stages
-    _require_tilelang()
     _require_cuda_tensors(q, k, v)
-    return fused_attention_forward_reference(
-        q,
-        k,
-        v,
+    _require_fp16_tensors(q, k, v)
+    _validate_attention_inputs(q, k, v, dropout_p=dropout_p)
+    kernel = _build_tilelang_flashatt_kernel(
+        batch=int(q.shape[0]),
+        heads=int(q.shape[1]),
+        seq_q=int(q.shape[2]),
+        seq_kv=int(k.shape[2]),
+        head_dim=int(q.shape[3]),
         causal=causal,
-        dropout_p=dropout_p,
+        block_m=int(block_m),
+        block_n=int(block_n),
+        num_stages=int(num_stages),
+        threads=int(threads),
     )
+    return kernel(q, k, v)
 
 
 def dequant_gemm_epilogue_reference(

@@ -221,12 +221,14 @@ def _check_quant_backend_capability(
     name: str,
     backend: str,
     *,
+    method: str | None,
     strategy: str | None,
     policy: dict[str, Any],
     component_name: str | None = None,
 ) -> None:
     capability = describe_quant_backend_capability(
         backend,
+        method=method,
         strategy=strategy,
         policy=policy,
     )
@@ -286,6 +288,7 @@ def _check_quant_component_policy(
         report,
         f"{prefix}.capability",
         backend,
+        method=component.method or quant_config.method,
         strategy=effective_strategy,
         policy=effective_policy,
         component_name=component.name,
@@ -294,6 +297,7 @@ def _check_quant_component_policy(
         _check_dependency(report, "torchao")
         if describe_quant_backend_capability(
             backend,
+            method=component.method or quant_config.method,
             strategy=effective_strategy,
             policy=effective_policy,
         ).requires_cuda:
@@ -387,11 +391,11 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             module_path=target.target,
             **capability.to_dict(),
         )
-        if target.backend == "tilelang" and not capability.available:
+        if target.backend == "tilelang" and not _package_available("tilelang"):
             report.add(
                 f"{prefix}.tilelang.runtime",
-                False,
-                "tilelang backend is configured but tilelang is not importable",
+                True,
+                "tilelang package is not importable; built-in executor will be limited to reference fallback",
                 level="warning",
                 target_name=target.name,
                 module_path=target.target,
@@ -562,6 +566,7 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             report,
             "compression.quant.capability",
             quant.backend,
+            method=quant.method,
             strategy=quant.strategy,
             policy=quant.policy,
         )
@@ -569,6 +574,7 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             _check_dependency(report, "torchao")
             if describe_quant_backend_capability(
                 quant.backend,
+                method=quant.method,
                 strategy=quant.strategy,
                 policy=quant.policy,
             ).requires_cuda:
@@ -660,6 +666,27 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 f"{prefix}.trtexec",
                 dry_run=bool(target.params.get("dry_run", False)),
             )
+            plugin_libraries = target.params.get("plugin_libraries")
+            if plugin_libraries is not None:
+                if not isinstance(plugin_libraries, list):
+                    report.add(
+                        f"{prefix}.plugin_libraries",
+                        False,
+                        "TensorRT plugin_libraries must be a list of shared library paths",
+                        level="error",
+                    )
+                else:
+                    for plugin_index, plugin_path in enumerate(plugin_libraries):
+                        path = Path(str(plugin_path))
+                        report.add(
+                            f"{prefix}.plugin_libraries.{plugin_index}",
+                            path.is_file(),
+                            "TensorRT plugin library found"
+                            if path.is_file()
+                            else "TensorRT plugin library missing",
+                            level="info" if path.is_file() else "warning",
+                            path=str(path),
+                        )
         elif target.format == "openvino":
             _check_optional_dependency(
                 report,

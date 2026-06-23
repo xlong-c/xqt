@@ -120,16 +120,25 @@ def _build_structured_details(
     reference: torch.Tensor,
     candidate: torch.Tensor,
     *,
-    structured: bool | Mapping[str, int],
+    structured: bool | Mapping[str, int] = False,
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> Optional[dict[str, object]]:
-    if structured is False:
+    if structured is False and not per_channel and not per_token:
         return None
+    ndim = reference.ndim
+    if ndim == 0:
+        return None
+
+    axes: dict[str, int] = {}
     if structured is True:
-        if reference.ndim == 0:
-            return None
-        axes: dict[str, int] = {"per_channel": -1}
-    else:
-        axes = {str(name): int(axis) for name, axis in structured.items()}
+        axes["per_channel"] = -1
+    elif isinstance(structured, Mapping):
+        axes.update({str(name): int(axis) for name, axis in structured.items()})
+    if per_channel and ndim >= 1:
+        axes.setdefault("per_channel", -1)
+    if per_token and ndim >= 2:
+        axes.setdefault("per_token", -2)
     if not axes:
         return None
 
@@ -215,8 +224,19 @@ def compare_tensors(
     rtol: float = 1e-5,
     include_summary: bool = True,
     structured: bool | Mapping[str, int] = False,
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> TensorDiff:
-    """Compare two tensors using common deployment validation metrics."""
+    """Compare two tensors using common deployment validation metrics.
+
+    Args:
+        structured: If True, produce per_channel diff along axis -1.
+            If a mapping, produce named diffs along the given axes.
+        per_channel: If True, produce per_channel diff along axis -1
+            (added to structured axes when not already present).
+        per_token: If True, produce per_token diff along axis -2
+            (added to structured axes when not already present, ndim >= 2).
+    """
 
     if reference.shape != candidate.shape:
         raise ValueError(
@@ -273,7 +293,12 @@ def compare_tensors(
         if delta.numel() and reference_norm.item() > 0.0
         else None
     )
-    details = _build_structured_details(reference, candidate, structured=structured)
+    details = _build_structured_details(
+        reference, candidate,
+        structured=structured,
+        per_channel=per_channel,
+        per_token=per_token,
+    )
     argmax_mismatch_rate = _compute_argmax_mismatch_rate(reference, candidate)
 
     return TensorDiff(

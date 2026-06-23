@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -162,7 +163,13 @@ def run_tilelang_kernel(
     tensor_args = tuple(arg for arg in args if isinstance(arg, torch.Tensor))
     if spec.cuda_only and not all(arg.is_cuda for arg in tensor_args):
         if fallback == "eager":
-            return spec.reference(*args, **kwargs)
+            allowed = set(inspect.signature(spec.reference).parameters)
+            filtered_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in allowed
+            }
+            return spec.reference(*args, **filtered_kwargs)
         raise XQTBackendError(f"TileLang pattern '{pattern}' requires CUDA tensors")
     return spec.kernel(*args, **kwargs)
 

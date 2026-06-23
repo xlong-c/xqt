@@ -1,0 +1,16 @@
+project:
+  name: smoke_workflow
+  artifact_dir: artifacts/xqt/smoke/workflow
+
+model:
+  target: torch.nn.Linear
+  params:
+    in_features: 4
+    out_features: 2
+
+stages:
+  - name: prune_l1
+    kind: prune
+    params:
+      method: global_l1_unstructured
+      target_sparsity: 0.5

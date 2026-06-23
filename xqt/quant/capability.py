@@ -5,6 +5,55 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
 
+from .types import QuantizationNature
+
+
+# ── strategy → nature mapping ─────────────────────────────────────────────
+# TRUE  = native low-precision MMA (W8A8, K=32), compute speedup expected.
+# PSEUDO = storage-only compression, dequant to fp16 before MMA (W8A16, K=16).
+# UNKNOWN = not yet classified.
+# ───────────────────────────────────────────────────────────────────────────
+_STRATEGY_NATURE: dict[str, QuantizationNature] = {
+    # fp8 native MMA: W8A8, K=32
+    "fp8_dynamic": QuantizationNature.TRUE,
+    "float8_dynamic_activation_float8_weight": QuantizationNature.TRUE,
+    # fp8 weight-only: W8A16, dequant before mma, K=16
+    "fp8_weight_only": QuantizationNature.PSEUDO,
+    # int8 weight-only: W8A16, dequant before mma, K=16
+    "weight_only_int8": QuantizationNature.PSEUDO,
+    "int8_weight_only": QuantizationNature.PSEUDO,
+    # int4 weight-only: W4A16, dequant before mma, K=16
+    "weight_only_int4": QuantizationNature.PSEUDO,
+    "int4_weight_only": QuantizationNature.PSEUDO,
+    # dynamic int8: observer-based quantize/dequantize, not native mma
+    "dynamic_int8": QuantizationNature.PSEUDO,
+    "int8_dynamic_activation_int8_weight": QuantizationNature.PSEUDO,
+    # onnxruntime QDQ INT8: runs QDQ ops on CPU integer backend → TRUE if backend hardware supports native int8 mma
+    "static_int8": QuantizationNature.PSEUDO,
+    # awq / gptq: weight-only packing, dequant to fp16 before compute
+    "awq": QuantizationNature.PSEUDO,
+    "gptq": QuantizationNature.PSEUDO,
+}
+
+_DEFAULT_NATURE = QuantizationNature.UNKNOWN
+
+
+def _resolve_nature(
+    strategy: Optional[str],
+    policy: Mapping[str, Any] | None,
+) -> QuantizationNature:
+    """Resolve quantization nature from strategy name or policy metadata."""
+    if policy is not None:
+        explicit = policy.get("nature")
+        if isinstance(explicit, str):
+            try:
+                return QuantizationNature(explicit)
+            except ValueError:
+                pass
+    if strategy is not None:
+        return _STRATEGY_NATURE.get(strategy, _DEFAULT_NATURE)
+    return _DEFAULT_NATURE
+
 
 @dataclass(frozen=True)
 class QuantBackendCapability:
@@ -23,6 +72,7 @@ class QuantBackendCapability:
     requires_calibration: bool = False
     requires_exportable_graph: bool = False
     requires_cuda: bool = False
+    nature: QuantizationNature = QuantizationNature.UNKNOWN
     notes: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
 
@@ -41,6 +91,7 @@ class QuantBackendCapability:
             "requires_calibration": self.requires_calibration,
             "requires_exportable_graph": self.requires_exportable_graph,
             "requires_cuda": self.requires_cuda,
+            "nature": self.nature.value,
             "notes": list(self.notes),
             "limitations": list(self.limitations),
         }
@@ -120,7 +171,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
     ),
     "pytorch": QuantBackendCapability(
         backend="pytorch",
-        status="planned",
+        status="available",
         runtime="pytorch",
         artifact_kind="pytorch_model",
         methods=("awq", "gptq"),
@@ -129,8 +180,13 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         default_high_precision=_DEFAULT_HIGH_PRECISION,
         preferred_devices=("cuda", "cpu"),
         requires_calibration=True,
-        notes=("Planned PyTorch reference path for method-driven weight-only quantization.",),
-        limitations=("AWQ/GPTQ are methods, not backends, and are not wired into execution yet.",),
+        notes=(
+            "PyTorch backend can host reference method-driven weight-only quantization paths.",
+        ),
+        limitations=(
+            "Current executable coverage is limited to reference fp4_weight_only Linear replacement.",
+            "Other AWQ/GPTQ method combinations still fall back to planned capability/report only.",
+        ),
     ),
     "tilelang": QuantBackendCapability(
         backend="tilelang",
@@ -198,14 +254,27 @@ def describe_quant_backend_capability(
         )
 
     requires_cuda = base.requires_cuda or _strategy_requires_cuda(strategy, policy)
+    resolved_nature = _resolve_nature(strategy, policy)
     notes = list(base.notes)
     if backend == "torchao" and requires_cuda:
         notes.append("Configured strategy requires CUDA-capable hardware.")
     if selected_method is not None:
         notes.append(f"Configured quantization method: {selected_method}.")
+    if resolved_nature == QuantizationNature.PSEUDO:
+        notes.append(
+            "PSEUDO quantization: storage compression only. "
+            "Weights dequantized to fp16 before MMA (K=16). "
+            "Expect memory bandwidth savings, zero compute speedup."
+        )
+    elif resolved_nature == QuantizationNature.TRUE:
+        notes.append(
+            "TRUE quantization: native low-precision MMA (K=32). "
+            "Expect compute speedup proportional to element packing density."
+        )
     return replace(
         base,
         requires_cuda=requires_cuda,
+        nature=resolved_nature,
         notes=tuple(notes),
     )
 

@@ -1,5 +1,3 @@
-config_version: 1
-
 project:
   name: prune_structured_vit
   artifact_dir: artifacts/xqt/prune/structured/vit
@@ -17,8 +15,6 @@ model:
     mlp_ratio: 2.0
     dropout: 0.0
     attn_dropout: 0.0
-  dtype: float32
-  device: cpu
 
 compression:
   axes:
@@ -35,11 +31,6 @@ compression:
     selection:
       min_keep: 1
 
-validation:
-  output_diff:
-    atol: 1.0e-5
-    rtol: 1.0e-5
 benchmark:
   warmup: 0
   iterations: 1
-  percentiles: [50, 90, 99]

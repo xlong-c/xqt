@@ -1,5 +1,3 @@
-config_version: 1
-
 project:
   name: quant_int8_multi_component_smoke
   artifact_dir: artifacts/xqt/quant/int8/multi_component_smoke
@@ -10,15 +8,12 @@ model:
     in_features: 4
     hidden_features: 4
     num_classes: 2
-  dtype: float32
-  device: cpu
 
 compression:
   axes:
     - precision
   quant:
     enabled: true
-    backend: torchao
     strategy: dynamic_int8
     component_policies:
       - name: vision_encoder
@@ -42,12 +37,6 @@ compression:
     policy:
       include_module_types: [Linear]
 
-validation:
-  output_diff:
-    atol: 1.0e-5
-    rtol: 1.0e-5
-
 benchmark:
   warmup: 0
   iterations: 1
-  percentiles: [50, 90, 99]

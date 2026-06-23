@@ -1,5 +1,3 @@
-config_version: 1
-
 project:
   name: operator_torch_compile_smoke_cpu
   artifact_dir: artifacts/xqt/operator/torch_compile/smoke_cpu
@@ -9,8 +7,6 @@ model:
   params:
     in_features: 4
     out_features: 2
-  dtype: float32
-  device: cpu
 
 compression:
   axes:
@@ -18,28 +14,15 @@ compression:
 
 operator_optimization:
   enabled: true
-  stage: after_compression
-  default_backend: torch_compile
   targets:
     - name: model
       backend: torch_compile
       mode: reduce-overhead
-      fullgraph: false
       dynamic: false
       options:
         backend: inductor
-      fallback: eager
       min_speedup: 1.000001
-      validate:
-        atol: 1.0e-5
-        rtol: 1.0e-5
-
-validation:
-  output_diff:
-    atol: 1.0e-5
-    rtol: 1.0e-5
 
 benchmark:
   warmup: 0
   iterations: 1
-  percentiles: [50, 90, 99]

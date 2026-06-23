@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from xqt.model.hooks import collect_module_outputs
-from xqt.eval.compare import TensorDiff, compare_tensors, summarize_tensor
+from xqt.analysis.compare import TensorDiff, compare_tensors, summarize_tensor
 
 from .policy import QuantizationPolicy, list_quantizable_modules
 
@@ -144,6 +144,8 @@ def _compare_sampled_tensors(
     rtol: float,
     sample_budget: Optional[int],
     sample_seed: int,
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> TensorDiff:
     sampled_reference, sampled_candidate = _sample_tensor_pair(
         reference,
@@ -156,6 +158,8 @@ def _compare_sampled_tensors(
         sampled_candidate,
         atol=atol,
         rtol=rtol,
+        per_channel=per_channel,
+        per_token=per_token,
     )
 
 
@@ -201,6 +205,8 @@ def _analyze_layer_output_drift(
     rtol: float = 1e-5,
     sample_budget: Optional[int] = None,
     sample_seed: int = 0,
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> list[LayerSensitivityRecord]:
     names, reference_outputs, candidate_outputs = _collect_shared_tensor_outputs(
         reference_model,
@@ -235,6 +241,8 @@ def _analyze_layer_output_drift(
             rtol=rtol,
             sample_budget=sample_budget,
             sample_seed=sample_seed,
+            per_channel=per_channel,
+            per_token=per_token,
         )
         reference_module = reference_model.get_submodule(name)
         records.append(
@@ -311,6 +319,8 @@ def analyze_layer_sensitivity(
     rtol: float = 1e-5,
     sample_budget: Optional[int] = None,
     sample_seed: int = 0,
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> list[LayerSensitivityRecord]:
     """Measure isolated final-output drift when replacing one module at a time."""
 
@@ -366,6 +376,8 @@ def analyze_layer_sensitivity(
             rtol=rtol,
             sample_budget=sample_budget,
             sample_seed=sample_seed,
+            per_channel=per_channel,
+            per_token=per_token,
         )
         records.append(
             LayerSensitivityRecord(
@@ -392,6 +404,8 @@ def analyze_layer_errors(
     include_weight_diff: bool = True,
     sample_budget: Optional[int] = None,
     sample_seed: int = 0,
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> list[LayerAnalysisRecord]:
     """Build a richer per-layer cumulative error table for reports."""
 
@@ -406,6 +420,8 @@ def analyze_layer_errors(
         rtol=rtol,
         sample_budget=sample_budget,
         sample_seed=sample_seed,
+        per_channel=per_channel,
+        per_token=per_token,
     )
     if not drift_records:
         return []

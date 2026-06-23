@@ -5,14 +5,8 @@ project:
 task:
   type: detection
   detection_postprocess:
-    format: auto
     box_format: cxcywh
-    score_threshold: 0.25
-    iou_threshold: 0.45
-    max_detections: 300
     score_activation: sigmoid
-    has_objectness: false
-    class_agnostic_nms: false
   params:
     imgsz: 640
 

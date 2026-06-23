@@ -22,10 +22,9 @@
 
 - `core`: structured config, artifact manifest, checksum, XQT registry.
 - `model`: smoke-only model helper 和模型 forward hook 输出采集工具.
-- `integrations`: detection output decode adapter.
 - `pipeline`: sequential pass manager,preflight 和 YAML runner.
 - `workflows`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
-- `eval`: tensor output diff,layer analysis 和 report helper.
+- `analysis`: tensor output diff,layer analysis 和 report helper.
 - `benchmark`: latency 和 memory benchmark helper.
 - `quant`: quantization policy,backend/method capability matrix,activation calibration,layer sensitivity helper.
 - `operator_opt`: `torch.compile`-first operator optimization pass,backend capability matrix and runtime fallback reporting.
@@ -42,7 +41,8 @@
 
 当前主 recipe 方向:
 
-- smoke CPU: 配置,PyTorch native export 和 manifest 路径.
+- smoke workflow: 默认 `xqt-run-workflow` 的最小 stage 闭环.
+- internal pass recipe smoke: 配置,压缩 pass 和 manifest/report 路径.
 - ONNX QDQ INT8: PyTorch model 或外部 ONNX -> QDQ ONNX,校准输入由调用方显式传入.
 - TensorRT/OpenVINO/mobile: 导出 adapter,dry-run/真实后端产物构建.
 - pruning: 纯模型侧 mask/rewrite/sparsity report,不做 recovery training.
@@ -50,13 +50,19 @@
 
 运行入口:
 
-- `xqt-preflight`: 不解析命令行参数,默认检查 `recipes/smoke_cpu.yaml`.
-- `XQT_CONFIG=/abs/path/to/recipe.yaml xqt-preflight`: 检查 recipe.
-- `xqt-run-recipe`: 不解析命令行参数,默认运行 `recipes/smoke_cpu.yaml`.
-- `XQT_CONFIG=/abs/path/to/recipe.yaml xqt-run-recipe`: 切换 recipe.
-- `XQT_WRITE_MANIFEST=0 xqt-run-recipe`: 跳过 manifest 写入.
-- `xqt-run-workflow`: 不解析命令行参数,默认运行模型优化 workflow.
+XQT 只提供两种配置方式,前者为第一选择:
+
+1. `XQTOptimizationSession` (第一配置) - Python 交互式 session,逐步编排优化 stage.
+2. YAML workflow (第二配置) - 声明式 recipe,通过 `optimize_model()` 或 CLI 入口运行.
+
+原则上没有其他配置方式.
+
+- `from xqt import XQTOptimizationSession` - session 主入口.
+- `optimize_model("path/to/workflow.yaml")` - YAML workflow 主入口.
+- `xqt-run-workflow`: 不解析命令行参数,默认运行 `recipes/smoke/smoke_workflow.yaml`.
 - `XQT_WORKFLOW_CONFIG=/abs/path/to/workflow.yaml xqt-run-workflow`: 切换 stage workflow recipe.
+
+历史 pass recipe runner (`xqt.pipeline.runner.run_xqt_recipe`),`XQTConfig` schema 和 preflight helper 只作为内部实现保留,不再从 `xqt` 顶层导出,也不再提供安装后命令入口.
 
 不属于 XQT:
 

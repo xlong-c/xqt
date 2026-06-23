@@ -271,7 +271,7 @@ def layer_statistics_rows(
     sample_seed: int = 0,
     histogram_bins: int = 32,
 ) -> list[dict[str, object]]:
-    """Build optional per-layer distribution statistics rows."""
+    """Build optional per-layer activation and weight distribution rows."""
 
     if not module_names:
         return []
@@ -295,35 +295,70 @@ def layer_statistics_rows(
     for index, name in enumerate(module_names):
         reference_output = reference_outputs.get(name)
         candidate_output = candidate_outputs.get(name)
-        if not isinstance(reference_output, torch.Tensor) or not isinstance(
-            candidate_output, torch.Tensor
-        ):
+        if isinstance(reference_output, torch.Tensor) and isinstance(candidate_output, torch.Tensor):
+            reference_sample = _sample_flat_tensor(
+                reference_output,
+                sample_budget=sample_budget,
+                sample_seed=sample_seed + index,
+            )
+            candidate_sample = _sample_flat_tensor(
+                candidate_output,
+                sample_budget=sample_budget,
+                sample_seed=sample_seed + index,
+            )
+            error_sample = candidate_sample - reference_sample
+            rows.append(
+                {
+                    "layer": name,
+                    "variable": "output",
+                    "error": _distribution_summary(
+                        error_sample,
+                        histogram_bins=histogram_bins,
+                    ),
+                    "quantized": _distribution_summary(
+                        candidate_sample,
+                        histogram_bins=histogram_bins,
+                    ),
+                    "float": _distribution_summary(
+                        reference_sample,
+                        histogram_bins=histogram_bins,
+                    ),
+                }
+            )
+
+        reference_module = reference_model.get_submodule(name)
+        candidate_module = candidate_model.get_submodule(name)
+        reference_weight = getattr(reference_module, "weight", None)
+        candidate_weight = getattr(candidate_module, "weight", None)
+        if not isinstance(reference_weight, torch.Tensor) or not isinstance(candidate_weight, torch.Tensor):
             continue
-        reference_sample = _sample_flat_tensor(
-            reference_output,
+        if reference_weight.shape != candidate_weight.shape:
+            continue
+        reference_weight_sample = _sample_flat_tensor(
+            reference_weight,
             sample_budget=sample_budget,
-            sample_seed=sample_seed + index,
+            sample_seed=sample_seed + 10_000 + index,
         )
-        candidate_sample = _sample_flat_tensor(
-            candidate_output,
+        candidate_weight_sample = _sample_flat_tensor(
+            candidate_weight,
             sample_budget=sample_budget,
-            sample_seed=sample_seed + index,
+            sample_seed=sample_seed + 10_000 + index,
         )
-        error_sample = candidate_sample - reference_sample
+        weight_error_sample = candidate_weight_sample - reference_weight_sample
         rows.append(
             {
                 "layer": name,
-                "variable": "output",
+                "variable": "weight",
                 "error": _distribution_summary(
-                    error_sample,
+                    weight_error_sample,
                     histogram_bins=histogram_bins,
                 ),
                 "quantized": _distribution_summary(
-                    candidate_sample,
+                    candidate_weight_sample,
                     histogram_bins=histogram_bins,
                 ),
                 "float": _distribution_summary(
-                    reference_sample,
+                    reference_weight_sample,
                     histogram_bins=histogram_bins,
                 ),
             }
@@ -418,6 +453,8 @@ def build_layer_analysis_payload(
     sample_seed: int = 0,
     runtime: str = "current_pytorch",
     avoid_used_by: str = "quant_retry",
+    per_channel: bool = False,
+    per_token: bool = False,
 ) -> dict[str, object]:
     """Build reusable layer-analysis payload for reports and JSONL events."""
 
@@ -439,6 +476,8 @@ def build_layer_analysis_payload(
         include_weight_diff=include_weight_diff,
         sample_budget=sample_budget,
         sample_seed=sample_seed,
+        per_channel=per_channel,
+        per_token=per_token,
     )
     sensitivity_records = (
         analyze_layer_sensitivity(
@@ -452,6 +491,8 @@ def build_layer_analysis_payload(
             rtol=rtol,
             sample_budget=sample_budget,
             sample_seed=sample_seed,
+            per_channel=per_channel,
+            per_token=per_token,
         )
         if include_sensitivity
         else []

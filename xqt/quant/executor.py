@@ -13,12 +13,15 @@ from xqt.core.types import XQTContext
 from xqt.export import export_onnx
 from xqt.export.input_utils import default_input_names
 
+from .fp4_backend import quantize_with_reference_fp4
 from .onnx_qdq import quantize_onnx_qdq_static
+from .capability import describe_quant_backend_capability, _resolve_nature
 from .torchao_backend import quantize_with_torchao
 from .types import (
     QuantizationComponentPlan,
     QuantizationExecutionPlan,
     QuantizationExecutionResult,
+    QuantizationNature,
     QuantizationReport,
 )
 
@@ -186,6 +189,8 @@ def _execute_torchao_component(
             *high_precision_modules,
         ]
     )
+    nature = _resolve_nature(component.strategy, component.policy)
+    compute_speedup = 1.0 if nature == QuantizationNature.TRUE else None
     report = QuantizationReport(
         component_name=component.name,
         backend=result.backend,
@@ -196,10 +201,58 @@ def _execute_torchao_component(
         quantized_modules=_prefix_module_names(result.quantized_modules, component.target_path),
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
+        nature=nature,
+        compute_speedup_expected=compute_speedup,
         metadata={
             **dict(result.metadata),
             "analysis_only": component.analysis_only,
             "policy": effective_policy,
+        },
+    )
+    return updated_model, report
+
+
+def _execute_reference_fp4_component(
+    root_model: nn.Module,
+    component: QuantizationComponentPlan,
+) -> tuple[nn.Module, QuantizationReport]:
+    target_model = _resolve_component_model(root_model, component.target_path)
+    effective_policy = _build_torchao_policy(component)
+    result = quantize_with_reference_fp4(
+        target_model,
+        policy=effective_policy,
+        strategy=component.strategy or effective_policy.get("strategy"),
+        inplace=True,
+    )
+    updated_model = _replace_component_model(root_model, component.target_path, result.model)
+    high_precision_modules = _prefix_module_names(
+        component.keep_high_precision,
+        component.target_path,
+    )
+    skipped_modules = _ordered_unique(
+        [
+            *_prefix_module_names(component.skip_quantize, component.target_path),
+            *high_precision_modules,
+        ]
+    )
+    report = QuantizationReport(
+        component_name=component.name,
+        backend=result.backend,
+        runtime="pytorch",
+        method=component.method,
+        strategy=result.strategy,
+        target_path=component.target_path,
+        quantized_modules=_prefix_module_names(result.quantized_modules, component.target_path),
+        skipped_modules=skipped_modules,
+        high_precision_modules=high_precision_modules,
+        nature=QuantizationNature.PSEUDO,
+        compute_speedup_expected=None,
+        metadata={
+            **dict(result.metadata),
+            "analysis_only": component.analysis_only,
+            "policy": effective_policy,
+            "executed": True,
+            "execution_state": "reference_fp4_weight_only",
         },
     )
     return updated_model, report
@@ -313,6 +366,7 @@ def _execute_onnx_qdq_component(
         artifacts={"onnx": str(result.path)},
         calibration_samples=result.calibration_samples,
         calibration_summary=metadata.get("calibration_summary"),
+        nature=_resolve_nature(component.strategy, component.policy),
         metadata={
             **metadata,
             "path": str(result.path),
@@ -338,6 +392,60 @@ def _component_requires_model(component: QuantizationComponentPlan) -> bool:
     if component.policy.get("onnx_path") is not None:
         return False
     return True
+
+
+def _execute_planned_method_component(
+    root_model: nn.Module | None,
+    component: QuantizationComponentPlan,
+) -> tuple[nn.Module | None, QuantizationReport, dict[str, Any]]:
+    capability = describe_quant_backend_capability(
+        component.backend,
+        method=component.method,
+        strategy=component.strategy,
+        policy=component.policy,
+    )
+    artifact_name = f"{component.name}_{component.backend}_{component.method or 'planned'}.json"
+    artifact_dir = Path("artifacts")
+    planned_artifact = artifact_dir / artifact_name
+    artifact_payload = {
+        "component_name": component.name,
+        "backend": component.backend,
+        "method": component.method,
+        "strategy": component.strategy,
+        "target_path": component.target_path,
+        "policy": dict(component.policy),
+        "status": "planned",
+        "runtime": capability.runtime,
+        "requires_cuda": capability.requires_cuda,
+        "notes": list(capability.notes),
+        "limitations": list(capability.limitations),
+    }
+    report = QuantizationReport(
+        component_name=component.name,
+        backend=component.backend,
+        runtime=capability.runtime,
+        method=component.method,
+        strategy=component.strategy,
+        target_path=component.target_path,
+        skipped_modules=_prefix_module_names(component.skip_quantize, component.target_path),
+        high_precision_modules=_prefix_module_names(
+            component.keep_high_precision,
+            component.target_path,
+        ),
+        nature=capability.nature,
+        artifacts={"planned": str(planned_artifact)},
+        metadata={
+            "execution_state": "planned",
+            "executed": False,
+            "capability": capability.to_dict(),
+            "planned_artifact": str(planned_artifact),
+            "policy": dict(component.policy),
+        },
+    )
+    artifact_updates = {
+        _artifact_key("quant_plan", component.name): planned_artifact,
+    }
+    return root_model, report, artifact_updates
 
 
 def execute_quantization_plan(
@@ -369,6 +477,7 @@ def execute_quantization_plan(
                         component.skip_quantize,
                         component.target_path,
                     ),
+                    nature=_resolve_nature(component.strategy, component.policy),
                     metadata={"analysis_only": True, "executed": False},
                 )
             )
@@ -380,6 +489,13 @@ def execute_quantization_plan(
             )
         if component.backend == "torchao":
             current_model, report = _execute_torchao_component(current_model, component)
+            reports.append(report)
+            continue
+        if (
+            component.backend == "pytorch"
+            and component.strategy == "fp4_weight_only"
+        ):
+            current_model, report = _execute_reference_fp4_component(current_model, component)
             reports.append(report)
             continue
         if component.backend == "onnxruntime_qdq":
@@ -394,10 +510,13 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if component.backend in {"pytorch", "tilelang"} and component.method in {"awq", "gptq"}:
-            raise NotImplementedError(
-                f"Quantization method '{component.method}' on backend "
-                f"'{component.backend}' is planned but not executable yet"
+            current_model, report, component_artifacts = _execute_planned_method_component(
+                current_model,
+                component,
             )
+            artifacts.update(component_artifacts)
+            reports.append(report)
+            continue
         if component.backend in {"transformers", "bitsandbytes"}:
             raise NotImplementedError(
                 f"Quantization backend '{component.backend}' is planned but not executable yet"

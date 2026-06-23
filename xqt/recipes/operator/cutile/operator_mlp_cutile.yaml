@@ -10,7 +10,6 @@ model:
     hidden_dim: 8
     intermediate_dim: 16
     num_classes: 2
-  device: cpu
 
 operator_optimization:
   enabled: true
@@ -19,13 +18,11 @@ operator_optimization:
       target: mlp
       backend: cutile
       patterns: [bias_silu]
-      fallback: eager
       min_speedup: 1.10
       validate:
         atol: 1e-4
         rtol: 1e-4
       cutile:
-        target: cuda
         target_arch: sm_89
         cache_dir: /tmp/xqt-cutile-cache
         pass_configs:

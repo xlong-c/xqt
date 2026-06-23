@@ -12,7 +12,7 @@ from torch import nn
 
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
-from xqt.eval.compare import TensorDiff, compare_tensors
+from xqt.analysis.compare import TensorDiff, compare_tensors
 
 
 @dataclass

@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from torch import nn
+
+
+class QuantizationNature(str, enum.Enum):
+    """Whether a quantization strategy reduces compute FLOPs or only saves memory bandwidth.
+
+    ``TRUE`` : native low-precision tensor core MMA (e.g. W8A8 fp8 mma m16n8k32,
+    W8A8 int8 mma m16n8k32). K dimension doubles relative to fp16, per-clock
+    math throughput increases -- should measure *compute* speedup.
+
+    ``PSEUDO`` : weight storage in low precision, dequantized to fp16/bf16 before
+    compute (e.g. fp8_weight_only, int4_weight_only, W8A16). K dimension stays at
+    16 (fp16 mma), per-clock math throughput unchanged -- can measure *memory
+    bandwidth* savings but zero compute speedup.
+
+    ``UNKNOWN`` : the backend or strategy has not been classified yet.
+    """
+
+    TRUE = "true"
+    PSEUDO = "pseudo"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -72,6 +93,10 @@ class QuantizationReport:
     artifacts: dict[str, str] = field(default_factory=dict)
     calibration_samples: Optional[int] = None
     calibration_summary: Optional[dict[str, Any]] = None
+    nature: QuantizationNature = QuantizationNature.UNKNOWN
+    compute_speedup_expected: Optional[float] = None
+    fusion_applied: list[str] = field(default_factory=list)
+    dequant_nodes_eliminated: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,6 +114,10 @@ class QuantizationReport:
             "artifacts": dict(self.artifacts),
             "calibration_samples": self.calibration_samples,
             "calibration_summary": self.calibration_summary,
+            "nature": self.nature.value,
+            "compute_speedup_expected": self.compute_speedup_expected,
+            "fusion_applied": list(self.fusion_applied),
+            "dequant_nodes_eliminated": self.dequant_nodes_eliminated,
             "metadata": dict(self.metadata),
         }
 
@@ -106,5 +135,6 @@ __all__ = [
     "QuantizationComponentPlan",
     "QuantizationExecutionPlan",
     "QuantizationExecutionResult",
+    "QuantizationNature",
     "QuantizationReport",
 ]

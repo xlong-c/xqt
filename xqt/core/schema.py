@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from xdl.metric.detection_utils import DetectionPostprocessConfig
+
 XQT_CONFIG_VERSION = 1
 
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps")
@@ -68,21 +70,6 @@ class ModelConfig(ComponentConfig):
     checkpoint: Optional[str] = None
     dtype: str = "float32"
     device: str = "cpu"
-
-
-@dataclass
-class DetectionPostprocessConfig:
-    """Postprocess settings for detection model outputs."""
-
-    format: str = "auto"
-    box_format: str = "xyxy"
-    score_threshold: float = 0.25
-    iou_threshold: float = 0.45
-    max_detections: int = 300
-    score_activation: str = "identity"
-    has_objectness: bool = False
-    class_agnostic_nms: bool = False
-    rescale_to_original: bool = True
 
 
 @dataclass

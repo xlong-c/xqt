@@ -36,15 +36,22 @@ from .types import (
     QuantizationComponentPlan,
     QuantizationExecutionPlan,
     QuantizationExecutionResult,
+    QuantizationNature,
     QuantizationReport,
 )
 from .executor import execute_quantization_plan, summarize_quantization_reports
 from .fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
+from .fp4_backend import (
+    FP4QuantizationResult,
+    ReferenceFP4Linear,
+    quantize_with_reference_fp4,
+)
 
 __all__ = [
     "ActivationDriftRecord",
     "ActivationStatistic",
     "FakeQDQSurrogateResult",
+    "FP4QuantizationResult",
     "IterableCalibrationDataReader",
     "LayerAnalysisRecord",
     "LayerSensitivityRecord",
@@ -54,8 +61,10 @@ __all__ = [
     "QuantizationComponentPlan",
     "QuantizationExecutionPlan",
     "QuantizationExecutionResult",
+    "QuantizationNature",
     "QuantizationPolicy",
     "QuantizationReport",
+    "ReferenceFP4Linear",
     "TorchAOQuantizationResult",
     "analyze_activation_drift",
     "analyze_layer_errors",
@@ -68,6 +77,7 @@ __all__ = [
     "list_quant_backend_capabilities",
     "list_quantizable_modules",
     "quantize_onnx_qdq_static",
+    "quantize_with_reference_fp4",
     "quantize_with_torchao",
     "recommend_high_precision_modules",
     "should_quantize_module",

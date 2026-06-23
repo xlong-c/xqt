@@ -23,10 +23,9 @@ XQT 负责模型压缩,模型图变换,导出适配,模型误差分析和 benchm
 
 - `core/`: structured config, artifact manifest, checksum, XQT registry.
 - `model/`: smoke-only model helper 和模型 forward hook 输出采集工具.
-- `integrations/`: detection output decode adapter.
 - `pipeline/`: sequential pass manager,preflight 和 YAML runner.
 - `workflows/`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
-- `eval/`: tensor output diff,layer analysis 和 report helper.
+- `analysis/`: tensor output diff,layer analysis 和 report helper.
 - `benchmark/`: latency 和 memory benchmark helper.
 - `quant/`: quantization policy,backend capability matrix,activation calibration,layer sensitivity helper.
 - `prune/`: unstructured,structured,N:M 和 block sparse pruning helper.
@@ -46,16 +45,27 @@ Recipe 按技术栈分层组织在 `recipes/` 下:
 
 不要新增 XQT 训练 recipe. `finetune`,`distill`,`recovery`,`QAT training` 等 recipe 应放到 XDL 或外部训练工具侧.
 
+### 配置方式
+
+XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配置方式:
+
+1. **`XQTOptimizationSession`** (第一配置): Python 交互式 session, 逐步编排 benchmark / prune / quant / operator / export / deploy / analyze. 适合探索, 调试和 notebook.
+2. **YAML workflow** (第二配置): 声明式 recipe, 通过 `optimize_model()` 或 CLI 入口运行, 适合可复现批量实验.
+
+不要新增 CLI 参数解析库, JSON-shaped Python dict 硬编码 workflow 或其他配置路径.
+
 ### 运行入口
 
-- `xqt-preflight`: 检查 recipe 的 target,可选依赖,后端命令和硬件要求.
-- `xqt-run-recipe`: 运行 pass recipe.
+- `from xqt import XQTOptimizationSession` - session 主入口, 即第一配置方式.
+- `optimize_model("path/to/workflow.yaml")` - YAML workflow 主入口, 即第二配置方式.
 - `xqt-run-workflow`: 运行 stage workflow recipe.
-- `entrypoints/`: 命令行入口脚本,通过环境变量指定 recipe.
+- `run_workflow.py`: workflow 命令入口模块,通过环境变量指定 stage workflow.
+
+早期 `load_xqt_config`,`run_xqt_recipe`,`preflight_xqt_config` 和 `XQTConfig` pass recipe 链路只作为 `xqt.core` / `xqt.pipeline` 内部实现,不要从 `xqt` 顶层重新导出,也不要新增安装后命令入口.
 
 ## API 边界
 
-- `xqt` 顶层导出进入 Provisional API: `load_xqt_config`, `run_xqt_recipe`, `preflight_xqt_config`, `optimize_model`, `load_optimization_config`, `XQTOptimizationSession`, `OptimizedModelResult`, `OptimizationConfig`, `OptimizationStageConfig`, `OptimizationStageResult`, `StageAcceptanceConfig`, `XQTConfig`, `ArtifactManifest`, `ArtifactRecord`, `MetricRecord`.
+- `xqt` 顶层导出进入 Provisional API: `optimize_model`, `load_optimization_config`, `XQTOptimizationSession`, `OptimizedModelResult`, `OptimizationConfig`, `OptimizationStageConfig`, `OptimizationStageResult`, `StageAcceptanceConfig`, `ArtifactManifest`, `ArtifactRecord`, `MetricRecord`.
 - `xqt` 到 XDL 的模型产物适配入口进入 Provisional API: `xdl_setup_to_xqt_context`, `xdl_checkpoint_to_xqt_context`, `load_checkpoint_into_model`.
 - 子模块内部实现按 Internal 处理,先服务 recipe 验证.
 

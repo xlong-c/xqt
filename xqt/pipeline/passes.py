@@ -14,7 +14,7 @@ from xqt.core.imports import build_target
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
-from xqt.eval import (
+from xqt.analysis import (
     records_to_rows,
     write_csv_report,
     write_json_report,
@@ -286,6 +286,8 @@ class AnalyzePass:
             rtol=context.config.validation.output_diff.rtol,
             include_weight_diff=analysis_config.include_weight_diff,
             policy=None,
+            per_channel=analysis_config.structured.per_channel,
+            per_token=analysis_config.structured.per_token,
         )
         if analysis_config.top_k is not None:
             records = records[: analysis_config.top_k]
@@ -974,6 +976,10 @@ class ExportPass:
                     ),
                     timing_cache_path=target.params.get("timing_cache_path"),
                     log_level=target.params.get("log_level"),
+                    plugin_libraries=target.params.get("plugin_libraries"),
+                    serialize_plugin_libraries=bool(
+                        target.params.get("serialize_plugin_libraries", True)
+                    ),
                 )
                 context.artifacts[f"export_{index}"] = result.engine_path
                 context.artifacts["last_engine"] = result.engine_path
@@ -987,6 +993,10 @@ class ExportPass:
                     "profiling_verbosity": result.metadata.get("profiling_verbosity"),
                     "builder_flags": result.metadata.get("builder_flags"),
                     "builder_notes": result.metadata.get("builder_notes"),
+                    "plugin_libraries": result.metadata.get("plugin_libraries"),
+                    "serialize_plugin_libraries": result.metadata.get(
+                        "serialize_plugin_libraries"
+                    ),
                     "engine_inspector": result.metadata.get("engine_inspector"),
                     "engine_inspector_error": result.metadata.get("engine_inspector_error"),
                     "performance": result.metadata.get("performance"),
@@ -1013,6 +1023,7 @@ class ExportPass:
                         iterations=int(runtime_benchmark_params.get("iterations", 50)),
                         device=str(runtime_benchmark_params.get("device", "cuda:0")),
                         fill_random=bool(runtime_benchmark_params.get("fill_random", True)),
+                        plugin_libraries=target.params.get("plugin_libraries"),
                     ).to_dict()
                     tensorrt_metadata["runtime_benchmark"] = runtime_benchmark
                 if context.manifest is not None:

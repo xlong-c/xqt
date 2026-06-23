@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import re
 import shutil
@@ -145,6 +146,35 @@ class TensorRTBuildResult:
     checksum: Optional[str] = None
     dry_run: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _normalize_plugin_libraries(
+    plugin_libraries: Optional[Sequence[str | Path]],
+) -> list[Path]:
+    normalized: list[Path] = []
+    for raw in plugin_libraries or ():
+        path = Path(raw)
+        if path in normalized:
+            continue
+        normalized.append(path)
+    return normalized
+
+
+def _load_tensorrt_plugin_libraries(
+    plugin_libraries: Optional[Sequence[str | Path]],
+) -> list[str]:
+    loaded: list[str] = []
+    for path in _normalize_plugin_libraries(plugin_libraries):
+        if not path.is_file():
+            raise XQTBackendError(f"TensorRT plugin library not found: {path}")
+        try:
+            ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+        except OSError as exc:
+            raise XQTBackendError(
+                f"Failed to load TensorRT plugin library '{path}': {exc}"
+            ) from exc
+        loaded.append(str(path))
+    return loaded
 
 
 def _import_tensorrt() -> Any:
@@ -402,6 +432,7 @@ def inspect_tensorrt_engine(
     engine_path: str | Path,
     *,
     profiling_verbosity: Optional[str] = None,
+    plugin_libraries: Optional[Sequence[str | Path]] = None,
 ) -> TensorRTEngineInspectorSummary:
     """Inspect a TensorRT engine and summarize layer-level quantization/fusion signals."""
 
@@ -409,7 +440,10 @@ def inspect_tensorrt_engine(
     if not engine.is_file():
         raise XQTBackendError(f"TensorRT engine file not found: {engine}")
 
+    loaded_plugins = _load_tensorrt_plugin_libraries(plugin_libraries)
     trt = _import_tensorrt()
+    if hasattr(trt, "init_libnvinfer_plugins"):
+        trt.init_libnvinfer_plugins(trt.Logger(trt.Logger.INFO), "")
     runtime = trt.Runtime(trt.Logger(trt.Logger.INFO))
     deserialized = runtime.deserialize_cuda_engine(engine.read_bytes())
     if deserialized is None:
@@ -425,6 +459,8 @@ def inspect_tensorrt_engine(
         raise XQTBackendError("Failed to parse TensorRT engine inspector JSON") from exc
     if profiling_verbosity is not None:
         raw["ProfilingVerbosity"] = profiling_verbosity
+    if loaded_plugins:
+        raw["PluginLibraries"] = loaded_plugins
     return summarize_tensorrt_engine_inspector(raw)
 
 
@@ -607,6 +643,8 @@ def build_trtexec_command(
     profiles: Optional[Mapping[str, Any]] = None,
     trtexec_path: str = "trtexec",
     extra_args: Optional[Sequence[str]] = None,
+    plugin_libraries: Optional[Sequence[str | Path]] = None,
+    serialize_plugin_libraries: bool = True,
 ) -> list[str]:
     """Build a trtexec command for ONNX -> TensorRT engine conversion."""
 
@@ -622,6 +660,10 @@ def build_trtexec_command(
         command.append(f"--{normalized}")
     if profiles:
         command.extend(_profiles_to_args(profiles))
+    for plugin_path in _normalize_plugin_libraries(plugin_libraries):
+        command.append(f"--dynamicPlugins={plugin_path}")
+        if serialize_plugin_libraries:
+            command.append(f"--setPluginsToSerialize={plugin_path}")
     command.extend(str(arg) for arg in (extra_args or ()))
     return command
 
@@ -764,7 +806,9 @@ def _build_tensorrt_engine_python_api(
     timing_cache_path: Optional[str | Path],
     dry_run: bool,
     log_level: Optional[str],
+    plugin_libraries: Optional[Sequence[str | Path]],
 ) -> TensorRTBuildResult:
+    normalized_plugins = _normalize_plugin_libraries(plugin_libraries)
     metadata: dict[str, Any] = {
         "backend": "python_api",
         "precision": precision,
@@ -773,6 +817,7 @@ def _build_tensorrt_engine_python_api(
         "builder_optimization_level": builder_optimization_level,
         "timing_cache_path": str(timing_cache_path) if timing_cache_path is not None else None,
         "profiling_verbosity": "DETAILED",
+        "plugin_libraries": [str(path) for path in normalized_plugins],
     }
     if dry_run:
         return TensorRTBuildResult(
@@ -782,7 +827,10 @@ def _build_tensorrt_engine_python_api(
             metadata=metadata,
         )
 
+    loaded_plugins = _load_tensorrt_plugin_libraries(normalized_plugins)
     trt = _import_tensorrt()
+    if hasattr(trt, "init_libnvinfer_plugins"):
+        trt.init_libnvinfer_plugins(trt.Logger(trt.Logger.INFO), "")
     builder, network, builder_config = _parse_onnx_network(trt, onnx, log_level=log_level)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(workspace_mib) << 20)
     if hasattr(builder_config, "profiling_verbosity") and hasattr(trt, "ProfilingVerbosity"):
@@ -843,10 +891,13 @@ def _build_tensorrt_engine_python_api(
         inspector_summary = inspect_tensorrt_engine(
             engine,
             profiling_verbosity=metadata.get("profiling_verbosity"),
+            plugin_libraries=normalized_plugins,
         )
         metadata["engine_inspector"] = inspector_summary.to_dict()
     except XQTBackendError as exc:
         metadata["engine_inspector_error"] = str(exc)
+    if loaded_plugins:
+        metadata["loaded_plugin_libraries"] = loaded_plugins
     return TensorRTBuildResult(
         engine_path=engine,
         command=["tensorrt-python-api", f"--onnx={onnx}", f"--saveEngine={engine}"],
@@ -877,6 +928,7 @@ def create_tensorrt_runtime_session(
     engine_path: str | Path,
     *,
     device: str = "cuda:0",
+    plugin_libraries: Optional[Sequence[str | Path]] = None,
 ) -> TensorRTRuntimeSession:
     """Create a reusable TensorRT runtime session."""
 
@@ -884,7 +936,10 @@ def create_tensorrt_runtime_session(
     if not engine.is_file():
         raise XQTBackendError(f"TensorRT engine file not found: {engine}")
 
+    loaded_plugins = _load_tensorrt_plugin_libraries(plugin_libraries)
     trt = _import_tensorrt()
+    if hasattr(trt, "init_libnvinfer_plugins"):
+        trt.init_libnvinfer_plugins(trt.Logger(trt.Logger.INFO), "")
     runtime = trt.Runtime(trt.Logger(trt.Logger.INFO))
     serialized = runtime.deserialize_cuda_engine(engine.read_bytes())
     if serialized is None:
@@ -899,7 +954,15 @@ def create_tensorrt_runtime_session(
         runtime=runtime,
         engine=serialized,
         context=context,
-        engine_inspector=inspect_tensorrt_engine(engine).to_dict(),
+        engine_inspector=inspect_tensorrt_engine(
+            engine,
+            plugin_libraries=plugin_libraries,
+        ).to_dict()
+        | (
+            {"plugin_libraries": loaded_plugins}
+            if loaded_plugins
+            else {}
+        ),
     )
 
 
@@ -908,10 +971,15 @@ def execute_tensorrt_engine(
     *,
     inputs: Mapping[str, torch.Tensor],
     device: str = "cuda:0",
+    plugin_libraries: Optional[Sequence[str | Path]] = None,
 ) -> TensorRTRuntimeExecutionResult:
     """Execute a TensorRT engine once with explicit input tensors."""
 
-    session = create_tensorrt_runtime_session(engine_path, device=device)
+    session = create_tensorrt_runtime_session(
+        engine_path,
+        device=device,
+        plugin_libraries=plugin_libraries,
+    )
     return execute_tensorrt_session(session, inputs=inputs)
 
 
@@ -983,11 +1051,16 @@ def benchmark_tensorrt_engine(
     iterations: int = 50,
     device: str = "cuda:0",
     fill_random: bool = True,
+    plugin_libraries: Optional[Sequence[str | Path]] = None,
 ) -> TensorRTRuntimeBenchmarkResult:
     """Benchmark a TensorRT engine using the TensorRT Python runtime."""
 
     engine = Path(engine_path)
-    session = create_tensorrt_runtime_session(engine, device=device)
+    session = create_tensorrt_runtime_session(
+        engine,
+        device=device,
+        plugin_libraries=plugin_libraries,
+    )
 
     torch_device = torch.device(device)
     inputs: dict[str, torch.Tensor] = {}
@@ -1045,6 +1118,8 @@ def build_tensorrt_engine(
     builder_optimization_level: Optional[int] = None,
     timing_cache_path: str | Path | None = None,
     log_level: Optional[str] = None,
+    plugin_libraries: Optional[Sequence[str | Path]] = None,
+    serialize_plugin_libraries: bool = True,
 ) -> TensorRTBuildResult:
     """Build a TensorRT engine via `trtexec` or TensorRT Python API."""
 
@@ -1073,6 +1148,7 @@ def build_tensorrt_engine(
             timing_cache_path=timing_cache_path,
             dry_run=dry_run,
             log_level=log_level,
+            plugin_libraries=plugin_libraries,
         )
         if compat_metadata:
             result.metadata["onnx_compat"] = compat_metadata
@@ -1086,6 +1162,8 @@ def build_tensorrt_engine(
         profiles=profiles,
         trtexec_path=trtexec_path,
         extra_args=extra_args,
+        plugin_libraries=plugin_libraries,
+        serialize_plugin_libraries=serialize_plugin_libraries,
     )
 
     if dry_run:
@@ -1098,6 +1176,10 @@ def build_tensorrt_engine(
                 "precision": precision,
                 "profiles": dict(profiles or {}),
                 "performance_thresholds": dict(performance_thresholds or {}),
+                "plugin_libraries": [
+                    str(path) for path in _normalize_plugin_libraries(plugin_libraries)
+                ],
+                "serialize_plugin_libraries": bool(serialize_plugin_libraries),
             },
         )
 
@@ -1149,6 +1231,10 @@ def build_tensorrt_engine(
             "performance_threshold_report": (
                 threshold_report.to_dict() if threshold_report is not None else None
             ),
+            "plugin_libraries": [
+                str(path) for path in _normalize_plugin_libraries(plugin_libraries)
+            ],
+            "serialize_plugin_libraries": bool(serialize_plugin_libraries),
         },
     )
 

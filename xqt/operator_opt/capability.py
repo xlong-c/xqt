@@ -74,12 +74,18 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
     ),
     "tilelang": OperatorOptimizationBackendCapability(
         backend="tilelang",
-        status="planned",
+        status="available",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
-        notes=("Reserved for CUDA-only TileLang kernels with artifact caching.",),
-        limitations=("Built-in executor does not yet ship TileLang kernels.",),
+        notes=(
+            "Built-in executor ships a minimal attention target with reference fallback metadata.",
+            "A minimal CUDA TileLang attention kernel path is available when tilelang and CUDA are present.",
+        ),
+        limitations=(
+            "Current built-in execution is limited to the attention pattern.",
+            "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q.",
+        ),
     ),
     "cutile": OperatorOptimizationBackendCapability(
         backend="cutile",
@@ -156,7 +162,9 @@ def describe_operator_backend_capability(
         except Exception:
             pass
     elif backend == "tilelang":
-        available = _package_available("tilelang")
+        available = True
+        if not _package_available("tilelang"):
+            notes.append("tilelang package is not importable; built-in execution is limited to reference fallback.")
         try:
             from .backends.tilelang import list_tilelang_kernel_specs
 

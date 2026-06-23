@@ -1,7 +1,6 @@
 """Pipeline pass abstractions."""
 
 from .pass_manager import SequentialPipeline, XQTPass
-from .preflight import PreflightCheck, PreflightReport, preflight_xqt_config
 from .runner import (
     DEFAULT_COMPRESSION_PASS_ORDER,
     DEFAULT_PASS_ORDER,
@@ -10,14 +9,11 @@ from .runner import (
     create_manifest,
     default_pass_names,
     enabled_pass_names,
-    run_xqt_recipe,
 )
 
 __all__ = [
     "DEFAULT_COMPRESSION_PASS_ORDER",
     "DEFAULT_PASS_ORDER",
-    "PreflightCheck",
-    "PreflightReport",
     "SequentialPipeline",
     "XQTPass",
     "build_pipeline_from_config",
@@ -25,6 +21,4 @@ __all__ = [
     "create_manifest",
     "default_pass_names",
     "enabled_pass_names",
-    "preflight_xqt_config",
-    "run_xqt_recipe",
 ]

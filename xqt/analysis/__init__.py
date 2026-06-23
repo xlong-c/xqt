@@ -3,9 +3,7 @@
 from .compare import TensorDiff, TensorSummary, compare_tensors, summarize_tensor
 from .detection import (
     DecodedDetectionDiff,
-    DetectionPrediction,
     compare_decoded_detections,
-    decode_detection_output,
 )
 from .layer_analysis import (
     build_avoid_list,
@@ -29,13 +27,11 @@ from .report import (
 
 __all__ = [
     "DecodedDetectionDiff",
-    "DetectionPrediction",
     "TensorDiff",
     "TensorSummary",
     "build_pareto_points",
     "compare_decoded_detections",
     "compare_tensors",
-    "decode_detection_output",
     "flatten_metrics",
     "build_avoid_list",
     "build_layer_analysis_events",

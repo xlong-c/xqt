@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from xqt.core.artifact import file_sha256
-from xqt.eval.compare import TensorDiff, compare_tensors
+from xqt.analysis.compare import TensorDiff, compare_tensors
 from xqt.export.input_utils import (
     call_model_with_example_input,
     first_tensor_output,

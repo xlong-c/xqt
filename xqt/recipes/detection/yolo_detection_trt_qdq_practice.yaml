@@ -7,20 +7,13 @@ model:
   params:
     num_classes: 80
     input_channels: 3
-  dtype: float32
-  device: cpu
 
 task:
   type: detection
   detection_postprocess:
     format: yolo_raw
     box_format: cxcywh
-    score_threshold: 0.25
-    iou_threshold: 0.45
-    max_detections: 300
     score_activation: sigmoid
-    has_objectness: false
-    class_agnostic_nms: false
   params:
     imgsz: 640
 

@@ -7,7 +7,7 @@ from typing import Sequence
 
 import torch
 
-from xqt.integrations.detection import DetectionPrediction, decode_detection_output
+from xdl.metric.detection_utils import DetectionPrediction, decode_detection_output
 
 
 @dataclass
@@ -84,7 +84,5 @@ def compare_decoded_detections(
 
 __all__ = [
     "DecodedDetectionDiff",
-    "DetectionPrediction",
     "compare_decoded_detections",
-    "decode_detection_output",
 ]

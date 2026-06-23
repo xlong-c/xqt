@@ -1,5 +1,3 @@
-config_version: 1
-
 project:
   name: quant_int8_torchao_compile
   artifact_dir: artifacts/xqt/quant/int8/torchao_compile
@@ -10,36 +8,23 @@ model:
     in_features: 4
     hidden_features: 4
     num_classes: 2
-  dtype: float32
-  device: cpu
 
 compression:
   axes:
     - precision
   quant:
     enabled: true
-    backend: torchao
     strategy: dynamic_int8
     policy:
       include_module_types: [Linear]
 
 operator_optimization:
   enabled: true
-  default_backend: torch_compile
   targets:
     - name: model
       backend: torch_compile
       mode: reduce-overhead
-      fallback: eager
       min_speedup: 1.000001
-      validate:
-        atol: 1.0e-5
-        rtol: 1.0e-5
-
-validation:
-  output_diff:
-    atol: 1.0e-5
-    rtol: 1.0e-5
 
 benchmark:
   warmup: 0

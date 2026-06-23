@@ -9,7 +9,7 @@ from typing import Optional, Sequence
 from xqt.workflows import optimize_model
 
 CONFIG_ENV = "XQT_WORKFLOW_CONFIG"
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "recipes" / "detection" / "yolo_detection_smoke.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "recipes" / "smoke" / "smoke_workflow.yaml"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
