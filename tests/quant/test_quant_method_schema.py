@@ -28,7 +28,6 @@ def _base_config() -> dict:
                 "backend": "pytorch",
                 "method": "awq",
                 "strategy": "int4_weight_only",
-                "calibration_split": "calibration",
                 "policy": {
                     "bits": 4,
                     "group_size": 128,
