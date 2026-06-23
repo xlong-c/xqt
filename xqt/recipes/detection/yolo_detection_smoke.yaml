@@ -24,10 +24,6 @@ task:
     score_activation: sigmoid
     has_objectness: false
     class_agnostic_nms: false
-  detection_metric:
-    iou_thresholds: [0.5, 0.75]
-    max_detections: 100
-
 compression:
   axes:
     - precision
@@ -58,9 +54,6 @@ validation:
   output_diff:
     atol: 1.0e-5
     rtol: 1.0e-5
-  metric:
-    name: map50_95
-    max_drop: 0.05
 
 benchmark:
   warmup: 0

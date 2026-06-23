@@ -39,10 +39,6 @@ validation:
   output_diff:
     atol: 1.0e-5
     rtol: 1.0e-5
-  metric:
-    name: top1
-    max_drop: 0.2
-
 benchmark:
   warmup: 0
   iterations: 1

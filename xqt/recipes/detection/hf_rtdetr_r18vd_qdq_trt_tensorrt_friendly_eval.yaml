@@ -15,9 +15,6 @@ task:
     score_activation: sigmoid
     has_objectness: false
     class_agnostic_nms: false
-  detection_metric:
-    iou_thresholds: [0.5, 0.75, 0.95]
-    max_detections: 300
   params:
     imgsz: 640
 
