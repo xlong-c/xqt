@@ -8,7 +8,7 @@ from typing import Any, Mapping, Optional, Sequence
 import torch
 from torch import nn
 
-from xqt.distill.hooks import collect_module_outputs
+from xqt.model.hooks import collect_module_outputs
 from xqt.eval.compare import TensorDiff, compare_tensors, summarize_tensor
 
 from .policy import QuantizationPolicy, list_quantizable_modules

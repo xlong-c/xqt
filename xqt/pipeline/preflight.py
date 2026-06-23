@@ -242,56 +242,26 @@ def _check_quant_backend_capability(
     )
 
 
-def _check_qdq_calibration(report: PreflightReport, loaded: XQTConfig) -> None:
-    _check_qdq_data_source(
-        report,
-        loaded,
-        name="data.calibration",
-        calibration_split=loaded.compression.quant.calibration_split,
-        validation_split=loaded.compression.quant.validation_split,
-    )
-
-
-def _check_qdq_data_source(
+def _check_external_calibration_inputs(
     report: PreflightReport,
-    loaded: XQTConfig,
     *,
     name: str,
-    calibration_split: str | None,
-    validation_split: str | None,
     component_name: str | None = None,
 ) -> None:
-    calibration_name = calibration_split or "calibration"
-    calibration = getattr(loaded.data, calibration_name, None)
-    metadata: dict[str, Any] = {
-        "calibration_split": calibration_name,
-    }
-    if validation_split is not None:
-        metadata["validation_split"] = validation_split
+    metadata: dict[str, Any] = {"source": "external_context.calibration_inputs"}
     if component_name is not None:
         metadata["component"] = component_name
-    if calibration is not None:
-        report.add(
-            name,
-            True,
-            "calibration data configured",
-            **metadata,
-            source="calibration",
-        )
-        return
     report.add(
         name,
-        False,
-        "explicit calibration data is required for ONNX QDQ",
-        level="error",
+        True,
+        "ONNX QDQ requires external calibration_inputs at runtime",
+        level="warning",
         **metadata,
-        missing=[calibration_name],
     )
 
 
 def _check_quant_component_policy(
     report: PreflightReport,
-    loaded: XQTConfig,
     quant_config: QuantConfig,
     component: QuantComponentPolicyConfig,
 ) -> None:
@@ -330,12 +300,9 @@ def _check_quant_component_policy(
             _check_cuda(report, f"{prefix}.hardware.cuda")
     if backend == "onnxruntime_qdq":
         _check_dependency(report, "onnxruntime")
-        _check_qdq_data_source(
+        _check_external_calibration_inputs(
             report,
-            loaded,
             name=f"{prefix}.data_source",
-            calibration_split=component.calibration_split or quant_config.calibration_split,
-            validation_split=component.validation_split or quant_config.validation_split,
             component_name=component.name,
         )
 
@@ -588,51 +555,6 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
     _check_target(report, "model.target", loaded.model.target)
     _check_model_device(report, loaded.model.device)
 
-    for split_name in ("train", "validation", "calibration", "prompts"):
-        split = getattr(loaded.data, split_name)
-        if split is None:
-            continue
-        if split.target and split.target not in {
-            "prompt_file",
-            "prompt_list",
-            "synthetic_classification",
-            "synthetic_detection",
-            "hf_text_classification",
-            "torchvision_image_classification",
-            "xdl_dataset",
-            "xdl_detection",
-        }:
-            _check_target(report, f"data.{split_name}.target", split.target)
-        else:
-            report.add(
-                f"data.{split_name}.target",
-                True,
-                "built-in data target",
-                target=split.target,
-            )
-        if loaded.task.type == "detection" and split.target in {
-            "synthetic_detection",
-            "xdl_detection",
-            "xdl_dataset",
-        }:
-            params = dict(getattr(split, "params", {}) or {})
-            report.add(
-                f"data.{split_name}.detection",
-                True,
-                "detection data split configured",
-                batch_size=getattr(split, "batch_size", None),
-                sample_limit=getattr(split, "sample_limit", None),
-                params=params,
-            )
-        if split.root is not None:
-            root = Path(split.root).expanduser()
-            report.add(
-                f"data.{split_name}.root",
-                root.exists(),
-                "root exists" if root.exists() else "root does not exist",
-                path=str(root),
-            )
-
     quant = loaded.compression.quant
     if quant.enabled:
         _check_quant_runtime_mix(report, quant)
@@ -653,7 +575,10 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 _check_cuda(report, "hardware.cuda")
         if quant.backend == "onnxruntime_qdq":
             _check_dependency(report, "onnxruntime")
-            _check_qdq_calibration(report, loaded)
+            _check_external_calibration_inputs(
+                report,
+                name="compression.quant.calibration_inputs",
+            )
         if quant.component_policies:
             report.add(
                 "compression.quant.component_policies",
@@ -662,7 +587,7 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 count=len(quant.component_policies),
             )
             for component in quant.component_policies:
-                _check_quant_component_policy(report, loaded, quant, component)
+                _check_quant_component_policy(report, quant, component)
     _check_operator_optimization(report, loaded)
 
     prune = loaded.compression.prune
@@ -719,13 +644,6 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 level="error",
             )
     _check_detection_prune_safety(report, loaded)
-
-    if loaded.model.target == "xqt.distill.build_hf_text_classification_bundle_from_params" or any(
-        getattr(getattr(loaded.data, split_name), "target", None) == "hf_text_classification"
-        for split_name in ("train", "validation", "calibration")
-    ):
-        _check_dependency(report, "transformers")
-        _check_dependency(report, "datasets")
 
     for index, target in enumerate(loaded.export.targets):
         prefix = f"export.targets.{index}.{target.format}"

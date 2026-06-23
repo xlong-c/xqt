@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,25 +10,11 @@ from torch import nn
 
 from xqt.benchmark import benchmark_callable, benchmark_memory
 from xqt.core.artifact import ArtifactRecord, MetricRecord
-from xqt.core.errors import XQTBackendError
 from xqt.core.imports import build_target
+from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
-from xqt.data import (
-    build_data_split,
-    extract_model_inputs,
-    infer_model_input_count,
-    prompt_summary,
-)
-from xqt.distill import (
-    HFTextClassificationBundle,
-    analyze_feature_alignment,
-    train_logit_distillation,
-)
 from xqt.eval import (
-    build_pareto_points,
-    evaluate_detection_model,
-    evaluate_pytorch_model,
     records_to_rows,
     write_csv_report,
     write_json_report,
@@ -54,12 +39,6 @@ from xqt.operator_opt import (
     summarize_operator_optimization_reports,
 )
 from xqt.export.input_utils import default_input_names, first_tensor_output
-from xqt.integrations import (
-    EvaluationJob,
-    resolve_evaluation_provider,
-    resolve_training_provider,
-    run_evaluation_job,
-)
 from xqt.prune import (
     collect_module_importance,
     prune_runtime_capability_from_report,
@@ -70,8 +49,8 @@ from xqt.prune import (
     apply_structured_pruning,
     rank_prune_candidates,
     remove_pruning_reparameterization,
-    run_prune_kd_loop,
-    run_structured_prune_kd_loop,
+    run_prune_schedule,
+    run_structured_prune_schedule,
     summarize_pruning,
 )
 from xqt.quant import (
@@ -264,210 +243,10 @@ class LoadModelPass:
         if not target:
             raise ValueError("model.target is required when context.model is not set")
         model = build_target(target, context.config.model.params)
-        if isinstance(model, HFTextClassificationBundle):
-            context.model = model.student
-            context.teacher = model.teacher
-            context.artifacts["tokenizer"] = model.tokenizer
-            context.metrics["hf_text_bundle"] = model.metadata
-            context.data.setdefault("train", model.train_loader)
-            if model.validation_loader is not None:
-                context.data.setdefault("validation", model.validation_loader)
-            return context
         if not isinstance(model, nn.Module):
             raise TypeError("model.target must build a torch.nn.Module")
         model.eval()
         context.model = model
-        return context
-
-
-@register_pass("load_data")
-class LoadDataPass:
-    """Build configured calibration, train, validation, and prompt data."""
-
-    name = "load_data"
-
-    def _build_data_split(
-        self,
-        split_name: str,
-        split: Any,
-        context: XQTContext,
-        *,
-        default_seed: int,
-    ) -> Any:
-        return build_data_split(
-            split_name,
-            split,
-            model_params=context.config.model.params,
-            default_seed=default_seed,
-        )
-
-    def run(self, context: XQTContext) -> XQTContext:
-        calibration = context.config.data.calibration
-        prompts = context.config.data.prompts
-        validation = context.config.data.validation
-        train = context.config.data.train
-        if calibration is not None and "calibration" not in context.data:
-            context.data["calibration"] = self._build_data_split(
-                "calibration",
-                calibration,
-                context,
-                default_seed=2,
-            )
-        if train is not None and "train" not in context.data:
-            context.data["train"] = self._build_data_split(
-                "train",
-                train,
-                context,
-                default_seed=1,
-            )
-        if validation is not None and "validation" not in context.data:
-            context.data["validation"] = self._build_data_split(
-                "validation",
-                validation,
-                context,
-                default_seed=0,
-            )
-            if context.config.task.type == "detection":
-                first_batch = next(iter(context.data["validation"]))
-                if isinstance(first_batch, Mapping):
-                    class_names = first_batch.get("class_names")
-                    if isinstance(class_names, list) and not context.config.task.class_names:
-                        context.config.task.class_names = [str(name) for name in class_names]
-                        if context.manifest is not None and context.manifest.task is not None:
-                            context.manifest.task["class_names"] = list(context.config.task.class_names)
-        if prompts is not None and "prompts" not in context.data:
-            built_prompts = self._build_data_split(
-                "prompts",
-                prompts,
-                context,
-                default_seed=3,
-            )
-            context.data["prompts"] = built_prompts
-            summary = prompt_summary(built_prompts)
-            context.metrics["prompts"] = summary
-            if context.manifest is not None:
-                context.manifest.add_metric(
-                    MetricRecord(
-                        name="prompts.count",
-                        value=summary["count"],
-                        metadata={
-                            "has_negative_prompt": summary["has_negative_prompt"],
-                            "has_seed": summary["has_seed"],
-                        },
-                    )
-                )
-        return context
-
-
-@register_pass("distill")
-class DistillPass:
-    """Run a small teacher-to-student logit distillation loop."""
-
-    name = "distill"
-
-    def run(self, context: XQTContext) -> XQTContext:
-        model = context.require_model()
-        distill_config = context.config.compression.distill
-        if not distill_config.enabled:
-            return context
-        if context.teacher is None:
-            raise ValueError("context.teacher is required for distill pass")
-        dataloader = context.data.get("train")
-        if dataloader is None:
-            raise ValueError("train data is required for distill pass")
-
-        params = dict(distill_config.params)
-        provider = resolve_training_provider(context, params)
-        report = train_logit_distillation(
-            model,
-            context.teacher,
-            dataloader,
-            optimizer=None,
-            temperature=distill_config.temperature,
-            alpha=distill_config.alpha,
-            device=context.config.model.device,
-            max_steps=params.get("max_steps"),
-            training_provider=provider,
-        )
-        context.metrics["distill"] = report.to_dict()
-        if context.manifest is not None:
-            context.manifest.add_metric(
-                MetricRecord(
-                    name="distill.mean_loss",
-                    value=report.mean_loss,
-                    metadata={"steps": report.steps},
-                )
-            )
-        return context
-
-
-@register_pass("baseline_eval")
-class BaselineEvalPass:
-    """Evaluate the current PyTorch model on validation data."""
-
-    name = "baseline_eval"
-
-    def run(self, context: XQTContext) -> XQTContext:
-        model = context.require_model()
-        if context.reference_model is None:
-            context.reference_model = copy.deepcopy(model)
-        dataloader = context.data.get("validation")
-        if dataloader is None:
-            raise ValueError("validation data is required for baseline_eval")
-        params = dict(context.config.task.params)
-        provider = resolve_evaluation_provider(context, params)
-        used_provider = provider is not None
-        if provider is not None:
-            report = run_evaluation_job(
-                provider,
-                EvaluationJob(
-                    name="baseline",
-                    mode="eval",
-                    model=model,
-                    data=dataloader,
-                    reference_model=context.reference_model,
-                    params=params,
-                    device=context.config.model.device,
-                    task_type=context.config.task.type,
-                    context=context,
-                ),
-            )
-            report_dict = report.to_dict()
-            metric_values = report.metrics
-        elif context.config.task.type == "detection":
-            report = evaluate_detection_model(
-                model,
-                dataloader,
-                postprocess=context.config.task.detection_postprocess,
-                metric_config=context.config.task.detection_metric,
-                device=context.config.model.device,
-            )
-            report_dict = report.to_dict()
-            metric_values = report.metrics
-        else:
-            report = evaluate_pytorch_model(
-                model,
-                dataloader,
-                device=context.config.model.device,
-            )
-            report_dict = report.to_dict()
-            metric_values = report.metrics
-        if not used_provider:
-            report_dict.setdefault("provider", "xqt_internal_transition")
-            metadata = report_dict.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-            metadata.setdefault("evaluation_source", "xqt.eval")
-            report_dict["metadata"] = metadata
-        context.metrics["baseline"] = report_dict
-        if context.manifest is not None:
-            for metric_name, value in metric_values.items():
-                context.manifest.add_metric(
-                    MetricRecord(
-                        name=f"baseline.{metric_name}",
-                        value=value,
-                    )
-                )
         return context
 
 
@@ -488,10 +267,9 @@ class AnalyzePass:
         if reference_model is None:
             raise ValueError("reference_model is required for analyze pass")
 
-        dataloader = context.data.get("validation")
-        if dataloader is None:
-            raise ValueError("validation data is required for analyze pass")
-        batch = next(iter(dataloader))
+        if context.example_inputs is None:
+            raise ValueError("example_inputs are required for analyze pass")
+        batch = context.example_inputs
         expected_input_count = infer_model_input_count(model)
         inputs = _move_to_device(
             extract_model_inputs(batch, expected_input_count=expected_input_count),
@@ -538,21 +316,6 @@ class AnalyzePass:
                 records,
                 top_k=analysis_config.top_k,
             )
-        teacher_student_alignment: list[dict[str, object]] = []
-        if isinstance(context.teacher, nn.Module):
-            alignment_records = analyze_feature_alignment(
-                context.teacher.to(context.config.model.device),
-                model,
-                inputs,
-                module_names=analysis_config.module_names,
-                atol=context.config.validation.output_diff.atol,
-                rtol=context.config.validation.output_diff.rtol,
-            )
-            if analysis_config.top_k is not None:
-                alignment_records = alignment_records[: analysis_config.top_k]
-            teacher_student_alignment = [
-                record.to_dict() for record in alignment_records
-            ]
         context.metrics["analysis"] = {
             "compare_to": analysis_config.compare_to,
             "metrics": list(analysis_config.metrics),
@@ -563,7 +326,6 @@ class AnalyzePass:
             "importance": [record.to_dict() for record in importance_records],
             "prune_candidates": prune_candidates,
             "recommended_high_precision_modules": recommended_modules,
-            "teacher_student_alignment": teacher_student_alignment,
             "pareto_points": [],
         }
 
@@ -714,31 +476,21 @@ class PrunePass:
                         )
                     )
                 return context
-            validation_loader = context.data.get("validation")
             example_input = None
-            if validation_loader is not None:
+            if context.example_inputs is not None:
                 expected_input_count = infer_model_input_count(model)
                 example_input = _move_to_device(
                     extract_model_inputs(
-                        next(iter(validation_loader)),
+                        context.example_inputs,
                         expected_input_count=expected_input_count,
                     ),
                     torch.device(context.config.model.device),
                 )
-            if prune_config.schedule in {"linear", "one_shot"} and bool(
-                prune_config.params.get("finetune", False)
-            ):
-                dataloader = context.data.get("train")
-                recovery_params = dict(prune_config.params)
-                provider = resolve_training_provider(context, recovery_params)
-                if provider is None:
-                    raise XQTBackendError(
-                        "compression.prune.params.finetune=true requires a training provider"
-                    )
-                report = run_structured_prune_kd_loop(
+            if prune_config.schedule in {"linear", "one_shot"} and int(
+                prune_config.params.get("steps", 1)
+            ) > 1:
+                report = run_structured_prune_schedule(
                     model,
-                    context.teacher,
-                    dataloader,
                     schedule=PruningSchedule(
                         target_sparsity=prune_config.target_sparsity,
                         steps=int(prune_config.params.get("steps", 1)),
@@ -749,13 +501,7 @@ class PrunePass:
                     scope=prune_config.scope,
                     importance=dict(prune_config.importance),
                     selection=dict(prune_config.selection),
-                    optimizer=None,
-                    temperature=context.config.compression.distill.temperature,
-                    alpha=context.config.compression.distill.alpha,
-                    device=context.config.model.device,
-                    kd_steps_per_prune=recovery_params.get("kd_steps_per_prune"),
                     example_input=example_input,
-                    training_provider=provider,
                 )
                 context.metrics["prune"] = report.to_dict()
                 if context.manifest is not None:
@@ -770,8 +516,6 @@ class PrunePass:
                                 "granularity": prune_config.granularity,
                                 "schedule": prune_config.schedule,
                                 "steps": len(report.steps),
-                                "finetune": provider is not None,
-                                "kd": context.teacher is not None,
                             },
                         )
                     )
@@ -810,37 +554,17 @@ class PrunePass:
                 "compression.prune.method=block_sparse or "
                 "compression.prune.method=nm_structured is supported by the built-in prune pass"
             )
-        if prune_config.schedule in {"linear", "one_shot"} and (
-            int(prune_config.params.get("steps", 1)) > 1
-            or bool(prune_config.params.get("finetune", False))
-        ):
-            dataloader = context.data.get("train")
-            recovery_params = dict(prune_config.params)
-            provider = (
-                resolve_training_provider(context, recovery_params)
-                if bool(prune_config.params.get("finetune", False))
-                else None
-            )
-            if bool(prune_config.params.get("finetune", False)) and provider is None:
-                raise XQTBackendError(
-                    "compression.prune.params.finetune=true requires a training provider"
-                )
-            report = run_prune_kd_loop(
+        if prune_config.schedule in {"linear", "one_shot"} and int(
+            prune_config.params.get("steps", 1)
+        ) > 1:
+            report = run_prune_schedule(
                 model,
-                context.teacher,
-                dataloader,
                 schedule=PruningSchedule(
                     target_sparsity=prune_config.target_sparsity,
                     steps=int(prune_config.params.get("steps", 1)),
                     start_sparsity=float(prune_config.params.get("start_sparsity", 0.0)),
                     schedule=prune_config.schedule,
                 ),
-                optimizer=None,
-                temperature=context.config.compression.distill.temperature,
-                alpha=context.config.compression.distill.alpha,
-                device=context.config.model.device,
-                kd_steps_per_prune=recovery_params.get("kd_steps_per_prune"),
-                training_provider=provider,
             )
             context.metrics["prune"] = report.to_dict()
             if context.manifest is not None:
@@ -853,7 +577,6 @@ class PrunePass:
                         metadata={
                             "schedule": prune_config.schedule,
                             "steps": len(report.steps),
-                            "finetune": provider is not None,
                         },
                     )
                 )
@@ -941,7 +664,7 @@ class QuantPass:
                             value=report.calibration_samples,
                             metadata={
                                 "backend": report.backend,
-                                "source_split": report.source_split,
+                                "calibration_source": report.metadata.get("calibration_source"),
                             },
                         )
                     )
@@ -1036,10 +759,9 @@ class ExportPass:
             model = context.require_model()
             del model
             export_model, export_guard = _resolve_export_model(context)
-            dataloader = context.data.get("validation")
-            if dataloader is None:
-                raise ValueError("validation data is required for export")
-            batch = next(iter(dataloader))
+            if context.example_inputs is None:
+                raise ValueError("example_inputs are required for model export")
+            batch = context.example_inputs
             example_input = extract_model_inputs(
                 batch,
                 expected_input_count=infer_model_input_count(export_model),
@@ -1052,7 +774,7 @@ class ExportPass:
         for index, target in enumerate(context.config.export.targets):
             if target.format == "torch_export":
                 if export_model is None or example_input is None:
-                    raise ValueError("torch_export requires a loaded model and validation data")
+                    raise ValueError("torch_export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -1106,7 +828,7 @@ class ExportPass:
 
             if target.format == "torchscript":
                 if export_model is None or example_input is None:
-                    raise ValueError("torchscript export requires a loaded model and validation data")
+                    raise ValueError("torchscript export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -1158,7 +880,7 @@ class ExportPass:
 
             if target.format == "onnx":
                 if export_model is None or example_input is None:
-                    raise ValueError("onnx export requires a loaded model and validation data")
+                    raise ValueError("onnx export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -1371,7 +1093,7 @@ class ExportPass:
                 ):
                     if reference_output is None or example_input is None:
                         raise ValueError(
-                            "OpenVINO runtime_diff requires a loaded model and validation data"
+                            "OpenVINO runtime_diff requires a loaded model and example_inputs"
                         )
                     diff = compare_openvino_outputs(
                         result.xml_path,
@@ -1429,7 +1151,7 @@ class ExportPass:
 
             if target.format == "executorch":
                 if export_model is None or example_input is None:
-                    raise ValueError("executorch export requires a loaded model and validation data")
+                    raise ValueError("executorch export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
                     output_path = str(
@@ -1575,16 +1297,15 @@ class ExportPass:
 
 @register_pass("benchmark")
 class BenchmarkPass:
-    """Benchmark current model latency on the first validation batch."""
+    """Benchmark current model latency on the configured example inputs."""
 
     name = "benchmark"
 
     def run(self, context: XQTContext) -> XQTContext:
         model = context.require_model()
-        dataloader = context.data.get("validation")
-        if dataloader is None:
-            raise ValueError("validation data is required for benchmark")
-        batch = next(iter(dataloader))
+        if context.example_inputs is None:
+            raise ValueError("example_inputs are required for benchmark")
+        batch = context.example_inputs
         inputs = _move_to_device(
             extract_model_inputs(
                 batch,
@@ -1615,21 +1336,6 @@ class BenchmarkPass:
             )
             benchmark_metrics["memory"] = memory_report.to_dict()
         context.metrics["benchmark"] = benchmark_metrics
-        analysis_metrics = context.metrics.get("analysis")
-        if isinstance(analysis_metrics, dict):
-            analysis_metrics["pareto_points"] = build_pareto_points(
-                [
-                    {
-                        "config_id": context.config.project.name,
-                        "benchmark": context.metrics["benchmark"],
-                        "analysis": {
-                            "records": analysis_metrics.get("records", []),
-                        },
-                        "baseline": context.metrics.get("baseline", {}),
-                    }
-                ],
-                metric_delta_key="baseline.metrics.top1",
-            )
         prune_metrics = context.metrics.get("prune")
         if isinstance(prune_metrics, dict) and prune_metrics.get("method") in {
             "nm_structured",
@@ -1684,11 +1390,8 @@ class WriteReportsPass:
 
 __all__ = [
     "AnalyzePass",
-    "BaselineEvalPass",
     "BenchmarkPass",
-    "DistillPass",
     "ExportPass",
-    "LoadDataPass",
     "LoadModelPass",
     "PrunePass",
     "QuantPass",

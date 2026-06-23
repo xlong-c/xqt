@@ -29,13 +29,13 @@ from .rewrite import (
     validate_conv2d_keep_indices,
 )
 from .schedule import (
-    PruneKDReport,
-    PruneKDStepReport,
+    PruneScheduleReport,
+    PruneScheduleStepReport,
     PruningSchedule,
-    StructuredPruneKDReport,
-    StructuredPruneKDStepReport,
-    run_prune_kd_loop,
-    run_structured_prune_kd_loop,
+    StructuredPruneScheduleReport,
+    StructuredPruneScheduleStepReport,
+    run_prune_schedule,
+    run_structured_prune_schedule,
 )
 from .structured import (
     apply_block_sparse_pruning,
@@ -59,13 +59,13 @@ from .structured import (
 )
 
 __all__ = [
-    "PruneKDReport",
-    "PruneKDStepReport",
+    "PruneScheduleReport",
+    "PruneScheduleStepReport",
     "PruningEntry",
     "PruningReport",
     "PruningSchedule",
-    "StructuredPruneKDReport",
-    "StructuredPruneKDStepReport",
+    "StructuredPruneScheduleReport",
+    "StructuredPruneScheduleStepReport",
     "DEFAULT_PRUNABLE_TYPES",
     "describe_prune_runtime_capability",
     "apply_block_sparse_pruning",
@@ -90,8 +90,8 @@ __all__ = [
     "prune_runtime_capability_from_report",
     "rank_prune_candidates",
     "remove_pruning_reparameterization",
-    "run_prune_kd_loop",
-    "run_structured_prune_kd_loop",
+    "run_prune_schedule",
+    "run_structured_prune_schedule",
     "summarize_pruning",
     "SUPPORTED_GRANULARITIES",
     "SUPPORTED_IMPORTANCE_METRICS",

@@ -71,25 +71,6 @@ class ModelConfig(ComponentConfig):
 
 
 @dataclass
-class DataSplitConfig(ComponentConfig):
-    """Dataset or sample split settings."""
-
-    root: Optional[str] = None
-    sample_limit: Optional[int] = None
-    batch_size: int = 1
-
-
-@dataclass
-class DataConfig:
-    """Data settings used by calibration, training, validation, and prompts."""
-
-    calibration: Optional[DataSplitConfig] = None
-    train: Optional[DataSplitConfig] = None
-    validation: Optional[DataSplitConfig] = None
-    prompts: Optional[DataSplitConfig] = None
-
-
-@dataclass
 class DetectionPostprocessConfig:
     """Postprocess settings for detection model outputs."""
 
@@ -133,10 +114,9 @@ class QuantConfig:
 
     enabled: bool = False
     backend: str = "torchao"
+    method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
-    calibration_split: Optional[str] = None
-    validation_split: Optional[str] = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
@@ -152,10 +132,9 @@ class QuantComponentPolicyConfig:
     target: Optional[str] = None
     enabled: bool = True
     backend: Optional[str] = None
+    method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
-    calibration_split: Optional[str] = None
-    validation_split: Optional[str] = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
@@ -175,31 +154,6 @@ class PruneConfig:
     importance: Dict[str, Any] = field(default_factory=dict)
     selection: Dict[str, Any] = field(default_factory=dict)
     rewrite: Dict[str, Any] = field(default_factory=dict)
-    params: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DistillConfig:
-    """General distillation pass settings."""
-
-    enabled: bool = False
-    teacher: Optional[ModelConfig] = None
-    temperature: float = 2.0
-    alpha: float = 0.5
-    cache_teacher: bool = False
-    params: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DiffusionDistillConfig:
-    """Diffusion few-step distillation settings."""
-
-    enabled: bool = False
-    teacher_steps: int = 20
-    student_steps: int = 4
-    scheduler: Optional[str] = None
-    prediction_type: str = "epsilon"
-    guidance_scale: float = 1.0
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -284,10 +238,6 @@ class CompressionConfig:
     axes: List[str] = field(default_factory=list)
     quant: QuantConfig = field(default_factory=QuantConfig)
     prune: PruneConfig = field(default_factory=PruneConfig)
-    distill: DistillConfig = field(default_factory=DistillConfig)
-    diffusion_distill: DiffusionDistillConfig = field(
-        default_factory=DiffusionDistillConfig
-    )
 
 
 @dataclass
@@ -396,7 +346,6 @@ class XQTConfig:
     config_version: int = XQT_CONFIG_VERSION
     project: ProjectConfig = field(default_factory=ProjectConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
-    data: DataConfig = field(default_factory=DataConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     operator_optimization: OperatorOptimizationConfig = field(
@@ -427,12 +376,8 @@ __all__ = [
     "CompressionConfig",
     "CuTileKernelConfig",
     "CutlassKernelConfig",
-    "DataConfig",
-    "DataSplitConfig",
     "DetectionMetricConfig",
     "DetectionPostprocessConfig",
-    "DiffusionDistillConfig",
-    "DistillConfig",
     "ExportConfig",
     "ExportTargetConfig",
     "MetricThresholdConfig",

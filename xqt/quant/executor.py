@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from itertools import chain
 from typing import Any, Iterable, Mapping, Optional
 
 from torch import nn
 
+from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.types import XQTContext
-from xqt.data import extract_model_inputs, infer_model_input_count
 from xqt.export import export_onnx
 from xqt.export.input_utils import default_input_names
 
@@ -81,16 +82,15 @@ def _replace_component_model(
     return model
 
 
-def _resolve_loader(
+def _resolve_calibration_inputs(
     context: XQTContext,
     component: QuantizationComponentPlan,
-) -> tuple[Iterable[Any], str]:
-    calibration_split = component.calibration_split or "calibration"
-    dataloader = context.data.get(calibration_split)
-    if dataloader is not None:
-        return dataloader, calibration_split
+) -> Iterable[Any]:
+    calibration_inputs = context.calibration_inputs
+    if calibration_inputs is not None:
+        return calibration_inputs
     raise ValueError(
-        f"{calibration_split} data is required for component "
+        "calibration_inputs are required for component "
         f"'{component.name}' backend '{component.backend}'"
     )
 
@@ -190,6 +190,7 @@ def _execute_torchao_component(
         component_name=component.name,
         backend=result.backend,
         runtime="pytorch",
+        method=component.method,
         strategy=result.strategy,
         target_path=component.target_path,
         quantized_modules=_prefix_module_names(result.quantized_modules, component.target_path),
@@ -212,9 +213,11 @@ def _execute_onnx_qdq_component(
     export_onnx_fn: Any,
     quantize_onnx_qdq_static_fn: Any,
 ) -> tuple[nn.Module | None, QuantizationReport, dict[str, Any]]:
-    dataloader, source_split = _resolve_loader(context, component)
+    calibration_inputs = _resolve_calibration_inputs(context, component)
     policy = dict(component.policy)
-    batch = next(iter(dataloader))
+    calibration_iterator = iter(calibration_inputs)
+    batch = next(calibration_iterator)
+    calibration_data = chain([batch], calibration_iterator)
     artifact_dir = Path(context.config.project.artifact_dir)
     onnx_key = _artifact_key("last_onnx", component.name)
     default_last_onnx = context.artifacts.get(onnx_key)
@@ -256,7 +259,7 @@ def _execute_onnx_qdq_component(
     result = quantize_onnx_qdq_static_fn(
         onnx_path,
         output_path,
-        dataloader,
+        calibration_data,
         input_names=input_names,
         sample_limit=policy.get("sample_limit"),
         activation_type=str(policy.get("activation_type", "QUInt8")),
@@ -284,7 +287,7 @@ def _execute_onnx_qdq_component(
     metadata.update(
         {
             "component_name": component.name,
-            "source_split": source_split,
+            "calibration_source": "context.calibration_inputs",
             "input_structure": input_structure,
             "policy": policy,
         }
@@ -295,6 +298,7 @@ def _execute_onnx_qdq_component(
         component_name=component.name,
         backend="onnxruntime_qdq",
         runtime="onnxruntime",
+        method=component.method,
         strategy=component.strategy,
         target_path=component.target_path,
         quantized_modules=[
@@ -309,7 +313,6 @@ def _execute_onnx_qdq_component(
         artifacts={"onnx": str(result.path)},
         calibration_samples=result.calibration_samples,
         calibration_summary=metadata.get("calibration_summary"),
-        source_split=source_split,
         metadata={
             **metadata,
             "path": str(result.path),
@@ -355,6 +358,7 @@ def execute_quantization_plan(
                 QuantizationReport(
                     component_name=component.name,
                     backend=component.backend,
+                    method=component.method,
                     strategy=component.strategy,
                     target_path=component.target_path,
                     high_precision_modules=_prefix_module_names(
@@ -389,7 +393,12 @@ def execute_quantization_plan(
             artifacts.update(component_artifacts)
             reports.append(report)
             continue
-        if component.backend in {"gptq", "awq", "bitsandbytes"}:
+        if component.backend in {"pytorch", "tilelang"} and component.method in {"awq", "gptq"}:
+            raise NotImplementedError(
+                f"Quantization method '{component.method}' on backend "
+                f"'{component.backend}' is planned but not executable yet"
+            )
+        if component.backend in {"transformers", "bitsandbytes"}:
             raise NotImplementedError(
                 f"Quantization backend '{component.backend}' is planned but not executable yet"
             )
@@ -428,6 +437,7 @@ def summarize_quantization_reports(reports: list[QuantizationReport]) -> dict[st
     metrics.update(
         {
             "backend": first.backend,
+            "method": first.method,
             "strategy": first.strategy,
             "quantized_modules": list(first.quantized_modules),
             "quantized_module_count": len(first.quantized_modules),

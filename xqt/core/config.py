@@ -26,9 +26,19 @@ from .schema import (
 )
 
 _STRUCTURED_IMPORTANCE_TYPES = {"l1", "l2", "bn_gamma", "usage"}
-_AVAILABLE_QUANT_BACKENDS = {"torchao", "onnxruntime_qdq"}
-_PLANNED_QUANT_BACKENDS = {"awq", "bitsandbytes", "gptq"}
+_AVAILABLE_QUANT_BACKENDS = {"torchao", "onnxruntime_qdq", "pytorch"}
+_PLANNED_QUANT_BACKENDS = {"tilelang", "transformers", "bitsandbytes"}
 _SUPPORTED_QUANT_BACKENDS = _AVAILABLE_QUANT_BACKENDS | _PLANNED_QUANT_BACKENDS
+_AVAILABLE_QUANT_METHODS = {
+    "dynamic_int8",
+    "fp8_dynamic",
+    "fp8_weight_only",
+    "int4_weight_only",
+    "int8_weight_only",
+    "static_int8",
+}
+_PLANNED_QUANT_METHODS = {"awq", "gptq"}
+_SUPPORTED_QUANT_METHODS = _AVAILABLE_QUANT_METHODS | _PLANNED_QUANT_METHODS
 
 ConfigInput = Union[str, Path, Mapping[str, Any]]
 
@@ -99,6 +109,9 @@ def _validate_quant_config(quant_config: QuantConfig) -> None:
     if quant_config.backend not in _SUPPORTED_QUANT_BACKENDS:
         allowed = ", ".join(sorted(_SUPPORTED_QUANT_BACKENDS))
         raise XQTConfigError(f"compression.quant.backend must be one of: {allowed}")
+    if quant_config.method is not None and quant_config.method not in _SUPPORTED_QUANT_METHODS:
+        allowed = ", ".join(sorted(_SUPPORTED_QUANT_METHODS))
+        raise XQTConfigError(f"compression.quant.method must be one of: {allowed}")
     _validate_quant_component_lists(quant_config, "compression.quant")
     _validate_quant_string_list(
         quant_config.analysis_only_modules,
@@ -118,6 +131,9 @@ def _validate_quant_config(quant_config: QuantConfig) -> None:
         if component.backend is not None and component.backend not in _SUPPORTED_QUANT_BACKENDS:
             allowed = ", ".join(sorted(_SUPPORTED_QUANT_BACKENDS))
             raise XQTConfigError(f"{location}.backend must be one of: {allowed}")
+        if component.method is not None and component.method not in _SUPPORTED_QUANT_METHODS:
+            allowed = ", ".join(sorted(_SUPPORTED_QUANT_METHODS))
+            raise XQTConfigError(f"{location}.method must be one of: {allowed}")
         _validate_quant_component_lists(component, location)
         _validate_pre_export_fusion(
             component.policy.get("pre_export_fusion"),
@@ -329,11 +345,6 @@ def _validate_config(config: XQTConfig) -> None:
                 raise XQTConfigError(
                     "compression.prune.selection.keep_indices values must contain only integers"
                 )
-    if config.compression.diffusion_distill.teacher_steps <= 0:
-        raise XQTConfigError("compression.diffusion_distill.teacher_steps must be positive")
-    if config.compression.diffusion_distill.student_steps <= 0:
-        raise XQTConfigError("compression.diffusion_distill.student_steps must be positive")
-
     for index, target in enumerate(config.export.targets):
         _validate_pre_export_fusion(
             target.params.get("pre_export_fusion"),

@@ -14,14 +14,12 @@ class XQTContext:
     config: XQTConfig
     model: Any = None
     reference_model: Any = None
-    teacher: Any = None
-    data: Dict[str, Any] = field(default_factory=dict)
+    example_inputs: Any = None
+    calibration_inputs: Any = None
     artifacts: Dict[str, Any] = field(default_factory=dict)
     metrics: Dict[str, Any] = field(default_factory=dict)
     device: str = "cpu"
     manifest: Optional[ArtifactManifest] = None
-    training_provider: Any = None
-    evaluation_provider: Any = None
 
     def require_model(self) -> Any:
         """Return the current model or raise a clear error."""

@@ -8,12 +8,13 @@ from typing import Any, Mapping, Optional
 
 @dataclass(frozen=True)
 class QuantBackendCapability:
-    """Static and strategy-derived capability description for one backend."""
+    """Static and method-derived capability description for one quantization backend."""
 
     backend: str
     status: str
     runtime: str
     artifact_kind: str
+    methods: tuple[str, ...]
     model_families: tuple[str, ...]
     primary_module_types: tuple[str, ...]
     candidate_module_types: tuple[str, ...] = ()
@@ -31,6 +32,7 @@ class QuantBackendCapability:
             "status": self.status,
             "runtime": self.runtime,
             "artifact_kind": self.artifact_kind,
+            "methods": list(self.methods),
             "model_families": list(self.model_families),
             "primary_module_types": list(self.primary_module_types),
             "candidate_module_types": list(self.candidate_module_types),
@@ -63,6 +65,13 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         status="available",
         runtime="pytorch",
         artifact_kind="pytorch_model",
+        methods=(
+            "dynamic_int8",
+            "fp8_dynamic",
+            "fp8_weight_only",
+            "int4_weight_only",
+            "int8_weight_only",
+        ),
         model_families=(
             "linear_heavy",
             "vision_transformer",
@@ -87,6 +96,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         status="available",
         runtime="onnxruntime",
         artifact_kind="onnx_qdq",
+        methods=("static_int8",),
         model_families=(
             "cnn",
             "resnet",
@@ -108,35 +118,41 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
             "QDQ artifacts are runtime graph artifacts and do not replace the original PyTorch submodule in-place.",
         ),
     ),
-    "gptq": QuantBackendCapability(
-        backend="gptq",
+    "pytorch": QuantBackendCapability(
+        backend="pytorch",
         status="planned",
-        runtime="transformers",
-        artifact_kind="hf_weights",
-        model_families=("llm", "decoder_only_transformer"),
+        runtime="pytorch",
+        artifact_kind="pytorch_model",
+        methods=("awq", "gptq"),
+        model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
-        preferred_devices=("cuda",),
-        notes=("Planned large-language-model weight-only quantization path.",),
-        limitations=("Not wired into XQT execution yet.",),
+        preferred_devices=("cuda", "cpu"),
+        requires_calibration=True,
+        notes=("Planned PyTorch reference path for method-driven weight-only quantization.",),
+        limitations=("AWQ/GPTQ are methods, not backends, and are not wired into execution yet.",),
     ),
-    "awq": QuantBackendCapability(
-        backend="awq",
+    "tilelang": QuantBackendCapability(
+        backend="tilelang",
         status="planned",
-        runtime="transformers",
-        artifact_kind="hf_weights",
-        model_families=("llm", "decoder_only_transformer", "vlm_decoder"),
+        runtime="pytorch",
+        artifact_kind="pytorch_model",
+        methods=("awq",),
+        model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
         preferred_devices=("cuda",),
-        notes=("Planned activation-aware weight quantization path for LLM-style modules.",),
-        limitations=("Not wired into XQT execution yet.",),
+        requires_calibration=True,
+        requires_cuda=True,
+        notes=("Planned TileLang runtime for packed weight-only kernels.",),
+        limitations=("TileLang AWQ kernels are not wired into XQT execution yet.",),
     ),
     "bitsandbytes": QuantBackendCapability(
         backend="bitsandbytes",
         status="planned",
         runtime="transformers",
         artifact_kind="hf_runtime_model",
+        methods=("int4_weight_only", "int8_weight_only"),
         model_families=("llm", "vlm", "linear_heavy"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
@@ -161,10 +177,11 @@ def _strategy_requires_cuda(
 def describe_quant_backend_capability(
     backend: str,
     *,
+    method: Optional[str] = None,
     strategy: Optional[str] = None,
     policy: Mapping[str, Any] | None = None,
 ) -> QuantBackendCapability:
-    """Return a capability description for a quantization backend and strategy."""
+    """Return a capability description for a quantization backend and method."""
 
     try:
         base = _BASE_CAPABILITIES[backend]
@@ -172,10 +189,20 @@ def describe_quant_backend_capability(
         allowed = ", ".join(sorted(_BASE_CAPABILITIES))
         raise ValueError(f"Unsupported quantization backend: {backend}. Known: {allowed}") from exc
 
+    selected_method = method or (str(policy.get("method")) if policy and policy.get("method") else None)
+    if selected_method is not None and selected_method not in base.methods:
+        allowed = ", ".join(base.methods) if base.methods else "<none>"
+        raise ValueError(
+            f"Quantization method '{selected_method}' is not supported by backend "
+            f"'{backend}'. Known methods: {allowed}"
+        )
+
     requires_cuda = base.requires_cuda or _strategy_requires_cuda(strategy, policy)
     notes = list(base.notes)
     if backend == "torchao" and requires_cuda:
         notes.append("Configured strategy requires CUDA-capable hardware.")
+    if selected_method is not None:
+        notes.append(f"Configured quantization method: {selected_method}.")
     return replace(
         base,
         requires_cuda=requires_cuda,

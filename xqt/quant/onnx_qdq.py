@@ -11,7 +11,7 @@ import torch
 
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
-from xqt.data.input_utils import extract_model_inputs
+from xqt.core.inputs import extract_model_inputs
 from xqt.export.input_utils import build_onnx_feed
 
 

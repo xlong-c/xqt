@@ -17,21 +17,14 @@ from .pass_manager import SequentialPipeline
 
 
 DEFAULT_COMPRESSION_PASS_ORDER = (
-    "distill",
     "prune",
     "quant",
     "operator_optimization",
-    "diffusion_distill",
 )
 
 DEFAULT_PASS_ORDER = (
     "load_model",
-    "load_data",
-    "baseline_eval",
     *DEFAULT_COMPRESSION_PASS_ORDER,
-    "analyze",
-    "export",
-    "benchmark",
     "write_reports",
 )
 
@@ -55,11 +48,9 @@ def enabled_pass_names(config: XQTConfig) -> list[str]:
 
     compression = config.compression
     enabled = {
-        "distill": compression.distill.enabled,
         "prune": compression.prune.enabled,
         "quant": compression.quant.enabled,
         "operator_optimization": config.operator_optimization.enabled,
-        "diffusion_distill": compression.diffusion_distill.enabled,
     }
     return [name for name in DEFAULT_COMPRESSION_PASS_ORDER if enabled[name]]
 
@@ -71,10 +62,6 @@ def default_pass_names(config: XQTConfig) -> list[str]:
     names: list[str] = []
     for name in DEFAULT_PASS_ORDER:
         if name in DEFAULT_COMPRESSION_PASS_ORDER and name not in compression_passes:
-            continue
-        if name == "analyze" and not config.analysis.enabled:
-            continue
-        if name == "export" and not config.export.targets:
             continue
         names.append(name)
     return names
@@ -122,13 +109,11 @@ def create_context(
     config: ConfigInput | XQTConfig,
     *,
     model: Any = None,
-    teacher: Any = None,
-    data: Optional[Mapping[str, Any]] = None,
+    example_inputs: Any = None,
+    calibration_inputs: Any = None,
     artifacts: Optional[Mapping[str, Any]] = None,
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
-    training_provider: Any = None,
-    evaluation_provider: Any = None,
 ) -> XQTContext:
     """Build an XQTContext from a config path, mapping, or dataclass."""
 
@@ -137,14 +122,12 @@ def create_context(
         config=loaded_config,
         model=model,
         reference_model=copy.deepcopy(model) if model is not None else None,
-        teacher=teacher,
-        data=dict(data or {}),
+        example_inputs=example_inputs,
+        calibration_inputs=calibration_inputs,
         artifacts=dict(artifacts or {}),
         metrics=dict(metrics or {}),
         device=loaded_config.model.device,
         manifest=manifest or create_manifest(loaded_config),
-        training_provider=training_provider,
-        evaluation_provider=evaluation_provider,
     )
 
 
@@ -171,13 +154,11 @@ def run_xqt_recipe(
     config: ConfigInput | XQTConfig,
     *,
     model: Any = None,
-    teacher: Any = None,
-    data: Optional[Mapping[str, Any]] = None,
+    example_inputs: Any = None,
+    calibration_inputs: Any = None,
     artifacts: Optional[Mapping[str, Any]] = None,
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
-    training_provider: Any = None,
-    evaluation_provider: Any = None,
     pass_names: Optional[Sequence[str]] = None,
     pass_registry: XQTRegistry = PASS_REGISTRY,
     pass_params: Optional[Mapping[str, Mapping[str, Any]]] = None,
@@ -189,13 +170,11 @@ def run_xqt_recipe(
     context = create_context(
         config,
         model=model,
-        teacher=teacher,
-        data=data,
+        example_inputs=example_inputs,
+        calibration_inputs=calibration_inputs,
         artifacts=artifacts,
         metrics=metrics,
         manifest=manifest,
-        training_provider=training_provider,
-        evaluation_provider=evaluation_provider,
     )
     pipeline = build_pipeline_from_config(
         context.config,

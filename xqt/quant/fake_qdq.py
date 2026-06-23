@@ -9,8 +9,8 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import torch
 from torch import nn
 
+from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.types import XQTContext
-from xqt.data import extract_model_inputs, infer_model_input_count
 
 from .plan import build_quantization_plan
 from .policy import QuantizationPolicy, list_quantizable_modules
@@ -38,7 +38,6 @@ class FakeQDQSurrogateResult:
     model: nn.Module
     quantized_modules: list[str]
     activation_statistics: dict[str, dict[str, float]]
-    source_split: Optional[str]
     sample_count: int
 
 
@@ -63,19 +62,10 @@ def _prefix_module_names(names: Iterable[str], prefix: Optional[str]) -> list[st
     return prefixed
 
 
-def _resolve_loader(
-    context: XQTContext,
-    component: QuantizationComponentPlan,
-) -> tuple[Iterable[Any], Optional[str]]:
-    split = component.calibration_split or component.validation_split or "calibration"
-    dataloader = context.data.get(split)
-    if dataloader is not None:
-        return dataloader, split
-    if split != "validation":
-        validation_loader = context.data.get("validation")
-        if validation_loader is not None:
-            return validation_loader, "validation"
-    return (), None
+def _resolve_calibration_inputs(context: XQTContext) -> Iterable[Any]:
+    if context.calibration_inputs is None:
+        return ()
+    return context.calibration_inputs
 
 
 def _build_policy(component: QuantizationComponentPlan) -> QuantizationPolicy:
@@ -494,18 +484,15 @@ def build_fake_qdq_surrogate(
     quantized_modules: list[str] = []
     activation_statistics: dict[str, dict[str, float]] = {}
     activation_settings: dict[str, tuple[str, bool]] = {}
-    source_split: Optional[str] = None
     sample_count = 0
     expected_input_count = infer_model_input_count(surrogate)
 
     for component in qdq_components:
         quantized_modules.extend(_apply_weight_fake_qdq(surrogate, component))
-        dataloader, resolved_split = _resolve_loader(context, component)
-        if source_split is None:
-            source_split = resolved_split
+        calibration_inputs = _resolve_calibration_inputs(context)
         sample_limit = component.policy.get("sample_limit")
         batches = _iter_input_batches(
-            dataloader,
+            calibration_inputs,
             expected_input_count=expected_input_count,
             sample_limit=int(sample_limit) if sample_limit is not None else None,
         )
@@ -541,7 +528,6 @@ def build_fake_qdq_surrogate(
         model=surrogate,
         quantized_modules=_ordered_unique(quantized_modules),
         activation_statistics=activation_statistics,
-        source_split=source_split,
         sample_count=sample_count,
     )
 

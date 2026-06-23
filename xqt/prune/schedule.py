@@ -1,15 +1,10 @@
-"""Pruning schedules and prune + KD helper loops."""
+"""Pruning schedules for model-only pruning transforms."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
 
-import torch
 from torch import nn
-
-from xqt.core.errors import XQTBackendError
-from xqt.distill.training import DistillationTrainReport, train_logit_distillation
 
 from .masks import (
     PruningReport,
@@ -48,50 +43,42 @@ class PruningSchedule:
 
 
 @dataclass
-class PruneKDStepReport:
-    """A single prune + KD step report."""
+class PruneScheduleStepReport:
+    """A single pruning schedule step report."""
 
     step: int
     target_sparsity: float
     pruning: PruningReport
-    distillation: Optional[DistillationTrainReport] = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "step": self.step,
             "target_sparsity": self.target_sparsity,
             "pruning": self.pruning.to_dict(),
-            "distillation": (
-                self.distillation.to_dict() if self.distillation is not None else None
-            ),
         }
 
 
 @dataclass
-class StructuredPruneKDStepReport:
-    """A single structured prune + KD step report."""
+class StructuredPruneScheduleStepReport:
+    """A single structured pruning schedule step report."""
 
     step: int
     target_sparsity: float
     pruning: StructuredPruningReport
-    distillation: Optional[DistillationTrainReport] = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "step": self.step,
             "target_sparsity": self.target_sparsity,
             "pruning": self.pruning.to_dict(),
-            "distillation": (
-                self.distillation.to_dict() if self.distillation is not None else None
-            ),
         }
 
 
 @dataclass
-class PruneKDReport:
-    """Full prune + KD loop report."""
+class PruneScheduleReport:
+    """Full pruning schedule report."""
 
-    steps: list[PruneKDStepReport] = field(default_factory=list)
+    steps: list[PruneScheduleStepReport] = field(default_factory=list)
 
     @property
     def final_sparsity(self) -> float:
@@ -107,10 +94,10 @@ class PruneKDReport:
 
 
 @dataclass
-class StructuredPruneKDReport:
-    """Full structured prune + KD loop report."""
+class StructuredPruneScheduleReport:
+    """Full structured pruning schedule report."""
 
-    steps: list[StructuredPruneKDStepReport] = field(default_factory=list)
+    steps: list[StructuredPruneScheduleStepReport] = field(default_factory=list)
 
     @property
     def final_sparsity(self) -> float:
@@ -126,81 +113,46 @@ class StructuredPruneKDReport:
         }
 
 
-def run_prune_kd_loop(
-    student: nn.Module,
-    teacher: Optional[nn.Module],
-    dataloader: Optional[Iterable[object]],
+def run_prune_schedule(
+    model: nn.Module,
     *,
     schedule: PruningSchedule,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    temperature: float = 2.0,
-    alpha: float = 0.5,
-    device: str | torch.device = "cpu",
-    kd_steps_per_prune: Optional[int] = None,
-    training_provider: object | None = None,
-) -> PruneKDReport:
-    """Apply scheduled pruning and optionally delegate KD recovery to a provider."""
+) -> PruneScheduleReport:
+    """Apply scheduled unstructured pruning without recovery training."""
 
-    reports: list[PruneKDStepReport] = []
+    reports: list[PruneScheduleStepReport] = []
     for step_index, sparsity in enumerate(schedule.values()):
-        pruning = apply_global_l1_unstructured_pruning(student, sparsity)
-        remove_pruning_reparameterization(student)
-        pruning = summarize_pruning(student)
-        distill_report: Optional[DistillationTrainReport] = None
-        if optimizer is not None and training_provider is None:
-            raise XQTBackendError(
-                "XQT prune KD recovery must be delegated to a provider. "
-                "Pass training_provider and let it execute the recovery step."
-            )
-        if teacher is not None and dataloader is not None and training_provider is not None:
-            distill_report = train_logit_distillation(
-                student,
-                teacher,
-                dataloader,
-                optimizer,
-                temperature=temperature,
-                alpha=alpha,
-                device=device,
-                max_steps=kd_steps_per_prune,
-                training_provider=training_provider,
-            )
+        apply_global_l1_unstructured_pruning(model, sparsity)
+        remove_pruning_reparameterization(model)
+        pruning = summarize_pruning(model)
         reports.append(
-            PruneKDStepReport(
+            PruneScheduleStepReport(
                 step=step_index,
                 target_sparsity=sparsity,
                 pruning=pruning,
-                distillation=distill_report,
             )
         )
-    return PruneKDReport(steps=reports)
+    return PruneScheduleReport(steps=reports)
 
 
-def run_structured_prune_kd_loop(
-    student: nn.Module,
-    teacher: Optional[nn.Module],
-    dataloader: Optional[Iterable[object]],
+def run_structured_prune_schedule(
+    model: nn.Module,
     *,
     schedule: PruningSchedule,
     granularity: str,
     scope: str,
-    importance: Optional[dict[str, object]] = None,
-    selection: Optional[dict[str, object]] = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    temperature: float = 2.0,
-    alpha: float = 0.5,
-    device: str | torch.device = "cpu",
-    kd_steps_per_prune: Optional[int] = None,
+    importance: dict[str, object] | None = None,
+    selection: dict[str, object] | None = None,
     example_input: object = None,
-    training_provider: object | None = None,
-) -> StructuredPruneKDReport:
-    """Apply scheduled structured pruning and optionally delegate KD recovery to a provider."""
+) -> StructuredPruneScheduleReport:
+    """Apply scheduled structured pruning without recovery training."""
 
     schedule_values = schedule.values()
     if not schedule_values:
-        return StructuredPruneKDReport()
+        return StructuredPruneScheduleReport()
 
     pruning = apply_structured_pruning(
-        student,
+        model,
         schedule_values[-1],
         granularity=granularity,
         scope=scope,
@@ -208,43 +160,24 @@ def run_structured_prune_kd_loop(
         selection=selection,
         example_input=example_input,
     )
-    reports: list[StructuredPruneKDStepReport] = []
+    reports: list[StructuredPruneScheduleStepReport] = []
     for step_index, sparsity in enumerate(schedule_values):
-        distill_report: Optional[DistillationTrainReport] = None
-        if optimizer is not None and training_provider is None:
-            raise XQTBackendError(
-                "XQT prune KD recovery must be delegated to a provider. "
-                "Pass training_provider and let it execute the recovery step."
-            )
-        if teacher is not None and dataloader is not None and training_provider is not None:
-            distill_report = train_logit_distillation(
-                student,
-                teacher,
-                dataloader,
-                optimizer,
-                temperature=temperature,
-                alpha=alpha,
-                device=device,
-                max_steps=kd_steps_per_prune,
-                training_provider=training_provider,
-            )
         reports.append(
-            StructuredPruneKDStepReport(
+            StructuredPruneScheduleStepReport(
                 step=step_index,
                 target_sparsity=sparsity,
                 pruning=pruning,
-                distillation=distill_report,
             )
         )
-    return StructuredPruneKDReport(steps=reports)
+    return StructuredPruneScheduleReport(steps=reports)
 
 
 __all__ = [
-    "PruneKDReport",
-    "PruneKDStepReport",
+    "PruneScheduleReport",
+    "PruneScheduleStepReport",
     "PruningSchedule",
-    "StructuredPruneKDReport",
-    "StructuredPruneKDStepReport",
-    "run_prune_kd_loop",
-    "run_structured_prune_kd_loop",
+    "StructuredPruneScheduleReport",
+    "StructuredPruneScheduleStepReport",
+    "run_prune_schedule",
+    "run_structured_prune_schedule",
 ]

@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import torch
 from torch import nn
 
-from xqt.distill.hooks import ModuleOutputCapture
+from xqt.model.hooks import ModuleOutputCapture
 
 from .policy import QuantizationPolicy, list_quantizable_modules
 

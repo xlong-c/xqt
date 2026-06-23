@@ -15,10 +15,9 @@ class QuantizationComponentPlan:
     name: str
     backend: str
     target_path: Optional[str] = None
+    method: Optional[str] = None
     strategy: Optional[str] = None
     policy: dict[str, Any] = field(default_factory=dict)
-    calibration_split: Optional[str] = None
-    validation_split: Optional[str] = None
     keep_high_precision: list[str] = field(default_factory=list)
     skip_quantize: list[str] = field(default_factory=list)
     force_quantize: list[str] = field(default_factory=list)
@@ -29,10 +28,9 @@ class QuantizationComponentPlan:
             "name": self.name,
             "backend": self.backend,
             "target_path": self.target_path,
+            "method": self.method,
             "strategy": self.strategy,
             "policy": dict(self.policy),
-            "calibration_split": self.calibration_split,
-            "validation_split": self.validation_split,
             "keep_high_precision": list(self.keep_high_precision),
             "skip_quantize": list(self.skip_quantize),
             "force_quantize": list(self.force_quantize),
@@ -65,6 +63,7 @@ class QuantizationReport:
     component_name: str
     backend: str
     runtime: Optional[str] = None
+    method: Optional[str] = None
     strategy: Optional[str] = None
     target_path: Optional[str] = None
     quantized_modules: list[str] = field(default_factory=list)
@@ -73,7 +72,6 @@ class QuantizationReport:
     artifacts: dict[str, str] = field(default_factory=dict)
     calibration_samples: Optional[int] = None
     calibration_summary: Optional[dict[str, Any]] = None
-    source_split: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +79,7 @@ class QuantizationReport:
             "component_name": self.component_name,
             "backend": self.backend,
             "runtime": self.runtime,
+            "method": self.method,
             "strategy": self.strategy,
             "target_path": self.target_path,
             "quantized_modules": list(self.quantized_modules),
@@ -90,7 +89,6 @@ class QuantizationReport:
             "artifacts": dict(self.artifacts),
             "calibration_samples": self.calibration_samples,
             "calibration_summary": self.calibration_summary,
-            "source_split": self.source_split,
             "metadata": dict(self.metadata),
         }
 
