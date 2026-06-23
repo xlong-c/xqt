@@ -7,6 +7,56 @@ from torch import nn
 import torch.nn.functional as F
 
 
+class ToyDequantGemmBlock(nn.Module):
+    """Minimal dequantize + GEMM + epilogue block for TileLang workflows."""
+
+    def __init__(
+        self,
+        input_dim: int = 32,
+        output_dim: int = 64,
+        *,
+        activation: str | None = "silu",
+    ) -> None:
+        super().__init__()
+        self.activation = activation
+        self.qweight = nn.Parameter(torch.randn(output_dim, input_dim, dtype=torch.float32))
+        self.scale = nn.Parameter(torch.rand(output_dim, dtype=torch.float32) + 0.01)
+        self.bias = nn.Parameter(torch.randn(output_dim, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight_scale = self.scale.to(dtype=x.dtype, device=x.device).unsqueeze(-1)
+        weight = self.qweight.to(dtype=x.dtype, device=x.device) * weight_scale
+        output = x.matmul(weight.t())
+        output = output + self.bias.to(dtype=output.dtype, device=output.device)
+        if self.activation is None:
+            return output
+        if self.activation == "gelu":
+            return F.gelu(output)
+        if self.activation == "silu":
+            return F.silu(output)
+        if self.activation == "relu":
+            return F.relu(output)
+        raise ValueError(f"unsupported activation: {self.activation}")
+
+
+class ToyFP4MLP(nn.Module):
+    """Small MLP with a named Linear target for FP4 -> TileLang workflows."""
+
+    def __init__(
+        self,
+        hidden_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = self.fc1(x)
+        hidden = self.norm(hidden)
+        return self.fc2(hidden)
+
+
 class ToyTransformerClassifier(nn.Module):
     """Tiny Transformer-like classifier with a named encoder target."""
 
@@ -111,6 +161,29 @@ class ToyAttentionClassifier(nn.Module):
         return self.head(self.attention_block(x).mean(dim=1))
 
 
+def build_toy_dequant_gemm_block(
+    input_dim: int = 32,
+    output_dim: int = 64,
+    *,
+    activation: str | None = "silu",
+) -> ToyDequantGemmBlock:
+    """Build a small dequant GEMM block for TileLang recipes and tests."""
+
+    return ToyDequantGemmBlock(
+        input_dim=input_dim,
+        output_dim=output_dim,
+        activation=activation,
+    )
+
+
+def build_toy_fp4_mlp(
+    hidden_dim: int = 64,
+) -> ToyFP4MLP:
+    """Build a small MLP for FP4 quantization and TileLang operator recipes."""
+
+    return ToyFP4MLP(hidden_dim=hidden_dim)
+
+
 def build_toy_transformer_classifier(
     input_dim: int = 8,
     hidden_dim: int = 8,
@@ -158,12 +231,16 @@ def build_toy_attention_classifier(
 
 
 __all__ = [
+    "ToyDequantGemmBlock",
+    "ToyFP4MLP",
     "ToyAttentionBlock",
     "ToyAttentionClassifier",
     "ToyLLMMLPClassifier",
     "ToySwiGLUMLP",
     "ToyTransformerClassifier",
     "build_toy_attention_classifier",
+    "build_toy_dequant_gemm_block",
+    "build_toy_fp4_mlp",
     "build_toy_llm_mlp_classifier",
     "build_toy_transformer_classifier",
 ]

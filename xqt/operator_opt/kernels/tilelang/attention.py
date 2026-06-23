@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+from .gemm_builder import build_tilelang_gemm_kernel
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,36 @@ def _require_tilelang() -> object:
 def _require_fp16_tensors(*tensors: torch.Tensor) -> None:
     if not all(tensor.dtype == torch.float16 for tensor in tensors):
         raise XQTBackendError("TileLang FlashAttention path currently supports only float16 tensors")
+
+
+def _validate_dequant_gemm_inputs(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    bias: torch.Tensor | None,
+    activation: str | None,
+    block_m: int,
+    block_n: int,
+) -> None:
+    if x.ndim != 2 or qweight.ndim != 2:
+        raise XQTBackendError("TileLang dequant GEMM expects x and qweight to be 2D tensors")
+    if scale.ndim not in {1, 2}:
+        raise XQTBackendError("TileLang dequant GEMM expects scale to be 1D or 2D")
+    if x.shape[1] != qweight.shape[1]:
+        raise XQTBackendError("TileLang dequant GEMM requires x.shape[1] == qweight.shape[1]")
+    if scale.ndim == 1 and scale.shape[0] != qweight.shape[0]:
+        raise XQTBackendError("1D scale must match qweight out_features")
+    if scale.ndim == 2 and scale.shape != qweight.shape:
+        raise XQTBackendError("2D scale must match qweight shape")
+    if bias is not None and (bias.ndim != 1 or bias.shape[0] != qweight.shape[0]):
+        raise XQTBackendError("bias must be 1D and match qweight out_features")
+    if activation not in {None, "gelu", "silu", "relu"}:
+        raise XQTBackendError(f"unsupported activation: {activation}")
+    if x.shape[0] % block_m != 0 or qweight.shape[0] % block_n != 0:
+        raise XQTBackendError(
+            "minimal TileLang dequant GEMM currently requires batch and out_features to be multiples of block sizes"
+        )
 
 
 def _validate_attention_inputs(
@@ -225,7 +256,10 @@ def dequant_gemm_epilogue_reference(
 ) -> torch.Tensor:
     """Reference dequantized GEMM with optional bias and activation epilogue."""
 
-    weight = qweight.to(dtype=x.dtype, device=x.device) * scale.to(dtype=x.dtype, device=x.device)
+    weight_scale = scale.to(dtype=x.dtype, device=x.device)
+    if weight_scale.ndim == 1:
+        weight_scale = weight_scale.unsqueeze(-1)
+    weight = qweight.to(dtype=x.dtype, device=x.device) * weight_scale
     output = x.matmul(weight.t())
     if bias is not None:
         output = output + bias.to(dtype=output.dtype, device=output.device)
@@ -254,17 +288,40 @@ def dequant_gemm_epilogue_tilelang(
 ) -> torch.Tensor:
     """CUDA-only TileLang dequant GEMM epilogue entry point."""
 
-    del block_m, block_n, threads, num_stages
     tensors = (x, qweight, scale) if bias is None else (x, qweight, scale, bias)
-    _require_tilelang()
     _require_cuda_tensors(*tensors)
-    return dequant_gemm_epilogue_reference(
+    _require_fp16_tensors(*tensors)
+    _validate_dequant_gemm_inputs(
         x,
         qweight,
         scale,
-        bias,
+        bias=bias,
         activation=activation,
+        block_m=int(block_m),
+        block_n=int(block_n),
     )
+    _require_tilelang()
+    dequantized = qweight * scale if scale.ndim == 2 else qweight * scale.unsqueeze(-1)
+    kernel = build_tilelang_gemm_kernel(
+        m=int(x.shape[0]),
+        n=int(qweight.shape[0]),
+        k=int(x.shape[1]),
+        block_m=int(block_m),
+        block_n=int(block_n),
+        threads=int(threads),
+    )
+    output = kernel(x, dequantized)
+    if bias is not None:
+        output = output + bias.to(dtype=output.dtype, device=output.device)
+    if activation is None:
+        return output
+    if activation == "gelu":
+        return F.gelu(output)
+    if activation == "silu":
+        return F.silu(output)
+    if activation == "relu":
+        return F.relu(output)
+    raise ValueError(f"unsupported activation: {activation}")
 
 
 _ATTENTION_DESIGN = build_tilelang_attention_design()

@@ -136,6 +136,37 @@ class ReferenceFP4Linear(nn.Module):
             :, : self.input_features
         ]
 
+    def quantized_weight_codes(self) -> torch.Tensor:
+        """Return the unpacked signed FP4 codes as a dense matrix."""
+
+        return _unpack_int4(self.packed_weight, self.padded_input_features)[
+            :, : self.input_features
+        ]
+
+    def expanded_weight_scale(self) -> torch.Tensor:
+        """Return per-element scale expanded from the stored group-wise scale."""
+
+        expanded = self.weight_scale.expand(-1, -1, self.group_size).reshape(
+            self.output_features,
+            self.padded_input_features,
+        )
+        return expanded[:, : self.input_features]
+
+    def tilelang_dequant_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None]:
+        """Expose dequant GEMM inputs for TileLang operator wrappers."""
+
+        qweight = self.quantized_weight_codes().to(device=device, dtype=dtype)
+        scale = self.expanded_weight_scale().to(device=device, dtype=dtype)
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=device, dtype=dtype)
+        return qweight, scale, bias, None
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight().to(device=inputs.device, dtype=inputs.dtype)
         bias = None

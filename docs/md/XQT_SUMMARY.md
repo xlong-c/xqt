@@ -14,8 +14,8 @@ XQT 只关注模型本身.
 - 半可用:
   - TensorRT engine 构建,engine inspector,runtime benchmark.
   - TensorRT 自定义插件 `.so` 加载与 preflight 检查.
-  - TileLang attention operator target 已可进入 executor;CPU 路径走 reference fallback,CUDA 路径已有最小真实 TileLang attention kernel,但仍只覆盖受限场景.
-  - `backend: pytorch` 下的 `strategy: fp4_weight_only` 已有 group-wise reference Linear weight-only 路径,可执行模块替换,分组 scale 量化和误差验证,但不是高性能 packed kernel 路径.
+  - TileLang `attention` 和 `dequant_gemm_epilogue` operator target 已可进入 executor;CPU 路径走 reference fallback,CUDA 路径已有两条最小真实 TileLang kernel,但仍只覆盖受限场景.
+  - `backend: pytorch` 下的 `strategy: fp4_weight_only` 已有 group-wise reference Linear weight-only 路径,可执行模块替换,分组 scale 量化和误差验证;当前还能通过最小桥接进入 TileLang `dequant_gemm_epilogue` operator stage,但不是高性能 packed kernel 路径.
 - 偏实验 / planned:
   - CuTile/CUTLASS/custom CUDA 主要还是 capability,adapter,report 边界.
   - TileLang 上的 FP4/AWQ packed kernel,以及更完整的 AWQ/GPTQ 路径仍以 capability 声明和研究代码为主,未形成高性能执行闭环.
@@ -24,8 +24,8 @@ XQT 只关注模型本身.
 
 | 场景 | 当前状态 | 已验证证据 | 主要缺口 |
 | --- | --- | --- | --- |
-| FP4 量化 | 半可用 | `pytorch + fp4_weight_only` 已能做 group-wise reference Linear 替换,并有执行测试 | 还没有高性能 packed kernel,也没有完整 AWQ/GPTQ 执行闭环 |
-| TileLang megakernel | 半可用 | `attention` target 已进入 executor,能报告 `reference_fallback` / `cuda_tilelang_entry`,并已有 CUDA attention kernel 测试 | 仍只覆盖 attention/fp16/dropout=0/seq_kv>=seq_q,还没有更完整 megakernel 家族 |
+| FP4 量化 | 半可用 | `pytorch + fp4_weight_only` 已能做 group-wise reference Linear 替换,并有执行测试;`ReferenceFP4Linear` 已可桥接到 TileLang `dequant_gemm_epilogue` operator stage | 还没有高性能 packed kernel,也没有完整 AWQ/GPTQ 执行闭环 |
+| TileLang megakernel | 半可用 | `attention` 和 `dequant_gemm_epilogue` target 已进入 executor,能报告 `reference_fallback` / `cuda_tilelang_entry`,并已有对应 CUDA kernel 测试 | 仍只覆盖 attention/fp16/dropout=0/seq_kv>=seq_q 和带最小 block 对齐约束的 dequant GEMM,还没有更完整 megakernel 家族 |
 | TensorRT + `.so` 插件 | 半可用,接近工程可用 | build / inspect / runtime benchmark / plugin load / preflight 已接通 | 仍缺真实用户插件 ABI 和部署环境级联验证 |
 | 常规剪枝 / 误差分析 | 已基本可用 | activation drift,layer sensitivity,layer weight diff,输出/权重分布统计均已有实现和测试 | 更高层 task-level 准确率评估仍需外部评测链路 |
 

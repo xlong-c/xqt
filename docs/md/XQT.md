@@ -229,7 +229,7 @@ stages:
 量化:
 
 - torchao weight-only / FP8 adapter.
-- `backend: pytorch` 下的 `strategy: fp4_weight_only` 已有 group-wise reference Linear weight-only 路径,支持分组 scale 量化和误差分析,不代表高性能 kernel 已完成.
+- `backend: pytorch` 下的 `strategy: fp4_weight_only` 已有 group-wise reference Linear weight-only 路径,支持分组 scale 量化和误差分析;当前还可通过 `ReferenceFP4Linear -> dequant_gemm_epilogue` 的最小桥接进入 TileLang operator stage,但这仍不代表高性能 FP4 kernel 已完成.
 - ONNX Runtime static QDQ INT8 adapter.
 - activation statistics 和 calibration summary;校准输入来自外部 `calibration_inputs`.
 - layer sensitivity,mixed precision recommendation,以及按层输出/权重分布统计.
@@ -273,7 +273,7 @@ XQT 要求所有量化策略必须标明 `nature` 字段,区分以下几种优�
 算子优化:
 
 - built-in executor 当前以 `torch_compile` 为主要实际执行路径.
-- TileLang 当前已有一个最小可执行 target: `attention` pattern 可在 toy attention model 上进入 executor,完成模块替换,numeric diff 和 benchmark;CPU 路径走 reference fallback,CUDA 路径已有最小真实 TileLang attention kernel,但当前仍限定在 float16,`dropout_p=0` 和 `seq_kv >= seq_q`.
+- TileLang 当前已有两个最小可执行 target: `attention` 和 `dequant_gemm_epilogue` pattern 都可在 toy model 上进入 executor,完成模块替换,numeric diff 和 benchmark;CPU 路径走 reference fallback,CUDA 路径已有最小真实 TileLang attention kernel 与 dequant GEMM kernel,但当前仍限定在 float16,`attention` 的 `dropout_p=0` / `seq_kv >= seq_q`,以及 dequant GEMM 的最小 block 对齐约束.
 - Triton/CuTile/CUTLASS/custom CUDA 当前主要还是 capability/adapter/report 边界.
 - TensorRT/OpenVINO 自身 graph fusion,kernel selection 或 engine/IR 优化属于部署后端收益,不写成 XQT operator replacement gain.
 
@@ -295,8 +295,8 @@ TensorRT 自定义插件约定:
 
 | 场景 | 当前状态 | 已验证证据 | 主要缺口 |
 | --- | --- | --- | --- |
-| FP4 量化 | 半可用 | `xqt/quant/fp4_backend.py` 已提供 `pytorch + fp4_weight_only` 的 group-wise reference Linear weight-only 路径,并有执行测试 | 还没有高性能 packed kernel,也没有完整 AWQ/GPTQ 闭环 |
-| TileLang megakernel | 半可用 | `xqt/operator_opt/executor.py` 的 attention target 已能进入 executor,并在 report 中区分 `reference_fallback` 与 `cuda_tilelang_entry`;`xqt/operator_opt/kernels/tilelang/attention.py` 已接入最小真实 CUDA attention kernel | 仍只覆盖 attention/fp16/`dropout_p=0`/`seq_kv>=seq_q`,还没有更完整的 TileLang kernel 家族 |
+| FP4 量化 | 半可用 | `xqt/quant/fp4_backend.py` 已提供 `pytorch + fp4_weight_only` 的 group-wise reference Linear weight-only 路径,并有执行测试;`ReferenceFP4Linear` 还能通过最小桥接进入 TileLang `dequant_gemm_epilogue` operator stage | 还没有高性能 packed kernel,也没有完整 AWQ/GPTQ 闭环 |
+| TileLang megakernel | 半可用 | `xqt/operator_opt/executor.py` 的 `attention` 和 `dequant_gemm_epilogue` target 已能进入 executor,并在 report 中区分 `reference_fallback` 与 `cuda_tilelang_entry`;`xqt/operator_opt/kernels/tilelang/attention.py` 已接入最小真实 CUDA attention kernel 与 dequant GEMM kernel | 仍只覆盖 attention/fp16/`dropout_p=0`/`seq_kv>=seq_q` 和带最小 block 对齐约束的 dequant GEMM,还没有更完整的 TileLang kernel 家族 |
 | TensorRT + `.so` 插件 | 半可用,接近工程可用 | `xqt/export/tensorrt.py` 已支持 plugin libraries 的 build / inspect / runtime load,preflight 也会校验路径 | 仍缺真实插件 ABI 和目标部署环境的端到端验证 |
 | 常规剪枝 / 误差分析 | 已基本可用 | activation drift,layer sensitivity,layer weight diff,输出/权重分布统计都已在 `xqt/quant/` 和 `xqt/analysis/` 接通 | 更高层任务准确率和业务指标仍需外部评测链路 |
 

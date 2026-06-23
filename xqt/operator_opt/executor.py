@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
@@ -280,6 +281,51 @@ class _TileLangAttentionWrapper(nn.Module):
         self.last_execution_mode = "not_run"
         self.last_execution_reason: str | None = None
 
+    def _project_qkv(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not getattr(self.attention, "_qkv_same_embed_dim", True):
+            raise XQTBackendError(
+                "TileLang attention wrapper currently supports only qkv_same_embed_dim=True"
+            )
+        if self.attention.in_proj_weight is None:
+            raise XQTBackendError("TileLang attention wrapper requires packed in_proj_weight")
+        embed_dim = int(self.attention.embed_dim)
+        q_proj = F.linear(
+            query,
+            self.attention.in_proj_weight[:embed_dim],
+            None if self.attention.in_proj_bias is None else self.attention.in_proj_bias[:embed_dim],
+        )
+        k_proj = F.linear(
+            key,
+            self.attention.in_proj_weight[embed_dim : 2 * embed_dim],
+            None
+            if self.attention.in_proj_bias is None
+            else self.attention.in_proj_bias[embed_dim : 2 * embed_dim],
+        )
+        v_proj = F.linear(
+            value,
+            self.attention.in_proj_weight[2 * embed_dim :],
+            None
+            if self.attention.in_proj_bias is None
+            else self.attention.in_proj_bias[2 * embed_dim :],
+        )
+        return q_proj, k_proj, v_proj
+
+    def _reshape_for_tilelang(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, embed_dim = tensor.shape
+        num_heads = int(self.attention.num_heads)
+        head_dim = embed_dim // num_heads
+        return tensor.reshape(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
+
+    @staticmethod
+    def _merge_from_tilelang(tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, num_heads, seq_len, head_dim = tensor.shape
+        return tensor.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_heads * head_dim).contiguous()
+
     def forward(
         self,
         query: torch.Tensor,
@@ -298,11 +344,15 @@ class _TileLangAttentionWrapper(nn.Module):
             raise XQTBackendError(
                 "TileLang attention wrapper does not yet support attn_mask or key_padding_mask"
             )
-        q = query if self.attention.batch_first else query.transpose(0, 1)
+        q_input = query if self.attention.batch_first else query.transpose(0, 1)
         source_key = query if key is None else key
         source_value = source_key if value is None else value
-        k = source_key if self.attention.batch_first else source_key.transpose(0, 1)
-        v = source_value if self.attention.batch_first else source_value.transpose(0, 1)
+        k_input = source_key if self.attention.batch_first else source_key.transpose(0, 1)
+        v_input = source_value if self.attention.batch_first else source_value.transpose(0, 1)
+        q_proj, k_proj, v_proj = self._project_qkv(q_input, k_input, v_input)
+        q = self._reshape_for_tilelang(q_proj)
+        k = self._reshape_for_tilelang(k_proj)
+        v = self._reshape_for_tilelang(v_proj)
         self.last_execution_mode = (
             "cuda_tilelang_entry"
             if q.is_cuda and k.is_cuda and v.is_cuda
@@ -326,19 +376,121 @@ class _TileLangAttentionWrapper(nn.Module):
             num_stages=int(self.settings.get("num_stages", 2)),
             fallback=self.fallback,
         )
-        output = attn_output if self.attention.batch_first else attn_output.transpose(0, 1)
+        merged = self._merge_from_tilelang(attn_output)
+        projected = self.attention.out_proj(merged)
+        output = projected if self.attention.batch_first else projected.transpose(0, 1)
         weights = None
         if need_weights:
             batch_size = int(output.shape[0]) if output.ndim >= 3 else 0
-            target_len = int(output.shape[1]) if output.ndim >= 3 else 0
-            source_len = int(k.shape[1]) if k.ndim >= 3 else 0
+            target_len = int(q.shape[2]) if q.ndim == 4 else 0
+            source_len = int(k.shape[2]) if k.ndim == 4 else 0
             weights = output.new_zeros((batch_size, target_len, source_len))
         return output, weights
 
     def execution_metadata(self) -> dict[str, Any]:
+        kernel_kind = (
+            "minimal_cuda_jit"
+            if self.last_execution_mode == "cuda_tilelang_entry"
+            else "reference_fallback"
+            if self.last_execution_mode == "reference_fallback"
+            else "unknown"
+        )
         return {
             "execution_mode": self.last_execution_mode,
             "execution_reason": self.last_execution_reason,
+            "kernel_kind": kernel_kind,
+            "kernel_constraints": {
+                "dtype": "float16",
+                "dropout_p": 0.0,
+                "requires_seq_kv_gte_seq_q": True,
+                "supported_patterns": ["attention"],
+            },
+            "fallback": self.fallback,
+            "settings": dict(self.settings),
+        }
+
+
+class _TileLangDequantGemmWrapper(nn.Module):
+    """Minimal executable wrapper for dequant GEMM TileLang targets."""
+
+    def __init__(
+        self,
+        module: nn.Module,
+        *,
+        fallback: str,
+        settings: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.module = module
+        self.fallback = fallback
+        self.settings = dict(settings)
+        self.last_execution_mode = "not_run"
+        self.last_execution_reason: str | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        qweight: torch.Tensor | None = None
+        scale: torch.Tensor | None = None
+        bias: torch.Tensor | None = None
+        activation: str | None = None
+        bridge = getattr(self.module, "tilelang_dequant_gemm_args", None)
+        if callable(bridge):
+            qweight, scale, bias, activation = bridge(
+                dtype=x.dtype,
+                device=x.device,
+            )
+        else:
+            qweight = getattr(self.module, "qweight", None)
+            scale = getattr(self.module, "scale", None)
+            bias = getattr(self.module, "bias", None)
+            activation = getattr(self.module, "activation", None)
+        if not isinstance(qweight, torch.Tensor) or not isinstance(scale, torch.Tensor):
+            raise XQTBackendError(
+                "TileLang dequant GEMM target requires qweight/scale tensors or a tilelang_dequant_gemm_args bridge"
+            )
+        tensors = (x, qweight, scale) if bias is None else (x, qweight, scale, bias)
+        uses_cuda = all(tensor.is_cuda for tensor in tensors)
+        self.last_execution_mode = (
+            "cuda_tilelang_entry" if uses_cuda else "reference_fallback"
+        )
+        self.last_execution_reason = (
+            None
+            if uses_cuda
+            else "TileLang dequant GEMM kernel requires CUDA tensors; using configured fallback."
+        )
+        return run_tilelang_kernel(
+            "dequant_gemm_epilogue",
+            x,
+            qweight,
+            scale,
+            bias,
+            activation=activation,
+            block_m=int(self.settings.get("block_m", 64)),
+            block_n=int(self.settings.get("block_n", 64)),
+            threads=int(self.settings.get("threads", 128)),
+            num_stages=int(self.settings.get("num_stages", 2)),
+            fallback=self.fallback,
+        )
+
+    def execution_metadata(self) -> dict[str, Any]:
+        kernel_kind = (
+            "minimal_cuda_jit"
+            if self.last_execution_mode == "cuda_tilelang_entry"
+            else "reference_fallback"
+            if self.last_execution_mode == "reference_fallback"
+            else "unknown"
+        )
+        return {
+            "execution_mode": self.last_execution_mode,
+            "execution_reason": self.last_execution_reason,
+            "kernel_kind": kernel_kind,
+            "kernel_constraints": {
+                "dtype": "float16",
+                "batch_multiple_of_block_m": True,
+                "out_features_multiple_of_block_n": True,
+                "supported_activations": [None, "gelu", "silu", "relu"],
+                "supported_patterns": ["dequant_gemm_epilogue"],
+                "supports_reference_fp4_linear_bridge": True,
+            },
             "fallback": self.fallback,
             "settings": dict(self.settings),
         }
@@ -348,49 +500,83 @@ def _build_tilelang_candidate_model(
     target_model: nn.Module,
     target: OperatorOptimizationTargetPlan,
 ) -> nn.Module:
-    if "attention" not in (target.patterns or ["attention"]):
-        raise XQTBackendError(
-            "built-in TileLang executor currently supports only the attention pattern"
-        )
-    if isinstance(target_model, nn.MultiheadAttention):
-        return _TileLangAttentionWrapper(
-            target_model,
-            fallback=target.fallback,
-            settings=target.tilelang,
-        )
-    attention = getattr(target_model, "attention", None)
-    if isinstance(attention, nn.MultiheadAttention):
-        target_model = copy.deepcopy(target_model)
-        target_model.attention = _TileLangAttentionWrapper(
-            attention,
-            fallback=target.fallback,
-            settings=target.tilelang,
-        )
-        return target_model
-    for child_name, child in target_model.named_children():
-        nested_attention = getattr(child, "attention", None)
-        if isinstance(nested_attention, nn.MultiheadAttention):
+    patterns = target.patterns or ["attention"]
+    if patterns == ["attention"]:
+        if isinstance(target_model, nn.MultiheadAttention):
+            return _TileLangAttentionWrapper(
+                target_model,
+                fallback=target.fallback,
+                settings=target.tilelang,
+            )
+        attention = getattr(target_model, "attention", None)
+        if isinstance(attention, nn.MultiheadAttention):
             target_model = copy.deepcopy(target_model)
-            wrapped_child = target_model.get_submodule(child_name)
-            wrapped_child.attention = _TileLangAttentionWrapper(
-                nested_attention,
+            target_model.attention = _TileLangAttentionWrapper(
+                attention,
                 fallback=target.fallback,
                 settings=target.tilelang,
             )
             return target_model
+        for child_name, child in target_model.named_children():
+            nested_attention = getattr(child, "attention", None)
+            if isinstance(nested_attention, nn.MultiheadAttention):
+                target_model = copy.deepcopy(target_model)
+                wrapped_child = target_model.get_submodule(child_name)
+                wrapped_child.attention = _TileLangAttentionWrapper(
+                    nested_attention,
+                    fallback=target.fallback,
+                    settings=target.tilelang,
+                )
+                return target_model
+        raise XQTBackendError(
+            "TileLang attention target requires nn.MultiheadAttention or a module with an .attention submodule"
+        )
+    if patterns == ["dequant_gemm_epilogue"]:
+        if callable(getattr(target_model, "tilelang_dequant_gemm_args", None)) or all(
+            hasattr(target_model, name) for name in ("qweight", "scale")
+        ):
+            return _TileLangDequantGemmWrapper(
+                target_model,
+                fallback=target.fallback,
+                settings=target.tilelang,
+            )
+        for child_name, child in target_model.named_children():
+            if callable(getattr(child, "tilelang_dequant_gemm_args", None)) or all(
+                hasattr(child, name) for name in ("qweight", "scale")
+            ):
+                target_model = copy.deepcopy(target_model)
+                wrapped_child = target_model.get_submodule(child_name)
+                setattr(
+                    target_model,
+                    child_name,
+                    _TileLangDequantGemmWrapper(
+                        wrapped_child,
+                        fallback=target.fallback,
+                        settings=target.tilelang,
+                    ),
+                )
+                return target_model
+        raise XQTBackendError(
+            "TileLang dequant GEMM target requires a module with qweight/scale tensors or a tilelang_dequant_gemm_args bridge"
+        )
     raise XQTBackendError(
-        "TileLang attention target requires nn.MultiheadAttention or a module with an .attention submodule"
+        "built-in TileLang executor currently supports only the attention and dequant_gemm_epilogue patterns"
     )
 
 
 def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
     if isinstance(model, _TileLangAttentionWrapper):
         return model.execution_metadata()
+    if isinstance(model, _TileLangDequantGemmWrapper):
+        return model.execution_metadata()
     attention = getattr(model, "attention", None)
     if isinstance(attention, _TileLangAttentionWrapper):
         return attention.execution_metadata()
+    wrapped_module = getattr(model, "module", None)
+    if isinstance(wrapped_module, _TileLangDequantGemmWrapper):
+        return wrapped_module.execution_metadata()
     for module in model.modules():
-        if isinstance(module, _TileLangAttentionWrapper):
+        if isinstance(module, (_TileLangAttentionWrapper, _TileLangDequantGemmWrapper)):
             return module.execution_metadata()
     return {
         "execution_mode": "unknown",
@@ -854,8 +1040,7 @@ def execute_operator_optimization_plan(
                     "min_speedup": target.min_speedup,
                     "capability": capability.to_dict(),
                     **backend_metadata,
-                    "execution_mode": execution_detail.get("execution_mode"),
-                    "execution_reason": execution_detail.get("execution_reason"),
+                    **execution_detail,
                 },
             )
         )
