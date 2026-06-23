@@ -61,7 +61,9 @@ def split_batch(
 
     if isinstance(batch, Mapping):
         inputs = None
-        detection_target_present = any(key in batch for key in DETECTION_TARGET_KEYS)
+        detection_target_present = any(
+            key in batch for key in DETECTION_TARGET_KEYS if key != "labels"
+        )
         for key in input_keys:
             if key in batch:
                 inputs = batch[key]

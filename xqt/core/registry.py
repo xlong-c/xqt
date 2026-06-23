@@ -8,10 +8,27 @@ from typing import Any, Callable, Dict, Iterable, Optional
 from .errors import XQTRegistryError
 
 
+_BANNED_REGISTRY_KINDS = {
+    "MODEL",
+    "DATASET",
+    "LOSS",
+    "METRIC",
+    "TRAINER",
+    "OPTIMIZER",
+    "SCHEDULER",
+}
+
+
 class XQTRegistry:
-    """Name to object registry used by the experimental XQT package."""
+    """Registry for XQT-owned extension points, not task framework objects."""
 
     def __init__(self, name: str) -> None:
+        upper_name = name.upper()
+        for banned in _BANNED_REGISTRY_KINDS:
+            if banned in upper_name:
+                raise XQTRegistryError(
+                    f"XQTRegistry must not be used as a {banned.lower()} registry"
+                )
         self.name = name
         self._items: Dict[str, Any] = {}
 

@@ -5,7 +5,7 @@ project:
   artifact_dir: artifacts/xqt/detection/yolo_smoke
 
 model:
-  target: xqt.model.build_toy_detection_module
+  target: xqt.model.build_smoke_detection_module
   params:
     num_classes: 3
     boxes_per_image: 2
@@ -58,7 +58,7 @@ compression:
 export:
   targets:
     - format: onnx
-      output_path: artifacts/xqt/detection/yolo_smoke/toy_detection.onnx
+      output_path: artifacts/xqt/detection/yolo_smoke/smoke_detection.onnx
       opset: 18
       params:
         input_names: [image]
@@ -66,7 +66,7 @@ export:
         dynamo: false
         runtime_diff: false
     - format: openvino
-      output_path: artifacts/xqt/detection/yolo_smoke/toy_detection.xml
+      output_path: artifacts/xqt/detection/yolo_smoke/smoke_detection.xml
       precision: fp32
       params:
         dry_run: true

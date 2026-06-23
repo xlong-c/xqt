@@ -24,7 +24,7 @@ PyTorch checkpoint
 核心目标:
 
 - 支持 PyTorch `nn.Module` 和 `state_dict` 作为主要输入.
-- 覆盖量化, 通用蒸馏, 剪枝, 扩散模型少步蒸馏四类优化技术.
+- 覆盖量化,蒸馏编排,剪枝,扩散模型少步蒸馏和部署转换等优化路径.
 - 能导出主流部署格式, 首期优先 `ONNX`, `TensorRT engine`, `OpenVINO IR`, `torch.export` 产物和 TorchScript 兼容路径.
 - 记录每次转换的配置, 数据, 版本, 指标和产物校验信息, 保证结果可复现.
 - 与 XDL 训练体系保持松耦合, 先作为 `xqt/` 独立实验项目推进, 成熟后再考虑抽公共能力到 `tools/` 或 `xdl/`.
@@ -52,9 +52,18 @@ PyTorch checkpoint
 非目标:
 
 - 不替代 `xdl.trainer.Trainer` 的训练生命周期.
+- 不维护通用 model/loss/metric registry. XDL 任务走 `xdl.model` / `xdl.loss` / `xdl.metric`,第三方任务走对应 provider.
+- 不在 XQT 内部运行通用 `optimizer.zero_grad() -> backward() -> step()` 训练循环. `finetune`,`distill` 和剪枝 recovery stage 只构造 training job,再委托 XDL 或第三方 provider.
 - 不重新实现 TensorRT, OpenVINO, ONNX Runtime, ExecuTorch, ncnn, MNN 等后端.
 - 不承诺一次支持所有模型族和硬件. 每个 recipe 必须声明支持的模型结构, 输入形状, 精度策略和硬件约束.
 - 不引入命令行参数解析库. 入口脚本读取 YAML 配置或明确的代码内配置.
+
+任务 provider 边界:
+
+- XDL provider 使用 `xdl.trainer.Trainer` 和 XDL registry/loss/metric 体系执行训练,微调,KD recovery 或 QAT recovery.
+- Ultralytics,HuggingFace,timm,diffusers 等第三方路径应通过 provider adapter 调用第三方自己的 train/evaluate API;当前已提供通用 callable/target provider 接入点,具体 provider 按 recipe 需要补齐.
+- XQT 负责把 stage,模型,teacher,train/validation split,设备和参数打包成 training job 或 evaluation job,并把 provider 返回的 metrics,artifacts 和 report 写入 manifest.
+- PTQ calibration,observer fit,ONNX Runtime QDQ `CalibrationDataReader`,activation range 统计和 calibration summary 仍属于 `xqt.quant`,不按训练生命周期处理.
 
 ## 2. 当前仓库现状
 
@@ -62,16 +71,17 @@ PyTorch checkpoint
 
 - `xqt/core`: structured config schema, OmegaConf 加载, artifact manifest, checksum, registry, dotted target import 和错误类型.
 - `xqt/data`: synthetic classification/detection samples, calibration dataloader, prompt 数据, torchvision image classification loader, Ultralytics detection loader, HuggingFace 文本数据和 `xdl.dataset` bridge.
-- `xqt/model`: 外部模型 adapter, 当前包含 Ultralytics YOLO detection wrapper, 数据集解析和参考导出 helper.
+- `xqt/model`: smoke-only model helper,不作为通用模型注册入口.
+- `xqt/integrations`: task provider adapter 边界,包含 detection decode adapter,training/evaluation job/report 归一化和 `XDLTrainingProvider`.
 - `xqt/pipeline`: pass manager, built-in passes, preflight 和 YAML runner.
-- `xqt/workflows`: stage-based optimization workflow,把 eval/benchmark/prune/quant/finetune/distill/operator/export/deploy/runtime_eval 等阶段按配置编排.
+- `xqt/workflows`: stage-based optimization workflow,把 eval/benchmark/prune/quant/finetune/distill/operator/export/deploy/runtime_eval 等阶段按配置编排;带反向传播的 stage 委托 training provider,任务级 eval 优先委托 evaluation provider,否则走过渡 fallback.
 - `xqt/quant`: torchao adapter, ONNX Runtime QDQ static quantization, calibration, policy, sensitivity, component quantization plan 和 backend capability.
-- `xqt/prune`: global L1 pruning, structured pruning, importance ranking, pruning schedule, prune + KD helper, N:M 和 block sparse 报告.
-- `xqt/distill`: logit KD, feature/relation loss, feature hook, teacher cache, HuggingFace text bundle 和基础训练 helper.
+- `xqt/prune`: global L1 pruning, structured pruning, importance ranking, pruning schedule, provider-backed prune recovery report, N:M 和 block sparse 报告.
+- `xqt/distill`: logit KD, feature/relation loss 兼容导出, feature hook, teacher cache, HuggingFace text bundle 和 provider-backed distillation report adapter. 实际训练 loss 已迁到 `xdl/loss.distillation_loss` 并注册.
 - `xqt/diffusion_distill`: timestep schedule, prompt/latent/trajectory cache, consistency/LCM style loss 和 sampling report metadata.
 - `xqt/export`: `torch.export`, TorchScript fallback, ONNX export/checker/runtime diff, TensorRT `trtexec` / Python API adapter, OpenVINO adapter, ExecuTorch/ncnn/MNN mobile adapter 和导出前融合 helper.
 - `xqt/operator_opt`: `torch.compile`, Triton, TileLang, CuTile, CUTLASS 和 custom CUDA 的 capability, plan, executor, pattern 和 fallback report.
-- `xqt/eval`, `xqt/benchmark`: detection decode/mAP, metric flatten, output diff, JSON/CSV/Markdown 报告, latency 和 memory benchmark.
+- `xqt/eval`, `xqt/benchmark`: runtime output diff, metric flatten, JSON/CSV/Markdown 报告, latency 和 memory benchmark. 任务级 metric 适配仍处于过渡期,`baseline_eval`/workflow `eval` 已可注入 evaluation provider,而 top-k 和 detection mAP 已迁到 `xdl/metric`;内置 PyTorch/detection fallback 仍保留.
 - `xqt/xdl_adapter.py`: 从 XDL TrainSetup-like 对象或 checkpoint 创建 XQT context.
 - `xqt/recipes`: CPU smoke, ONNX QDQ, CIFAR-100 QDQ, YOLO detection practice, 多组件量化, structured prune, KD prune 和 operator optimization recipes.
 
@@ -102,7 +112,7 @@ PyTorch checkpoint
 
 1. `xqt/core/schema.py` 和 `xqt/core/config.py`: 看 recipe schema,默认值,OmegaConf 加载和校验边界.
 2. `xqt/pipeline/runner.py` 和 `xqt/pipeline/passes.py`: 看 `config -> context -> pass pipeline -> artifacts/metrics/manifest` 主链路和真实执行顺序.
-3. 按任务进入 `xqt/quant`,`xqt/prune`,`xqt/distill`,`xqt/diffusion_distill`,`xqt/export`,`xqt/operator_opt`,`xqt/eval`,`xqt/benchmark`: 看可复用 helper 和后端 adapter.
+3. 按任务进入 `xqt/integrations`,`xqt/quant`,`xqt/prune`,`xqt/distill`,`xqt/diffusion_distill`,`xqt/export`,`xqt/operator_opt`,`xqt/eval`,`xqt/benchmark`: 看 provider 边界,可复用 helper 和后端 adapter.
 4. `xqt/recipes/*.yaml` 和 `tests/xqt/`: 看当前哪些路径已经有可运行闭环,哪些依赖本地数据,CUDA 或外部后端命令.
 
 新增能力时优先落在包模块,再通过 recipe,preflight 和测试暴露. 顶层示例脚本只能是薄入口,不能成为长期事实源.
@@ -129,12 +139,19 @@ xqt/
 │   ├── prompts.py         # prompt 数据
 │   ├── samples.py         # example input, input signature, synthetic data
 │   └── torchvision.py     # torchvision image classification loader
+├── model/
+│   └── smoke_detection.py # smoke-only detection model helper
+├── integrations/
+│   ├── detection.py       # provider-specific detection output decode adapter
+│   ├── evaluation.py      # provider evaluation job/report 边界
+│   ├── training.py        # provider training job/report 边界
+│   └── xdl.py             # XDL Trainer provider adapter
 ├── distill/
 │   ├── losses.py          # logit KD, feature KD, relation KD
 │   ├── hooks.py           # teacher/student 中间层对齐
 │   ├── cache.py           # teacher logits/features 缓存
 │   ├── hf_text.py         # HuggingFace 文本分类 KD/prune recipe 支架
-│   └── training.py        # 小型 teacher -> student 训练 helper
+│   └── training.py        # provider-backed distillation report adapter
 ├── diffusion_distill/
 │   ├── trajectory.py      # teacher 轨迹, 噪声, timestep 和 scheduler 采样
 │   ├── losses.py          # consistency/LCM 类少步蒸馏损失
@@ -146,7 +163,7 @@ xqt/
 │   ├── importance.py      # L1/L2, BN gamma, Taylor, gradient * weight
 │   ├── masks.py           # mask 管理和持久化
 │   ├── rewrite.py         # 结构化剪枝后的模块重写
-│   ├── schedule.py        # pruning schedule 和 KD helper
+│   ├── schedule.py        # pruning schedule 和 provider-backed KD recovery
 │   └── structured.py      # channel/filter/head/block 等结构化剪枝
 ├── quant/
 │   ├── capability.py      # quant backend 能力矩阵
@@ -175,7 +192,7 @@ xqt/
 │   ├── openvino.py        # PyTorch/ONNX -> OpenVINO IR
 │   └── mobile.py          # ExecuTorch/ncnn/MNN 等可选路径
 ├── eval/
-│   ├── accuracy.py        # task metric, topk, mAP, loss, custom metric
+│   ├── accuracy.py        # 过渡期 PyTorch task metric wrapper, 现在主要委托 xdl.metric
 │   ├── compare.py         # PyTorch vs exported backend 输出差异
 │   └── report.py          # JSON/CSV/Markdown 报告
 ├── benchmark/
@@ -299,18 +316,18 @@ Recipe 必须声明 `compression_axes`, 例如 `["precision"]`, `["width", "prec
 
 首期任务:
 
-- 离线蒸馏: 固定 teacher, 训练 student.
-- Logit KD: KL divergence + temperature + CE 组合.
+- 离线蒸馏: 固定 teacher,由任务 provider 训练 student;XQT 只编排 stage 和记录 report.
+- Logit KD: KL divergence + temperature + CE 组合属于任务训练 loss,长期归 XDL loss 或第三方 provider,XQT 只保留 provider report 归一化和 manifest 写入.
 - Feature KD: 中间层 hook, adapter 投影, MSE/Cosine loss.
 - 宽度/深度 student recipe: teacher 保持原始结构, student 显式减少 hidden size, heads, MLP width 或 layer 数.
 - Teacher 输出缓存: 对大 teacher 减少重复前向成本.
-- HuggingFace 文本分类参考 recipe: teacher/student 使用 `AutoModelForSequenceClassification`, 数据使用 `datasets` + `DataCollatorWithPadding`, 损失为 `alpha * KL(student / T, teacher / T) * T^2 + (1 - alpha) * CE`.
-- XDL 接入: 提供可被 `CoreModel.training_step()` 调用的 distillation loss helper, 不直接改 `Trainer`.
+- HuggingFace 文本分类参考 recipe: teacher/student 使用 `AutoModelForSequenceClassification`,数据使用 `datasets` + `DataCollatorWithPadding`,训练和评估由 HF provider 或 XDL provider 执行.
+- XDL 接入: 通过 `XDLTrainingProvider` 委托 `xdl.trainer.Trainer`;XQT 不直接改 Trainer 生命周期,也不在 pass 中自建优化器.
 
 验收标准:
 
 - 一个分类模型 teacher -> student recipe.
-- teacher 不反传梯度, student 可正常保存 checkpoint.
+- teacher 不反传梯度,student checkpoint 由 provider 或对应 callback 保存.
 - 报告包含 teacher metric, student baseline metric, distilled student metric.
 
 ### 7.3 剪枝
@@ -561,9 +578,9 @@ Manifest 必填字段:
 | --- | --- | --- | --- | --- |
 | `image_resnet_onnx_qdq_int8` | ResNet/CNN 分类 | quant + export | 打通 ONNX Q/DQ 和 ONNX Runtime diff | 已有 YAML smoke recipe, synthetic image runner 测试和 TensorRT 阈值解析测试,真实 TensorRT engine 待目标机器验证 |
 | `image_resnet_cifar100_qdq_cpu` | ResNet/CIFAR-100 | quant + eval + benchmark | 在本地真实数据上验证 ONNX Runtime QDQ CPU 路径 | 已用本地 CIFAR-100 生成真实 QDQ ONNX, manifest 和 benchmark |
-| `yolo_detection_smoke` | synthetic detection + toy model | detection eval + prune + export | 用最小依赖验证 detection schema,baseline eval,prune,ONNX export 和 manifest | 已有 recipe 和 runner 测试覆盖 |
-| `yolo_detection_practice` | synthetic detection + toy model | detection eval + quant + export + prune | 验证 detection task schema,mAP,ONNX QDQ 和 stage workflow 主链 | 当前 recipe 已改为 `data_splits + stages` schema,由 `xqt.workflows.optimize_model` 编排 baseline eval/latency,FP32 ONNX runtime eval,QDQ artifact/runtime eval 和 global L1 unstructured prune. operator/deploy 能力由独立 recipe 和测试覆盖,不塞进默认 practice 主链. 示例入口只打印 stage result,不再维护 YOLO 专用场景矩阵或报告生成器 |
-| `yolo_detection_trt_qdq_practice` | synthetic detection + toy model | detection quant + deploy | 验证 detection QDQ ONNX -> TensorRT INT8 build 参数,artifact 和 report 主链,不依赖 ultralytics 运行时 | 当前 recipe 默认使用 TensorRT Python API dry-run,固定 `Conv`-only QDQ + INT8 profile + engine artifact 结构,为目标机器上的真实 build 做准备 |
+| `yolo_detection_smoke` | synthetic detection + smoke-only model | detection eval + prune + export | 用最小依赖验证 detection schema,baseline eval,prune,ONNX export 和 manifest | 已有 recipe 和 runner 测试覆盖 |
+| `yolo_detection_practice` | synthetic detection + smoke-only model | detection eval + quant + export + prune | 验证 detection task schema,mAP,ONNX QDQ 和 stage workflow 主链 | 当前 recipe 已改为 `data_splits + stages` schema,由 `xqt.workflows.optimize_model` 编排 baseline eval/latency,FP32 ONNX runtime eval,QDQ artifact/runtime eval 和 global L1 unstructured prune. operator/deploy 能力由独立 recipe 和测试覆盖,不塞进默认 practice 主链. 示例入口只打印 stage result,不再维护 YOLO 专用场景矩阵或报告生成器 |
+| `yolo_detection_trt_qdq_practice` | synthetic detection + smoke-only model | detection quant + deploy | 验证 detection QDQ ONNX -> TensorRT INT8 build 参数,artifact 和 report 主链,不依赖 ultralytics 运行时 | 当前 recipe 默认使用 TensorRT Python API dry-run,固定 `Conv`-only QDQ + INT8 profile + engine artifact 结构,为目标机器上的真实 build 做准备 |
 | `external_detection_trt_deploy` | 外部 detection ONNX | detection deploy | 验证 stage workflow 直接消费仓库外 ONNX,生成 TensorRT engine artifact/report 主链 | 当前 recipe 只依赖 `params.onnx_path`,不要求加载 PyTorch 模型,默认 Python API dry-run,用于承接 RT-DETR 等外部导出资产 |
 | `multi_component_quant_smoke` | 异构 toy 模型 | quant + manifest | 验证 component policy,多 backend report 和 manifest 表达 | 已有 CPU smoke recipe 和 runner 测试覆盖 |
 | `hf_text_kd_prune` | HF 文本分类 | distill + prune | 复用知乎示例但改为 YAML | 已有 recipe 支架和 fake HF pipeline 测试, 真实 checkpoint 运行待补 |
@@ -587,13 +604,13 @@ Recipe 文件按技术栈分层放在 `xqt/recipes/` 下 (`quant/`, `prune/`, `d
 
 这两个 TODO 属于实践计划,不是已实现事实. 示例编写时如果发现 XQT 功能实现错误,优先修复或破坏性重构 `xqt` 内部实现,不要在示例脚本中绕开错误或降低验收标准.
 
-当前已提供 `xqt/recipes/detection/yolo_detection_smoke.yaml` 作为最小 detection smoke,以及 `xqt/recipes/detection/yolo_detection_practice.yaml` + `examples/yolo_detection_practice.py` 作为 detection practice 入口. Practice recipe 使用通用 `OptimizationConfig` 风格,顶层是 `model`,`task`,`data_splits`,`stages`;`examples/yolo_detection_practice.py` 本身也是可直接运行的单文件示例,默认内嵌一条轻量 detection workflow,不依赖 `ultralytics`,并调用 `xqt.workflows.optimize_model` 打印 stage 摘要和 workflow 产物路径. 需要切换到 YAML 或真实 RT-DETR TensorRT workflow 时,用 `XQT_YOLO_PRACTICE_CONFIG` 指向对应 recipe. 每个 stage 都有独立 `kind`,`split`,`from_stage`,`params`,`accept`,`revert_on_reject` 等编排字段,运行后进入 `OptimizedModelResult.stages`,同时返回当前模型,`best_model`,stage metrics 和 artifacts. 这条链路不再维护 YOLO 专用场景矩阵,也不再把底层逻辑复制进示例脚本.
+当前已提供 `xqt/recipes/detection/yolo_detection_smoke.yaml` 作为最小 detection smoke,以及 `xqt/recipes/detection/yolo_detection_practice.yaml` + `examples/yolo_detection_practice.py` 作为 detection practice 入口. Practice recipe 使用通用 `OptimizationConfig` 风格,顶层是 `model`,`task`,`data_splits`,`stages`;`examples/yolo_detection_practice.py` 本身也是可直接运行的单文件示例,默认用 `XQTOptimizationSession` 逐步调用 `eval/benchmark/export/runtime_eval/quant/prune`,不依赖 `ultralytics`,也不在 Python 里内嵌完整 workflow dict. 需要切换到 YAML 或真实 RT-DETR TensorRT workflow 时,用 `XQT_YOLO_PRACTICE_CONFIG` 指向对应 recipe,入口会改走 `xqt.workflows.optimize_model`. 每个 stage 都有独立 `kind`,`split`,`from_stage`,`params`,`accept`,`revert_on_reject` 等编排字段,运行后进入 `OptimizedModelResult.stages`,同时返回当前模型,`best_model`,stage metrics 和 artifacts. 这条链路不再维护 YOLO 专用场景矩阵,也不再把底层逻辑复制进示例脚本.
 
 这里要区分现状和方向:
 
 - 当前 CLI 主入口仍然是 `xqt-run-recipe` / `xqt-preflight`, 默认通过 `XQT_CONFIG` 选择 pass recipe;另外已经补了 `xqt-run-workflow`,默认指向 detection smoke workflow,通过 `XQT_WORKFLOW_CONFIG` 切换 stage workflow recipe.
 - `xqt/recipes/detection/hf_rtdetr_r18vd_qdq_trt_practice.yaml` 提供了一个不引入 `ultralytics` 运行时依赖的真实 detection 资产样例: 直接消费 Hugging Face 社区版 RT-DETR R18vd 单输入 ONNX(`pixel_values -> logits,pred_boxes`),走 ONNX Runtime QDQ INT8 + TensorRT Python API deploy 主链.
-- `OptimizationConfig` + `optimize_model` 已经是 stage workflow 的核心执行路径, 通用 stage workflow CLI 已补齐最小入口, 但 recipe 模板和完整用户心智仍在继续收敛.
+- `OptimizationConfig` + `optimize_model` 已经是 stage workflow 的核心批处理执行路径,`XQTOptimizationSession` 复用同一 stage 执行核心作为 Pythonic 手动入口. 通用 stage workflow CLI 已补齐最小入口, 但 recipe 模板和完整用户心智仍在继续收敛.
 - 长期方向是让 stage workflow + 默认模板承接主用户心智, pass recipe 逐步退到兼容层和内部桥接层, 而不是立刻假定 `XQTConfig` 已经废弃.
 
 已验证的 YOLO practice 边界:
@@ -917,7 +934,7 @@ benchmark:
 
 - [x] 实现非结构化 pruning baseline 和 sparsity 报告, 并接入内置 `prune` pass.
 - [x] 实现 Conv2d/Linear 结构化剪枝和模块改写的基础 helper.
-- [x] 增加剪枝后微调 recipe. 当前 `xqt/recipes/prune/unstructured/prune_finetune_cpu.yaml` 使用线性 sparsity schedule, teacher 注入和 KD 微调 smoke 测试.
+- [x] 增加剪枝后微调 recipe 支架. 当前 recovery 训练已改为 provider 委托;XQT prune pass 只负责 schedule,mask/rewrite 和 report.
 - [x] 验证剪枝模型可导出 ONNX.
 - [x] 增加 HF Transformer 文本分类的全局 L1 非结构化剪枝 recipe, 用 YAML 替代 argparse. 当前已提供 `xqt/recipes/distill/hf_text_kd_prune.yaml`, HF bundle adapter 和 fake HF pipeline 测试, 真实 checkpoint 验证仍作为后续任务.
 
@@ -926,8 +943,8 @@ benchmark:
 - [x] 实现 logit KD loss helper.
 - [x] 实现 feature hook 和层对齐配置的基础 helper.
 - [x] 实现 teacher logits/features 缓存.
-- [x] 跑通 teacher -> student 分类 recipe 的基础 PyTorch helper 和内置 `distill` pass.
-- [x] 增加剪枝 + KD 组合 recipe 的基础 helper, 支持 teacher logits 磁盘缓存和线性稀疏率 schedule.
+- [x] 跑通 teacher -> student 分类 recipe 支架,内置 `distill` pass 现在只构造 provider training job 并记录 report.
+- [x] 增加剪枝 + KD 组合 recipe 支架,支持 teacher logits 磁盘缓存,线性稀疏率 schedule 和 provider-backed recovery report.
 
 ### 阶段 7: 扩散少步蒸馏 MVP
 

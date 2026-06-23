@@ -29,6 +29,7 @@ from .workflows import (
     OptimizationStageConfig,
     OptimizationStageResult,
     StageAcceptanceConfig,
+    XQTOptimizationSession,
     load_optimization_config,
     optimize_model,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "RECIPE_REGISTRY",
     "StageAcceptanceConfig",
     "XQTConfig",
+    "XQTOptimizationSession",
     "XQTRegistry",
     "build_operator_optimization_plan",
     "describe_operator_backend_capability",

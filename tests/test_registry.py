@@ -45,3 +45,9 @@ def test_xqt_registry_rejects_params_for_non_callable_target() -> None:
 
     with pytest.raises(XQTRegistryError, match="does not accept params"):
         registry.build("value", x=1)
+
+
+def test_xqt_registry_rejects_task_framework_registry_names() -> None:
+    for name in ("XQT_MODEL", "XQT_LOSS", "XQT_METRIC", "XQT_TRAINER"):
+        with pytest.raises(XQTRegistryError, match="must not be used"):
+            XQTRegistry(name)

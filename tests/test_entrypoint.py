@@ -136,12 +136,36 @@ stages:
     assert (artifact_dir / "baseline_eval" / "workflow_result.json").is_file()
 
 
-def test_yolo_detection_practice_example_embeds_lightweight_workflow() -> None:
-    config = yolo_detection_practice._default_config()
+class _StageRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
 
-    assert config["model"]["target"] == "xqt.model.build_toy_detection_module"
-    assert "ultralytics" not in repr(config).lower()
-    assert [stage["kind"] for stage in config["stages"]] == [
+    def eval(self, **kwargs: object) -> None:
+        self.calls.append(("eval", kwargs))
+
+    def benchmark(self, **kwargs: object) -> None:
+        self.calls.append(("benchmark", kwargs))
+
+    def export(self, **kwargs: object) -> None:
+        self.calls.append(("export", kwargs))
+
+    def runtime_eval(self, **kwargs: object) -> None:
+        self.calls.append(("runtime_eval", kwargs))
+
+    def quant(self, **kwargs: object) -> None:
+        self.calls.append(("quant", kwargs))
+
+    def prune(self, **kwargs: object) -> None:
+        self.calls.append(("prune", kwargs))
+
+
+def test_yolo_detection_practice_example_uses_session_stage_calls() -> None:
+    recorder = _StageRecorder()
+
+    yolo_detection_practice._run_default_stages(recorder)  # type: ignore[arg-type]
+
+    assert "ultralytics" not in repr(recorder.calls).lower()
+    assert [kind for kind, _kwargs in recorder.calls] == [
         "eval",
         "benchmark",
         "export",
@@ -153,5 +177,14 @@ def test_yolo_detection_practice_example_embeds_lightweight_workflow() -> None:
         "benchmark",
         "prune",
     ]
-    assert config["stages"][6]["params"]["method"] == "global_l1_unstructured"
-    assert config["stages"][-1]["params"]["method"] == "structured"
+    assert recorder.calls[6][1]["method"] == "global_l1_unstructured"
+    assert recorder.calls[-1][1]["method"] == "structured"
+
+
+def test_yolo_detection_practice_example_builds_session_without_ultralytics() -> None:
+    session = yolo_detection_practice._build_default_session()
+
+    assert session.config.project["name"] == "yolo_detection_practice_example"
+    assert session.config.task.type == "detection"
+    assert "ultralytics" not in repr(session.config).lower()
+    assert set(session.context.data) == {"calibration", "validation"}

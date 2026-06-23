@@ -3,7 +3,7 @@ project:
   artifact_dir: artifacts/xqt/detection/yolo_practice
 
 model:
-  target: xqt.model.build_toy_detection_module
+  target: xqt.model.build_smoke_detection_module
   params:
     num_classes: 80
     input_channels: 3
@@ -77,7 +77,7 @@ stages:
     params:
       targets:
         - format: onnx
-          output_path: artifacts/xqt/detection/yolo_practice/export_fp32_onnx/toy_detection_fp32.onnx
+          output_path: artifacts/xqt/detection/yolo_practice/export_fp32_onnx/smoke_detection_fp32.onnx
           opset: 18
           params:
             input_names: [images]
@@ -113,8 +113,8 @@ stages:
       calibration_split: calibration
       validation_split: validation
       policy:
-        source_name: toy_detection_source.onnx
-        output_path: artifacts/xqt/detection/yolo_practice/quant_qdq/toy_detection_qdq.onnx
+        source_name: smoke_detection_source.onnx
+        output_path: artifacts/xqt/detection/yolo_practice/quant_qdq/smoke_detection_qdq.onnx
         input_names: [images]
         output_names: [predictions]
         dynamo: false

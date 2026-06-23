@@ -272,6 +272,7 @@ def train_hf_text_classification_distillation(
     alpha: float = 0.5,
     device: str | torch.device = "cpu",
     max_steps: Optional[int] = None,
+    training_provider: Any | None = None,
 ) -> DistillationTrainReport:
     """Train HF sequence classification models with logit KD."""
 
@@ -284,6 +285,7 @@ def train_hf_text_classification_distillation(
         alpha=alpha,
         device=device,
         max_steps=max_steps,
+        training_provider=training_provider,
     )
 
 

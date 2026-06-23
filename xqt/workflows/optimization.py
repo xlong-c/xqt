@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, cast
 
 import torch
-import torch.nn.functional as F
 from omegaconf import OmegaConf
 from torch import nn
 
@@ -47,9 +46,16 @@ from xqt.export.input_utils import (
     default_input_names,
     first_tensor_output,
 )
+from xqt.integrations import (
+    EvaluationJob,
+    resolve_evaluation_provider,
+    run_evaluation_job,
+    TrainingJob,
+    resolve_training_provider,
+    run_training_job,
+)
 from xqt.pipeline.passes import (
     AnalyzePass,
-    DistillPass,
     ExportPass,
     OperatorOptimizationPass,
     PrunePass,
@@ -155,6 +161,22 @@ class OptimizedModelResult:
         if self.best_stage is None:
             return self.model
         return self.models.get(self.best_stage, self.model)
+
+
+@dataclass
+class _OptimizationRunState:
+    """Mutable execution state shared by workflow and session entrypoints."""
+
+    config: OptimizationConfig
+    context: XQTContext
+    splits: dict[str, Any]
+    teacher: Any | None = None
+    stage_results: list[OptimizationStageResult] = field(default_factory=list)
+    model_snapshots: dict[str, Any] = field(default_factory=dict)
+    eval_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    benchmark_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    baseline_stage: Optional[str] = None
+    best_stage: Optional[str] = None
 
 
 def load_optimization_config(config: ConfigInput | OptimizationConfig) -> OptimizationConfig:
@@ -431,6 +453,54 @@ def _build_splits(config: OptimizationConfig, data: Mapping[str, Any] | None) ->
     return splits
 
 
+def _snapshot_model(model: Any) -> Any:
+    return copy.deepcopy(model) if isinstance(model, nn.Module) else model
+
+
+def _create_optimization_state(
+    config: OptimizationConfig,
+    *,
+    model: Any | None = None,
+    teacher: Any | None = None,
+    data: Mapping[str, Any] | None = None,
+    training_provider: Any | None = None,
+    evaluation_provider: Any | None = None,
+) -> _OptimizationRunState:
+    current_model = _build_model(config, model)
+    splits = _build_splits(config, data)
+    context = XQTContext(
+        config=_base_xqt_config(config, stage_name="init"),
+        model=current_model,
+        reference_model=_snapshot_model(current_model),
+        teacher=teacher,
+        data=dict(splits),
+        device=_device(config),
+        manifest=_create_workflow_manifest(config),
+        training_provider=training_provider,
+        evaluation_provider=evaluation_provider,
+    )
+    return _OptimizationRunState(
+        config=config,
+        context=context,
+        splits=splits,
+        teacher=teacher,
+        model_snapshots={"initial": _snapshot_model(current_model)},
+    )
+
+
+def _result_from_state(state: _OptimizationRunState) -> OptimizedModelResult:
+    if state.context.manifest is not None:
+        state.context.manifest.config_snapshot = asdict(state.config)
+    return OptimizedModelResult(
+        model=state.context.model,
+        context=state.context,
+        stages=list(state.stage_results),
+        best_stage=state.best_stage,
+        baseline_stage=state.baseline_stage,
+        models=dict(state.model_snapshots),
+    )
+
+
 def _split_name(stage: OptimizationStageConfig, default: str = "validation") -> str:
     return str(stage.split or stage.validation_split or default)
 
@@ -464,21 +534,49 @@ def _evaluate_current(
     context: XQTContext,
     *,
     dataloader: Any,
+    stage_name: str,
+    params: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     model = context.require_model()
+    eval_params = dict(params or {})
+    provider = resolve_evaluation_provider(context, eval_params)
+    if provider is not None:
+        report = run_evaluation_job(
+            provider,
+            EvaluationJob(
+                name=stage_name,
+                mode="eval",
+                model=model,
+                data=dataloader,
+                reference_model=context.reference_model,
+                params=eval_params,
+                device=context.config.model.device,
+                task_type=context.config.task.type,
+                context=context,
+            ),
+        )
+        return report.to_dict()
     if context.config.task.type == "detection":
-        return evaluate_detection_model(
+        report = evaluate_detection_model(
             model,
             dataloader,
             postprocess=context.config.task.detection_postprocess,
             metric_config=context.config.task.detection_metric,
             device=context.config.model.device,
         ).to_dict()
-    return evaluate_pytorch_model(
-        model,
-        dataloader,
-        device=context.config.model.device,
-    ).to_dict()
+    else:
+        report = evaluate_pytorch_model(
+            model,
+            dataloader,
+            device=context.config.model.device,
+        ).to_dict()
+    report.setdefault("provider", "xqt_internal_transition")
+    metadata = report.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata.setdefault("evaluation_source", "xqt.eval")
+    report["metadata"] = metadata
+    return report
 
 
 def _benchmark_model(
@@ -654,64 +752,6 @@ def _max_nested_numeric(value: Any, key: str) -> Optional[float]:
     return max(values) if values else None
 
 
-def _run_supervised_finetune(
-    context: XQTContext,
-    *,
-    dataloader: Any,
-    params: Mapping[str, Any],
-) -> None:
-    model = cast(nn.Module, context.require_model())
-    device = torch.device(context.config.model.device)
-    model.to(device)
-    was_training = model.training
-    model.train()
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(params.get("lr", 1e-3)),
-        weight_decay=float(params.get("weight_decay", 0.0)),
-    )
-    max_steps = params.get("max_steps")
-    max_steps = int(max_steps) if max_steps is not None else None
-    history: list[float] = []
-    sample_count = 0
-
-    for step, batch in enumerate(dataloader):
-        if max_steps is not None and step >= max_steps:
-            break
-        split = split_batch(
-            batch,
-            expected_input_count=infer_model_input_count(model),
-        )
-        if split.targets is None:
-            raise ValueError("supervised finetune requires labeled train data")
-        inputs = _move_to_device(split.inputs, device)
-        targets = _move_to_device(split.targets, device)
-        if not isinstance(targets, torch.Tensor):
-            raise TypeError("supervised finetune targets must be a tensor")
-
-        logits = first_tensor_output(call_model_with_example_input(model, inputs))
-        loss = F.cross_entropy(logits, targets.reshape(-1).long())
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        history.append(float(loss.detach().cpu().item()))
-        sample_count += int(targets.shape[0]) if targets.ndim > 0 else 1
-
-    if not was_training:
-        model.eval()
-    steps = len(history)
-    context.metrics["finetune"] = {
-        "mode": "supervised",
-        "steps": steps,
-        "samples": sample_count,
-        "mean_loss": sum(history) / steps if steps else 0.0,
-        "last_loss": history[-1] if history else 0.0,
-        "loss_history": history,
-    }
-
-
 def _run_prune(
     config: OptimizationConfig,
     stage: OptimizationStageConfig,
@@ -775,26 +815,51 @@ def _run_finetune(
     params = dict(stage.params)
     params.pop("enabled", None)
     train_split = stage.train_split or stage.split or params.pop("train_split", None)
+    validation_split = stage.validation_split or params.pop("validation_split", None)
     if train_split is None:
         raise ValueError(f"stage {stage.name} requires train_split")
     context.data["train"] = _require_split(splits, str(train_split))
+    if validation_split is not None:
+        context.data["validation"] = _require_split(splits, str(validation_split))
     context.teacher = teacher or context.teacher
-    if context.teacher is None and stage.kind == "distill":
+    provider = resolve_training_provider(context, params)
+    job_teacher = params.pop("teacher", context.teacher)
+    if job_teacher is None and stage.kind == "distill":
         raise ValueError(
             f"stage {stage.name} requires a teacher model for distill finetune"
         )
-    if context.teacher is None:
-        _run_supervised_finetune(
-            context,
-            dataloader=context.data["train"],
+    metric_key = "distill" if stage.kind == "distill" else "finetune"
+    report = run_training_job(
+        provider,
+        TrainingJob(
+            name=stage.name,
+            mode=stage.kind,
+            model=context.require_model(),
+            teacher=job_teacher,
+            train_data=context.data["train"],
+            validation_data=context.data.get("validation"),
             params=params,
+            device=context.config.model.device,
+            task_type=context.config.task.type,
+            context=context,
+        ),
+    )
+    context.metrics[metric_key] = report.to_dict()
+    if context.manifest is not None:
+        mean_loss = report.metrics.get("mean_loss")
+        context.manifest.add_metric(
+            MetricRecord(
+                name=f"{metric_key}.provider",
+                value=float(mean_loss) if isinstance(mean_loss, (float, int)) else 0.0,
+                metadata={
+                    "provider": report.provider,
+                    "mode": report.mode,
+                    "steps": report.steps,
+                    "samples": report.samples,
+                    "message": report.message,
+                },
+            )
         )
-        return
-    context.config.compression.distill.enabled = True
-    context.config.compression.distill.temperature = float(params.pop("temperature", 2.0))
-    context.config.compression.distill.alpha = float(params.pop("alpha", 0.5))
-    context.config.compression.distill.params = params
-    DistillPass().run(context)
 
 
 def _run_operator(
@@ -1164,188 +1229,622 @@ def _run_runtime_eval(
     return report
 
 
+def _run_optimization_stage(
+    state: _OptimizationRunState,
+    stage: OptimizationStageConfig,
+) -> OptimizationStageResult | None:
+    if not stage.enabled:
+        return None
+
+    loaded = state.config
+    context = state.context
+    splits = state.splits
+    if stage.from_stage is not None:
+        source = state.model_snapshots[stage.from_stage]
+        context.model = _snapshot_model(source)
+
+    before_model = _snapshot_model(context.model)
+    metrics_before = dict(context.metrics)
+    artifacts_before = dict(context.artifacts)
+    accepted = True
+    message = "ok"
+    stage_metrics: dict[str, Any] = {}
+
+    if stage.kind == "eval":
+        stage_context = _stage_context(loaded, stage, context=context, splits=splits)
+        split_name = _split_name(stage)
+        report = _evaluate_current(
+            stage_context,
+            dataloader=_require_split(splits, split_name),
+            stage_name=stage.name,
+            params=stage.params,
+        )
+        compare_to = stage.compare_to or state.baseline_stage
+        reference = state.eval_results.get(compare_to) if compare_to else None
+        accepted, message, checks = _accept_stage(
+            stage,
+            report,
+            reference_eval=reference,
+            reference_benchmark=None,
+        )
+        stage_metrics = {"eval": report, "acceptance": checks}
+        state.eval_results[stage.name] = report
+        context.metrics[stage.name] = stage_metrics
+        if state.baseline_stage is None or bool(stage.params.get("baseline", False)):
+            state.baseline_stage = stage.name
+            context.reference_model = _snapshot_model(context.model)
+    elif stage.kind == "benchmark":
+        stage_context = _stage_context(loaded, stage, context=context, splits=splits)
+        split_name = _split_name(stage)
+        bench_cfg = _benchmark_config(stage.params)
+        report = _benchmark_model(
+            cast(nn.Module, stage_context.require_model()),
+            dataloader=_require_split(splits, split_name),
+            config=bench_cfg,
+            device=stage_context.config.model.device,
+        )
+        compare_to = stage.compare_to
+        reference = state.benchmark_results.get(compare_to) if compare_to else None
+        accepted, message, checks = _accept_stage(
+            stage,
+            report,
+            reference_eval=None,
+            reference_benchmark=reference,
+        )
+        stage_metrics = {"benchmark": report, "acceptance": checks}
+        state.benchmark_results[stage.name] = report
+        context.metrics[stage.name] = stage_metrics
+    elif stage.kind == "prune":
+        _run_prune(loaded, stage, context, splits)
+        stage_metrics = {"prune": context.metrics.get("prune", {})}
+    elif stage.kind == "quant":
+        _run_quant(loaded, stage, context, splits)
+        stage_metrics = {"quant": context.metrics.get("quant", {})}
+    elif stage.kind in {"finetune", "distill"}:
+        _run_finetune(loaded, stage, context, splits, state.teacher)
+        metric_key = "distill" if stage.kind == "distill" else "finetune"
+        stage_metrics = {
+            metric_key: context.metrics.get(metric_key, context.metrics.get("distill", {}))
+        }
+    elif stage.kind == "operator":
+        _run_operator(loaded, stage, context, splits)
+        stage_metrics = {
+            "operator": context.metrics.get("operator_optimization", {})
+        }
+    elif stage.kind in {"export", "deploy"}:
+        _run_export(loaded, stage, context, splits)
+        stage_metrics = {"export": context.metrics.get("export", {})}
+    elif stage.kind == "analyze":
+        _run_analyze(loaded, stage, context, splits)
+        stage_metrics = {"analysis": context.metrics.get("analysis", {})}
+    elif stage.kind == "runtime_eval":
+        report = _run_runtime_eval(loaded, stage, context, splits)
+        context.metrics["runtime_eval"] = report
+        stage_metrics = {
+            "runtime_eval": report,
+            "metrics": report.get("metrics", {}),
+            "latency": report.get("latency", {}),
+            "raw_output_diff": report.get("raw_output_diff"),
+            "decoded_diff": report.get("decoded_diff"),
+        }
+        state.benchmark_results[stage.name] = report
+
+    if stage.kind not in {"eval", "benchmark"} and _has_acceptance_thresholds(stage):
+        compare_to = stage.compare_to or state.baseline_stage
+        reference_eval = state.eval_results.get(compare_to) if compare_to else None
+        reference_benchmark = (
+            state.benchmark_results.get(compare_to) if compare_to else None
+        )
+        accepted, message, checks = _accept_stage(
+            stage,
+            stage_metrics,
+            reference_eval=reference_eval,
+            reference_benchmark=reference_benchmark,
+        )
+        stage_metrics["acceptance"] = checks
+
+    stage_artifacts = _new_artifacts(artifacts_before, context.artifacts)
+    context.metrics[stage.name] = stage_metrics
+
+    if not accepted and stage.revert_on_reject:
+        context.model = before_model
+        context.metrics = metrics_before
+        context.artifacts = artifacts_before
+    elif stage.save_model:
+        state.model_snapshots[stage.name] = _snapshot_model(context.model)
+        if accepted and stage.kind not in {
+            "eval",
+            "benchmark",
+            "export",
+            "deploy",
+            "analyze",
+            "runtime_eval",
+        }:
+            state.best_stage = stage.name
+
+    result = OptimizationStageResult(
+        name=stage.name,
+        kind=stage.kind,
+        accepted=accepted,
+        metrics=stage_metrics,
+        artifacts=stage_artifacts,
+        message=message,
+    )
+    state.stage_results.append(result)
+    return result
+
+
+def _acceptance_from_mapping(
+    accept: Mapping[str, Any] | StageAcceptanceConfig | None,
+) -> StageAcceptanceConfig:
+    if accept is None:
+        return StageAcceptanceConfig()
+    if isinstance(accept, StageAcceptanceConfig):
+        return accept
+    try:
+        merged = OmegaConf.merge(OmegaConf.structured(StageAcceptanceConfig), dict(accept))
+        return cast(StageAcceptanceConfig, OmegaConf.to_object(merged))
+    except Exception as exc:
+        raise ValueError(f"failed to load stage acceptance config: {exc}") from exc
+
+
+class XQTOptimizationSession:
+    """Pythonic step-by-step interface for XQT stage workflows."""
+
+    def __init__(
+        self,
+        config: ConfigInput | OptimizationConfig | None = None,
+        *,
+        model: Any | None = None,
+        teacher: Any | None = None,
+        data_splits: Mapping[str, Any] | None = None,
+        training_provider: Any | None = None,
+        evaluation_provider: Any | None = None,
+        project: Mapping[str, Any] | None = None,
+        model_config: Mapping[str, Any] | ModelConfig | None = None,
+        task: Mapping[str, Any] | TaskConfig | None = None,
+        device: str | None = None,
+    ) -> None:
+        if config is None:
+            raw_config: dict[str, Any] = {"stages": []}
+            if project is not None:
+                raw_config["project"] = dict(project)
+            if model_config is not None:
+                raw_config["model"] = (
+                    asdict(model_config)
+                    if is_dataclass(model_config)
+                    else dict(model_config)
+                )
+            if task is not None:
+                raw_config["task"] = (
+                    asdict(task) if is_dataclass(task) else dict(task)
+                )
+            if device is not None:
+                raw_config["device"] = device
+            loaded = load_optimization_config(raw_config)
+        else:
+            loaded = load_optimization_config(config)
+            if loaded.stages:
+                loaded = copy.deepcopy(loaded)
+                loaded.stages = []
+        self._state = _create_optimization_state(
+            loaded,
+            model=model,
+            teacher=teacher,
+            data=data_splits,
+            training_provider=training_provider,
+            evaluation_provider=evaluation_provider,
+        )
+        self._outputs_written = False
+
+    @property
+    def config(self) -> OptimizationConfig:
+        return self._state.config
+
+    @property
+    def context(self) -> XQTContext:
+        return self._state.context
+
+    @property
+    def model(self) -> Any:
+        return self._state.context.model
+
+    @property
+    def stages(self) -> list[OptimizationStageResult]:
+        return list(self._state.stage_results)
+
+    @property
+    def baseline_stage(self) -> Optional[str]:
+        return self._state.baseline_stage
+
+    @property
+    def best_stage(self) -> Optional[str]:
+        return self._state.best_stage
+
+    def set_data(self, name: str, data: Any) -> None:
+        self._state.splits[name] = data
+        self._state.context.data[name] = data
+
+    def revert_to(self, stage_name: str) -> None:
+        if stage_name not in self._state.model_snapshots:
+            raise ValueError(f"unknown model snapshot: {stage_name}")
+        self._state.context.model = _snapshot_model(self._state.model_snapshots[stage_name])
+
+    def use(self, stage_name: str) -> None:
+        self.revert_to(stage_name)
+
+    def run_stage(self, stage: OptimizationStageConfig) -> OptimizationStageResult:
+        self._validate_stage(stage)
+        self._state.config.stages.append(stage)
+        result = _run_optimization_stage(self._state, stage)
+        if result is None:
+            raise ValueError(f"stage is disabled: {stage.name}")
+        self._outputs_written = False
+        return result
+
+    def eval(
+        self,
+        *,
+        name: str,
+        split: str = "validation",
+        compare_to: str | None = None,
+        baseline: bool = False,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        if baseline:
+            params = {**params, "baseline": True}
+        return self._run(
+            name=name,
+            kind="eval",
+            split=split,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def benchmark(
+        self,
+        *,
+        name: str,
+        split: str = "validation",
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        return self._run(
+            name=name,
+            kind="benchmark",
+            split=split,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def prune(
+        self,
+        *,
+        name: str,
+        method: str | None = None,
+        target_sparsity: float | None = None,
+        granularity: str | None = None,
+        split: str | None = None,
+        train_split: str | None = None,
+        validation_split: str | None = None,
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        revert_on_reject: bool = False,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        if method is not None:
+            params["method"] = method
+        if target_sparsity is not None:
+            params["target_sparsity"] = target_sparsity
+        if granularity is not None:
+            params["granularity"] = granularity
+        return self._run(
+            name=name,
+            kind="prune",
+            split=split,
+            train_split=train_split,
+            validation_split=validation_split,
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            revert_on_reject=revert_on_reject,
+            params=params,
+            accept=accept,
+        )
+
+    def quant(
+        self,
+        *,
+        name: str,
+        backend: str | None = None,
+        strategy: str | None = None,
+        policy: Mapping[str, Any] | None = None,
+        calibration_split: str | None = None,
+        validation_split: str | None = None,
+        split: str | None = None,
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        revert_on_reject: bool = False,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        if backend is not None:
+            params["backend"] = backend
+        if strategy is not None:
+            params["strategy"] = strategy
+        if policy is not None:
+            params["policy"] = dict(policy)
+        return self._run(
+            name=name,
+            kind="quant",
+            split=split,
+            calibration_split=calibration_split,
+            validation_split=validation_split,
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            revert_on_reject=revert_on_reject,
+            params=params,
+            accept=accept,
+        )
+
+    def finetune(
+        self,
+        *,
+        name: str,
+        train_split: str = "train",
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        return self._run(
+            name=name,
+            kind="finetune",
+            train_split=train_split,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def distill(
+        self,
+        *,
+        name: str,
+        train_split: str = "train",
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        return self._run(
+            name=name,
+            kind="distill",
+            train_split=train_split,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def operator(
+        self,
+        *,
+        name: str,
+        split: str | None = None,
+        validation_split: str | None = None,
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = True,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        return self._run(
+            name=name,
+            kind="operator",
+            split=split,
+            validation_split=validation_split,
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def export(
+        self,
+        *,
+        name: str,
+        format: str | None = None,
+        output_path: str | Path | None = None,
+        targets: list[Mapping[str, Any]] | None = None,
+        target_params: Mapping[str, Any] | None = None,
+        opset: int | None = None,
+        split: str = "validation",
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = False,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        if targets is None:
+            if format is None or output_path is None:
+                raise ValueError("export requires targets or format + output_path")
+            target: dict[str, Any] = {
+                "format": format,
+                "output_path": str(output_path),
+            }
+            if opset is not None:
+                target["opset"] = opset
+            if target_params is not None:
+                target["params"] = dict(target_params)
+            targets = [target]
+        params["targets"] = [dict(target) for target in targets]
+        return self._run(
+            name=name,
+            kind="export",
+            split=split,
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def analyze(
+        self,
+        *,
+        name: str,
+        split: str | None = None,
+        validation_split: str | None = None,
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = False,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        return self._run(
+            name=name,
+            kind="analyze",
+            split=split,
+            validation_split=validation_split,
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def runtime_eval(
+        self,
+        *,
+        name: str,
+        split: str = "validation",
+        artifact: str | None = None,
+        path: str | Path | None = None,
+        input_names: list[str] | None = None,
+        output_names: list[str] | None = None,
+        runtime: str | None = None,
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = False,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        if artifact is not None:
+            params["artifact"] = artifact
+        if path is not None:
+            params["path"] = str(path)
+        if input_names is not None:
+            params["input_names"] = list(input_names)
+        if output_names is not None:
+            params["output_names"] = list(output_names)
+        if runtime is not None:
+            params["runtime"] = runtime
+        return self._run(
+            name=name,
+            kind="runtime_eval",
+            split=split,
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def result(self, *, write_outputs: bool = True) -> OptimizedModelResult:
+        result = _result_from_state(self._state)
+        if write_outputs and not self._outputs_written:
+            _write_workflow_outputs(result)
+            self._outputs_written = True
+        return result
+
+    def write_outputs(self) -> OptimizedModelResult:
+        return self.result(write_outputs=True)
+
+    def _run(
+        self,
+        *,
+        name: str,
+        kind: str,
+        split: str | None = None,
+        train_split: str | None = None,
+        calibration_split: str | None = None,
+        validation_split: str | None = None,
+        compare_to: str | None = None,
+        from_stage: str | None = None,
+        save_model: bool = True,
+        revert_on_reject: bool = False,
+        params: Mapping[str, Any] | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+    ) -> OptimizationStageResult:
+        return self.run_stage(
+            OptimizationStageConfig(
+                name=name,
+                kind=kind,
+                split=split,
+                train_split=train_split,
+                calibration_split=calibration_split,
+                validation_split=validation_split,
+                compare_to=compare_to,
+                from_stage=from_stage,
+                save_model=save_model,
+                revert_on_reject=revert_on_reject,
+                params=dict(params or {}),
+                accept=_acceptance_from_mapping(accept),
+            )
+        )
+
+    def _validate_stage(self, stage: OptimizationStageConfig) -> None:
+        if not stage.name:
+            raise ValueError("stage.name is required")
+        if stage.kind not in STAGE_KINDS:
+            allowed = ", ".join(sorted(STAGE_KINDS))
+            raise ValueError(f"unsupported stage kind {stage.kind}. Allowed: {allowed}")
+        seen = {"initial", *(item.name for item in self._state.config.stages)}
+        if stage.name in seen:
+            raise ValueError(f"stage names must be unique: {stage.name}")
+        if stage.from_stage is not None and stage.from_stage not in self._state.model_snapshots:
+            raise ValueError(
+                f"stage {stage.name} references unknown previous from_stage {stage.from_stage}"
+            )
+
+
 def optimize_model(
     config: ConfigInput | OptimizationConfig,
     *,
     model: Any | None = None,
     teacher: Any | None = None,
     data: Mapping[str, Any] | None = None,
+    training_provider: Any | None = None,
+    evaluation_provider: Any | None = None,
 ) -> OptimizedModelResult:
     """Run a decoupled stage workflow and return the optimized model/result."""
 
     loaded = load_optimization_config(config)
-    current_model = _build_model(loaded, model)
-    splits = _build_splits(loaded, data)
-    context = XQTContext(
-        config=_base_xqt_config(loaded, stage_name="init"),
-        model=current_model,
-        reference_model=copy.deepcopy(current_model)
-        if isinstance(current_model, nn.Module)
-        else current_model,
+    state = _create_optimization_state(
+        loaded,
+        model=model,
         teacher=teacher,
-        data=dict(splits),
-        device=_device(loaded),
-        manifest=_create_workflow_manifest(loaded),
+        data=data,
+        training_provider=training_provider,
+        evaluation_provider=evaluation_provider,
     )
-
-    stage_results: list[OptimizationStageResult] = []
-    model_snapshots: dict[str, Any] = {
-        "initial": copy.deepcopy(current_model) if isinstance(current_model, nn.Module) else current_model
-    }
-    eval_results: dict[str, dict[str, Any]] = {}
-    benchmark_results: dict[str, dict[str, Any]] = {}
-    baseline_stage: Optional[str] = None
-    best_stage: Optional[str] = None
-
     for stage in loaded.stages:
-        if not stage.enabled:
-            continue
-        if stage.from_stage is not None:
-            source = model_snapshots[stage.from_stage]
-            context.model = copy.deepcopy(source) if isinstance(source, nn.Module) else source
-        before_model = (
-            copy.deepcopy(context.model) if isinstance(context.model, nn.Module) else context.model
-        )
-        metrics_before = dict(context.metrics)
-        artifacts_before = dict(context.artifacts)
-        accepted = True
-        message = "ok"
-        stage_metrics: dict[str, Any] = {}
-        stage_artifacts: dict[str, Any] = {}
-
-        if stage.kind == "eval":
-            stage_context = _stage_context(loaded, stage, context=context, splits=splits)
-            split_name = _split_name(stage)
-            report = _evaluate_current(
-                stage_context,
-                dataloader=_require_split(splits, split_name),
-            )
-            compare_to = stage.compare_to or baseline_stage
-            reference = eval_results.get(compare_to) if compare_to else None
-            accepted, message, checks = _accept_stage(
-                stage,
-                report,
-                reference_eval=reference,
-                reference_benchmark=None,
-            )
-            stage_metrics = {"eval": report, "acceptance": checks}
-            eval_results[stage.name] = report
-            context.metrics[stage.name] = stage_metrics
-            if baseline_stage is None or bool(stage.params.get("baseline", False)):
-                baseline_stage = stage.name
-                context.reference_model = copy.deepcopy(context.model)
-        elif stage.kind == "benchmark":
-            stage_context = _stage_context(loaded, stage, context=context, splits=splits)
-            split_name = _split_name(stage)
-            bench_cfg = _benchmark_config(stage.params)
-            report = _benchmark_model(
-                cast(nn.Module, stage_context.require_model()),
-                dataloader=_require_split(splits, split_name),
-                config=bench_cfg,
-                device=stage_context.config.model.device,
-            )
-            compare_to = stage.compare_to
-            reference = benchmark_results.get(compare_to) if compare_to else None
-            accepted, message, checks = _accept_stage(
-                stage,
-                report,
-                reference_eval=None,
-                reference_benchmark=reference,
-            )
-            stage_metrics = {"benchmark": report, "acceptance": checks}
-            benchmark_results[stage.name] = report
-            context.metrics[stage.name] = stage_metrics
-        elif stage.kind == "prune":
-            _run_prune(loaded, stage, context, splits)
-            stage_metrics = {"prune": context.metrics.get("prune", {})}
-        elif stage.kind == "quant":
-            _run_quant(loaded, stage, context, splits)
-            stage_metrics = {"quant": context.metrics.get("quant", {})}
-        elif stage.kind in {"finetune", "distill"}:
-            _run_finetune(loaded, stage, context, splits, teacher)
-            metric_key = "distill" if stage.kind == "distill" else "finetune"
-            stage_metrics = {
-                metric_key: context.metrics.get(metric_key, context.metrics.get("distill", {}))
-            }
-        elif stage.kind == "operator":
-            _run_operator(loaded, stage, context, splits)
-            stage_metrics = {
-                "operator": context.metrics.get("operator_optimization", {})
-            }
-        elif stage.kind in {"export", "deploy"}:
-            _run_export(loaded, stage, context, splits)
-            stage_metrics = {"export": context.metrics.get("export", {})}
-        elif stage.kind == "analyze":
-            _run_analyze(loaded, stage, context, splits)
-            stage_metrics = {"analysis": context.metrics.get("analysis", {})}
-        elif stage.kind == "runtime_eval":
-            report = _run_runtime_eval(loaded, stage, context, splits)
-            context.metrics["runtime_eval"] = report
-            stage_metrics = {
-                "runtime_eval": report,
-                "metrics": report.get("metrics", {}),
-                "latency": report.get("latency", {}),
-                "raw_output_diff": report.get("raw_output_diff"),
-                "decoded_diff": report.get("decoded_diff"),
-            }
-            benchmark_results[stage.name] = report
-
-        if stage.kind not in {"eval", "benchmark"} and _has_acceptance_thresholds(stage):
-            compare_to = stage.compare_to or baseline_stage
-            reference_eval = eval_results.get(compare_to) if compare_to else None
-            reference_benchmark = (
-                benchmark_results.get(compare_to) if compare_to else None
-            )
-            accepted, message, checks = _accept_stage(
-                stage,
-                stage_metrics,
-                reference_eval=reference_eval,
-                reference_benchmark=reference_benchmark,
-            )
-            stage_metrics["acceptance"] = checks
-
-        stage_artifacts = _new_artifacts(artifacts_before, context.artifacts)
-        context.metrics[stage.name] = stage_metrics
-
-        if not accepted and stage.revert_on_reject:
-            context.model = before_model
-            context.metrics = metrics_before
-            context.artifacts = artifacts_before
-        elif stage.save_model:
-            model_snapshots[stage.name] = (
-                copy.deepcopy(context.model)
-                if isinstance(context.model, nn.Module)
-                else context.model
-            )
-            if accepted and stage.kind not in {
-                "eval",
-                "benchmark",
-                "export",
-                "deploy",
-                "analyze",
-                "runtime_eval",
-            }:
-                best_stage = stage.name
-
-        stage_results.append(
-            OptimizationStageResult(
-                name=stage.name,
-                kind=stage.kind,
-                accepted=accepted,
-                metrics=stage_metrics,
-                artifacts=stage_artifacts,
-                message=message,
-            )
-        )
-
-    result = OptimizedModelResult(
-        model=context.model,
-        context=context,
-        stages=stage_results,
-        best_stage=best_stage,
-        baseline_stage=baseline_stage,
-        models=model_snapshots,
-    )
+        _run_optimization_stage(state, stage)
+    result = _result_from_state(state)
     _write_workflow_outputs(result)
     return result
 
@@ -1356,6 +1855,7 @@ __all__ = [
     "OptimizationStageConfig",
     "OptimizationStageResult",
     "StageAcceptanceConfig",
+    "XQTOptimizationSession",
     "load_optimization_config",
     "optimize_model",
 ]

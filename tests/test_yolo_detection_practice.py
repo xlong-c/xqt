@@ -8,8 +8,13 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from xqt.core.artifact import load_manifest
-from xqt.model import build_toy_detection_module
-from xqt.workflows import load_optimization_config, optimize_model
+from xqt.core.errors import XQTBackendError
+from xqt.model import build_smoke_detection_module
+from xqt.workflows import (
+    XQTOptimizationSession,
+    load_optimization_config,
+    optimize_model,
+)
 
 
 class TinyClassifier(nn.Module):
@@ -28,8 +33,38 @@ def _classification_loader(*, seed: int = 0, samples: int = 8) -> DataLoader:
     return DataLoader(TensorDataset(inputs, targets), batch_size=4)
 
 
+class RecordingTrainingProvider:
+    def __init__(self) -> None:
+        self.jobs: list[Any] = []
+
+    def __call__(self, job: Any) -> dict[str, Any]:
+        self.jobs.append(job)
+        return {
+            "provider": "recording",
+            "steps": 1,
+            "samples": 4,
+            "mean_loss": 0.2,
+            "last_loss": 0.2,
+        }
+
+
+class RecordingEvaluationProvider:
+    def __init__(self) -> None:
+        self.jobs: list[Any] = []
+
+    def __call__(self, job: Any) -> dict[str, Any]:
+        self.jobs.append(job)
+        return {
+            "provider": "recording",
+            "samples": 8,
+            "metrics": {"top1": 0.9},
+            "metadata": {"source": "provider"},
+        }
+
+
 def test_stage_workflow_prunes_evaluates_benchmarks_and_exports(tmp_path: Path) -> None:
     model = TinyClassifier()
+    provider = RecordingEvaluationProvider()
     export_path = tmp_path / "model.pt"
     config = {
         "project": {
@@ -91,6 +126,7 @@ def test_stage_workflow_prunes_evaluates_benchmarks_and_exports(tmp_path: Path) 
         config,
         model=model,
         data={"validation": _classification_loader()},
+        evaluation_provider=provider,
     )
 
     assert [stage.name for stage in result.stages] == [
@@ -101,6 +137,10 @@ def test_stage_workflow_prunes_evaluates_benchmarks_and_exports(tmp_path: Path) 
         "export_torchscript",
     ]
     assert result.baseline_stage == "baseline_eval"
+    assert result.stages[0].metrics["eval"]["provider"] == "recording"
+    assert provider.jobs[0].name == "baseline_eval"
+    assert provider.jobs[0].mode == "eval"
+    assert provider.jobs[0].task_type == "classification"
     assert result.best_stage == "prune_sparse"
     assert result.best_model is result.models["prune_sparse"]
     assert result.stages[1].metrics["prune"]["sparsity"] >= 0.0
@@ -108,6 +148,80 @@ def test_stage_workflow_prunes_evaluates_benchmarks_and_exports(tmp_path: Path) 
     assert result.stages[3].metrics["benchmark"]["iterations"] == 1
     assert export_path.is_file()
     assert result.stages[4].metrics["export"]["artifacts"][0]["format"] == "torchscript"
+
+
+def test_optimization_session_runs_pythonic_stage_calls(tmp_path: Path) -> None:
+    provider = RecordingEvaluationProvider()
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_workflow",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=TinyClassifier(),
+        task={"type": "classification"},
+        data_splits={"validation": _classification_loader()},
+        evaluation_provider=provider,
+    )
+
+    session.eval(name="baseline", split="validation", baseline=True)
+    session.prune(
+        name="prune_sparse",
+        split="validation",
+        method="global_l1_unstructured",
+        target_sparsity=0.5,
+    )
+    session.eval(
+        name="prune_eval",
+        split="validation",
+        compare_to="baseline",
+        accept={"metric": "top1", "max_drop": 1.0},
+    )
+
+    result = session.result(write_outputs=False)
+
+    assert [stage.name for stage in result.stages] == [
+        "baseline",
+        "prune_sparse",
+        "prune_eval",
+    ]
+    assert result.baseline_stage == "baseline"
+    assert result.best_stage == "prune_sparse"
+    assert result.stages[0].metrics["eval"]["provider"] == "recording"
+    assert provider.jobs[0].name == "baseline"
+    assert provider.jobs[0].data is session.context.data["validation"]
+    assert result.stages[1].metrics["prune"]["sparsity"] >= 0.0
+    assert result.stages[2].accepted is True
+    assert [stage.name for stage in session.config.stages] == [
+        "baseline",
+        "prune_sparse",
+        "prune_eval",
+    ]
+
+
+def test_optimization_session_delegates_finetune_to_provider(tmp_path: Path) -> None:
+    model = TinyClassifier()
+    before = model.linear.weight.detach().clone()
+    provider = RecordingTrainingProvider()
+    loader = _classification_loader()
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_finetune",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=model,
+        task={"type": "classification"},
+        data_splits={"train": loader},
+        training_provider=provider,
+    )
+
+    stage = session.finetune(name="recovery", train_split="train", max_steps=1)
+
+    assert stage.metrics["finetune"]["provider"] == "recording"
+    assert provider.jobs[0].name == "recovery"
+    assert provider.jobs[0].mode == "finetune"
+    assert provider.jobs[0].train_data is loader
+    assert provider.jobs[0].params["max_steps"] == 1
+    assert torch.equal(before, model.linear.weight)
 
 
 def test_stage_workflow_runtime_eval_uses_artifact_metrics_and_latency(
@@ -193,7 +307,7 @@ def test_stage_workflow_runtime_eval_uses_artifact_metrics_and_latency(
         ],
     }
 
-    result = optimize_model(config, model=build_toy_detection_module())
+    result = optimize_model(config, model=build_smoke_detection_module())
 
     assert calls == [str(onnx_path)]
     runtime_stage = result.stages[1]
@@ -324,7 +438,7 @@ def test_detection_runtime_eval_resolves_export_artifact_and_rejects_acceptance(
                 },
             ],
         },
-        model=build_toy_detection_module(),
+        model=build_smoke_detection_module(),
     )
 
     assert calls == [str(onnx_path)]
@@ -431,7 +545,7 @@ def test_detection_runtime_eval_writes_dataset_metadata_into_workflow_manifest(
                 }
             ],
         },
-        model=build_toy_detection_module(),
+        model=build_smoke_detection_module(),
     )
 
     manifest = load_manifest(result.context.artifacts["workflow_manifest"])
@@ -683,7 +797,7 @@ def test_detection_operator_stage_records_graph_break_and_fallback(
         ],
     }
 
-    result = optimize_model(config, model=build_toy_detection_module())
+    result = optimize_model(config, model=build_smoke_detection_module())
 
     operator_metrics = result.stages[0].metrics["operator"]
     target = operator_metrics["targets"][0]
@@ -740,7 +854,7 @@ def test_detection_structured_prune_stage_is_guarded_and_reports_skips(
                 }
             ],
         },
-        model=build_toy_detection_module(),
+        model=build_smoke_detection_module(),
     )
 
     stage = result.stages[0]
@@ -806,7 +920,7 @@ def test_detection_unstructured_prune_stage_is_sparsity_baseline(
                 }
             ],
         },
-        model=build_toy_detection_module(),
+        model=build_smoke_detection_module(),
     )
 
     prune = result.stages[0].metrics["prune"]
@@ -855,20 +969,26 @@ def test_stage_workflow_finetune_and_distill_use_train_split(tmp_path: Path) -> 
         ],
     }
     teacher = TinyClassifier()
+    train_loader = _classification_loader(seed=3)
+    provider = RecordingTrainingProvider()
 
     result = optimize_model(
         config,
         model=TinyClassifier(),
         teacher=teacher,
-        data={"train": _classification_loader(seed=3)},
+        data={"train": train_loader},
+        training_provider=provider,
     )
 
     assert result.stages[0].metrics["finetune"]["steps"] == 1
     assert result.stages[1].metrics["distill"]["steps"] == 1
+    assert [job.mode for job in provider.jobs] == ["finetune", "distill"]
+    assert provider.jobs[0].train_data is train_loader
+    assert provider.jobs[1].teacher is teacher
     assert result.best_stage == "distill"
 
 
-def test_stage_workflow_supervised_finetune_without_teacher(tmp_path: Path) -> None:
+def test_stage_workflow_finetune_requires_training_provider(tmp_path: Path) -> None:
     config = {
         "project": {
             "name": "supervised_finetune_case",
@@ -885,15 +1005,12 @@ def test_stage_workflow_supervised_finetune_without_teacher(tmp_path: Path) -> N
         ],
     }
 
-    result = optimize_model(
-        config,
-        model=TinyClassifier(),
-        data={"train": _classification_loader(seed=5)},
-    )
-
-    assert result.stages[0].metrics["finetune"]["mode"] == "supervised"
-    assert result.stages[0].metrics["finetune"]["steps"] == 1
-    assert result.best_stage == "finetune"
+    with pytest.raises(XQTBackendError, match="does not run optimizer"):
+        optimize_model(
+            config,
+            model=TinyClassifier(),
+            data={"train": _classification_loader(seed=5)},
+        )
 
 
 def test_load_optimization_config_rejects_forward_from_stage() -> None:
@@ -916,7 +1033,7 @@ def test_yolo_detection_practice_recipe_uses_stage_schema() -> None:
     config = load_optimization_config("xqt/recipes/detection/yolo_detection_practice.yaml")
 
     assert config.project["name"] == "yolo_detection_practice"
-    assert config.model.target == "xqt.model.build_toy_detection_module"
+    assert config.model.target == "xqt.model.build_smoke_detection_module"
     assert config.task.type == "detection"
     assert "ultralytics" not in repr(config).lower()
     assert "validation" in config.data_splits
@@ -1068,8 +1185,8 @@ def test_hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval_recipe_adds_runtime_eval
     assert deploy_target["params"]["runtime_benchmark"]["enabled"] is True
 
 
-def test_build_toy_detection_module_accepts_input_channels() -> None:
-    model = build_toy_detection_module(
+def test_build_smoke_detection_module_accepts_input_channels() -> None:
+    model = build_smoke_detection_module(
         num_classes=5,
         boxes_per_image=3,
         input_channels=3,

@@ -33,6 +33,38 @@ class MarkPass:
         return context
 
 
+class RecordingTrainingProvider:
+    def __init__(self) -> None:
+        self.jobs = []
+
+    def __call__(self, job):
+        self.jobs.append(job)
+        return {
+            "provider": "recording",
+            "steps": 1,
+            "samples": 2,
+            "mean_loss": 0.1,
+            "last_loss": 0.1,
+            "loss_history": [0.1],
+        }
+
+
+class RecordingEvaluationProvider:
+    def __init__(self) -> None:
+        self.jobs = []
+
+    def __call__(self, job):
+        self.jobs.append(job)
+        return {
+            "provider": "recording",
+            "samples": 2,
+            "metrics": {"top1": 0.75},
+            "artifacts": {"report": "baseline.json"},
+            "metadata": {"source": "provider"},
+            "message": "ok",
+        }
+
+
 def test_enabled_pass_names_follow_default_order() -> None:
     config = load_xqt_config(
         {
@@ -219,6 +251,37 @@ benchmark:
     assert manifest["project_name"] == "runner_recipe"
     assert manifest["passes"] == ["quant"]
     assert manifest["compression_axes"] == ["precision"]
+
+
+def test_run_xqt_recipe_delegates_baseline_eval_to_provider(tmp_path) -> None:
+    provider = RecordingEvaluationProvider()
+    model = torch.nn.Linear(4, 2)
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.randn(2, 4), torch.tensor([0, 1])),
+        batch_size=2,
+    )
+
+    context = run_xqt_recipe(
+        {
+            "project": {
+                "name": "runner_eval_provider",
+                "artifact_dir": str(tmp_path / "artifacts"),
+            },
+            "task": {"type": "classification"},
+        },
+        model=model,
+        data={"validation": loader},
+        evaluation_provider=provider,
+        pass_names=["baseline_eval"],
+        write_manifest=False,
+    )
+
+    assert context.metrics["baseline"]["provider"] == "recording"
+    assert context.metrics["baseline"]["metrics"]["top1"] == 0.75
+    assert provider.jobs[0].name == "baseline"
+    assert provider.jobs[0].mode == "eval"
+    assert provider.jobs[0].data is loader
+    assert provider.jobs[0].task_type == "classification"
 
 
 def test_smoke_cpu_recipe_loads_and_runs_empty_pipeline(tmp_path) -> None:
@@ -1645,11 +1708,13 @@ def test_builtin_distill_pass_runs_with_injected_teacher(tmp_path) -> None:
         },
     )
 
-    context = run_xqt_recipe(config, teacher=teacher)
+    provider = RecordingTrainingProvider()
+    context = run_xqt_recipe(config, teacher=teacher, training_provider=provider)
 
     assert "distill" in context.metrics
     assert context.metrics["distill"]["steps"] == 1
     assert context.metrics["distill"]["samples"] == 2
+    assert provider.jobs[0].mode == "distill"
     assert context.manifest is not None
     assert "distill" in context.manifest.passes
 
@@ -2488,12 +2553,14 @@ def test_prune_finetune_recipe_runs_schedule_with_teacher(tmp_path) -> None:
         },
     )
 
-    context = run_xqt_recipe(config, teacher=teacher)
+    provider = RecordingTrainingProvider()
+    context = run_xqt_recipe(config, teacher=teacher, training_provider=provider)
 
     assert context.metrics["prune"]["final_sparsity"] == 0.5
     assert len(context.metrics["prune"]["steps"]) == 2
     assert context.metrics["prune"]["steps"][0]["distillation"]["steps"] == 1
     assert context.metrics["prune"]["steps"][1]["distillation"]["steps"] == 1
+    assert [job.mode for job in provider.jobs] == ["distill", "distill"]
     assert context.manifest is not None
     assert "prune" in context.manifest.passes
 
@@ -2525,12 +2592,18 @@ def test_structured_prune_kd_recipe_runs_with_teacher_and_exports(tmp_path) -> N
             batch_size = x.shape[0]
             return torch.zeros(batch_size, self.num_classes, device=x.device)
 
-    context = run_xqt_recipe(config, teacher=TeacherWrapper())
+    provider = RecordingTrainingProvider()
+    context = run_xqt_recipe(
+        config,
+        teacher=TeacherWrapper(),
+        training_provider=provider,
+    )
 
     assert context.metrics["prune"]["method"] == "structured"
     assert context.metrics["prune"]["final_sparsity"] == pytest.approx(0.25)
     assert len(context.metrics["prune"]["steps"]) == 1
     assert context.metrics["prune"]["steps"][0]["distillation"]["steps"] == 1
+    assert provider.jobs[0].mode == "distill"
     assert context.metrics["prune"]["steps"][0]["pruning"]["granularity"] == "mlp_neuron"
     assert context.metrics["export"]["artifacts"][0]["format"] == "onnx"
     assert context.metrics["benchmark"]["latency"]["iterations"] == 1

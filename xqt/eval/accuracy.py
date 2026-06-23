@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 import torch
 from torch import nn
 
+from xdl.metric import TopKAccuracy as _XDLTopKAccuracy
 from xqt.data.input_utils import split_batch
 
 
@@ -38,15 +39,7 @@ def topk_accuracy(
 ) -> float:
     """Compute top-k accuracy for classification logits."""
 
-    if k <= 0:
-        raise ValueError("k must be positive")
-    if logits.ndim < 2:
-        predictions = (logits.reshape(-1) > 0).long()
-        return float((predictions == targets.reshape(-1).long()).float().mean().item())
-
-    topk = logits.topk(k=min(k, logits.shape[-1]), dim=-1).indices
-    target = targets.reshape(-1, 1).long()
-    return float((topk == target).any(dim=-1).float().mean().item())
+    return _XDLTopKAccuracy(k=k)(logits, targets)
 
 
 def _split_batch(batch: Any) -> tuple[Any, Optional[torch.Tensor]]:

@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import torch
-from torchvision.ops import nms
 
-from xdl.metric.metrics import _aligned_box_iou, _boxes_to_xyxy
+from xdl.metric import DetectionMeanAveragePrecision
 from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
 from xqt.core.schema import DetectionMetricConfig, DetectionPostprocessConfig
@@ -16,22 +15,7 @@ from xqt.data.input_utils import split_batch
 from xqt.export import create_tensorrt_runtime_session, execute_tensorrt_engine, execute_tensorrt_session
 from xqt.export.input_utils import build_onnx_feed, default_input_names, first_tensor_output
 from xqt.eval.compare import TensorDiff, compare_tensors
-
-
-@dataclass
-class DetectionPrediction:
-    """One image worth of decoded detections."""
-
-    boxes: torch.Tensor
-    scores: torch.Tensor
-    labels: torch.Tensor
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "boxes": self.boxes.detach().cpu().tolist(),
-            "scores": self.scores.detach().cpu().tolist(),
-            "labels": self.labels.detach().cpu().tolist(),
-        }
+from xqt.integrations.detection import DetectionPrediction, decode_detection_output
 
 
 @dataclass
@@ -264,221 +248,6 @@ def _batch_detection_metadata(
     return metadata
 
 
-def _score_activation(logits: torch.Tensor, activation: str) -> torch.Tensor:
-    if activation == "identity":
-        return logits
-    if activation == "sigmoid":
-        return logits.sigmoid()
-    if activation == "softmax":
-        return logits.softmax(dim=-1)
-    raise ValueError(f"Unsupported score activation: {activation}")
-
-
-def _apply_nms(
-    boxes: torch.Tensor,
-    scores: torch.Tensor,
-    labels: torch.Tensor,
-    config: DetectionPostprocessConfig,
-) -> DetectionPrediction:
-    if boxes.numel() == 0:
-        empty = torch.empty((0,), dtype=torch.float32, device=boxes.device)
-        return DetectionPrediction(
-            boxes=boxes.reshape(0, 4),
-            scores=empty,
-            labels=torch.empty((0,), dtype=torch.long, device=boxes.device),
-        )
-    if config.class_agnostic_nms:
-        keep = nms(boxes, scores, config.iou_threshold)
-    else:
-        keep_indices: list[torch.Tensor] = []
-        for label in labels.unique(sorted=True):
-            class_mask = labels == label
-            class_indices = torch.nonzero(class_mask, as_tuple=False).reshape(-1)
-            selected = nms(boxes[class_mask], scores[class_mask], config.iou_threshold)
-            keep_indices.append(class_indices[selected])
-        keep = torch.cat(keep_indices, dim=0) if keep_indices else torch.empty((0,), dtype=torch.long)
-        keep = keep[scores[keep].argsort(descending=True)]
-    keep = keep[: config.max_detections]
-    return DetectionPrediction(
-        boxes=boxes[keep],
-        scores=scores[keep],
-        labels=labels[keep],
-    )
-
-
-def decode_detection_output(
-    output: Any,
-    config: DetectionPostprocessConfig,
-    *,
-    image_sizes: Optional[Sequence[tuple[int, int]]] = None,
-) -> list[DetectionPrediction]:
-    """Decode model outputs into per-image detections."""
-
-    if isinstance(output, Mapping):
-        if {"boxes", "scores", "labels"} <= set(output.keys()):
-            return [
-                DetectionPrediction(
-                    boxes=output["boxes"].float(),
-                    scores=output["scores"].float(),
-                    labels=output["labels"].long(),
-                )
-            ]
-        if {"logits", "pred_boxes"} <= set(output.keys()):
-            logits = output["logits"]
-            pred_boxes = output["pred_boxes"]
-            if not isinstance(logits, torch.Tensor) or not isinstance(pred_boxes, torch.Tensor):
-                raise TypeError("RT-DETR style detection output must use tensor logits/pred_boxes")
-            if logits.ndim != 3 or pred_boxes.ndim != 3:
-                raise TypeError("RT-DETR style detection output tensors must have shape [B, N, C]")
-            predictions: list[DetectionPrediction] = []
-            for batch_index, (image_logits, image_boxes) in enumerate(
-                zip(logits, pred_boxes, strict=False)
-            ):
-                scores_per_class = _score_activation(image_logits.float(), config.score_activation)
-                scores, labels = scores_per_class.max(dim=-1)
-                boxes_input = image_boxes.float()
-                if (
-                    image_sizes is not None
-                    and batch_index < len(image_sizes)
-                    and boxes_input.numel() > 0
-                    and float(boxes_input.max().item()) <= 1.5
-                ):
-                    height, width = image_sizes[batch_index]
-                    scale = torch.tensor(
-                        [float(width), float(height), float(width), float(height)],
-                        dtype=boxes_input.dtype,
-                        device=boxes_input.device,
-                    )
-                    boxes_input = boxes_input * scale
-                boxes = _boxes_to_xyxy(boxes_input, config.box_format)
-                keep = scores >= config.score_threshold
-                predictions.append(
-                    _apply_nms(boxes[keep], scores[keep], labels[keep], config)
-                )
-            return predictions
-        if "logits" in output:
-            output = output["logits"]
-
-    if isinstance(output, (tuple, list)):
-        if len(output) == 1:
-            output = output[0]
-        elif output and isinstance(output[0], torch.Tensor):
-            output = output[0]
-
-    if not isinstance(output, torch.Tensor):
-        raise TypeError("detection output must resolve to a tensor or mapping")
-    if output.ndim == 2 and output.shape[-1] == 6:
-        output = output.unsqueeze(0)
-    if output.ndim != 3:
-        raise TypeError("detection output tensor must have shape [B, N, 6] or [B, C, N]")
-
-    predictions: list[DetectionPrediction] = []
-    if config.format == "end2end" or (config.format == "auto" and output.shape[-1] == 6):
-        for image_output in output:
-            boxes = image_output[:, :4].float()
-            scores = image_output[:, 4].float()
-            labels = image_output[:, 5].long()
-            keep = scores >= config.score_threshold
-            predictions.append(
-                _apply_nms(boxes[keep], scores[keep], labels[keep], config)
-            )
-        return predictions
-
-    if config.format not in {"auto", "yolo_raw"}:
-        raise ValueError(f"Unsupported detection postprocess format: {config.format}")
-
-    if output.shape[1] < 5:
-        raise ValueError("yolo_raw output must have at least 5 channels")
-
-    batch_predictions = output.permute(0, 2, 1).contiguous()
-    for image_output in batch_predictions:
-        boxes = _boxes_to_xyxy(image_output[:, :4].float(), config.box_format)
-        class_logits = image_output[:, 4:].float()
-        if config.has_objectness:
-            objectness = class_logits[:, :1].sigmoid()
-            class_scores = _score_activation(class_logits[:, 1:], config.score_activation)
-            scores_per_class = objectness * class_scores
-        else:
-            scores_per_class = _score_activation(class_logits, config.score_activation)
-        scores, labels = scores_per_class.max(dim=-1)
-        keep = scores >= config.score_threshold
-        predictions.append(
-            _apply_nms(boxes[keep], scores[keep], labels[keep], config)
-        )
-    return predictions
-
-
-def _build_tp_flags(
-    prediction: DetectionPrediction,
-    target: Mapping[str, torch.Tensor],
-    iou_threshold: float,
-) -> tuple[torch.Tensor, int]:
-    if prediction.boxes.numel() == 0:
-        return torch.zeros((0,), dtype=torch.bool), int(target["boxes"].shape[0])
-    target_boxes = target["boxes"].float()
-    target_labels = target["labels"].long()
-    matched_targets = torch.zeros((target_boxes.shape[0],), dtype=torch.bool)
-    tp = torch.zeros((prediction.boxes.shape[0],), dtype=torch.bool)
-    order = prediction.scores.argsort(descending=True)
-    sorted_boxes = prediction.boxes[order]
-    sorted_labels = prediction.labels[order]
-    for pred_position, (box, label) in enumerate(zip(sorted_boxes, sorted_labels, strict=False)):
-        label_mask = target_labels == label
-        if not bool(label_mask.any()):
-            continue
-        candidate_indices = torch.nonzero(label_mask, as_tuple=False).reshape(-1)
-        ious = _aligned_box_iou(
-            box.unsqueeze(0).expand(candidate_indices.shape[0], -1),
-            target_boxes[candidate_indices],
-            "xyxy",
-            1e-7,
-        )
-        best_iou, best_index = ious.max(dim=0)
-        candidate_index = int(candidate_indices[int(best_index.item())].item())
-        if float(best_iou.item()) >= iou_threshold and not bool(matched_targets[candidate_index]):
-            tp[pred_position] = True
-            matched_targets[candidate_index] = True
-    reordered = torch.zeros_like(tp)
-    reordered[order] = tp
-    return reordered, int(target_boxes.shape[0])
-
-
-def _average_precision(
-    predictions: Sequence[DetectionPrediction],
-    targets: Sequence[Mapping[str, torch.Tensor]],
-    iou_threshold: float,
-) -> float:
-    all_scores: list[torch.Tensor] = []
-    all_tp: list[torch.Tensor] = []
-    total_gt = 0
-    for prediction, target in zip(predictions, targets, strict=False):
-        tp_flags, gt_count = _build_tp_flags(prediction, target, iou_threshold)
-        all_scores.append(prediction.scores.detach().cpu())
-        all_tp.append(tp_flags.detach().cpu())
-        total_gt += gt_count
-    if total_gt == 0:
-        return 0.0
-    if not all_scores:
-        return 0.0
-    scores = torch.cat(all_scores) if all_scores else torch.empty((0,))
-    tp = torch.cat(all_tp) if all_tp else torch.empty((0,), dtype=torch.bool)
-    if scores.numel() == 0:
-        return 0.0
-    order = scores.argsort(descending=True)
-    tp_sorted = tp[order].float()
-    fp_sorted = 1.0 - tp_sorted
-    tp_cum = tp_sorted.cumsum(dim=0)
-    fp_cum = fp_sorted.cumsum(dim=0)
-    recall = tp_cum / max(total_gt, 1)
-    precision = tp_cum / torch.clamp(tp_cum + fp_cum, min=1.0)
-    precision = torch.cat([torch.tensor([1.0]), precision, torch.tensor([0.0])])
-    recall = torch.cat([torch.tensor([0.0]), recall, torch.tensor([1.0])])
-    for index in range(precision.numel() - 1, 0, -1):
-        precision[index - 1] = torch.maximum(precision[index - 1], precision[index])
-    delta = recall[1:] - recall[:-1]
-    return float((delta * precision[1:]).sum().item())
-
-
 def evaluate_detection_predictions(
     predictions: Sequence[DetectionPrediction],
     targets: Sequence[Mapping[str, torch.Tensor]],
@@ -486,21 +255,11 @@ def evaluate_detection_predictions(
 ) -> dict[str, float]:
     """Evaluate decoded detections using COCO-style AP over configured IoU thresholds."""
 
-    aps = [
-        _average_precision(predictions, targets, iou_threshold=float(threshold))
-        for threshold in metric_config.iou_thresholds
-    ]
-    metric_map = {
-        "map50_95": float(sum(aps) / len(aps)) if aps else 0.0,
-        "map50": 0.0,
-        "map75": 0.0,
-    }
-    for threshold, ap in zip(metric_config.iou_thresholds, aps, strict=False):
-        if abs(float(threshold) - 0.5) < 1e-6:
-            metric_map["map50"] = float(ap)
-        if abs(float(threshold) - 0.75) < 1e-6:
-            metric_map["map75"] = float(ap)
-    return metric_map
+    metric = DetectionMeanAveragePrecision(
+        iou_thresholds=metric_config.iou_thresholds,
+        box_format="xyxy",
+    )
+    return metric(predictions, targets)
 
 
 def evaluate_detection_model(

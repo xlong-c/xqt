@@ -21,8 +21,9 @@
 ## 当前边界
 
 - `xqt` 仍是实验包,不是 XDL 主框架稳定子模块.
-- 顶层配置,runner,stage workflow,manifest 和 XDL adapter 按 Provisional 管理.
+- 顶层配置,runner,stage workflow,`XQTOptimizationSession`,manifest 和 XDL adapter 按 Provisional 管理.
 - `core`,`pipeline`,`quant`,`prune`,`distill`,`diffusion_distill`,`export`,`operator_opt` 等子模块细节默认按 Internal 管理.
+- XQT 只编排压缩与部署 stage. 带反向传播的 finetune,distill 和剪枝 recovery 委托 XDL 或第三方 training provider;任务级 eval 优先委托 evaluation provider. PTQ calibration 和 runtime/export/benchmark 仍由 XQT 负责.
 
 需要明确 API 边界时,回到 [XQT.md](XQT.md) 和 [README.md#xdl-api-稳定边界](README.md#xdl-api-稳定边界).
 
@@ -65,7 +66,8 @@ PyTorch checkpoint
 - `core`: schema,OmegaConf 加载,artifact manifest,registry.
 - `pipeline` / `workflows`: 把 pass 或 stage 按配置编排起来.
 - `quant`,`prune`,`distill`,`diffusion_distill`,`operator_opt`,`export`: 具体优化和部署能力.
-- `eval`,`benchmark`: 做精度 diff,任务指标和性能报告.
+- `integrations`: training/evaluation provider job/report 边界.
+- `eval`,`benchmark`: 做精度 diff,过渡期 task metric wrapper/fallback 和性能报告;top-k 与 detection mAP 归 XDL metric.
 - `data`,`model`,`xdl_adapter`: 衔接数据,外部模型和 XDL.
 
 如果你只是想找一个改动落点,这一级通常已经够用. 具体文件职责见 [XQT.md#4-当前模块划分](XQT.md#4-当前模块划分).

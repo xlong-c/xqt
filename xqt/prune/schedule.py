@@ -8,6 +8,7 @@ from typing import Iterable, Optional
 import torch
 from torch import nn
 
+from xqt.core.errors import XQTBackendError
 from xqt.distill.training import DistillationTrainReport, train_logit_distillation
 
 from .masks import (
@@ -136,8 +137,9 @@ def run_prune_kd_loop(
     alpha: float = 0.5,
     device: str | torch.device = "cpu",
     kd_steps_per_prune: Optional[int] = None,
+    training_provider: object | None = None,
 ) -> PruneKDReport:
-    """Apply scheduled pruning and optionally run KD after each pruning step."""
+    """Apply scheduled pruning and optionally delegate KD recovery to a provider."""
 
     reports: list[PruneKDStepReport] = []
     for step_index, sparsity in enumerate(schedule.values()):
@@ -145,7 +147,12 @@ def run_prune_kd_loop(
         remove_pruning_reparameterization(student)
         pruning = summarize_pruning(student)
         distill_report: Optional[DistillationTrainReport] = None
-        if teacher is not None and dataloader is not None and optimizer is not None:
+        if optimizer is not None and training_provider is None:
+            raise XQTBackendError(
+                "XQT prune KD recovery must be delegated to a provider. "
+                "Pass training_provider and let it execute the recovery step."
+            )
+        if teacher is not None and dataloader is not None and training_provider is not None:
             distill_report = train_logit_distillation(
                 student,
                 teacher,
@@ -155,6 +162,7 @@ def run_prune_kd_loop(
                 alpha=alpha,
                 device=device,
                 max_steps=kd_steps_per_prune,
+                training_provider=training_provider,
             )
         reports.append(
             PruneKDStepReport(
@@ -183,8 +191,9 @@ def run_structured_prune_kd_loop(
     device: str | torch.device = "cpu",
     kd_steps_per_prune: Optional[int] = None,
     example_input: object = None,
+    training_provider: object | None = None,
 ) -> StructuredPruneKDReport:
-    """Apply scheduled structured pruning and optionally run KD after one rewrite."""
+    """Apply scheduled structured pruning and optionally delegate KD recovery to a provider."""
 
     schedule_values = schedule.values()
     if not schedule_values:
@@ -202,7 +211,12 @@ def run_structured_prune_kd_loop(
     reports: list[StructuredPruneKDStepReport] = []
     for step_index, sparsity in enumerate(schedule_values):
         distill_report: Optional[DistillationTrainReport] = None
-        if teacher is not None and dataloader is not None and optimizer is not None:
+        if optimizer is not None and training_provider is None:
+            raise XQTBackendError(
+                "XQT prune KD recovery must be delegated to a provider. "
+                "Pass training_provider and let it execute the recovery step."
+            )
+        if teacher is not None and dataloader is not None and training_provider is not None:
             distill_report = train_logit_distillation(
                 student,
                 teacher,
@@ -212,6 +226,7 @@ def run_structured_prune_kd_loop(
                 alpha=alpha,
                 device=device,
                 max_steps=kd_steps_per_prune,
+                training_provider=training_provider,
             )
         reports.append(
             StructuredPruneKDStepReport(

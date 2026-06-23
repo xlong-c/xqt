@@ -29,6 +29,22 @@ class FakeTokenizer:
     name: str = "fake"
 
 
+class RecordingTrainingProvider:
+    def __init__(self) -> None:
+        self.jobs = []
+
+    def __call__(self, job):
+        self.jobs.append(job)
+        return {
+            "provider": "recording",
+            "steps": 1,
+            "samples": 4,
+            "mean_loss": 0.1,
+            "last_loss": 0.1,
+            "loss_history": [0.1],
+        }
+
+
 def build_fake_hf_bundle() -> HFTextClassificationBundle:
     batch = {
         "input_ids": torch.randn(4, 3),
@@ -74,7 +90,8 @@ def test_hf_text_bundle_target_populates_context_and_runs_distill(tmp_path) -> N
         }
     )
 
-    context = run_xqt_recipe(config)
+    provider = RecordingTrainingProvider()
+    context = run_xqt_recipe(config, training_provider=provider)
 
     assert isinstance(context.model, MappingClassifier)
     assert isinstance(context.teacher, MappingClassifier)
@@ -82,6 +99,7 @@ def test_hf_text_bundle_target_populates_context_and_runs_distill(tmp_path) -> N
     assert "validation" in context.data
     assert context.metrics["hf_text_bundle"]["dataset_name"] == "fake"
     assert context.metrics["distill"]["steps"] == 1
+    assert provider.jobs[0].mode == "distill"
     assert context.metrics["baseline"]["samples"] == 4
 
 

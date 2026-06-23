@@ -219,7 +219,7 @@ def test_preflight_treats_xdl_dataset_as_builtin_target() -> None:
 def test_preflight_treats_synthetic_detection_as_builtin_target() -> None:
     config = {
         "model": {
-            "target": "xqt.model.build_toy_detection_module",
+            "target": "xqt.model.build_smoke_detection_module",
             "params": {"num_classes": 80, "input_channels": 3},
         },
         "task": {
@@ -272,7 +272,7 @@ def test_preflight_fails_without_calibration_for_qdq() -> None:
 def test_preflight_warns_structured_detection_pruning() -> None:
     config = {
         "model": {
-            "target": "xqt.model.build_toy_detection_module",
+            "target": "xqt.model.build_smoke_detection_module",
             "params": {"num_classes": 80, "input_channels": 3},
         },
         "task": {
@@ -313,7 +313,7 @@ def test_preflight_warns_structured_detection_pruning() -> None:
 def test_preflight_allows_unstructured_detection_pruning_as_sparsity_only() -> None:
     config = {
         "model": {
-            "target": "xqt.model.build_toy_detection_module",
+            "target": "xqt.model.build_smoke_detection_module",
             "params": {"num_classes": 80, "input_channels": 3},
         },
         "task": {"type": "detection"},

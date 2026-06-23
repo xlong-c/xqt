@@ -1,4 +1,4 @@
-"""Small deterministic detection module for XQT smoke recipes."""
+"""Smoke-only deterministic detection module for XQT recipes."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import torch
 from torch import nn
 
 
-class ToyDetectionModule(nn.Module):
-    """Emit deterministic YOLO-style raw detections matching synthetic targets."""
+class SmokeDetectionModule(nn.Module):
+    """Emit deterministic YOLO-style raw detections for synthetic smoke tests."""
 
     def __init__(
         self,
@@ -47,14 +47,14 @@ class ToyDetectionModule(nn.Module):
         return output + anchor.view(batch_size, 1, 1)
 
 
-def build_toy_detection_module(
+def build_smoke_detection_module(
     num_classes: int = 3,
     boxes_per_image: int = 2,
     input_channels: int = 3,
-) -> ToyDetectionModule:
+) -> SmokeDetectionModule:
     """Build a deterministic detection model for synthetic smoke tests."""
 
-    return ToyDetectionModule(
+    return SmokeDetectionModule(
         num_classes=num_classes,
         boxes_per_image=boxes_per_image,
         input_channels=input_channels,
@@ -62,6 +62,6 @@ def build_toy_detection_module(
 
 
 __all__ = [
-    "ToyDetectionModule",
-    "build_toy_detection_module",
+    "SmokeDetectionModule",
+    "build_smoke_detection_module",
 ]

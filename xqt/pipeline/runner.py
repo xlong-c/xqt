@@ -127,6 +127,8 @@ def create_context(
     artifacts: Optional[Mapping[str, Any]] = None,
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
+    training_provider: Any = None,
+    evaluation_provider: Any = None,
 ) -> XQTContext:
     """Build an XQTContext from a config path, mapping, or dataclass."""
 
@@ -141,6 +143,8 @@ def create_context(
         metrics=dict(metrics or {}),
         device=loaded_config.model.device,
         manifest=manifest or create_manifest(loaded_config),
+        training_provider=training_provider,
+        evaluation_provider=evaluation_provider,
     )
 
 
@@ -172,6 +176,8 @@ def run_xqt_recipe(
     artifacts: Optional[Mapping[str, Any]] = None,
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
+    training_provider: Any = None,
+    evaluation_provider: Any = None,
     pass_names: Optional[Sequence[str]] = None,
     pass_registry: XQTRegistry = PASS_REGISTRY,
     pass_params: Optional[Mapping[str, Mapping[str, Any]]] = None,
@@ -188,6 +194,8 @@ def run_xqt_recipe(
         artifacts=artifacts,
         metrics=metrics,
         manifest=manifest,
+        training_provider=training_provider,
+        evaluation_provider=evaluation_provider,
     )
     pipeline = build_pipeline_from_config(
         context.config,

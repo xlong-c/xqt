@@ -3,7 +3,7 @@ project:
   artifact_dir: artifacts/xqt/detection/yolo_trt_qdq_practice
 
 model:
-  target: xqt.model.build_toy_detection_module
+  target: xqt.model.build_smoke_detection_module
   params:
     num_classes: 80
     input_channels: 3
@@ -61,7 +61,7 @@ stages:
     params:
       targets:
         - format: onnx
-          output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/export_fp32_onnx/toy_detection_fp32.onnx
+          output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/export_fp32_onnx/smoke_detection_fp32.onnx
           opset: 18
           params:
             input_names: [images]
@@ -78,8 +78,8 @@ stages:
       backend: onnxruntime_qdq
       strategy: static_int8
       policy:
-        source_name: toy_detection_source.onnx
-        output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/toy_detection_qdq.onnx
+        source_name: smoke_detection_source.onnx
+        output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/smoke_detection_qdq.onnx
         input_names: [images]
         output_names: [predictions]
         dynamo: false
@@ -107,7 +107,7 @@ stages:
     params:
       targets:
         - format: tensorrt
-          output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/deploy/toy_detection_qdq.engine
+          output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/deploy/smoke_detection_qdq.engine
           precision: int8
           profiles:
             images:
@@ -117,7 +117,7 @@ stages:
           params:
             backend: python_api
             dry_run: true
-            onnx_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/toy_detection_qdq.onnx
+            onnx_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/smoke_detection_qdq.onnx
             runtime_benchmark:
               enabled: false
               input_shapes:

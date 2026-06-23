@@ -1,8 +1,8 @@
-"""Model adapters used by XQT recipes."""
+"""Smoke-only model helpers used by XQT recipes."""
 
-from .toy_detection import ToyDetectionModule, build_toy_detection_module
+from .smoke_detection import SmokeDetectionModule, build_smoke_detection_module
 
 __all__ = [
-    "ToyDetectionModule",
-    "build_toy_detection_module",
+    "SmokeDetectionModule",
+    "build_smoke_detection_module",
 ]

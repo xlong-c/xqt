@@ -1,21 +1,17 @@
-"""Small PyTorch training loop for classification distillation."""
+"""Distillation training adapter for XQT."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional
 
-import torch
-from torch import nn
-
-from xqt.data.input_utils import split_batch
-
-from .losses import distillation_loss
+from xqt.core.errors import XQTBackendError
+from xqt.integrations import TrainingJob, run_training_job
 
 
 @dataclass
 class DistillationTrainReport:
-    """Metrics collected from a distillation training run."""
+    """Metrics collected from a provider-backed distillation run."""
 
     steps: int
     samples: int
@@ -32,103 +28,67 @@ class DistillationTrainReport:
             "loss_history": list(self.loss_history),
         }
 
-
-def _split_batch(batch: Any) -> tuple[Any, Optional[torch.Tensor]]:
-    split = split_batch(batch)
-    return split.inputs, split.targets
-
-
-def _move_to_device(data: Any, device: torch.device) -> Any:
-    if isinstance(data, torch.Tensor):
-        return data.to(device)
-    if isinstance(data, Mapping):
-        return {key: _move_to_device(value, device) for key, value in data.items()}
-    if isinstance(data, tuple):
-        return tuple(_move_to_device(value, device) for value in data)
-    if isinstance(data, list):
-        return [_move_to_device(value, device) for value in data]
-    return data
-
-
-def _call_model(model: nn.Module, inputs: Any) -> torch.Tensor:
-    if isinstance(inputs, Mapping):
-        output = model(**inputs)
-    elif isinstance(inputs, tuple):
-        output = model(*inputs)
-    else:
-        output = model(inputs)
-    if isinstance(output, torch.Tensor):
-        return output
-    if isinstance(output, Mapping) and isinstance(output.get("logits"), torch.Tensor):
-        return output["logits"]
-    if isinstance(output, (tuple, list)) and output and isinstance(output[0], torch.Tensor):
-        return output[0]
-    raise TypeError("model output must be a Tensor, tuple/list Tensor[0], or logits mapping")
+    @classmethod
+    def from_mapping(cls, report: Mapping[str, Any]) -> "DistillationTrainReport":
+        metrics = report.get("metrics")
+        metric_values = dict(metrics) if isinstance(metrics, Mapping) else {}
+        loss_history = report.get("loss_history")
+        if loss_history is None:
+            loss_history = metric_values.get("loss_history")
+        if isinstance(loss_history, list):
+            history = [float(value) for value in loss_history if isinstance(value, (int, float))]
+        else:
+            history = []
+        steps = int(report.get("steps", metric_values.get("steps", len(history) or 0)))
+        samples = int(report.get("samples", metric_values.get("samples", 0)))
+        mean_loss = float(report.get("mean_loss", metric_values.get("mean_loss", 0.0)))
+        last_loss = float(report.get("last_loss", metric_values.get("last_loss", 0.0)))
+        return cls(
+            steps=steps,
+            samples=samples,
+            mean_loss=mean_loss,
+            last_loss=last_loss,
+            loss_history=history,
+        )
 
 
 def train_logit_distillation(
-    student: nn.Module,
-    teacher: nn.Module,
+    student: Any,
+    teacher: Any,
     dataloader: Iterable[Any],
-    optimizer: torch.optim.Optimizer,
+    optimizer: Any,
     *,
     temperature: float = 2.0,
     alpha: float = 0.5,
-    device: str | torch.device = "cpu",
+    device: str | Any = "cpu",
     max_steps: Optional[int] = None,
+    training_provider: Any | None = None,
 ) -> DistillationTrainReport:
-    """Train a student with teacher logit distillation on a small iterable."""
+    """Delegate logit distillation to a task provider."""
 
-    torch_device = torch.device(device)
-    student.to(torch_device)
-    teacher.to(torch_device)
-    teacher_was_training = teacher.training
-    student_was_training = student.training
-    teacher.eval()
-    student.train()
-
-    history: list[float] = []
-    sample_count = 0
-    for step, batch in enumerate(dataloader):
-        if max_steps is not None and step >= max_steps:
-            break
-        inputs, targets = _split_batch(batch)
-        inputs = _move_to_device(inputs, torch_device)
-        targets = _move_to_device(targets, torch_device) if targets is not None else None
-
-        with torch.no_grad():
-            teacher_logits = _call_model(teacher, inputs)
-        student_logits = _call_model(student, inputs)
-        loss_breakdown = distillation_loss(
-            student_logits,
-            teacher_logits,
-            targets=targets,
-            temperature=temperature,
-            alpha=alpha,
+    if training_provider is None:
+        raise XQTBackendError(
+            "XQT no longer owns a standalone distillation training loop. "
+            "Pass a provider via training_provider and let it execute the update step."
         )
-        optimizer.zero_grad()
-        loss_breakdown.total.backward()
-        optimizer.step()
-
-        history.append(float(loss_breakdown.total.detach().cpu().item()))
-        if isinstance(student_logits, torch.Tensor) and student_logits.ndim > 0:
-            sample_count += int(student_logits.shape[0])
-
-    if teacher_was_training:
-        teacher.train()
-    if not student_was_training:
-        student.eval()
-
-    steps = len(history)
-    mean_loss = sum(history) / steps if steps else 0.0
-    last_loss = history[-1] if history else 0.0
-    return DistillationTrainReport(
-        steps=steps,
-        samples=sample_count,
-        mean_loss=mean_loss,
-        last_loss=last_loss,
-        loss_history=history,
+    report = run_training_job(
+        training_provider,
+        TrainingJob(
+            name="logit_distillation",
+            mode="distill",
+            model=student,
+            teacher=teacher,
+            train_data=dataloader,
+            params={
+                "optimizer": optimizer,
+                "temperature": temperature,
+                "alpha": alpha,
+                "max_steps": max_steps,
+            },
+            device=str(device),
+        ),
     )
+    return DistillationTrainReport.from_mapping(report.to_dict())
 
 
 __all__ = [

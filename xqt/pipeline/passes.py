@@ -11,6 +11,7 @@ from torch import nn
 
 from xqt.benchmark import benchmark_callable, benchmark_memory
 from xqt.core.artifact import ArtifactRecord, MetricRecord
+from xqt.core.errors import XQTBackendError
 from xqt.core.imports import build_target
 from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
@@ -53,6 +54,12 @@ from xqt.operator_opt import (
     summarize_operator_optimization_reports,
 )
 from xqt.export.input_utils import default_input_names, first_tensor_output
+from xqt.integrations import (
+    EvaluationJob,
+    resolve_evaluation_provider,
+    resolve_training_provider,
+    run_evaluation_job,
+)
 from xqt.prune import (
     collect_module_importance,
     prune_runtime_capability_from_report,
@@ -369,21 +376,18 @@ class DistillPass:
         if dataloader is None:
             raise ValueError("train data is required for distill pass")
 
-        params = distill_config.params
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=float(params.get("lr", 1e-3)),
-            weight_decay=float(params.get("weight_decay", 0.0)),
-        )
+        params = dict(distill_config.params)
+        provider = resolve_training_provider(context, params)
         report = train_logit_distillation(
             model,
             context.teacher,
             dataloader,
-            optimizer,
+            optimizer=None,
             temperature=distill_config.temperature,
             alpha=distill_config.alpha,
             device=context.config.model.device,
             max_steps=params.get("max_steps"),
+            training_provider=provider,
         )
         context.metrics["distill"] = report.to_dict()
         if context.manifest is not None:
@@ -410,7 +414,27 @@ class BaselineEvalPass:
         dataloader = context.data.get("validation")
         if dataloader is None:
             raise ValueError("validation data is required for baseline_eval")
-        if context.config.task.type == "detection":
+        params = dict(context.config.task.params)
+        provider = resolve_evaluation_provider(context, params)
+        used_provider = provider is not None
+        if provider is not None:
+            report = run_evaluation_job(
+                provider,
+                EvaluationJob(
+                    name="baseline",
+                    mode="eval",
+                    model=model,
+                    data=dataloader,
+                    reference_model=context.reference_model,
+                    params=params,
+                    device=context.config.model.device,
+                    task_type=context.config.task.type,
+                    context=context,
+                ),
+            )
+            report_dict = report.to_dict()
+            metric_values = report.metrics
+        elif context.config.task.type == "detection":
             report = evaluate_detection_model(
                 model,
                 dataloader,
@@ -418,15 +442,26 @@ class BaselineEvalPass:
                 metric_config=context.config.task.detection_metric,
                 device=context.config.model.device,
             )
+            report_dict = report.to_dict()
+            metric_values = report.metrics
         else:
             report = evaluate_pytorch_model(
                 model,
                 dataloader,
                 device=context.config.model.device,
             )
-        context.metrics["baseline"] = report.to_dict()
+            report_dict = report.to_dict()
+            metric_values = report.metrics
+        if not used_provider:
+            report_dict.setdefault("provider", "xqt_internal_transition")
+            metadata = report_dict.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.setdefault("evaluation_source", "xqt.eval")
+            report_dict["metadata"] = metadata
+        context.metrics["baseline"] = report_dict
         if context.manifest is not None:
-            for metric_name, value in report.metrics.items():
+            for metric_name, value in metric_values.items():
                 context.manifest.add_metric(
                     MetricRecord(
                         name=f"baseline.{metric_name}",
@@ -694,12 +729,11 @@ class PrunePass:
                 prune_config.params.get("finetune", False)
             ):
                 dataloader = context.data.get("train")
-                optimizer = None
-                if dataloader is not None:
-                    optimizer = torch.optim.AdamW(
-                        model.parameters(),
-                        lr=float(prune_config.params.get("lr", 1e-3)),
-                        weight_decay=float(prune_config.params.get("weight_decay", 0.0)),
+                recovery_params = dict(prune_config.params)
+                provider = resolve_training_provider(context, recovery_params)
+                if provider is None:
+                    raise XQTBackendError(
+                        "compression.prune.params.finetune=true requires a training provider"
                     )
                 report = run_structured_prune_kd_loop(
                     model,
@@ -715,12 +749,13 @@ class PrunePass:
                     scope=prune_config.scope,
                     importance=dict(prune_config.importance),
                     selection=dict(prune_config.selection),
-                    optimizer=optimizer,
+                    optimizer=None,
                     temperature=context.config.compression.distill.temperature,
                     alpha=context.config.compression.distill.alpha,
                     device=context.config.model.device,
-                    kd_steps_per_prune=prune_config.params.get("kd_steps_per_prune"),
+                    kd_steps_per_prune=recovery_params.get("kd_steps_per_prune"),
                     example_input=example_input,
+                    training_provider=provider,
                 )
                 context.metrics["prune"] = report.to_dict()
                 if context.manifest is not None:
@@ -735,7 +770,7 @@ class PrunePass:
                                 "granularity": prune_config.granularity,
                                 "schedule": prune_config.schedule,
                                 "steps": len(report.steps),
-                                "finetune": optimizer is not None,
+                                "finetune": provider is not None,
                                 "kd": context.teacher is not None,
                             },
                         )
@@ -780,12 +815,15 @@ class PrunePass:
             or bool(prune_config.params.get("finetune", False))
         ):
             dataloader = context.data.get("train")
-            optimizer = None
-            if dataloader is not None and bool(prune_config.params.get("finetune", False)):
-                optimizer = torch.optim.AdamW(
-                    model.parameters(),
-                    lr=float(prune_config.params.get("lr", 1e-3)),
-                    weight_decay=float(prune_config.params.get("weight_decay", 0.0)),
+            recovery_params = dict(prune_config.params)
+            provider = (
+                resolve_training_provider(context, recovery_params)
+                if bool(prune_config.params.get("finetune", False))
+                else None
+            )
+            if bool(prune_config.params.get("finetune", False)) and provider is None:
+                raise XQTBackendError(
+                    "compression.prune.params.finetune=true requires a training provider"
                 )
             report = run_prune_kd_loop(
                 model,
@@ -797,11 +835,12 @@ class PrunePass:
                     start_sparsity=float(prune_config.params.get("start_sparsity", 0.0)),
                     schedule=prune_config.schedule,
                 ),
-                optimizer=optimizer,
+                optimizer=None,
                 temperature=context.config.compression.distill.temperature,
                 alpha=context.config.compression.distill.alpha,
                 device=context.config.model.device,
-                kd_steps_per_prune=prune_config.params.get("kd_steps_per_prune"),
+                kd_steps_per_prune=recovery_params.get("kd_steps_per_prune"),
+                training_provider=provider,
             )
             context.metrics["prune"] = report.to_dict()
             if context.manifest is not None:
@@ -814,7 +853,7 @@ class PrunePass:
                         metadata={
                             "schedule": prune_config.schedule,
                             "steps": len(report.steps),
-                            "finetune": optimizer is not None,
+                            "finetune": provider is not None,
                         },
                     )
                 )
