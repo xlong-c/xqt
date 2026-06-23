@@ -2,7 +2,7 @@
 
 `xqt` 是 XDL 仓库中的模型压缩,模型图变换和部署格式导出实验包. 当前目录是包化实验工具链,不代表稳定公共 API.
 
-核心契约: XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,执行量化,剪枝,算子优化,导出,误差分析和运行时验证. 训练,QAT 训练,finetune,distillation,KD/prune recovery 和 provider 编排不属于 XQT.
+核心契约: XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,执行量化,剪枝,算子优化,导出,误差分析和 benchmark. 训练,QAT 训练,finetune,distillation,KD/prune recovery,dataset/dataloader 和 provider 编排不属于 XQT.
 
 包内工程契约:
 
@@ -21,12 +21,11 @@
 当前包模块:
 
 - `core`: structured config, artifact manifest, checksum, XQT registry.
-- `data`: synthetic classification/detection samples, calibration dataloader utilities, torchvision image classification loader, detection loader, `xdl.dataset` bridge loader.
 - `model`: smoke-only model helper 和模型 forward hook 输出采集工具.
 - `integrations`: detection output decode adapter.
 - `pipeline`: sequential pass manager,preflight 和 YAML runner.
-- `workflows`: stage-based model optimization workflow,支持 `eval`,`benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`,`runtime_eval`.
-- `eval`: tensor output diff,runtime report,layer analysis 和过渡期 smoke metric wrapper.
+- `workflows`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
+- `eval`: tensor output diff,layer analysis 和 report helper.
 - `benchmark`: latency 和 memory benchmark helper.
 - `quant`: quantization policy,backend/method capability matrix,activation calibration,layer sensitivity helper.
 - `operator_opt`: `torch.compile`-first operator optimization pass,backend capability matrix and runtime fallback reporting.
@@ -44,8 +43,8 @@
 当前主 recipe 方向:
 
 - smoke CPU: 配置,PyTorch native export 和 manifest 路径.
-- ONNX QDQ INT8: PyTorch model -> ONNX -> QDQ ONNX -> runtime diff.
-- TensorRT/OpenVINO/mobile: 导出 adapter,dry-run/真实后端验证和 benchmark.
+- ONNX QDQ INT8: PyTorch model 或外部 ONNX -> QDQ ONNX,校准输入由调用方显式传入.
+- TensorRT/OpenVINO/mobile: 导出 adapter,dry-run/真实后端产物构建.
 - pruning: 纯模型侧 mask/rewrite/sparsity report,不做 recovery training.
 - operator optimization: `torch.compile` 和 planned backend capability/report.
 
@@ -63,5 +62,6 @@
 
 - 训练循环,QAT 训练,finetune,distillation,KD recovery,prune recovery.
 - `training_provider`,`evaluation_provider`,`XDLTrainingProvider`.
+- dataset/dataloader 构建和 task-level validation.
 - 通用 model/loss/metric registry.
 - 任务框架的训练/评估语义.

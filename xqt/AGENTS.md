@@ -13,7 +13,7 @@
 
 XQT 只关注模型本身.
 
-XQT 负责模型压缩,模型图变换,导出适配,模型误差分析和模型运行时验证. XQT 不负责训练,QAT 训练,finetune,distillation,KD/prune recovery,training provider 或 evaluation provider. 需要梯度更新的流程归 XDL 或第三方训练工具,再把训练后的模型/checkpoint 交给 XQT.
+XQT 负责模型压缩,模型图变换,导出适配,模型误差分析和 benchmark. XQT 不负责训练,QAT 训练,finetune,distillation,KD/prune recovery,dataset/dataloader,training provider 或 evaluation provider. 需要梯度更新或任务验证的流程归 XDL 或第三方工具,再把训练后的模型/checkpoint 或指标交给 XQT.
 
 包内工程契约见 `xqt/FRAMEWORK.md`;长期事实源见 `docs/md/XQT.md`.
 
@@ -22,12 +22,11 @@ XQT 负责模型压缩,模型图变换,导出适配,模型误差分析和模型�
 ### 包模块
 
 - `core/`: structured config, artifact manifest, checksum, XQT registry.
-- `data/`: synthetic samples,calibration dataloader,torchvision loader,detection loader 和 `xdl.dataset` bridge.
 - `model/`: smoke-only model helper 和模型 forward hook 输出采集工具.
 - `integrations/`: detection output decode adapter.
 - `pipeline/`: sequential pass manager,preflight 和 YAML runner.
-- `workflows/`: stage-based model optimization workflow,支持 `eval`,`benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`,`runtime_eval`.
-- `eval/`: tensor output diff,runtime report,layer analysis 和过渡期 smoke metric wrapper.
+- `workflows/`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
+- `eval/`: tensor output diff,layer analysis 和 report helper.
 - `benchmark/`: latency 和 memory benchmark helper.
 - `quant/`: quantization policy,backend capability matrix,activation calibration,layer sensitivity helper.
 - `prune/`: unstructured,structured,N:M 和 block sparse pruning helper.
@@ -42,14 +41,14 @@ Recipe 按技术栈分层组织在 `recipes/` 下:
 - `quant/` - 量化.
 - `prune/` - 纯模型侧剪枝和 sparsity report.
 - `operator/` - 算子优化.
-- `detection/` - 检测模型部署和 runtime 验证.
+- `detection/` - 检测模型部署和后端产物适配.
 - `smoke/` - 综合冒烟测试.
 
 不要新增 XQT 训练 recipe. `finetune`,`distill`,`recovery`,`QAT training` 等 recipe 应放到 XDL 或外部训练工具侧.
 
 ### 运行入口
 
-- `xqt-preflight`: 检查 recipe 的 target,数据 root,可选依赖,后端命令和硬件要求.
+- `xqt-preflight`: 检查 recipe 的 target,可选依赖,后端命令和硬件要求.
 - `xqt-run-recipe`: 运行 pass recipe.
 - `xqt-run-workflow`: 运行 stage workflow recipe.
 - `entrypoints/`: 命令行入口脚本,通过环境变量指定 recipe.
@@ -62,14 +61,15 @@ Recipe 按技术栈分层组织在 `recipes/` 下:
 
 ## 修改约束
 
-- 新能力必须服务模型本身: quant,prune,operator optimization,export,diff,runtime validation,benchmark 或 manifest.
+- 新能力必须服务模型本身: quant,prune,operator optimization,export,diff,benchmark 或 manifest.
 - 不要在 XQT 中新增训练循环,trainer,training provider,evaluation provider,loss wrapper 或任务 registry.
+- 不要在 XQT 中新增 dataset/dataloader 构建或 task-level validation.
 - 公共压缩或部署工具若可复用,再考虑抽到 `tools/` 或 `xdl/`.
 - 外部库依赖,设备要求,模型限制要写清楚.
 - 顶层示例脚本要保持薄入口,优先调用 XQT 已有 helper.
 - 顶层示例脚本涉及可选依赖时使用 lazy import,失败时抛出清楚的 XQT 异常或错误信息.
 - 新增 recipe 必须声明 `compression_axes` 和支持的硬件约束.
-- 所有量化/剪枝/导出后都必须能跑模型侧 diff 和最小性能基准.
+- 所有量化/剪枝/导出后都必须能产出模型侧 report 或最小性能基准.
 
 ## 注意事项
 

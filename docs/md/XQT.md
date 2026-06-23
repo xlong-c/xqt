@@ -6,7 +6,7 @@
 XQT 只关注模型本身.
 ```
 
-XQT 接收 PyTorch 模型,checkpoint 或已导出模型产物,执行模型侧压缩,图变换,导出适配,误差分析和运行时验证. 训练,QAT 训练,finetune,distillation,KD recovery,prune recovery,training provider 和 evaluation provider 不属于 XQT.
+XQT 接收 PyTorch 模型,checkpoint 或已导出模型产物,执行模型侧压缩,图变换,导出适配,误差分析和 benchmark. 训练,QAT 训练,finetune,distillation,KD recovery,prune recovery,dataset/dataloader,training provider 和 evaluation provider 不属于 XQT.
 
 需要梯度更新的流程归 XDL 或第三方训练工具. XQT 只消费训练后的模型或 checkpoint.
 
@@ -19,7 +19,7 @@ PyTorch model / checkpoint / exported artifact
     -> model compression or graph transform
     -> model-side diff / layer analysis
     -> export target artifact
-    -> runtime diff / benchmark / manifest
+    -> benchmark / manifest
 ```
 
 核心目标:
@@ -28,7 +28,7 @@ PyTorch model / checkpoint / exported artifact
 - 覆盖 PTQ/QDQ,权重量化,剪枝,算子优化,导出前适配和部署格式转换.
 - 能导出 ONNX,TensorRT engine,OpenVINO IR,torch.export,TorchScript,ExecuTorch,ncnn,MNN 等产物.
 - 记录配置,源 checkpoint,指标,产物校验和执行阶段,保证模型转换结果可复现.
-- 与 XDL 训练体系保持松耦合. XDL 负责训练/QAT/recovery;XQT 负责训练后的模型优化和部署验证.
+- 与 XDL 训练体系保持松耦合. XDL 负责训练/QAT/recovery/dataset/task validation;XQT 负责训练后的模型优化,分析和部署产物适配.
 
 非目标:
 
@@ -36,6 +36,7 @@ PyTorch model / checkpoint / exported artifact
 - 不维护通用 model/loss/metric registry.
 - 不运行 `optimizer.zero_grad() -> backward() -> step()` 训练循环.
 - 不承载 QAT 训练,finetune,distillation 或任何 recovery training.
+- 不构建 dataset/dataloader,不拥有 `data`/`data_splits` schema,不做 task-level validation.
 - 不重新实现 TensorRT,OpenVINO,ONNX Runtime,ExecuTorch,ncnn,MNN 等后端.
 - 不引入命令行参数解析库. 入口脚本读取 YAML 配置或明确的环境变量.
 
@@ -70,7 +71,6 @@ Internal implementation:
 - `xqt.export`
 - `xqt.eval`
 - `xqt.benchmark`
-- `xqt.data`
 - `xqt.model`
 - `xqt.integrations`
 
@@ -79,7 +79,6 @@ Internal implementation:
 ```text
 xqt/
 ├── core/          # config schema, manifest, registry, import helpers
-├── data/          # calibration/validation sample loaders
 ├── model/         # smoke model helpers and forward hook output capture
 ├── integrations/  # detection output decode adapter
 ├── pipeline/      # pass manager, built-in passes, preflight, YAML runner
@@ -88,7 +87,7 @@ xqt/
 ├── prune/         # pruning masks, structured rewrite, sparsity reports
 ├── operator_opt/  # torch.compile and backend capability/report adapters
 ├── export/        # torch.export,TorchScript,ONNX,TensorRT,OpenVINO,mobile
-├── eval/          # tensor diff, layer analysis, runtime reports
+├── eval/          # tensor diff, layer analysis, report helpers
 ├── benchmark/     # latency and memory benchmark helpers
 ├── recipes/       # smoke, quant, prune, operator, detection recipes
 └── xdl_adapter.py # model/checkpoint context bridge, not training bridge
@@ -100,17 +99,26 @@ Removed from XQT:
 - `diffusion_distill/`
 - `training_provider` / `evaluation_provider`
 - `XDLTrainingProvider`
+- `data/`
 - `finetune` / `distill` stage
+- `eval` / `runtime_eval` stage
 - HF text KD recipe and prune recovery recipe
 
-## 4. 数据角色
+## 4. 外部输入契约
 
-XQT 只保留模型优化需要的数据角色:
+XQT 不拥有数据层. 具体约束:
 
-- `calibration`: PTQ/observer/QDQ calibration 的代表性输入.
-- `validation`: output diff,runtime diff,smoke metric 和 benchmark 的输入.
+- 不提供 `xqt.data` 包.
+- 不构建 dataset,dataloader 或 XDL dataset bridge.
+- 不维护 `data`,`data_splits`,`train_split`,`validation_split`,`calibration_split` 配置字段.
+- 不做 task-level validation,accuracy,mAP 或 label 解析.
 
-`train_split` 不属于 XQT schema. 如果方法需要训练数据或反向传播,先在 XDL 或第三方训练工具中完成训练,再把训练后模型/checkpoint 交给 XQT.
+需要模型前向输入时,调用方在 Python API 中显式传入:
+
+- `example_inputs`: 一批模型输入,用于 export,benchmark,layer analysis 或 operator optimization.
+- `calibration_inputs`: iterable,用于 PTQ/QDQ/observer calibration.
+
+如果方法需要训练数据,验证数据或反向传播,先在 XDL 或第三方训练工具中完成,再把训练后模型/checkpoint 或评估指标交给 XQT.
 
 ## 5. Stage Workflow
 
@@ -118,7 +126,6 @@ XQT 只保留模型优化需要的数据角色:
 
 | Stage | 职责 |
 | --- | --- |
-| `eval` | 对当前 PyTorch 模型做无梯度 smoke eval 或 detection eval. |
 | `benchmark` | 对当前模型做 latency/memory benchmark. |
 | `prune` | 执行模型侧剪枝,mask/rewrite 和 sparsity report. |
 | `quant` | 执行 PTQ/QDQ/torchao 等量化路径. |
@@ -126,10 +133,11 @@ XQT 只保留模型优化需要的数据角色:
 | `export` | 导出 ONNX,torch.export,TorchScript 等产物. |
 | `deploy` | 导出部署后端产物或 dry-run plan. |
 | `analyze` | 分析 layer diff,activation drift,prune candidates 和高精度保留建议. |
-| `runtime_eval` | 对导出产物做 runtime diff/metric/latency 验证. |
 
 不支持的 stage:
 
+- `eval`
+- `runtime_eval`
 - `finetune`
 - `distill`
 - `qat_train`
@@ -139,11 +147,11 @@ XQT 只保留模型优化需要的数据角色:
 
 - 量化 recipe 必须显式写 `backend` 和 `policy`;`backend` 表示执行/运行时后端,如 `torchao`,`onnxruntime_qdq`,`pytorch`,`tilelang`;`method` 表示量化算法,如 `awq`,`gptq`;`strategy` 表示后端内的具体模式或 dtype 策略,如 `static_int8`,`dynamic_int8`,`fp8_dynamic`.
 - AWQ/GPTQ 这类算法不能写成 `backend: awq` 或 `backend: gptq`,应写成 `backend: pytorch` 或 `backend: tilelang` 加 `method: awq` / `method: gptq`.
-- QDQ/PTQ recipe 必须显式写 `calibration_split`.
-- `validation_split` 用于 diff,metric 或 benchmark,不能隐式当作 calibration fallback.
+- QDQ/PTQ 执行时必须由调用方显式传入 `calibration_inputs`;recipe 只描述 backend/policy/artifact.
+- 导出,benchmark,operator 和 analysis 需要前向样例时,由调用方显式传入 `example_inputs`.
 - 剪枝 recipe 只能表达模型侧剪枝和 report,不能表达 recovery training.
 - planned/capability-only 后端必须在 preflight 和文档中明确标注,不能写成已执行闭环.
-- 每条压缩或导出路径至少产出 output diff 或 smoke metric,以及最小 latency benchmark.
+- 压缩或导出路径至少产出 artifact/manifest/report;task metric 和验证闭环交给 XDL 或用户项目.
 
 stage workflow 示例:
 
@@ -161,37 +169,15 @@ model:
 task:
   type: classification
 
-data_splits:
-  calibration:
-    target: synthetic_classification
-    sample_limit: 4
-    batch_size: 1
-    params:
-      input_shape: [3, 224, 224]
-      num_classes: 10
-  validation:
-    target: synthetic_classification
-    sample_limit: 4
-    batch_size: 1
-    params:
-      input_shape: [3, 224, 224]
-      num_classes: 10
-
 stages:
-  - name: baseline_eval
-    kind: eval
-    split: validation
   - name: prune_sparse
     kind: prune
-    split: validation
     params:
       method: global_l1_unstructured
       target_sparsity: 0.2
   - name: qdq_quant
     kind: quant
     from_stage: prune_sparse
-    calibration_split: calibration
-    validation_split: validation
     params:
       backend: onnxruntime_qdq
       strategy: static_int8
@@ -200,7 +186,6 @@ stages:
         output_names: [output]
   - name: deploy
     kind: deploy
-    split: validation
     params:
       targets:
         - format: onnx
@@ -209,13 +194,15 @@ stages:
             runtime_diff: true
 ```
 
+运行上面的 workflow 时,调用方需要用 Python API 传入 `example_inputs` 和,若启用 QDQ/PTQ,`calibration_inputs`.
+
 ## 7. 能力分层
 
 量化:
 
 - torchao weight-only / FP8 adapter.
 - ONNX Runtime static QDQ INT8 adapter.
-- calibration dataloader,activation statistics,calibration summary.
+- activation statistics 和 calibration summary;校准输入来自外部 `calibration_inputs`.
 - layer sensitivity and mixed precision recommendation.
 
 剪枝:
@@ -234,7 +221,7 @@ stages:
 导出:
 
 - `torch.export` / TorchScript.
-- ONNX export/checker/runtime diff.
+- ONNX export/checker.
 - TensorRT `trtexec` / Python API adapter.
 - OpenVINO optional adapter.
 - ExecuTorch/ncnn/MNN mobile adapter.
@@ -245,10 +232,8 @@ stages:
 
 ```text
 PyTorch image classification model
-    -> baseline eval
     -> ONNX export
     -> ONNX Runtime QDQ INT8 quantization
-    -> output diff
     -> TensorRT INT8 engine or dry-run report
     -> benchmark report
     -> manifest
