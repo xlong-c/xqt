@@ -76,6 +76,10 @@ def _materialize_tensor(tensor: torch.Tensor) -> Optional[torch.Tensor]:
     return tensor.detach().to(dtype=torch.float32, device="cpu")
 
 
+def _module_has_dequantized_weight(module: nn.Module) -> bool:
+    return callable(getattr(module, "dequantize_weight", None))
+
+
 def _iter_target_modules(
     model: nn.Module,
     module_names: Optional[Sequence[str]],
@@ -87,7 +91,7 @@ def _iter_target_modules(
         module_name = name or "<root>"
         if target_names is not None and module_name not in target_names:
             continue
-        if not isinstance(module, tuple(module_types)):
+        if not isinstance(module, tuple(module_types)) and not _module_has_dequantized_weight(module):
             continue
         targets.append((module_name, module))
     return targets
@@ -105,9 +109,17 @@ def collect_module_importance(
     records: list[ModuleImportanceRecord] = []
     for name, module in _iter_target_modules(model, module_names, module_types):
         parameter = getattr(module, parameter_name, None)
-        if not isinstance(parameter, torch.Tensor):
-            continue
-        tensor = _materialize_tensor(parameter)
+        if isinstance(parameter, torch.Tensor):
+            tensor = _materialize_tensor(parameter)
+        elif _module_has_dequantized_weight(module):
+            try:
+                weight = module.dequantize_weight()
+            except Exception:
+                tensor = None
+            else:
+                tensor = _materialize_tensor(weight) if isinstance(weight, torch.Tensor) else None
+        else:
+            tensor = None
         if tensor is None:
             continue
         if tensor.numel() == 0:

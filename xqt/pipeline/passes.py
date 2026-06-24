@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +16,7 @@ from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
 from xqt.analysis import (
+    layer_statistics_rows,
     records_to_rows,
     write_csv_report,
     write_json_report,
@@ -247,6 +249,8 @@ class LoadModelPass:
             raise TypeError("model.target must build a torch.nn.Module")
         model.eval()
         context.model = model
+        if context.reference_model is None:
+            context.reference_model = copy.deepcopy(model)
         return context
 
 
@@ -293,6 +297,24 @@ class AnalyzePass:
             records = records[: analysis_config.top_k]
 
         rows = records_to_rows(records)
+        statistics_module_names = (
+            analysis_config.module_names
+            if analysis_config.module_names is not None
+            else [record.name for record in records]
+        )
+        layer_statistics = (
+            layer_statistics_rows(
+                reference_model,
+                model,
+                inputs,
+                module_names=statistics_module_names,
+                sample_budget=analysis_config.sample_budget,
+                sample_seed=analysis_config.sample_seed,
+                histogram_bins=analysis_config.histogram_bins,
+            )
+            if analysis_config.include_statistics
+            else []
+        )
         activation_drift = analyze_activation_drift(
             reference_model,
             model,
@@ -324,6 +346,7 @@ class AnalyzePass:
             "record_count": len(records),
             "records": [record.to_dict() for record in records],
             "rows": rows,
+            "layer_statistics": layer_statistics,
             "activation_drift": [record.to_dict() for record in activation_drift],
             "importance": [record.to_dict() for record in importance_records],
             "prune_candidates": prune_candidates,
@@ -994,6 +1017,7 @@ class ExportPass:
                     "builder_flags": result.metadata.get("builder_flags"),
                     "builder_notes": result.metadata.get("builder_notes"),
                     "plugin_libraries": result.metadata.get("plugin_libraries"),
+                    "loaded_plugin_libraries": result.metadata.get("loaded_plugin_libraries"),
                     "serialize_plugin_libraries": result.metadata.get(
                         "serialize_plugin_libraries"
                     ),

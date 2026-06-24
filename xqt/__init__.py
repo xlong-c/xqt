@@ -11,6 +11,11 @@ from .workflows import (
     optimize_model,
 )
 from .core.artifact import ArtifactManifest, ArtifactRecord, MetricRecord
+from .readiness import (
+    XQTReadinessReport,
+    XQTReadinessScenario,
+    assess_xqt_readiness,
+)
 from .xdl_adapter import (
     load_checkpoint_into_model,
     xdl_checkpoint_to_xqt_context,
@@ -29,6 +34,9 @@ __all__ = [
     "ArtifactManifest",
     "ArtifactRecord",
     "MetricRecord",
+    "XQTReadinessReport",
+    "XQTReadinessScenario",
+    "assess_xqt_readiness",
     "load_checkpoint_into_model",
     "xdl_checkpoint_to_xqt_context",
     "xdl_setup_to_xqt_context",

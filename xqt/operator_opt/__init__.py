@@ -52,6 +52,10 @@ from .backends.tilelang import (
     run_tilelang_kernel,
     tilelang_validation_thresholds,
 )
+from .backends.tilelang_validation import (
+    TileLangFP4ValidationResult,
+    validate_tilelang_packed_fp4_fused_gemm,
+)
 from .backends.triton import (
     TritonKernelSpec,
     get_triton_kernel_spec,
@@ -110,6 +114,8 @@ __all__ = [
     "summarize_candidate_report",
     "tilelang_validation_thresholds",
     "TileLangCompileSettings",
+    "TileLangFP4ValidationResult",
     "TileLangKernelSpec",
     "TritonKernelSpec",
+    "validate_tilelang_packed_fp4_fused_gemm",
 ]

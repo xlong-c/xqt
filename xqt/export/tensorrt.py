@@ -148,6 +148,59 @@ class TensorRTBuildResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class TensorRTPluginLibraryCheck:
+    """Validation result for one TensorRT plugin shared library."""
+
+    path: str
+    exists: bool
+    load_requested: bool = False
+    loadable: bool | None = None
+    loaded_plugin_libraries: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "exists": self.exists,
+            "load_requested": self.load_requested,
+            "loadable": self.loadable,
+            "loaded_plugin_libraries": list(self.loaded_plugin_libraries),
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class TensorRTPluginValidationResult:
+    """Structured validation report for TensorRT plugin shared libraries."""
+
+    status: str
+    loadability_requested: bool
+    plugin_libraries: list[TensorRTPluginLibraryCheck] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return self.status in {"present", "ok", "not_requested"}
+
+    @property
+    def loaded_plugin_libraries(self) -> list[str]:
+        loaded: list[str] = []
+        for check in self.plugin_libraries:
+            loaded.extend(check.loaded_plugin_libraries)
+        return loaded
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "passed": self.passed,
+            "loadability_requested": self.loadability_requested,
+            "plugin_libraries": [
+                check.to_dict() for check in self.plugin_libraries
+            ],
+            "loaded_plugin_libraries": self.loaded_plugin_libraries,
+        }
+
+
 def _normalize_plugin_libraries(
     plugin_libraries: Optional[Sequence[str | Path]],
 ) -> list[Path]:
@@ -175,6 +228,75 @@ def _load_tensorrt_plugin_libraries(
             ) from exc
         loaded.append(str(path))
     return loaded
+
+
+def validate_tensorrt_plugin_libraries(
+    plugin_libraries: Optional[Sequence[str | Path]],
+    *,
+    validate_loadability: bool = False,
+) -> TensorRTPluginValidationResult:
+    """Validate TensorRT plugin shared libraries without building an engine."""
+
+    checks: list[TensorRTPluginLibraryCheck] = []
+    for path in _normalize_plugin_libraries(plugin_libraries):
+        exists = path.is_file()
+        if not exists:
+            checks.append(
+                TensorRTPluginLibraryCheck(
+                    path=str(path),
+                    exists=False,
+                    load_requested=validate_loadability,
+                    error=f"TensorRT plugin library not found: {path}",
+                )
+            )
+            continue
+        if not validate_loadability:
+            checks.append(
+                TensorRTPluginLibraryCheck(
+                    path=str(path),
+                    exists=True,
+                    load_requested=False,
+                )
+            )
+            continue
+        try:
+            loaded = _load_tensorrt_plugin_libraries([path])
+        except Exception as exc:
+            checks.append(
+                TensorRTPluginLibraryCheck(
+                    path=str(path),
+                    exists=True,
+                    load_requested=True,
+                    loadable=False,
+                    error=str(exc),
+                )
+            )
+            continue
+        checks.append(
+            TensorRTPluginLibraryCheck(
+                path=str(path),
+                exists=True,
+                load_requested=True,
+                loadable=True,
+                loaded_plugin_libraries=loaded,
+            )
+        )
+
+    if not checks:
+        status = "not_requested"
+    elif any(not check.exists for check in checks):
+        status = "missing"
+    elif validate_loadability and any(check.loadable is False for check in checks):
+        status = "load_failed"
+    elif validate_loadability:
+        status = "ok"
+    else:
+        status = "present"
+    return TensorRTPluginValidationResult(
+        status=status,
+        loadability_requested=validate_loadability,
+        plugin_libraries=checks,
+    )
 
 
 def _import_tensorrt() -> Any:
@@ -1242,6 +1364,8 @@ def build_tensorrt_engine(
 __all__ = [
     "TensorRTBuildResult",
     "TensorRTEngineInspectorSummary",
+    "TensorRTPluginLibraryCheck",
+    "TensorRTPluginValidationResult",
     "TensorRTRuntimeBenchmarkResult",
     "TensorRTRuntimeExecutionResult",
     "TensorRTRuntimeSession",
@@ -1258,4 +1382,5 @@ __all__ = [
     "inspect_tensorrt_engine",
     "parse_trtexec_performance",
     "summarize_tensorrt_engine_inspector",
+    "validate_tensorrt_plugin_libraries",
 ]

@@ -80,11 +80,11 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         requires_cuda=True,
         notes=(
             "Built-in executor ships minimal attention and dequant_gemm_epilogue targets with reference fallback metadata.",
-            "Minimal CUDA TileLang attention and dequant GEMM kernel paths are available when tilelang and CUDA are present.",
+            "Minimal CUDA TileLang attention, dequant GEMM, and fused packed FP4 unpack/dequant GEMM epilogue paths are available when tilelang and CUDA are present.",
         ),
         limitations=(
             "Current built-in execution is limited to the attention and dequant_gemm_epilogue patterns.",
-            "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q, plus dequant GEMM shapes aligned to the minimal block constraints.",
+            "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q, dequant GEMM shapes aligned to the minimal block constraints, and packed FP4 runtime correctness/performance still requiring real CUDA hardware validation.",
         ),
     ),
     "cutile": OperatorOptimizationBackendCapability(

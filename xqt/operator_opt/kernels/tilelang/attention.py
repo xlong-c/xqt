@@ -10,7 +10,11 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
-from .gemm_builder import build_tilelang_gemm_kernel
+from .gemm_builder import (
+    build_tilelang_fp4_fused_dequant_gemm_kernel,
+    build_tilelang_fp4_unpack_dequant_kernel,
+    build_tilelang_gemm_kernel,
+)
 
 
 @dataclass(frozen=True)
@@ -274,6 +278,59 @@ def dequant_gemm_epilogue_reference(
     raise ValueError(f"unsupported activation: {activation}")
 
 
+def _decode_packed_signed_int4(
+    packed_weight: torch.Tensor,
+    *,
+    input_features: int,
+) -> torch.Tensor:
+    low = packed_weight & 0x0F
+    high = (packed_weight >> 4) & 0x0F
+    unpacked = torch.stack((low, high), dim=-1).reshape(packed_weight.shape[0], -1)
+    unpacked = unpacked[:, : int(input_features)]
+    signed = torch.where(
+        unpacked >= 8,
+        unpacked.to(torch.int16) - 16,
+        unpacked.to(torch.int16),
+    )
+    return signed.to(torch.float32)
+
+
+def fp4_packed_dequant_gemm_epilogue_reference(
+    x: torch.Tensor,
+    packed_weight: torch.Tensor,
+    scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    group_size: int,
+    activation: str | None = None,
+) -> torch.Tensor:
+    """Reference packed FP4 dequantized GEMM with optional epilogue."""
+
+    padded_input_features = int(packed_weight.shape[1]) * 2
+    qweight = _decode_packed_signed_int4(
+        packed_weight.to(device=x.device),
+        input_features=padded_input_features,
+    ).to(dtype=x.dtype, device=x.device)
+    weight_scale = scale.to(dtype=x.dtype, device=x.device)
+    grouped = qweight.reshape(qweight.shape[0], -1, int(group_size))
+    weight = (grouped * weight_scale).reshape(qweight.shape[0], padded_input_features)[
+        :, : int(input_features)
+    ]
+    output = x.matmul(weight.t())
+    if bias is not None:
+        output = output + bias.to(dtype=output.dtype, device=output.device)
+    if activation is None:
+        return output
+    if activation == "gelu":
+        return F.gelu(output)
+    if activation == "silu":
+        return F.silu(output)
+    if activation == "relu":
+        return F.relu(output)
+    raise ValueError(f"unsupported activation: {activation}")
+
+
 def dequant_gemm_epilogue_tilelang(
     x: torch.Tensor,
     qweight: torch.Tensor,
@@ -285,6 +342,7 @@ def dequant_gemm_epilogue_tilelang(
     block_n: int = 64,
     threads: int = 128,
     num_stages: int = 2,
+    target_arch: str | None = None,
 ) -> torch.Tensor:
     """CUDA-only TileLang dequant GEMM epilogue entry point."""
 
@@ -309,6 +367,7 @@ def dequant_gemm_epilogue_tilelang(
         block_m=int(block_m),
         block_n=int(block_n),
         threads=int(threads),
+        target_arch=target_arch,
     )
     output = kernel(x, dequantized)
     if bias is not None:
@@ -322,6 +381,68 @@ def dequant_gemm_epilogue_tilelang(
     if activation == "relu":
         return F.relu(output)
     raise ValueError(f"unsupported activation: {activation}")
+
+
+def fp4_packed_dequant_gemm_epilogue_tilelang(
+    x: torch.Tensor,
+    packed_weight: torch.Tensor,
+    scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    group_size: int,
+    activation: str | None = None,
+    block_m: int = 64,
+    block_n: int = 64,
+    threads: int = 128,
+    num_stages: int = 2,
+    target_arch: str | None = None,
+) -> torch.Tensor:
+    """CUDA-only packed FP4 entry using fused TileLang unpack/dequant GEMM."""
+
+    tensors = (x, packed_weight, scale) if bias is None else (x, packed_weight, scale, bias)
+    _require_cuda_tensors(*tensors)
+    if x.dtype != torch.float16 or scale.dtype != torch.float16:
+        raise XQTBackendError("packed FP4 TileLang path currently requires float16 x and scale")
+    if bias is not None and bias.dtype != torch.float16:
+        raise XQTBackendError("packed FP4 TileLang path currently requires float16 bias")
+    if packed_weight.dtype != torch.uint8:
+        raise XQTBackendError("packed FP4 TileLang path expects uint8 packed_weight")
+    if x.ndim != 2 or packed_weight.ndim != 2:
+        raise XQTBackendError("packed FP4 TileLang path expects 2D x and packed_weight")
+    if x.shape[1] != int(input_features):
+        raise XQTBackendError("packed FP4 TileLang path requires x.shape[1] == input_features")
+    if scale.ndim != 3 or scale.shape[0] != packed_weight.shape[0] or scale.shape[2] != 1:
+        raise XQTBackendError("packed FP4 TileLang path expects scale shaped [out_features, groups, 1]")
+    if int(group_size) <= 0:
+        raise XQTBackendError("group_size must be positive")
+    padded_input_features = int(packed_weight.shape[1]) * 2
+    if scale.shape[1] * int(group_size) != padded_input_features:
+        raise XQTBackendError("scale groups must cover the packed padded input features")
+    if bias is not None and (bias.ndim != 1 or bias.shape[0] != packed_weight.shape[0]):
+        raise XQTBackendError("bias must be 1D and match packed_weight out_features")
+    if activation not in {None, "gelu", "silu", "relu"}:
+        raise XQTBackendError(f"unsupported activation: {activation}")
+    if x.shape[0] % int(block_m) != 0 or packed_weight.shape[0] % int(block_n) != 0:
+        raise XQTBackendError(
+            "minimal packed FP4 TileLang path requires batch and out_features to be multiples of block sizes"
+        )
+    _require_tilelang()
+    kernel = build_tilelang_fp4_fused_dequant_gemm_kernel(
+        m=int(x.shape[0]),
+        n=int(packed_weight.shape[0]),
+        input_features=int(input_features),
+        group_size=int(group_size),
+        block_m=int(block_m),
+        block_n=int(block_n),
+        threads=int(threads),
+        target_arch=target_arch,
+        has_bias=bias is not None,
+        activation=activation,
+    )
+    if bias is not None:
+        return kernel(x, packed_weight, scale, bias)
+    return kernel(x, packed_weight, scale)
 
 
 _ATTENTION_DESIGN = build_tilelang_attention_design()
@@ -345,6 +466,19 @@ TILELANG_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "baseline": "torch.matmul + epilogue",
         "usage": "Quantized Linear path with dequantize + matmul + bias/activation epilogue.",
     },
+    "fp4_packed_dequant_gemm_epilogue": {
+        "kernel_name": "fp4_packed_dequant_gemm_epilogue",
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 64,
+        "threads": 128,
+        "num_stages": 2,
+        "baseline": "fused TileLang packed FP4 unpack/dequant GEMM + bias/activation epilogue",
+        "usage": "ReferenceFP4Linear path that consumes packed uint8 weight and group-wise scale.",
+        "unpack_stage": "tilelang_fused_gemm_kernel",
+        "fusion_status": "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue",
+        "epilogue_stage": "tilelang_fused_bias_activation",
+    },
 }
 
 
@@ -354,6 +488,8 @@ __all__ = [
     "build_tilelang_attention_design",
     "dequant_gemm_epilogue_reference",
     "dequant_gemm_epilogue_tilelang",
+    "fp4_packed_dequant_gemm_epilogue_reference",
+    "fp4_packed_dequant_gemm_epilogue_tilelang",
     "fused_attention_forward_reference",
     "fused_attention_forward_tilelang",
 ]

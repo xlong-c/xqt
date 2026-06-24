@@ -31,6 +31,8 @@ from .tensorrt import (
     TensorRTPerformanceCheck,
     TensorRTPerformanceMetrics,
     TensorRTPerformanceThresholdReport,
+    TensorRTPluginLibraryCheck,
+    TensorRTPluginValidationResult,
     TensorRTRuntimeBenchmarkResult,
     TensorRTRuntimeExecutionResult,
     TensorRTRuntimeSession,
@@ -44,6 +46,7 @@ from .tensorrt import (
     inspect_tensorrt_engine,
     parse_trtexec_performance,
     summarize_tensorrt_engine_inspector,
+    validate_tensorrt_plugin_libraries,
 )
 from .torch_exporter import (
     TorchExportResult,
@@ -65,6 +68,8 @@ __all__ = [
     "TensorRTPerformanceCheck",
     "TensorRTPerformanceMetrics",
     "TensorRTPerformanceThresholdReport",
+    "TensorRTPluginLibraryCheck",
+    "TensorRTPluginValidationResult",
     "TensorRTRuntimeBenchmarkResult",
     "TensorRTRuntimeExecutionResult",
     "TensorRTRuntimeSession",
@@ -96,5 +101,6 @@ __all__ = [
     "inspect_tensorrt_engine",
     "parse_trtexec_performance",
     "summarize_tensorrt_engine_inspector",
+    "validate_tensorrt_plugin_libraries",
     "validate_onnx",
 ]

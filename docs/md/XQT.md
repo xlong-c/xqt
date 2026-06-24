@@ -49,13 +49,16 @@ Provisional API:
 - `optimize_model`
 - `load_optimization_config`
 - `XQTOptimizationSession`
+- `assess_xqt_readiness`
 - `OptimizedModelResult`
 - `OptimizationConfig`
 - `OptimizationStageConfig`
 - `OptimizationStageResult`
 - `StageAcceptanceConfig`
+- `XQTReadinessReport`,`XQTReadinessScenario`
 - `ArtifactManifest`,`ArtifactRecord`,`MetricRecord`
 - `xdl_setup_to_xqt_context`,`xdl_checkpoint_to_xqt_context`,`load_checkpoint_into_model`
+- `xqt.export.validate_tensorrt_plugin_libraries`,`TensorRTPluginValidationResult`,`TensorRTPluginLibraryCheck`
 
 Internal implementation:
 
@@ -145,6 +148,8 @@ result = session.result()  # OptimizedModelResult
 
 Session 提供 6 种 stage 方法和状态管理: `benchmark()` / `prune()` / `quant()` / `operator()` / `export()` / `analyze()`, 以及 `revert_to()`, `set_example_inputs()`, `result()` 等. 模型快照, 延迟对比和接受度阈值由 session 内部自动管理.
 
+`assess_xqt_readiness()` 提供轻量场景 readiness audit,用于聚合当前 XQT 在 FP4 + TileLang,TensorRT `.so` plugin,剪枝/量化误差分析三个目标场景上的状态. 默认只做快速环境和能力聚合,不触发 TileLang 编译或 CUDA benchmark;设置 `run_tilelang_probe=True` 时才会调用 `validate_tilelang_packed_fp4_fused_gemm()` 做 compile-only 或 runtime probe. 返回的 `XQTReadinessReport` 会包含 `overall_status`,`status_counts`,`required_action_count`;每个 `XQTReadinessScenario` 会包含 `status`,`evidence`,`gaps`,`required_actions`,`distance_to_ready`,用于回答"还差哪些证据或动作才能可用". `XQTReadinessReport.write_json()`, `write_markdown()` 和 `write_artifacts()` 可把同一份结论落成 JSON 和 Markdown 产物,适合 CI,artifact 或人工评审留档;`add_to_manifest()` 可把 readiness status,scenario status 和报告 artifact 记录附加到 `ArtifactManifest`. 交互式优化时也可以直接调用 `XQTOptimizationSession.readiness()`,它会把 readiness report 写入 session metrics/artifacts,并同步更新 session manifest.
+
 ### 第二配置: stage workflow YAML
 
 `OptimizationConfig` 通过 YAML 声明式定义多阶段优化链路, 通过 `optimize_model()` 运行. 原则上除了以上两种配置方式, XQT 不提供其他配置路径 (不要新增 CLI 参数解析, JSON-shaped Python dict 硬编码 workflow 等).
@@ -172,7 +177,7 @@ Session 提供 6 种 stage 方法和状态管理: `benchmark()` / `prune()` / `q
 
 ## 6. Recipe 约定
 
-- 量化 recipe 必须显式写 `backend` 和 `policy`;`backend` 表示执行/运行时后端,如 `torchao`,`onnxruntime_qdq`,`pytorch`,`tilelang`;`method` 表示量化算法,如 `awq`,`gptq`;`strategy` 表示后端内的具体模式或 dtype 策略,如 `static_int8`,`dynamic_int8`,`fp8_dynamic`. **新增**: recipe 的 `strategy` 必须通过 `_STRATEGY_NATURE` 映射表获得明确的 `nature` 分类;新策略若未分类默认为 `UNKNOWN`,直到有人在 capability 矩阵中标注.
+- 量化 recipe 必须显式写 `backend` 和 `policy`;`backend` 表示执行/运行时后端,如 `torchao`,`onnxruntime_qdq`,`pytorch`,`tilelang`;`method` 表示量化算法,如 `awq`,`gptq`;`strategy` 表示后端内的具体模式或 dtype 策略,如 `static_int8`,`dynamic_int8`,`fp8_dynamic`. FP4 是数值格式和存储表示,不是 backend;不要写成 `backend: fp4`,应写 `backend: pytorch` 或 `backend: tilelang` 加 `strategy: fp4_weight_only` / `policy.dtype: fp4`. **新增**: recipe 的 `strategy` 必须通过 `_STRATEGY_NATURE` 映射表获得明确的 `nature` 分类;新策略若未分类默认为 `UNKNOWN`,直到有人在 capability 矩阵中标注.
 - 量化报告和 capability 描述必须区分 `nature` (TRUE 真量化 vs PSEUDO 伪量化),`fusion_applied` (算子融合) 和 `dequant_nodes_eliminated` (去量化节点消除). 伪量化方案不得在报告中暗示或写成"已获得算力提升".
 - AWQ/GPTQ 这类算法不能写成 `backend: awq` 或 `backend: gptq`,应写成 `backend: pytorch` 或 `backend: tilelang` 加 `method: awq` / `method: gptq`.
 - QDQ/PTQ 执行时必须由调用方显式传入 `calibration_inputs`;recipe 只描述 backend/policy/artifact.
@@ -229,10 +234,10 @@ stages:
 量化:
 
 - torchao weight-only / FP8 adapter.
-- `backend: pytorch` 下的 `strategy: fp4_weight_only` 已有 group-wise reference Linear weight-only 路径,支持分组 scale 量化和误差分析;当前还可通过 `ReferenceFP4Linear -> dequant_gemm_epilogue` 的最小桥接进入 TileLang operator stage,但这仍不代表高性能 FP4 kernel 已完成.
+- `backend: pytorch` 下的 `strategy: fp4_weight_only` 已有 group-wise reference Linear weight-only 路径,支持分组 scale 量化和误差分析. 这里的 FP4 指 data format / packed storage,执行后端仍是 PyTorch eager,TileLang 或 TensorRT plugin 等 operator backend. 当前还可通过 `ReferenceFP4Linear -> dequant_gemm_epilogue` 的最小桥接进入 TileLang operator stage,并提供 `xqt/recipes/operator/tilelang/fp4_tilelang_workflow.yaml` 作为声明式 workflow 示例. TileLang 报告会明确标记 `weight_representation=packed_signed_int4_plus_group_scale`,`consumes_packed_weight=true`,`unpack_stage=tilelang_fused_gemm_kernel`,`epilogue_stage=tilelang_fused_bias_activation`;这说明 operator stage 已直接消费 packed weight,并把 unpack/dequant/GEMM/bias/activation 推进到单个 TileLang kernel. `validate_tilelang_packed_fp4_fused_gemm()` 已提供可复用验证入口: 无 CUDA 时返回 structured skipped,`compile_only=true` 时可做 explicit `target_arch` 编译探测,真 CUDA 上会输出 allclose,error,latency 和 speedup. 当前机器只能完成编译验证,不能替代真实 CUDA runtime 数值和性能验证.
 - ONNX Runtime static QDQ INT8 adapter.
 - activation statistics 和 calibration summary;校准输入来自外部 `calibration_inputs`.
-- layer sensitivity,mixed precision recommendation,以及按层输出/权重分布统计.
+- layer sensitivity,mixed precision recommendation,以及按层输出/权重分布统计.`analysis.include_statistics=true` 时,analyze stage 会在 `context.metrics["analysis"]["layer_statistics"]` 输出 output/weight 的 float,quantized,error 分布;`xqt/recipes/analysis/quant_layer_statistics_workflow.yaml` 提供 `quant -> analyze` 的声明式 workflow 示例.
 
 **量化语义约定** (真量化 vs 伪量化 vs 融合 vs 去量化节点):
 
@@ -244,7 +249,7 @@ XQT 要求所有量化策略必须标明 `nature` 字段,区分以下几种优�
 | `PSEUDO` | 存储低精度,计算前反量化到 fp16,走 fp16 MMA | 仅内存带宽 | K=16 | `fp8_weight_only`, `int4_weight_only`, `int8_weight_only`, `dynamic_int8` |
 | `UNKNOWN` | 未分类 | 未知 | 未知 | 新策略默认值 |
 
-关键判断依据: 只需看一条——**MMA 指令的 K 维度是否翻倍**。
+关键判断依据: 只需看一条--**MMA 指令的 K 维度是否翻倍**.
 - K=32: 真量化,算力翻倍 (`mma.sync m16n8k32 f32.e4m3.e4m3.f32`)
 - K=16: 伪量化,算力不变 (`mma.sync m16n8k16 f32.f16.f16.f32`)
 
@@ -273,7 +278,7 @@ XQT 要求所有量化策略必须标明 `nature` 字段,区分以下几种优�
 算子优化:
 
 - built-in executor 当前以 `torch_compile` 为主要实际执行路径.
-- TileLang 当前已有两个最小可执行 target: `attention` 和 `dequant_gemm_epilogue` pattern 都可在 toy model 上进入 executor,完成模块替换,numeric diff 和 benchmark;CPU 路径走 reference fallback,CUDA 路径已有最小真实 TileLang attention kernel 与 dequant GEMM kernel,但当前仍限定在 float16,`attention` 的 `dropout_p=0` / `seq_kv >= seq_q`,以及 dequant GEMM 的最小 block 对齐约束.
+- TileLang 当前已有两个最小可执行 target: `attention` 和 `dequant_gemm_epilogue` pattern 都可在 toy model 上进入 executor,完成模块替换,numeric diff 和 benchmark;CPU 路径走 reference fallback,CUDA 路径已有最小真实 TileLang attention kernel,dequant GEMM kernel,以及 packed FP4 单 kernel unpack/dequant/GEMM/bias/activation core,但当前仍限定在 float16,`attention` 的 `dropout_p=0` / `seq_kv >= seq_q`,以及 dequant GEMM 的最小 block 对齐约束.
 - Triton/CuTile/CUTLASS/custom CUDA 当前主要还是 capability/adapter/report 边界.
 - TensorRT/OpenVINO 自身 graph fusion,kernel selection 或 engine/IR 优化属于部署后端收益,不写成 XQT operator replacement gain.
 
@@ -289,16 +294,17 @@ TensorRT 自定义插件约定:
 
 - `export.targets[].params.plugin_libraries`: `.so` 路径列表. `trtexec` 后端会展开为 `--dynamicPlugins` 和 `--setPluginsToSerialize`; `python_api` 后端会在 build / inspect / runtime benchmark 前显式 `ctypes.CDLL(..., RTLD_GLOBAL)` 加载.
 - `export.targets[].params.serialize_plugin_libraries`: 是否把插件库附带写入 `trtexec --setPluginsToSerialize`,默认 `true`.
-- preflight 会检查每个插件库路径是否存在,但不会尝试编译或校验插件 ABI.
+- preflight 默认只检查每个插件库路径是否存在;设置 `export.targets[].params.validate_plugin_libraries_loadable: true` 时,preflight 会用 `ctypes.CDLL(..., RTLD_GLOBAL)` 做 opt-in loadability 校验并记录 `loaded_plugin_libraries`. 这只证明 `.so` 可加载,不证明 TensorRT plugin ABI 正确.
+- `validate_tensorrt_plugin_libraries(plugin_libraries, validate_loadability=True)` 可在不构建 engine 的情况下返回 structured plugin validation report,覆盖 `not_requested`,`missing`,`present`,`ok`,`load_failed` 状态. 它只验证文件存在和可被 `ctypes.RTLD_GLOBAL` 加载,不能替代 TensorRT plugin ABI 或 engine runtime 验证.
 
 场景 readiness 矩阵:
 
 | 场景 | 当前状态 | 已验证证据 | 主要缺口 |
 | --- | --- | --- | --- |
-| FP4 量化 | 半可用 | `xqt/quant/fp4_backend.py` 已提供 `pytorch + fp4_weight_only` 的 group-wise reference Linear weight-only 路径,并有执行测试;`ReferenceFP4Linear` 还能通过最小桥接进入 TileLang `dequant_gemm_epilogue` operator stage | 还没有高性能 packed kernel,也没有完整 AWQ/GPTQ 闭环 |
-| TileLang megakernel | 半可用 | `xqt/operator_opt/executor.py` 的 `attention` 和 `dequant_gemm_epilogue` target 已能进入 executor,并在 report 中区分 `reference_fallback` 与 `cuda_tilelang_entry`;`xqt/operator_opt/kernels/tilelang/attention.py` 已接入最小真实 CUDA attention kernel 与 dequant GEMM kernel | 仍只覆盖 attention/fp16/`dropout_p=0`/`seq_kv>=seq_q` 和带最小 block 对齐约束的 dequant GEMM,还没有更完整的 TileLang kernel 家族 |
-| TensorRT + `.so` 插件 | 半可用,接近工程可用 | `xqt/export/tensorrt.py` 已支持 plugin libraries 的 build / inspect / runtime load,preflight 也会校验路径 | 仍缺真实插件 ABI 和目标部署环境的端到端验证 |
-| 常规剪枝 / 误差分析 | 已基本可用 | activation drift,layer sensitivity,layer weight diff,输出/权重分布统计都已在 `xqt/quant/` 和 `xqt/analysis/` 接通 | 更高层任务准确率和业务指标仍需外部评测链路 |
+| FP4 量化 | 半可用 | `xqt/quant/fp4_backend.py` 已提供 `pytorch + fp4_weight_only` 的 group-wise reference Linear weight-only 路径,并有执行测试;`ReferenceFP4Linear` 还能通过最小桥接进入 TileLang `dequant_gemm_epilogue` operator stage;`xqt/recipes/operator/tilelang/fp4_tilelang_workflow.yaml` 已提供 YAML workflow 入口;operator report 明确标记 packed weight 被消费,CUDA 路径的 unpack/dequant/GEMM/bias/activation 已推进到单 TileLang kernel;`validate_tilelang_packed_fp4_fused_gemm()` 已覆盖 no-CUDA skipped 和 `target_arch=sm_80` compile-only 探测 | 还没有真实 CUDA runtime 数值和性能验证,也没有完整 AWQ/GPTQ 闭环 |
+| TileLang megakernel | 半可用 | `xqt/operator_opt/executor.py` 的 `attention` 和 `dequant_gemm_epilogue` target 已能进入 executor,并在 report 中区分 `reference_fallback` 与 `cuda_tilelang_entry`;`xqt/operator_opt/kernels/tilelang/attention.py` 已接入最小真实 CUDA attention kernel,dequant GEMM kernel,以及 packed FP4 fused unpack/dequant/GEMM/bias/activation core;`xqt/operator_opt/backends/tilelang_validation.py` 可在真 CUDA 上产出 correctness + latency + speedup 结构化结果 | 仍只覆盖 attention/fp16/`dropout_p=0`/`seq_kv>=seq_q` 和带最小 block 对齐约束的 dequant GEMM;packed FP4 megakernel 还缺真实 CUDA runtime 验证和性能基准 |
+| TensorRT + `.so` 插件 | 半可用,接近工程可用 | `xqt/export/tensorrt.py` 已支持 plugin libraries 的 build / inspect / runtime load,preflight 会校验路径;`validate_plugin_libraries_loadable=true` 时还可 opt-in 验证 `.so` 能被 `ctypes` 真实加载 | 仍缺真实 TensorRT plugin ABI 和目标部署环境的端到端验证 |
+| 常规剪枝 / 误差分析 | 已基本可用 | activation drift,layer sensitivity,layer weight diff,输出/权重分布统计都已在 `xqt/quant/` 和 `xqt/analysis/` 接通;`xqt/recipes/analysis/quant_layer_statistics_workflow.yaml` 已可通过 `optimize_model()` 跑通并输出 `layer_statistics` | 更高层任务准确率和业务指标仍需外部评测链路 |
 
 ## 8. 当前最小闭环
 

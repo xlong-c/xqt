@@ -426,23 +426,51 @@ class _TileLangDequantGemmWrapper(nn.Module):
         self.settings = dict(settings)
         self.last_execution_mode = "not_run"
         self.last_execution_reason: str | None = None
+        self.last_weight_source = "not_run"
+        self.last_weight_representation = "unknown"
+        self.last_consumes_packed_weight = False
+        self.last_unpack_stage: str | None = None
+        self.last_kernel_pattern = "dequant_gemm_epilogue"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         qweight: torch.Tensor | None = None
         scale: torch.Tensor | None = None
         bias: torch.Tensor | None = None
         activation: str | None = None
-        bridge = getattr(self.module, "tilelang_dequant_gemm_args", None)
-        if callable(bridge):
-            qweight, scale, bias, activation = bridge(
+        kernel_pattern = "dequant_gemm_epilogue"
+        extra_kwargs: dict[str, Any] = {}
+        packed_bridge = getattr(self.module, "tilelang_packed_dequant_gemm_args", None)
+        dense_bridge = getattr(self.module, "tilelang_dequant_gemm_args", None)
+        if callable(packed_bridge):
+            packed_weight, scale, bias, activation, input_features, group_size = packed_bridge(
                 dtype=x.dtype,
                 device=x.device,
             )
+            qweight = packed_weight
+            kernel_pattern = "fp4_packed_dequant_gemm_epilogue"
+            extra_kwargs = {
+                "input_features": int(input_features),
+                "group_size": int(group_size),
+            }
+            self.last_weight_source = "reference_fp4_linear_packed_bridge"
+            self.last_weight_representation = "packed_signed_int4_plus_group_scale"
+            self.last_consumes_packed_weight = True
+        elif callable(dense_bridge):
+            qweight, scale, bias, activation = dense_bridge(
+                dtype=x.dtype,
+                device=x.device,
+            )
+            self.last_weight_source = "reference_fp4_linear_dense_bridge"
+            self.last_weight_representation = "dense_unpacked_codes_plus_expanded_scale"
+            self.last_consumes_packed_weight = False
         else:
             qweight = getattr(self.module, "qweight", None)
             scale = getattr(self.module, "scale", None)
             bias = getattr(self.module, "bias", None)
             activation = getattr(self.module, "activation", None)
+            self.last_weight_source = "module_qweight_scale"
+            self.last_weight_representation = "dense_qweight_plus_scale"
+            self.last_consumes_packed_weight = False
         if not isinstance(qweight, torch.Tensor) or not isinstance(scale, torch.Tensor):
             raise XQTBackendError(
                 "TileLang dequant GEMM target requires qweight/scale tensors or a tilelang_dequant_gemm_args bridge"
@@ -452,22 +480,32 @@ class _TileLangDequantGemmWrapper(nn.Module):
         self.last_execution_mode = (
             "cuda_tilelang_entry" if uses_cuda else "reference_fallback"
         )
+        self.last_kernel_pattern = kernel_pattern
+        self.last_unpack_stage = (
+            "tilelang_fused_gemm_kernel"
+            if uses_cuda and kernel_pattern == "fp4_packed_dequant_gemm_epilogue"
+            else "eager_reference_fallback"
+            if kernel_pattern == "fp4_packed_dequant_gemm_epilogue"
+            else None
+        )
         self.last_execution_reason = (
             None
             if uses_cuda
             else "TileLang dequant GEMM kernel requires CUDA tensors; using configured fallback."
         )
         return run_tilelang_kernel(
-            "dequant_gemm_epilogue",
+            kernel_pattern,
             x,
             qweight,
             scale,
             bias,
             activation=activation,
+            **extra_kwargs,
             block_m=int(self.settings.get("block_m", 64)),
             block_n=int(self.settings.get("block_n", 64)),
             threads=int(self.settings.get("threads", 128)),
             num_stages=int(self.settings.get("num_stages", 2)),
+            target_arch=self.settings.get("target_arch"),
             fallback=self.fallback,
         )
 
@@ -490,7 +528,23 @@ class _TileLangDequantGemmWrapper(nn.Module):
                 "supported_activations": [None, "gelu", "silu", "relu"],
                 "supported_patterns": ["dequant_gemm_epilogue"],
                 "supports_reference_fp4_linear_bridge": True,
+                "supports_packed_fp4_bridge": True,
             },
+            "kernel_pattern": self.last_kernel_pattern,
+            "weight_source": self.last_weight_source,
+            "weight_representation": self.last_weight_representation,
+            "consumes_packed_weight": self.last_consumes_packed_weight,
+            "unpack_stage": self.last_unpack_stage,
+            "fusion_status": (
+                "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue"
+                if self.last_unpack_stage == "tilelang_fused_gemm_kernel"
+                else None
+            ),
+            "epilogue_stage": (
+                "tilelang_fused_bias_activation"
+                if self.last_unpack_stage == "tilelang_fused_gemm_kernel"
+                else None
+            ),
             "fallback": self.fallback,
             "settings": dict(self.settings),
         }
@@ -532,7 +586,10 @@ def _build_tilelang_candidate_model(
             "TileLang attention target requires nn.MultiheadAttention or a module with an .attention submodule"
         )
     if patterns == ["dequant_gemm_epilogue"]:
-        if callable(getattr(target_model, "tilelang_dequant_gemm_args", None)) or all(
+        if (
+            callable(getattr(target_model, "tilelang_packed_dequant_gemm_args", None))
+            or callable(getattr(target_model, "tilelang_dequant_gemm_args", None))
+        ) or all(
             hasattr(target_model, name) for name in ("qweight", "scale")
         ):
             return _TileLangDequantGemmWrapper(
@@ -541,7 +598,10 @@ def _build_tilelang_candidate_model(
                 settings=target.tilelang,
             )
         for child_name, child in target_model.named_children():
-            if callable(getattr(child, "tilelang_dequant_gemm_args", None)) or all(
+            if (
+                callable(getattr(child, "tilelang_packed_dequant_gemm_args", None))
+                or callable(getattr(child, "tilelang_dequant_gemm_args", None))
+            ) or all(
                 hasattr(child, name) for name in ("qweight", "scale")
             ):
                 target_model = copy.deepcopy(target_model)

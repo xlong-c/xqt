@@ -303,6 +303,10 @@ class AnalysisConfig:
         default_factory=AnalysisRecommendationConfig
     )
     include_weight_diff: bool = True
+    include_statistics: bool = False
+    sample_budget: Optional[int] = None
+    sample_seed: int = 0
+    histogram_bins: int = 32
     export: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
 
 

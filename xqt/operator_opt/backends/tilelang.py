@@ -16,6 +16,8 @@ from ..kernels.tilelang import (
     TILELANG_KERNEL_METADATA,
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
+    fp4_packed_dequant_gemm_epilogue_reference,
+    fp4_packed_dequant_gemm_epilogue_tilelang,
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
 )
@@ -85,6 +87,12 @@ TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
         reference=dequant_gemm_epilogue_reference,
         kernel=dequant_gemm_epilogue_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["dequant_gemm_epilogue"]),
+    ),
+    "fp4_packed_dequant_gemm_epilogue": TileLangKernelSpec(
+        pattern="fp4_packed_dequant_gemm_epilogue",
+        reference=fp4_packed_dequant_gemm_epilogue_reference,
+        kernel=fp4_packed_dequant_gemm_epilogue_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["fp4_packed_dequant_gemm_epilogue"]),
     ),
 }
 

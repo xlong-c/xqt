@@ -25,6 +25,8 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     # int4 weight-only: W4A16, dequant before mma, K=16
     "weight_only_int4": QuantizationNature.PSEUDO,
     "int4_weight_only": QuantizationNature.PSEUDO,
+    # fp4 weight-only: W4A16, packed storage with dequant before fp16 MMA
+    "fp4_weight_only": QuantizationNature.PSEUDO,
     # dynamic int8: observer-based quantize/dequantize, not native mma
     "dynamic_int8": QuantizationNature.PSEUDO,
     "int8_dynamic_activation_int8_weight": QuantizationNature.PSEUDO,

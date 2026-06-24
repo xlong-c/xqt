@@ -30,6 +30,7 @@ from xqt.pipeline.passes import (
     QuantPass,
 )
 from xqt.pipeline.runner import create_context
+from xqt.readiness import XQTReadinessReport, assess_xqt_readiness
 
 
 STAGE_KINDS = {
@@ -588,6 +589,68 @@ class XQTOptimizationSession:
 
     def set_calibration_inputs(self, calibration_inputs: Any) -> None:
         self._state.context.calibration_inputs = calibration_inputs
+
+    def readiness(
+        self,
+        *,
+        name: str = "readiness",
+        write_artifacts: bool = True,
+        run_tilelang_probe: bool = False,
+        tilelang_compile_only: bool = True,
+        tilelang_target_arch: str | None = "sm_80",
+        tilelang_warmup: int = 1,
+        tilelang_iterations: int = 2,
+        tensorrt_plugin_libraries: list[str | Path] | None = None,
+        validate_tensorrt_plugin_loadability: bool = False,
+        trtexec_path: str = "trtexec",
+    ) -> XQTReadinessReport:
+        """Assess XQT scenario readiness and attach the report to this session."""
+
+        report = assess_xqt_readiness(
+            run_tilelang_probe=run_tilelang_probe,
+            tilelang_compile_only=tilelang_compile_only,
+            tilelang_target_arch=tilelang_target_arch,
+            tilelang_warmup=tilelang_warmup,
+            tilelang_iterations=tilelang_iterations,
+            tensorrt_plugin_libraries=tensorrt_plugin_libraries,
+            validate_tensorrt_plugin_loadability=validate_tensorrt_plugin_loadability,
+            trtexec_path=trtexec_path,
+        )
+        artifact_paths: dict[str, Path] = {}
+        if write_artifacts:
+            artifact_dir = Path(
+                str(
+                    self._state.config.project.get(
+                        "artifact_dir",
+                        "artifacts/xqt/optimization",
+                    )
+                )
+            )
+            artifact_paths = report.write_artifacts(
+                artifact_dir / name,
+                stem=name,
+            )
+            self._state.context.artifacts[f"{name}_json"] = artifact_paths["json"]
+            self._state.context.artifacts[f"{name}_markdown"] = artifact_paths["markdown"]
+        self._state.context.metrics[name] = report.to_dict()
+        if self._state.context.manifest is not None:
+            report.add_to_manifest(
+                self._state.context.manifest,
+                artifact_paths=artifact_paths,
+            )
+            if write_artifacts:
+                manifest_path = Path(
+                    str(
+                        self._state.config.project.get(
+                            "artifact_dir",
+                            "artifacts/xqt/optimization",
+                        )
+                    )
+                ) / "manifest.json"
+                self._state.context.manifest.write_json(manifest_path)
+                self._state.context.artifacts["manifest"] = manifest_path
+        self._outputs_written = False
+        return report
 
     def revert_to(self, stage_name: str) -> None:
         if stage_name not in self._state.model_snapshots:

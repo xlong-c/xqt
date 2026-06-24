@@ -167,6 +167,21 @@ class ReferenceFP4Linear(nn.Module):
             bias = self.bias.to(device=device, dtype=dtype)
         return qweight, scale, bias, None
 
+    def tilelang_packed_dequant_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, int, int]:
+        """Expose packed FP4 inputs for TileLang operator wrappers."""
+
+        packed_weight = self.packed_weight.to(device=device)
+        scale = self.weight_scale.to(device=device, dtype=dtype)
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=device, dtype=dtype)
+        return packed_weight, scale, bias, None, self.input_features, self.group_size
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight().to(device=inputs.device, dtype=inputs.dtype)
         bias = None

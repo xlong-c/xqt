@@ -32,6 +32,10 @@ from .tilelang import (
     tilelang_validation_thresholds,
     tilelang_version,
 )
+from .tilelang_validation import (
+    TileLangFP4ValidationResult,
+    validate_tilelang_packed_fp4_fused_gemm,
+)
 from .triton import (
     TRITON_KERNEL_REGISTRY,
     TritonKernelSpec,
@@ -51,6 +55,7 @@ __all__ = [
     "CutlassCompileSettings",
     "CutlassKernelSpec",
     "TileLangCompileSettings",
+    "TileLangFP4ValidationResult",
     "TileLangKernelSpec",
     "TritonKernelSpec",
     "build_cutile_artifact_metadata",
@@ -72,4 +77,5 @@ __all__ = [
     "run_triton_kernel",
     "tilelang_validation_thresholds",
     "tilelang_version",
+    "validate_tilelang_packed_fp4_fused_gemm",
 ]

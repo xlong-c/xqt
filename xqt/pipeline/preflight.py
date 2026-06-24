@@ -23,6 +23,7 @@ from xqt.operator_opt.capability import describe_operator_backend_capability
 from xqt.operator_opt.cuda_extension import describe_custom_cuda_extension_capability
 from xqt.prune import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
+from xqt.export.tensorrt import validate_tensorrt_plugin_libraries
 
 
 @dataclass
@@ -678,15 +679,46 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 else:
                     for plugin_index, plugin_path in enumerate(plugin_libraries):
                         path = Path(str(plugin_path))
+                        plugin_validation = validate_tensorrt_plugin_libraries(
+                            [path],
+                            validate_loadability=bool(
+                                target.params.get(
+                                    "validate_plugin_libraries_loadable",
+                                    False,
+                                )
+                            ),
+                        )
+                        plugin_check = plugin_validation.plugin_libraries[0]
                         report.add(
                             f"{prefix}.plugin_libraries.{plugin_index}",
-                            path.is_file(),
+                            plugin_check.exists,
                             "TensorRT plugin library found"
-                            if path.is_file()
+                            if plugin_check.exists
                             else "TensorRT plugin library missing",
-                            level="info" if path.is_file() else "warning",
-                            path=str(path),
+                            level="info" if plugin_check.exists else "warning",
+                            path=plugin_check.path,
+                            validation=plugin_check.to_dict(),
                         )
+                        if bool(target.params.get("validate_plugin_libraries_loadable", False)):
+                            if plugin_check.loadable is True:
+                                report.add(
+                                    f"{prefix}.plugin_libraries.{plugin_index}.loadable",
+                                    True,
+                                    "TensorRT plugin library loaded with ctypes RTLD_GLOBAL",
+                                    level="info",
+                                    path=plugin_check.path,
+                                    loaded_plugin_libraries=plugin_check.loaded_plugin_libraries,
+                                    validation=plugin_check.to_dict(),
+                                )
+                            else:
+                                report.add(
+                                    f"{prefix}.plugin_libraries.{plugin_index}.loadable",
+                                    False,
+                                    f"TensorRT plugin library failed to load: {plugin_check.error}",
+                                    level="error",
+                                    path=plugin_check.path,
+                                    validation=plugin_check.to_dict(),
+                                )
         elif target.format == "openvino":
             _check_optional_dependency(
                 report,

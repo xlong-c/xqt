@@ -205,6 +205,21 @@ def _sample_flat_tensor(
     return flat.index_select(0, indices)
 
 
+def _module_weight_tensor(module: nn.Module) -> Optional[torch.Tensor]:
+    weight = getattr(module, "weight", None)
+    if isinstance(weight, torch.Tensor):
+        return weight.detach()
+    dequantize_weight = getattr(module, "dequantize_weight", None)
+    if callable(dequantize_weight):
+        try:
+            value = dequantize_weight()
+        except Exception:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.detach()
+    return None
+
+
 def _distribution_summary(
     tensor: torch.Tensor,
     *,
@@ -328,9 +343,9 @@ def layer_statistics_rows(
 
         reference_module = reference_model.get_submodule(name)
         candidate_module = candidate_model.get_submodule(name)
-        reference_weight = getattr(reference_module, "weight", None)
-        candidate_weight = getattr(candidate_module, "weight", None)
-        if not isinstance(reference_weight, torch.Tensor) or not isinstance(candidate_weight, torch.Tensor):
+        reference_weight = _module_weight_tensor(reference_module)
+        candidate_weight = _module_weight_tensor(candidate_module)
+        if reference_weight is None or candidate_weight is None:
             continue
         if reference_weight.shape != candidate_weight.shape:
             continue

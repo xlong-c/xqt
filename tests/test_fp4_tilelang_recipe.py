@@ -38,3 +38,8 @@ def test_fp4_tilelang_workflow_recipe_runs_via_optimize_model() -> None:
     assert target["metadata"]["kernel_constraints"]["supported_patterns"] == [
         "dequant_gemm_epilogue"
     ]
+    assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
+    assert target["metadata"]["weight_source"] == "reference_fp4_linear_packed_bridge"
+    assert target["metadata"]["weight_representation"] == "packed_signed_int4_plus_group_scale"
+    assert target["metadata"]["consumes_packed_weight"] is True
+    assert target["metadata"]["unpack_stage"] == "eager_reference_fallback"
