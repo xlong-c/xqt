@@ -16,7 +16,7 @@ stages:
     save_model: false
     params:
       backend: onnxruntime_qdq
-      strategy: static_int8
+      strategy: static_qdq_int8
       policy:
         onnx_path: /root/others/rtdetr-artifacts/onnx-community-rtdetr_r18vd-direct.onnx
         output_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly/quant/hf_rtdetr_r18vd_qdq.onnx

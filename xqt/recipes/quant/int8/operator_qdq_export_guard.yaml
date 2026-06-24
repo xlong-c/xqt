@@ -15,7 +15,7 @@ compression:
   quant:
     enabled: true
     backend: onnxruntime_qdq
-    strategy: static_int8
+    strategy: static_qdq_int8
     policy:
       input_names: [input]
       sample_limit: 1

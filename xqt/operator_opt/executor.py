@@ -37,6 +37,11 @@ from .backends.cutlass import (
     build_cutlass_artifact_metadata,
     list_cutlass_kernel_specs,
 )
+from .backends.cute_dsl import (
+    CuteDSLCompileSettings,
+    build_cute_dsl_artifact_metadata,
+    list_cute_dsl_kernel_specs,
+)
 from .backends.tilelang import (
     TileLangCompileSettings,
     build_tilelang_artifact_metadata,
@@ -245,12 +250,38 @@ def _backend_metadata(
             "execution_latency_ms": None,
             "status": "not_executed",
         }
+    if target.backend == "cute_dsl":
+        tile_shape_raw = target.cute_dsl.get("tile_shape", [128, 128, 64])
+        cluster_shape_raw = target.cute_dsl.get("cluster_shape")
+        settings = CuteDSLCompileSettings(
+            target_arch=target.cute_dsl.get("target_arch"),
+            cache_dir=target.cute_dsl.get("cache_dir"),
+            tile_shape=tuple(int(value) for value in tile_shape_raw),
+            cluster_shape=(
+                tuple(int(value) for value in cluster_shape_raw)
+                if cluster_shape_raw is not None
+                else None
+            ),
+            pass_configs=dict(target.cute_dsl.get("pass_configs", {})),
+        )
+        metadata["kernel_registry"] = list_cute_dsl_kernel_specs()
+        selected_patterns = target.patterns or ["gemm_epilogue"]
+        metadata["cute_dsl_artifacts"] = {
+            pattern: build_cute_dsl_artifact_metadata(pattern, settings)
+            for pattern in selected_patterns
+            if pattern in metadata["kernel_registry"]
+        }
+        metadata["latency"] = {
+            "compile_latency_ms": None,
+            "execution_latency_ms": None,
+            "status": "not_executed",
+        }
     return metadata
 
 
 def _artifact_paths_from_backend_metadata(metadata: dict[str, Any]) -> dict[str, str]:
     artifact_paths: dict[str, str] = {}
-    for backend in ("tilelang", "cutile", "cutlass"):
+    for backend in ("tilelang", "cutile", "cutlass", "cute_dsl"):
         backend_artifacts = metadata.get(f"{backend}_artifacts")
         if not isinstance(backend_artifacts, Mapping):
             continue
@@ -799,6 +830,17 @@ def build_operator_optimization_plan(
                     ),
                     "pass_configs": dict(target.cutlass.pass_configs),
                 },
+                cute_dsl={
+                    "target_arch": target.cute_dsl.target_arch,
+                    "cache_dir": target.cute_dsl.cache_dir,
+                    "tile_shape": list(target.cute_dsl.tile_shape),
+                    "cluster_shape": (
+                        list(target.cute_dsl.cluster_shape)
+                        if target.cute_dsl.cluster_shape is not None
+                        else None
+                    ),
+                    "pass_configs": dict(target.cute_dsl.pass_configs),
+                },
             )
         )
     return OperatorOptimizationExecutionPlan(
@@ -885,7 +927,7 @@ def execute_operator_optimization_plan(
         skip_reason = _quant_runtime_guard(context, target)
         if skip_reason is None and target.backend == "torch_compile" and not capability.available:
             skip_reason = "torch.compile is not available in the current PyTorch build"
-        if skip_reason is None and target.backend in {"triton", "cutile", "cutlass", "custom_cuda"}:
+        if skip_reason is None and target.backend in {"triton", "cutile", "cutlass", "cute_dsl", "custom_cuda"}:
             if not torch.cuda.is_available():
                 skip_reason = f"{target.backend} requires CUDA-capable hardware"
             else:

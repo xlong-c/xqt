@@ -12,12 +12,15 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from xqt.core.artifact import ArtifactManifest, ArtifactRecord, MetricRecord
+from xqt.core.reporting import OptimizationCapability, reporting_schema_payload
+from xqt.export.capability import deployment_capability_matrix
 from xqt.export.tensorrt import validate_tensorrt_plugin_libraries
 from xqt.operator_opt.backends.tilelang_validation import (
     TileLangFP4ValidationResult,
     validate_tilelang_packed_fp4_fused_gemm,
 )
 from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.prune.capability import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
 
 
@@ -58,6 +61,8 @@ class XQTReadinessReport:
 
     overall_status: str
     scenarios: list[XQTReadinessScenario] = field(default_factory=list)
+    capability_matrix: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    reporting_schemas: dict[str, Any] = field(default_factory=reporting_schema_payload)
 
     @property
     def status_counts(self) -> dict[str, int]:
@@ -82,6 +87,8 @@ class XQTReadinessReport:
             "status_counts": self.status_counts,
             "required_action_count": self.required_action_count,
             "scenarios": [scenario.to_dict() for scenario in self.scenarios],
+            "capability_matrix": self.capability_matrix,
+            "reporting_schemas": self.reporting_schemas,
         }
 
     def to_markdown(self) -> str:
@@ -112,6 +119,26 @@ class XQTReadinessReport:
                 )
                 + " |"
             )
+        if self.capability_matrix:
+            lines.extend(
+                [
+                    "",
+                    "## Capability matrix",
+                    "",
+                    "| Domain | Count | Statuses |",
+                    "| --- | --- | --- |",
+                ]
+            )
+            for domain, capabilities in sorted(self.capability_matrix.items()):
+                statuses = sorted(
+                    {
+                        str(capability.get("status", "unknown"))
+                        for capability in capabilities
+                    }
+                )
+                lines.append(
+                    f"| {domain} | {len(capabilities)} | `{', '.join(statuses)}` |"
+                )
         for scenario in self.scenarios:
             lines.extend(
                 [
@@ -187,6 +214,22 @@ class XQTReadinessReport:
                 metadata={
                     "status_counts": self.status_counts,
                     "required_action_count": self.required_action_count,
+                    "capability_domains": sorted(self.capability_matrix),
+                    "reporting_schemas": self.reporting_schemas,
+                },
+            )
+        )
+        capability_count = sum(
+            len(capabilities) for capabilities in self.capability_matrix.values()
+        )
+        manifest.add_metric(
+            MetricRecord(
+                name="readiness.capability_matrix.count",
+                value=capability_count,
+                passed=True,
+                metadata={
+                    "capability_matrix": self.capability_matrix,
+                    "reporting_schemas": self.reporting_schemas,
                 },
             )
         )
@@ -234,6 +277,118 @@ def _overall_status(scenarios: Sequence[XQTReadinessScenario]) -> str:
     if "partial" in statuses or "not_verified" in statuses:
         return "partial"
     return "unknown"
+
+
+def _capability_dict(capability: OptimizationCapability) -> dict[str, Any]:
+    return capability.to_dict()
+
+
+def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]]]:
+    quantization = [
+        describe_quant_backend_capability(
+            "torchao",
+            method="dynamic_int8",
+            strategy="dynamic_int8",
+        ).to_optimization_capability(),
+        describe_quant_backend_capability(
+            "torchao",
+            method="weight_only_int4",
+            strategy="weight_only_int4",
+        ).to_optimization_capability(),
+        describe_quant_backend_capability(
+            "torchao",
+            method="fp8_dynamic",
+            strategy="fp8_dynamic",
+        ).to_optimization_capability(),
+        describe_quant_backend_capability(
+            "pytorch",
+            method="awq",
+            strategy="fp4_weight_only",
+            policy={"dtype": "fp4", "scheme": "weight_only"},
+        ).to_optimization_capability(),
+        describe_quant_backend_capability(
+            "onnxruntime_qdq",
+            method="static_qdq_int8",
+            strategy="static_qdq_int8",
+        ).to_optimization_capability(),
+    ]
+    operator = [
+        describe_operator_backend_capability("torch_compile").to_optimization_capability(),
+        describe_operator_backend_capability("tilelang").to_optimization_capability(),
+        describe_operator_backend_capability("cute_dsl").to_optimization_capability(),
+    ]
+    pruning = [
+        OptimizationCapability(
+            kind="pruning",
+            name="structured",
+            backend="pytorch_rewrite",
+            status="available",
+            runtime="pytorch",
+            artifact_kind="pytorch_model",
+            available=True,
+            supported=True,
+            methods=("structured",),
+            target_module_types=("Conv2d", "Linear", "BatchNorm2d"),
+            notes=("Structured pruning can rewrite selected PyTorch module dimensions.",),
+            limitations=(
+                "Speedup is model, shape, and backend dependent and must be benchmarked.",
+            ),
+            metadata={
+                "granularities": [
+                    "channel",
+                    "filter",
+                    "mlp_neuron",
+                    "attention_head",
+                    "block",
+                    "token",
+                ],
+                "speedup_verified": False,
+            },
+        ),
+        describe_prune_runtime_capability(
+            method="nm_structured",
+            device="cuda",
+            pattern=(2, 4),
+        ).to_optimization_capability(),
+        describe_prune_runtime_capability(
+            method="block_sparse",
+            device=None,
+            block_shape=(4, 4),
+        ).to_optimization_capability(),
+    ]
+    export = [
+        capability.to_optimization_capability()
+        for capability in deployment_capability_matrix(implemented_only=False)
+        if capability.format in {"onnx", "tensorrt", "openvino"}
+    ]
+    runtime_features = [
+        OptimizationCapability(
+            kind="runtime_feature",
+            name="llm_runtime_metadata",
+            backend="adapter_only",
+            status="planned",
+            runtime="external_serving",
+            artifact_kind="metadata",
+            available=False,
+            supported=False,
+            notes=(
+                "XQT records runtime feature metadata for backend adapters but does not implement serving schedulers.",
+            ),
+            limitations=(
+                "Paged KV, prefix cache, speculative decode, and continuous batching require an external runtime.",
+            ),
+            metadata=reporting_schema_payload()["runtime_features"],
+        )
+    ]
+    return {
+        "quantization": [_capability_dict(capability) for capability in quantization],
+        "pruning": [_capability_dict(capability) for capability in pruning],
+        "operator": [_capability_dict(capability) for capability in operator],
+        "export": [_capability_dict(capability) for capability in export],
+        "runtime_features": [
+            _capability_dict(capability) for capability in runtime_features
+        ],
+    }
 
 
 def _fp4_tilelang_readiness(
@@ -475,6 +630,7 @@ def assess_xqt_readiness(
     return XQTReadinessReport(
         overall_status=_overall_status(scenarios),
         scenarios=scenarios,
+        capability_matrix=_inference_optimization_capability_matrix(),
     )
 
 

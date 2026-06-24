@@ -13,6 +13,7 @@ from torch import nn
 
 from xdl.config.resolver import register_default_resolvers
 from xqt.core.config import ConfigInput, load_xqt_config
+from xqt.core.reporting import add_stage_report_to_manifest, build_stage_report
 from xqt.core.schema import (
     BenchmarkConfig,
     ModelConfig,
@@ -293,6 +294,65 @@ def _new_artifacts(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[
     }
 
 
+def _extract_optimization_capability(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        raw = value.get("optimization_capability")
+        if isinstance(raw, Mapping):
+            return dict(raw)
+        raw_capability = value.get("capability")
+        if isinstance(raw_capability, Mapping):
+            nested = _extract_optimization_capability(raw_capability)
+            if nested is not None:
+                return nested
+            if "status" in raw_capability and "runtime" in raw_capability:
+                return dict(raw_capability)
+        for item in value.values():
+            nested = _extract_optimization_capability(item)
+            if nested is not None:
+                return nested
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            nested = _extract_optimization_capability(item)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _record_stage_report(
+    state: _OptimizationRunState,
+    stage: OptimizationStageConfig,
+    result: OptimizationStageResult,
+) -> None:
+    capability = _extract_optimization_capability(result.metrics)
+    report = build_stage_report(
+        stage_name=result.name,
+        stage_kind=result.kind,
+        accepted=result.accepted,
+        message=result.message,
+        metrics=result.metrics,
+        artifacts=result.artifacts,
+        capability=capability,
+        lineage={
+            "from_stage": stage.from_stage,
+            "compare_to": stage.compare_to,
+            "baseline_stage": state.baseline_stage,
+            "best_stage": state.best_stage,
+        },
+        metadata={
+            "save_model": stage.save_model,
+            "revert_on_reject": stage.revert_on_reject,
+        },
+    )
+    stage_reports = state.context.metrics.setdefault("stage_reports", {})
+    if isinstance(stage_reports, dict):
+        stage_reports[result.name] = report.to_dict()
+    if state.context.manifest is not None:
+        stage_record = f"{result.kind}:{result.name}"
+        if stage_record not in state.context.manifest.passes:
+            state.context.manifest.passes.append(stage_record)
+        add_stage_report_to_manifest(state.context.manifest, report)
+
+
 def _run_prune(
     config: OptimizationConfig,
     stage: OptimizationStageConfig,
@@ -432,6 +492,7 @@ def _run_optimization_stage(
         message=message,
     )
     state.stage_results.append(result)
+    _record_stage_report(state, stage, result)
     return result
 
 

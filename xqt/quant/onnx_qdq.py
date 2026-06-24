@@ -76,6 +76,7 @@ class IterableCalibrationDataReader:
                 dtypes.setdefault(name, []).append(str(value.dtype))
         return {
             "input_names": input_names,
+            "sample_count": len(self._records),
             "batch_count": len(self._records),
             "shapes": {
                 name: shape_list[: min(3, len(shape_list))]
@@ -85,6 +86,15 @@ class IterableCalibrationDataReader:
                 name: sorted(set(dtype_list))
                 for name, dtype_list in dtypes.items()
             },
+            "input_signature": {
+                name: {
+                    "shapes": shape_list[: min(3, len(shape_list))],
+                    "dtypes": sorted(set(dtypes.get(name, []))),
+                }
+                for name, shape_list in shapes.items()
+            },
+            "calibrator_type": type(self).__name__,
+            "observer_type": "onnxruntime.quantization.CalibrationDataReader",
         }
 
     def get_next(self) -> Optional[dict[str, np.ndarray]]:

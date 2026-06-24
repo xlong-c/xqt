@@ -69,6 +69,12 @@ def test_pytorch_fp4_weight_only_executes_reference_linear_rewrite() -> None:
     assert report.metadata["executed"] is True
     assert report.metadata["execution_state"] == "reference_fp4_weight_only"
     assert report.metadata["group_size"] == 128
+    assert report.metadata["selection_policy"]["selectors"]["include_module_types"] == ["Linear"]
+    assert (
+        report.metadata["module_selection_reasons"]["quantized"]["fc1"]
+        == "matched_selection_policy"
+    )
+    assert report.metadata["module_selection_reasons"]["fallback"] == {}
     assert "fc1" in report.quantized_modules
     assert "fc2" in report.quantized_modules
 
@@ -100,6 +106,37 @@ def test_pytorch_fp4_weight_only_respects_skip_quantize() -> None:
     assert isinstance(quantized_model.fc1, ReferenceFP4Linear)
     assert isinstance(quantized_model.fc2, torch.nn.Linear)
     assert execution.reports[0].skipped_modules == ["fc2"]
+    assert (
+        execution.reports[0].metadata["module_selection_reasons"]["skipped"]["fc2"]
+        == "skip_quantize"
+    )
+
+
+def test_pytorch_fp4_weight_only_reports_high_precision_reason() -> None:
+    config_dict = _base_config()
+    config_dict["compression"]["quant"]["keep_high_precision"] = ["fc2"]
+    config = load_xqt_config(config_dict)
+    model = _TinyMLP().eval()
+    context = create_context(config, model=model)
+    plan = build_quantization_plan(config.compression.quant)
+
+    execution = execute_quantization_plan(context, plan)
+
+    report = execution.reports[0]
+    quantized_model = execution.model
+    assert isinstance(quantized_model, _TinyMLP)
+    assert isinstance(quantized_model.fc1, ReferenceFP4Linear)
+    assert isinstance(quantized_model.fc2, torch.nn.Linear)
+    assert report.high_precision_modules == ["fc2"]
+    assert report.skipped_modules == ["fc2"]
+    assert (
+        report.metadata["module_selection_reasons"]["high_precision"]["fc2"]
+        == "keep_high_precision"
+    )
+    assert (
+        report.metadata["module_selection_reasons"]["skipped"]["fc2"]
+        == "keep_high_precision"
+    )
 
 
 def test_pytorch_fp4_weight_only_uses_group_size_policy() -> None:

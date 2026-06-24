@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .policy import QuantizationPolicy, should_quantize_module
+from .strategy import normalize_quant_strategy
 
 
 @dataclass
@@ -219,7 +220,16 @@ def quantize_with_reference_fp4(
         else {}
     )
     configured_group_size = int(policy_mapping.get("group_size", 128) or 128)
-    selected_strategy = strategy or str(getattr(quant_policy, "dtype", "fp4_weight_only"))
+    selected_strategy = (
+        normalize_quant_strategy(
+            strategy,
+            {
+                "dtype": getattr(quant_policy, "dtype", "fp4"),
+                "scheme": getattr(quant_policy, "scheme", "weight_only"),
+            },
+        )
+        or "fp4_weight_only"
+    )
     target_model = model if inplace else copy.deepcopy(model)
     quantized_modules: list[str] = []
 

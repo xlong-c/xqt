@@ -2,12 +2,18 @@
 
 from dataclasses import asdict
 from pathlib import Path
+import re
 from typing import Any, Mapping, Optional, Union, cast
 
 from omegaconf import OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 
 from xdl.config.resolver import register_default_resolvers
+
+from xqt.quant.strategy import (
+    SUPPORTED_QUANT_STRATEGIES,
+    normalize_quant_strategy,
+)
 
 from .errors import XQTConfigError
 from .schema import (
@@ -33,12 +39,29 @@ _AVAILABLE_QUANT_METHODS = {
     "dynamic_int8",
     "fp8_dynamic",
     "fp8_weight_only",
+    "weight_only_int4",
+    "weight_only_int8",
+    "static_qdq_int8",
+}
+_PLANNED_QUANT_METHODS = {"awq", "gptq"}
+_LEGACY_QUANT_METHODS = {
     "int4_weight_only",
     "int8_weight_only",
     "static_int8",
 }
-_PLANNED_QUANT_METHODS = {"awq", "gptq"}
-_SUPPORTED_QUANT_METHODS = _AVAILABLE_QUANT_METHODS | _PLANNED_QUANT_METHODS
+_SUPPORTED_QUANT_METHODS = (
+    _AVAILABLE_QUANT_METHODS
+    | _PLANNED_QUANT_METHODS
+    | _LEGACY_QUANT_METHODS
+)
+_QUANT_POLICY_SELECTOR_KEYS = {
+    "include_module_types",
+    "exclude_module_types",
+    "include_name_patterns",
+    "exclude_name_patterns",
+    "include_module_names",
+    "exclude_module_names",
+}
 
 ConfigInput = Union[str, Path, Mapping[str, Any]]
 
@@ -65,6 +88,48 @@ def _load_raw_config(config: ConfigInput) -> Any:
     if isinstance(config, Mapping):
         return _strip_local_recipe_extensions(OmegaConf.create(dict(config)))
     raise XQTConfigError(f"Unsupported config input type: {type(config).__name__}")
+
+
+def _plain_container(config_value: Any) -> Any:
+    if OmegaConf.is_config(config_value):
+        return OmegaConf.to_container(
+            config_value,
+            resolve=False,
+            enum_to_str=True,
+        )
+    return config_value
+
+
+def _mapping_at(root: Mapping[str, Any], *keys: str) -> Mapping[str, Any] | None:
+    value: Any = root
+    for key in keys:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value if isinstance(value, Mapping) else None
+
+
+def _validate_raw_quant_config(config_value: Any) -> None:
+    root = _plain_container(config_value)
+    if not isinstance(root, Mapping):
+        return
+    quant = _mapping_at(root, "compression", "quant")
+    if quant is None or not bool(quant.get("enabled", False)):
+        return
+    if "backend" not in quant or quant.get("backend") in {None, ""}:
+        raise XQTConfigError(
+            "compression.quant.backend is required when compression.quant.enabled=true"
+        )
+    has_selector = (
+        quant.get("method") is not None
+        or quant.get("strategy") is not None
+        or bool(quant.get("policy") or {})
+    )
+    if not has_selector:
+        raise XQTConfigError(
+            "compression.quant must explicitly set method, strategy, or policy "
+            "when enabled=true"
+        )
 
 
 def _validate_pre_export_fusion(config_value: Any, location: str) -> None:
@@ -105,14 +170,57 @@ def _validate_quant_component_lists(
         )
 
 
+def _validate_quant_policy(
+    policy: Mapping[str, Any],
+    location: str,
+) -> None:
+    for key in _QUANT_POLICY_SELECTOR_KEYS:
+        if key not in policy:
+            continue
+        value = policy[key]
+        if not isinstance(value, list):
+            raise XQTConfigError(f"{location}.{key} must be a list of strings")
+        if any(not isinstance(item, str) or not item for item in value):
+            raise XQTConfigError(f"{location}.{key} must contain only non-empty strings")
+        if key.endswith("_patterns"):
+            for pattern in value:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    raise XQTConfigError(
+                        f"{location}.{key} contains invalid regex {pattern!r}: {exc}"
+                    ) from exc
+    strategy = normalize_quant_strategy(policy.get("strategy"), policy)
+    if strategy is not None and strategy not in SUPPORTED_QUANT_STRATEGIES:
+        allowed = ", ".join(SUPPORTED_QUANT_STRATEGIES)
+        raise XQTConfigError(f"{location}.strategy must be one of: {allowed}")
+
+
 def _validate_quant_config(quant_config: QuantConfig) -> None:
+    if not quant_config.enabled:
+        return
     if quant_config.backend not in _SUPPORTED_QUANT_BACKENDS:
         allowed = ", ".join(sorted(_SUPPORTED_QUANT_BACKENDS))
         raise XQTConfigError(f"compression.quant.backend must be one of: {allowed}")
     if quant_config.method is not None and quant_config.method not in _SUPPORTED_QUANT_METHODS:
         allowed = ", ".join(sorted(_SUPPORTED_QUANT_METHODS))
         raise XQTConfigError(f"compression.quant.method must be one of: {allowed}")
+    if quant_config.strategy is not None:
+        strategy = normalize_quant_strategy(quant_config.strategy, quant_config.policy)
+        if strategy not in SUPPORTED_QUANT_STRATEGIES:
+            allowed = ", ".join(SUPPORTED_QUANT_STRATEGIES)
+            raise XQTConfigError(f"compression.quant.strategy must be one of: {allowed}")
+    if (
+        quant_config.method is None
+        and normalize_quant_strategy(quant_config.strategy, quant_config.policy) is None
+        and not quant_config.policy
+    ):
+        raise XQTConfigError(
+            "compression.quant must explicitly set method, strategy, or policy "
+            "when enabled=true"
+        )
     _validate_quant_component_lists(quant_config, "compression.quant")
+    _validate_quant_policy(quant_config.policy, "compression.quant.policy")
     _validate_quant_string_list(
         quant_config.analysis_only_modules,
         "compression.quant.analysis_only_modules",
@@ -134,7 +242,13 @@ def _validate_quant_config(quant_config: QuantConfig) -> None:
         if component.method is not None and component.method not in _SUPPORTED_QUANT_METHODS:
             allowed = ", ".join(sorted(_SUPPORTED_QUANT_METHODS))
             raise XQTConfigError(f"{location}.method must be one of: {allowed}")
+        if component.strategy is not None:
+            strategy = normalize_quant_strategy(component.strategy, component.policy)
+            if strategy not in SUPPORTED_QUANT_STRATEGIES:
+                allowed = ", ".join(SUPPORTED_QUANT_STRATEGIES)
+                raise XQTConfigError(f"{location}.strategy must be one of: {allowed}")
         _validate_quant_component_lists(component, location)
+        _validate_quant_policy(component.policy, f"{location}.policy")
         _validate_pre_export_fusion(
             component.policy.get("pre_export_fusion"),
             f"{location}.policy.pre_export_fusion",
@@ -356,9 +470,13 @@ def load_xqt_config(
     """Load an XQT recipe using structured defaults then YAML or mapping overrides."""
 
     register_default_resolvers()
-    nodes = [OmegaConf.structured(XQTConfig), _load_raw_config(config)]
+    raw_config = _load_raw_config(config)
+    raw_nodes = [raw_config]
     if overrides:
-        nodes.append(OmegaConf.create(dict(overrides)))
+        raw_nodes.append(OmegaConf.create(dict(overrides)))
+    raw_user_config = OmegaConf.merge(*raw_nodes)
+    _validate_raw_quant_config(raw_user_config)
+    nodes = [OmegaConf.structured(XQTConfig), raw_user_config]
 
     try:
         merged = OmegaConf.merge(*nodes)

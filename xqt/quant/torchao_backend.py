@@ -10,6 +10,7 @@ from torch import nn
 
 from xqt.core.errors import XQTBackendError
 
+from .strategy import normalize_quant_strategy
 from .policy import QuantizationPolicy, should_quantize_module
 
 
@@ -36,18 +37,19 @@ def _import_torchao_quantization() -> Any:
 
 def _get_strategy_factory(strategy: str) -> Callable[[], Any]:
     quantization = _import_torchao_quantization()
+    normalized = normalize_quant_strategy(strategy)
     aliases = {
         "dynamic_int8": "Int8DynamicActivationInt8WeightConfig",
         "int8_dynamic_activation_int8_weight": "Int8DynamicActivationInt8WeightConfig",
-        "int8_weight_only": "Int8WeightOnlyConfig",
         "weight_only_int8": "Int8WeightOnlyConfig",
-        "int4_weight_only": "Int4WeightOnlyConfig",
+        "int8_weight_only": "Int8WeightOnlyConfig",
         "weight_only_int4": "Int4WeightOnlyConfig",
+        "int4_weight_only": "Int4WeightOnlyConfig",
         "fp8_dynamic": "Float8DynamicActivationFloat8WeightConfig",
         "float8_dynamic_activation_float8_weight": "Float8DynamicActivationFloat8WeightConfig",
         "fp8_weight_only": "Float8WeightOnlyConfig",
     }
-    attr_name = aliases.get(strategy)
+    attr_name = aliases.get(normalized or strategy)
     if attr_name is None:
         raise XQTBackendError(f"Unsupported torchao quantization strategy: {strategy}")
     if not hasattr(quantization, attr_name):
@@ -99,9 +101,13 @@ def quantize_with_torchao(
     if selected_strategy in {"int8", "int4", "fp8"}:
         selected_strategy = {
             "int8": "dynamic_int8",
-            "int4": "int4_weight_only",
+            "int4": "weight_only_int4",
             "fp8": "fp8_dynamic",
         }[selected_strategy]
+    selected_strategy = normalize_quant_strategy(selected_strategy, {
+        "dtype": quant_policy.dtype,
+        "scheme": quant_policy.scheme,
+    }) or selected_strategy
 
     strategy_factory = _get_strategy_factory(selected_strategy)
     quantization_config = strategy_factory()

@@ -26,6 +26,7 @@ class OperatorOptimizationTargetPlan:
     tilelang: dict[str, Any] = field(default_factory=dict)
     cutile: dict[str, Any] = field(default_factory=dict)
     cutlass: dict[str, Any] = field(default_factory=dict)
+    cute_dsl: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +44,7 @@ class OperatorOptimizationTargetPlan:
             "tilelang": dict(self.tilelang),
             "cutile": dict(self.cutile),
             "cutlass": dict(self.cutlass),
+            "cute_dsl": dict(self.cute_dsl),
         }
 
 

@@ -8,9 +8,14 @@ from typing import Any, Optional
 
 import torch
 
+from xqt.core.reporting import OptimizationCapability
+
 
 def _package_available(package_name: str) -> bool:
-    return importlib.util.find_spec(package_name) is not None
+    try:
+        return importlib.util.find_spec(package_name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -21,10 +26,35 @@ class OperatorOptimizationBackendCapability:
     status: str
     runtime: str
     exportable: bool
+    artifact_kind: str = "pytorch_model"
     requires_cuda: bool = False
+    requires_calibration: bool = False
+    requires_exportable_graph: bool = False
     available: bool = False
     notes: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
+
+    def to_optimization_capability(self) -> OptimizationCapability:
+        """Project operator backend capability onto the shared optimization schema."""
+
+        return OptimizationCapability(
+            kind="operator",
+            name=self.backend,
+            backend=self.backend,
+            status=self.status,
+            runtime=self.runtime,
+            artifact_kind=self.artifact_kind,
+            requires_cuda=self.requires_cuda,
+            requires_calibration=self.requires_calibration,
+            requires_exportable_graph=self.requires_exportable_graph,
+            available=self.available,
+            supported=self.available or self.status == "available",
+            notes=self.notes,
+            limitations=self.limitations,
+            metadata={
+                "exportable": self.exportable,
+            },
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -32,10 +62,14 @@ class OperatorOptimizationBackendCapability:
             "status": self.status,
             "runtime": self.runtime,
             "exportable": self.exportable,
+            "artifact_kind": self.artifact_kind,
             "requires_cuda": self.requires_cuda,
+            "requires_calibration": self.requires_calibration,
+            "requires_exportable_graph": self.requires_exportable_graph,
             "available": self.available,
             "notes": list(self.notes),
             "limitations": list(self.limitations),
+            "optimization_capability": self.to_optimization_capability().to_dict(),
         }
 
 
@@ -58,6 +92,8 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         status="planned",
         runtime="deployment_backend",
         exportable=True,
+        artifact_kind="deployment_artifact",
+        requires_exportable_graph=True,
         notes=(
             "Represents TensorRT, OpenVINO, or ONNX Runtime deployment fusion rather than PyTorch custom kernels.",
         ),
@@ -109,6 +145,18 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         limitations=(
             "Built-in executor records metadata and reference fallback only.",
             "CUTLASS Python DSL support is version and architecture sensitive.",
+        ),
+    ),
+    "cute_dsl": OperatorOptimizationBackendCapability(
+        backend="cute_dsl",
+        status="planned",
+        runtime="pytorch",
+        exportable=False,
+        requires_cuda=True,
+        notes=("Reserved for CUDA-only CUTLASS CuTe DSL kernels through cutlass.cute.",),
+        limitations=(
+            "Built-in executor records metadata and reference fallback only.",
+            "CuTe DSL support is version, Python package, CUDA toolkit, and architecture sensitive.",
         ),
     ),
     "custom_cuda": OperatorOptimizationBackendCapability(
@@ -193,6 +241,17 @@ def describe_operator_backend_capability(
             notes.append(
                 "Registered patterns: "
                 + ", ".join(sorted(list_cutlass_kernel_specs()))
+            )
+        except Exception:
+            pass
+    elif backend == "cute_dsl":
+        available = _package_available("cutlass.cute")
+        try:
+            from .backends.cute_dsl import list_cute_dsl_kernel_specs
+
+            notes.append(
+                "Registered patterns: "
+                + ", ".join(sorted(list_cute_dsl_kernel_specs()))
             )
         except Exception:
             pass

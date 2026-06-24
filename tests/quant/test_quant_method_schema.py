@@ -27,7 +27,7 @@ def _base_config() -> dict:
                 "enabled": True,
                 "backend": "pytorch",
                 "method": "awq",
-                "strategy": "int4_weight_only",
+                "strategy": "weight_only_int4",
                 "policy": {
                     "bits": 4,
                     "group_size": 128,
@@ -46,7 +46,70 @@ def test_quant_method_is_distinct_from_backend() -> None:
     component = plan.components[0]
     assert component.backend == "pytorch"
     assert component.method == "awq"
-    assert component.strategy == "int4_weight_only"
+    assert component.strategy == "weight_only_int4"
+    assert "weight_only_int4" in plan.metadata["canonical_strategies"]
+
+
+def test_legacy_strategy_alias_is_canonicalized_in_plan() -> None:
+    config_dict = _base_config()
+    config_dict["compression"]["quant"]["strategy"] = "int4_weight_only"
+    config = load_xqt_config(config_dict)
+
+    plan = build_quantization_plan(config.compression.quant)
+
+    assert plan.components[0].strategy == "weight_only_int4"
+
+
+def test_quant_config_requires_explicit_backend_when_enabled() -> None:
+    config = _base_config()
+    config["compression"]["quant"].pop("backend")
+
+    with pytest.raises(XQTConfigError, match="compression.quant.backend"):
+        load_xqt_config(config)
+
+
+def test_quant_config_requires_explicit_method_strategy_or_policy() -> None:
+    config = _base_config()
+    quant = config["compression"]["quant"]
+    quant["backend"] = "pytorch"
+    quant.pop("method")
+    quant.pop("strategy")
+    quant.pop("policy")
+
+    with pytest.raises(XQTConfigError, match="method, strategy, or policy"):
+        load_xqt_config(config)
+
+
+def test_component_policy_records_selection_policy_metadata() -> None:
+    config = _base_config()
+    config["compression"]["quant"]["component_policies"] = [
+        {
+            "name": "encoder",
+            "target": "encoder",
+            "backend": "pytorch",
+            "method": "awq",
+            "policy": {
+                "include_module_types": ["Linear"],
+                "include_name_patterns": ["layers\\.\\d+"],
+                "exclude_module_names": ["lm_head"],
+            },
+            "keep_high_precision": ["norm"],
+            "skip_quantize": ["router"],
+            "force_quantize": ["fc1"],
+        }
+    ]
+
+    loaded = load_xqt_config(config)
+    plan = build_quantization_plan(loaded.compression.quant)
+    selection_policy = plan.components[0].policy["selection_policy"]
+
+    assert selection_policy["target_path"] == "encoder"
+    assert selection_policy["selectors"]["include_module_types"] == ["Linear"]
+    assert selection_policy["selectors"]["include_name_patterns"] == ["layers\\.\\d+"]
+    assert selection_policy["selectors"]["exclude_module_names"] == ["lm_head"]
+    assert selection_policy["keep_high_precision"] == ["norm"]
+    assert selection_policy["skip_quantize"] == ["router"]
+    assert selection_policy["force_quantize"] == ["fc1"]
 
 
 def test_awq_is_not_accepted_as_quant_backend() -> None:

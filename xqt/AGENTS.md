@@ -2,18 +2,13 @@
 
 ## 开发阶段
 
-**当前处于 v0.x 开发期,未到 v1.0.允许破坏性重构,不需要兼容老接口.怎么方便,怎么清晰,怎么简洁就怎么来.**
-
-- 改 API 时直接改,不需要保留旧入口,不需要 migration guide,不需要 deprecation warning.
-- 改 recipe schema 时直接打破兼容,旧的 recipe yaml 跟着一起更新.
-- 删模块,改名,合并,拆分都可以,只为最终方案干净服务.
-- 取舍时优先顺序: 清晰 > 简洁 > 方便 > 兼容.
+当前处于 v0.x 开发期,可以按现有方案直接重构,不需要围绕旧接口做兼容层.
 
 ## 核心契约
 
 XQT 只关注模型本身.
 
-XQT 负责模型压缩,模型图变换,导出适配,模型误差分析和 benchmark. XQT 不负责训练,QAT 训练,finetune,distillation,KD/prune recovery,dataset/dataloader,training provider 或 evaluation provider. 需要梯度更新或任务验证的流程归 XDL 或第三方工具,再把训练后的模型/checkpoint 或指标交给 XQT.
+XQT 负责模型压缩,图变换,导出适配,误差分析和 benchmark. XQT 不负责训练,QAT,finetune,distillation,recovery,dataset / dataloader,training provider 或 evaluation provider. 需要梯度更新或任务验证的流程归 XDL 或第三方工具,再把训练后的模型 / checkpoint 或指标交给 XQT.
 
 包内工程契约见 `xqt/FRAMEWORK.md`;长期事实源见 `docs/md/XQT.md`.
 
@@ -61,11 +56,11 @@ XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配
 - `xqt-run-workflow`: 运行 stage workflow recipe.
 - `run_workflow.py`: workflow 命令入口模块,通过环境变量指定 stage workflow.
 
-早期 `load_xqt_config`,`run_xqt_recipe`,`preflight_xqt_config` 和 `XQTConfig` pass recipe 链路只作为 `xqt.core` / `xqt.pipeline` 内部实现,不要从 `xqt` 顶层重新导出,也不要新增安装后命令入口.
+早期 `load_xqt_config`,`run_xqt_recipe`,`preflight_xqt_config` 和 `XQTConfig` pass recipe 链路只作为内部实现保留,不要从 `xqt` 顶层重新导出,也不要新增安装后命令入口.
 
 ## API 边界
 
-- `xqt` 顶层导出进入 Provisional API: `optimize_model`, `load_optimization_config`, `XQTOptimizationSession`, `OptimizedModelResult`, `OptimizationConfig`, `OptimizationStageConfig`, `OptimizationStageResult`, `StageAcceptanceConfig`, `ArtifactManifest`, `ArtifactRecord`, `MetricRecord`.
+- `xqt` 顶层导出进入 Provisional API: `optimize_model`, `load_optimization_config`, `XQTOptimizationSession`, `OptimizedModelResult`, `OptimizationConfig`, `OptimizationStageConfig`, `OptimizationStageResult`, `StageAcceptanceConfig`, `ArtifactManifest`, `ArtifactRecord`, `MetricRecord`, `XQTReadinessReport`, `XQTReadinessScenario`, `assess_xqt_readiness`.
 - `xqt` 到 XDL 的模型产物适配入口进入 Provisional API: `xdl_setup_to_xqt_context`, `xdl_checkpoint_to_xqt_context`, `load_checkpoint_into_model`.
 - 子模块内部实现按 Internal 处理,先服务 recipe 验证.
 
@@ -80,6 +75,14 @@ XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配
 - 顶层示例脚本涉及可选依赖时使用 lazy import,失败时抛出清楚的 XQT 异常或错误信息.
 - 新增 recipe 必须声明 `compression_axes` 和支持的硬件约束.
 - 所有量化/剪枝/导出后都必须能产出模型侧 report 或最小性能基准.
+
+## Profiling 工具约定
+
+- XQT 可以记录和消费 profiler 产物,但不接管厂商 profiler 的安装,权限,驱动版本或 GUI 工作流.
+- `benchmark` stage 给出 latency / memory / throughput 基线;`ncu`,`nsys`,`rocprof`,`vtune`,`msprof`,XProf 等 profiler 只用于瓶颈归因和优化线索.
+- profiler 输出应作为 artifact 进入 manifest,并在 report 中记录 backend,device,target artifact,input shape,warmup,repeat,precision,batch size,profiler 名称,关键参数和环境版本.
+- 允许做 profiler preflight 或命令模板;不要封装厂商 profiler 的完整 CLI,不要新增 dataset / dataloader,evaluation provider,task-level validation 或训练循环.
+- 常见对应关系: NVIDIA `nsys` / `ncu`,AMD `rocprof-sys` / `rocprof`,Intel VTune,Apple Instruments / Metal Debugger,Arm Streamline,Qualcomm Snapdragon Profiler,Google XProf / TensorBoard Profile,华为 Ascend `msprof`.
 
 ## 注意事项
 

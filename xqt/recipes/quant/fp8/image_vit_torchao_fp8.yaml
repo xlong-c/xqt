@@ -16,6 +16,7 @@ compression:
     - precision
   quant:
     enabled: true
+    backend: torchao
     strategy: fp8_dynamic
     skip_quantize: [head, norm]
     keep_high_precision: [head, norm]

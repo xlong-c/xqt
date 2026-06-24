@@ -43,7 +43,7 @@ stages:
     save_model: false
     params:
       backend: onnxruntime_qdq
-      strategy: static_int8
+      strategy: static_qdq_int8
       policy:
         source_name: smoke_detection_source.onnx
         output_path: artifacts/xqt/detection/yolo_practice/quant_qdq/smoke_detection_qdq.onnx

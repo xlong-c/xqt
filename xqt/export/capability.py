@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Optional
+
+from xqt.core.reporting import OptimizationCapability, normalize_capability_status
 
 
 @dataclass(frozen=True)
@@ -20,10 +22,39 @@ class ExportCapability:
     status: str = "planned"
     notes: str = ""
 
-    def to_dict(self) -> dict[str, object]:
+    def to_optimization_capability(self) -> OptimizationCapability:
+        """Project export capability onto the shared optimization schema."""
+
+        unified_status = normalize_capability_status(self.status)
+        available = unified_status in {"available", "adapter"}
+        return OptimizationCapability(
+            kind="export",
+            name=self.format,
+            backend=self.format,
+            status=unified_status,
+            runtime="/".join(self.runtimes) if self.runtimes else "unknown",
+            artifact_kind=f"{self.format}_artifact",
+            requires_exportable_graph=self.format not in {"torchscript"},
+            available=available,
+            supported=available,
+            precisions=self.precisions,
+            notes=(self.notes,) if self.notes else (),
+            limitations=(),
+            metadata={
+                "priority": self.priority,
+                "runtimes": list(self.runtimes),
+                "dynamic_shapes": self.dynamic_shapes,
+                "quantization": self.quantization,
+                "sparse_support": self.sparse_support,
+                "source_status": self.status,
+            },
+        )
+
+    def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["runtimes"] = list(self.runtimes)
         data["precisions"] = list(self.precisions)
+        data["optimization_capability"] = self.to_optimization_capability().to_dict()
         return data
 
 

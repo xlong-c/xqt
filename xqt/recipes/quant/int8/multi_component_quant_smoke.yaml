@@ -14,12 +14,13 @@ compression:
     - precision
   quant:
     enabled: true
+    backend: torchao
     strategy: dynamic_int8
     component_policies:
       - name: vision_encoder
         target: vision_encoder
         backend: onnxruntime_qdq
-        strategy: static_int8
+        strategy: static_qdq_int8
         policy:
           input_names: [input]
           sample_limit: 1

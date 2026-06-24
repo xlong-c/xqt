@@ -76,7 +76,10 @@ class PreflightReport:
 
 
 def _package_available(package_name: str) -> bool:
-    return importlib.util.find_spec(package_name) is not None
+    try:
+        return importlib.util.find_spec(package_name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _check_target(report: PreflightReport, name: str, target: str | None) -> None:
@@ -370,15 +373,18 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         target.backend or operator_config.default_backend
         for target in operator_config.targets
     }
-    if target_backends & {"triton", "tilelang", "cutile", "cutlass", "custom_cuda"}:
+    if target_backends & {"triton", "tilelang", "cutile", "cutlass", "cute_dsl", "custom_cuda"}:
         _check_cuda(report, "operator_optimization.hardware.cuda")
     for package_backend in ("triton", "tilelang", "cutile", "cutlass"):
         if package_backend in target_backends:
             _check_dependency(report, package_backend)
+    if "cute_dsl" in target_backends:
+        _check_dependency(report, "cutlass.cute")
     for index, target in enumerate(operator_config.targets):
         prefix = f"operator_optimization.targets.{index}"
+        target_backend = target.backend or operator_config.default_backend
         capability = describe_operator_backend_capability(
-            target.backend or operator_config.default_backend,
+            target_backend,
             torch_compile_available=torch_compile_available,
         )
         report.add(
@@ -392,7 +398,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             module_path=target.target,
             **capability.to_dict(),
         )
-        if target.backend == "tilelang" and not _package_available("tilelang"):
+        if target_backend == "tilelang" and not _package_available("tilelang"):
             report.add(
                 f"{prefix}.tilelang.runtime",
                 True,
@@ -401,7 +407,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target.backend == "cutile" and not capability.available:
+        if target_backend == "cutile" and not capability.available:
             report.add(
                 f"{prefix}.cutile.runtime",
                 False,
@@ -410,7 +416,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target.backend == "cutlass" and not capability.available:
+        if target_backend == "cutlass" and not capability.available:
             report.add(
                 f"{prefix}.cutlass.runtime",
                 False,
@@ -419,7 +425,16 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target.backend == "tilelang":
+        if target_backend == "cute_dsl" and not capability.available:
+            report.add(
+                f"{prefix}.cute_dsl.runtime",
+                False,
+                "cute_dsl backend is configured but cutlass.cute is not importable",
+                level="warning",
+                target_name=target.name,
+                module_path=target.target,
+            )
+        if target_backend == "tilelang":
             tilelang_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -437,7 +452,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "tilelang compile configuration recorded",
                 **tilelang_metadata,
             )
-        if target.backend == "cutile":
+        if target_backend == "cutile":
             cutile_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -454,7 +469,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "cutile compile configuration recorded",
                 **cutile_metadata,
             )
-        if target.backend == "cutlass":
+        if target_backend == "cutlass":
             cutlass_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -475,7 +490,28 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "cutlass compile configuration recorded",
                 **cutlass_metadata,
             )
-        if target.backend == "custom_cuda":
+        if target_backend == "cute_dsl":
+            cute_dsl_metadata = {
+                "target_name": target.name,
+                "module_path": target.target,
+                "target_arch": target.cute_dsl.target_arch,
+                "cache_dir": target.cute_dsl.cache_dir,
+                "tile_shape": list(target.cute_dsl.tile_shape),
+                "cluster_shape": (
+                    list(target.cute_dsl.cluster_shape)
+                    if target.cute_dsl.cluster_shape is not None
+                    else None
+                ),
+                "pass_configs": dict(target.cute_dsl.pass_configs),
+            }
+            cute_dsl_metadata.update(_module_metadata("cutlass.cute"))
+            report.add(
+                f"{prefix}.cute_dsl.config",
+                True,
+                "cute_dsl compile configuration recorded",
+                **cute_dsl_metadata,
+            )
+        if target_backend == "custom_cuda":
             extension = describe_custom_cuda_extension_capability()
             report.add(
                 f"{prefix}.custom_cuda.extension",

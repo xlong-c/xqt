@@ -17,7 +17,7 @@ class QuantizationNature(str, enum.Enum):
     math throughput increases -- should measure *compute* speedup.
 
     ``PSEUDO`` : weight storage in low precision, dequantized to fp16/bf16 before
-    compute (e.g. fp8_weight_only, int4_weight_only, W8A16). K dimension stays at
+    compute (e.g. fp8_weight_only, weight_only_int4, W8A16). K dimension stays at
     16 (fp16 mma), per-clock math throughput unchanged -- can measure *memory
     bandwidth* savings but zero compute speedup.
 

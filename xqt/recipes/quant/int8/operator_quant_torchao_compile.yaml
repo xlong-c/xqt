@@ -14,6 +14,7 @@ compression:
     - precision
   quant:
     enabled: true
+    backend: torchao
     strategy: dynamic_int8
     policy:
       include_module_types: [Linear]

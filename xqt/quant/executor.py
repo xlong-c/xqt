@@ -114,6 +114,52 @@ def _build_torchao_policy(component: QuantizationComponentPlan) -> dict[str, Any
     return policy
 
 
+def _selection_policy_metadata(component: QuantizationComponentPlan) -> dict[str, Any]:
+    raw = component.policy.get("selection_policy")
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return {
+        "target_path": component.target_path,
+        "selectors": {},
+        "keep_high_precision": list(component.keep_high_precision),
+        "skip_quantize": list(component.skip_quantize),
+        "force_quantize": list(component.force_quantize),
+    }
+
+
+def _module_selection_reason_metadata(
+    component: QuantizationComponentPlan,
+    *,
+    quantized_modules: list[str],
+    skipped_modules: list[str],
+    high_precision_modules: list[str],
+) -> dict[str, dict[str, str]]:
+    forced = set(_prefix_module_names(component.force_quantize, component.target_path))
+    explicit_skip = set(_prefix_module_names(component.skip_quantize, component.target_path))
+    high_precision = set(high_precision_modules)
+    quantized: dict[str, str] = {}
+    skipped: dict[str, str] = {}
+
+    for name in quantized_modules:
+        quantized[name] = "force_quantize" if name in forced else "matched_selection_policy"
+    for name in skipped_modules:
+        if name in high_precision:
+            skipped[name] = "keep_high_precision"
+        elif name in explicit_skip:
+            skipped[name] = "skip_quantize"
+        else:
+            skipped[name] = "filtered_by_selection_policy"
+
+    return {
+        "quantized": quantized,
+        "skipped": skipped,
+        "high_precision": {
+            name: "keep_high_precision" for name in high_precision_modules
+        },
+        "fallback": {},
+    }
+
+
 def _component_source_name(component: QuantizationComponentPlan) -> str:
     if component.name == "model":
         return "quant_source.onnx"
@@ -189,6 +235,13 @@ def _execute_torchao_component(
             *high_precision_modules,
         ]
     )
+    quantized_modules = _prefix_module_names(result.quantized_modules, component.target_path)
+    module_selection_reasons = _module_selection_reason_metadata(
+        component,
+        quantized_modules=quantized_modules,
+        skipped_modules=skipped_modules,
+        high_precision_modules=high_precision_modules,
+    )
     nature = _resolve_nature(component.strategy, component.policy)
     compute_speedup = 1.0 if nature == QuantizationNature.TRUE else None
     report = QuantizationReport(
@@ -198,7 +251,7 @@ def _execute_torchao_component(
         method=component.method,
         strategy=result.strategy,
         target_path=component.target_path,
-        quantized_modules=_prefix_module_names(result.quantized_modules, component.target_path),
+        quantized_modules=quantized_modules,
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
         nature=nature,
@@ -207,6 +260,8 @@ def _execute_torchao_component(
             **dict(result.metadata),
             "analysis_only": component.analysis_only,
             "policy": effective_policy,
+            "selection_policy": _selection_policy_metadata(component),
+            "module_selection_reasons": module_selection_reasons,
         },
     )
     return updated_model, report
@@ -235,6 +290,13 @@ def _execute_reference_fp4_component(
             *high_precision_modules,
         ]
     )
+    quantized_modules = _prefix_module_names(result.quantized_modules, component.target_path)
+    module_selection_reasons = _module_selection_reason_metadata(
+        component,
+        quantized_modules=quantized_modules,
+        skipped_modules=skipped_modules,
+        high_precision_modules=high_precision_modules,
+    )
     report = QuantizationReport(
         component_name=component.name,
         backend=result.backend,
@@ -242,7 +304,7 @@ def _execute_reference_fp4_component(
         method=component.method,
         strategy=result.strategy,
         target_path=component.target_path,
-        quantized_modules=_prefix_module_names(result.quantized_modules, component.target_path),
+        quantized_modules=quantized_modules,
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
         nature=QuantizationNature.PSEUDO,
@@ -251,6 +313,8 @@ def _execute_reference_fp4_component(
             **dict(result.metadata),
             "analysis_only": component.analysis_only,
             "policy": effective_policy,
+            "selection_policy": _selection_policy_metadata(component),
+            "module_selection_reasons": module_selection_reasons,
             "executed": True,
             "execution_state": "reference_fp4_weight_only",
         },
@@ -343,6 +407,7 @@ def _execute_onnx_qdq_component(
             "calibration_source": "context.calibration_inputs",
             "input_structure": input_structure,
             "policy": policy,
+            "selection_policy": _selection_policy_metadata(component),
         }
     )
     if export_metadata.get("pre_export_fusion") is not None:
@@ -372,6 +437,7 @@ def _execute_onnx_qdq_component(
             "path": str(result.path),
             "checksum": result.checksum,
             "analysis_only": component.analysis_only,
+            "selection_policy": _selection_policy_metadata(component),
         },
     )
     artifact_updates = {
@@ -440,6 +506,7 @@ def _execute_planned_method_component(
             "capability": capability.to_dict(),
             "planned_artifact": str(planned_artifact),
             "policy": dict(component.policy),
+            "selection_policy": _selection_policy_metadata(component),
         },
     )
     artifact_updates = {
@@ -478,7 +545,11 @@ def execute_quantization_plan(
                         component.target_path,
                     ),
                     nature=_resolve_nature(component.strategy, component.policy),
-                    metadata={"analysis_only": True, "executed": False},
+                    metadata={
+                        "analysis_only": True,
+                        "executed": False,
+                        "selection_policy": _selection_policy_metadata(component),
+                    },
                 )
             )
             continue
@@ -537,12 +608,41 @@ def summarize_quantization_reports(reports: list[QuantizationReport]) -> dict[st
         "component_count": len(reports),
         "backends": [report.backend for report in reports],
         "quantized_module_count": sum(len(report.quantized_modules) for report in reports),
+        "skipped_module_count": sum(len(report.skipped_modules) for report in reports),
+        "high_precision_module_count": sum(
+            len(report.high_precision_modules) for report in reports
+        ),
         "artifact_count": sum(len(report.artifacts) for report in reports),
+        "calibration_component_count": sum(
+            1 for report in reports if report.calibration_summary is not None
+        ),
     }
     metrics: dict[str, Any] = {
         "mode": "multi_component" if len(reports) > 1 else "single_component",
         "components": components,
         "summary": summary,
+        "quantized_modules_by_component": {
+            report.component_name: list(report.quantized_modules)
+            for report in reports
+        },
+        "skipped_modules_by_component": {
+            report.component_name: list(report.skipped_modules)
+            for report in reports
+        },
+        "high_precision_modules_by_component": {
+            report.component_name: list(report.high_precision_modules)
+            for report in reports
+        },
+        "module_selection_reasons_by_component": {
+            report.component_name: dict(report.metadata["module_selection_reasons"])
+            for report in reports
+            if "module_selection_reasons" in report.metadata
+        },
+        "calibration_summaries": {
+            report.component_name: dict(report.calibration_summary)
+            for report in reports
+            if report.calibration_summary is not None
+        },
         "artifacts": {
             report.component_name: dict(report.artifacts)
             for report in reports
@@ -560,6 +660,8 @@ def summarize_quantization_reports(reports: list[QuantizationReport]) -> dict[st
             "strategy": first.strategy,
             "quantized_modules": list(first.quantized_modules),
             "quantized_module_count": len(first.quantized_modules),
+            "skipped_modules": list(first.skipped_modules),
+            "high_precision_modules": list(first.high_precision_modules),
             "calibration_samples": first.calibration_samples,
             "calibration_summary": first.calibration_summary,
             "metadata": dict(first.metadata),

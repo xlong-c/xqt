@@ -30,6 +30,7 @@ OPERATOR_OPT_BACKENDS = (
     "tilelang",
     "cutile",
     "cutlass",
+    "cute_dsl",
     "custom_cuda",
 )
 TILELANG_PASS_CONFIG_KEYS = (
@@ -44,6 +45,11 @@ CUTILE_PASS_CONFIG_KEYS = (
 CUTLASS_PASS_CONFIG_KEYS = (
     "CUTLASS_ENABLE_FAST_MATH",
     "CUTLASS_ENABLE_EPILOGUE_FUSION",
+)
+CUTE_DSL_PASS_CONFIG_KEYS = (
+    "CUTE_DSL_ENABLE_FAST_MATH",
+    "CUTE_DSL_ENABLE_EPILOGUE_FUSION",
+    "CUTE_DSL_ENABLE_PERSISTENT_CACHE",
 )
 
 
@@ -176,6 +182,17 @@ class CutlassKernelConfig:
 
 
 @dataclass
+class CuteDSLKernelConfig:
+    """Structured CuTe DSL compile settings."""
+
+    target_arch: Optional[str] = None
+    cache_dir: Optional[str] = None
+    tile_shape: List[int] = field(default_factory=lambda: [128, 128, 64])
+    cluster_shape: Optional[List[int]] = None
+    pass_configs: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class OperatorOptimizationTargetConfig:
     """One operator optimization target entry."""
 
@@ -195,6 +212,7 @@ class OperatorOptimizationTargetConfig:
     tilelang: TileLangKernelConfig = field(default_factory=TileLangKernelConfig)
     cutile: CuTileKernelConfig = field(default_factory=CuTileKernelConfig)
     cutlass: CutlassKernelConfig = field(default_factory=CutlassKernelConfig)
+    cute_dsl: CuteDSLKernelConfig = field(default_factory=CuteDSLKernelConfig)
 
 
 @dataclass
@@ -332,6 +350,7 @@ __all__ = [
     "COMPRESSION_AXES",
     "CUTILE_PASS_CONFIG_KEYS",
     "CUTLASS_PASS_CONFIG_KEYS",
+    "CUTE_DSL_PASS_CONFIG_KEYS",
     "OPERATOR_OPT_BACKENDS",
     "PRUNE_GRANULARITIES",
     "PRUNE_SCOPES",
@@ -347,6 +366,7 @@ __all__ = [
     "CompressionConfig",
     "CuTileKernelConfig",
     "CutlassKernelConfig",
+    "CuteDSLKernelConfig",
     "DetectionPostprocessConfig",
     "ExportConfig",
     "ExportTargetConfig",

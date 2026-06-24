@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
 
+from xqt.core.reporting import OptimizationCapability
+
+from .strategy import normalize_quant_strategy
 from .types import QuantizationNature
 
 
@@ -31,6 +34,7 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     "dynamic_int8": QuantizationNature.PSEUDO,
     "int8_dynamic_activation_int8_weight": QuantizationNature.PSEUDO,
     # onnxruntime QDQ INT8: runs QDQ ops on CPU integer backend → TRUE if backend hardware supports native int8 mma
+    "static_qdq_int8": QuantizationNature.PSEUDO,
     "static_int8": QuantizationNature.PSEUDO,
     # awq / gptq: weight-only packing, dequant to fp16 before compute
     "awq": QuantizationNature.PSEUDO,
@@ -53,7 +57,13 @@ def _resolve_nature(
             except ValueError:
                 pass
     if strategy is not None:
-        return _STRATEGY_NATURE.get(strategy, _DEFAULT_NATURE)
+        normalized = normalize_quant_strategy(strategy, policy)
+        if normalized is not None:
+            return _STRATEGY_NATURE.get(normalized, _DEFAULT_NATURE)
+        return _DEFAULT_NATURE
+    normalized = normalize_quant_strategy(None, policy)
+    if normalized is not None:
+        return _STRATEGY_NATURE.get(normalized, _DEFAULT_NATURE)
     return _DEFAULT_NATURE
 
 
@@ -78,6 +88,34 @@ class QuantBackendCapability:
     notes: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
 
+    def to_optimization_capability(self) -> OptimizationCapability:
+        """Project quantization capability onto the shared optimization schema."""
+
+        return OptimizationCapability(
+            kind="quantization",
+            name=self.backend,
+            backend=self.backend,
+            status=self.status,
+            runtime=self.runtime,
+            artifact_kind=self.artifact_kind,
+            requires_cuda=self.requires_cuda,
+            requires_calibration=self.requires_calibration,
+            requires_exportable_graph=self.requires_exportable_graph,
+            available=self.status == "available",
+            supported=self.status == "available",
+            methods=self.methods,
+            model_families=self.model_families,
+            target_module_types=self.primary_module_types,
+            notes=self.notes,
+            limitations=self.limitations,
+            metadata={
+                "candidate_module_types": list(self.candidate_module_types),
+                "default_high_precision": list(self.default_high_precision),
+                "preferred_devices": list(self.preferred_devices),
+                "nature": self.nature.value,
+            },
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "backend": self.backend,
@@ -96,6 +134,7 @@ class QuantBackendCapability:
             "nature": self.nature.value,
             "notes": list(self.notes),
             "limitations": list(self.limitations),
+            "optimization_capability": self.to_optimization_capability().to_dict(),
         }
 
 
@@ -122,8 +161,8 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
             "dynamic_int8",
             "fp8_dynamic",
             "fp8_weight_only",
-            "int4_weight_only",
-            "int8_weight_only",
+            "weight_only_int4",
+            "weight_only_int8",
         ),
         model_families=(
             "linear_heavy",
@@ -149,7 +188,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         status="available",
         runtime="onnxruntime",
         artifact_kind="onnx_qdq",
-        methods=("static_int8",),
+        methods=("static_qdq_int8",),
         model_families=(
             "cnn",
             "resnet",
@@ -210,7 +249,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         status="planned",
         runtime="transformers",
         artifact_kind="hf_runtime_model",
-        methods=("int4_weight_only", "int8_weight_only"),
+        methods=("weight_only_int4", "weight_only_int8"),
         model_families=("llm", "vlm", "linear_heavy"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
@@ -248,6 +287,8 @@ def describe_quant_backend_capability(
         raise ValueError(f"Unsupported quantization backend: {backend}. Known: {allowed}") from exc
 
     selected_method = method or (str(policy.get("method")) if policy and policy.get("method") else None)
+    if selected_method is not None:
+        selected_method = normalize_quant_strategy(selected_method) or selected_method
     if selected_method is not None and selected_method not in base.methods:
         allowed = ", ".join(base.methods) if base.methods else "<none>"
         raise ValueError(

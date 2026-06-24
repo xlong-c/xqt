@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from xqt.core.reporting import OptimizationCapability
+
 
 @dataclass(frozen=True)
 class PruneRuntimeCapability:
@@ -21,6 +23,30 @@ class PruneRuntimeCapability:
     reason: str = ""
     metadata: dict[str, Any] | None = None
 
+    def to_optimization_capability(self) -> OptimizationCapability:
+        """Project pruning runtime capability onto the shared optimization schema."""
+
+        status = "available" if self.supported else "unsupported"
+        return OptimizationCapability(
+            kind="pruning",
+            name=self.method,
+            backend=self.runtime,
+            status=status,
+            runtime=self.runtime,
+            artifact_kind=self.artifact_kind,
+            available=self.supported,
+            supported=self.supported,
+            methods=(self.method,),
+            notes=self.notes,
+            limitations=self.limitations,
+            metadata={
+                "speedup_verified": self.speedup_verified,
+                "pattern_present": self.pattern_present,
+                "reason": self.reason,
+                **dict(self.metadata or {}),
+            },
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "method": self.method,
@@ -33,6 +59,7 @@ class PruneRuntimeCapability:
             "limitations": list(self.limitations),
             "reason": self.reason,
             "metadata": dict(self.metadata or {}),
+            "optimization_capability": self.to_optimization_capability().to_dict(),
         }
 
 
