@@ -12,6 +12,8 @@ CANONICAL_QUANT_STRATEGIES = (
     "static_qdq_int8",
     "fp8_dynamic",
     "fp4_weight_only",
+    "svd_fp4",
+    "svd_int4",
 )
 
 OPTIONAL_QUANT_STRATEGIES = (
@@ -37,6 +39,11 @@ QUANT_STRATEGY_ALIASES = {
     "fp8": "fp8_dynamic",
     "fp4": "fp4_weight_only",
     "weight_only_fp4": "fp4_weight_only",
+    "svdquant_fp4": "svd_fp4",
+    "svdquant_int4": "svd_int4",
+    "svd_fp4": "svd_fp4",
+    "svd_int4": "svd_int4",
+    "svdquant": "svd_fp4",
 }
 
 
@@ -53,7 +60,11 @@ def normalize_quant_strategy(
     if raw is None:
         dtype = str(policy.get("dtype") or "").lower()
         scheme = str(policy.get("scheme") or "").lower()
-        if dtype == "fp4" and scheme in {"", "weight_only", "weight-only"}:
+        if dtype == "fp4" and scheme in {"svd", "svdquant"}:
+            raw = "svd_fp4"
+        elif dtype == "int4" and scheme in {"svd", "svdquant"}:
+            raw = "svd_int4"
+        elif dtype == "fp4" and scheme in {"", "weight_only", "weight-only"}:
             raw = "fp4_weight_only"
         elif dtype == "int4" and scheme in {"", "weight_only", "weight-only"}:
             raw = "weight_only_int4"

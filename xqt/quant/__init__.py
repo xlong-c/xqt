@@ -46,6 +46,12 @@ from .fp4_backend import (
     ReferenceFP4Linear,
     quantize_with_reference_fp4,
 )
+from .svd_quant import (
+    LowRankBranch,
+    SVDQuantLinear,
+    SVDQuantResult,
+    quantize_with_svd,
+)
 
 __all__ = [
     "ActivationDriftRecord",
@@ -55,6 +61,7 @@ __all__ = [
     "IterableCalibrationDataReader",
     "LayerAnalysisRecord",
     "LayerSensitivityRecord",
+    "LowRankBranch",
     "ONNXQDQQuantizationResult",
     "QuantBackendCapability",
     "QuantizationCandidate",
@@ -65,6 +72,8 @@ __all__ = [
     "QuantizationPolicy",
     "QuantizationReport",
     "ReferenceFP4Linear",
+    "SVDQuantLinear",
+    "SVDQuantResult",
     "TorchAOQuantizationResult",
     "analyze_activation_drift",
     "analyze_layer_errors",
@@ -78,6 +87,7 @@ __all__ = [
     "list_quantizable_modules",
     "quantize_onnx_qdq_static",
     "quantize_with_reference_fp4",
+    "quantize_with_svd",
     "quantize_with_torchao",
     "recommend_high_precision_modules",
     "should_quantize_module",

@@ -11,9 +11,27 @@ from .pointwise import (
     fused_swiglu_reference,
     fused_swiglu_triton,
 )
+from .gemm import (
+    TRITON_GEMM_KERNEL_METADATA,
+    gemm_bf16_triton,
+    gemm_fp16_triton,
+    gemm_fp8_triton,
+    gemm_int4_dequant_triton,
+    gemm_int8_triton,
+    gemm_reference,
+)
+from .mxfp_gemm import (
+    MXFP_GEMM_KERNEL_METADATA,
+    gemm_mxfp_reference,
+    gemm_mxfp_triton,
+    pack_mxfp,
+    unpack_mxfp,
+)
 
 __all__ = [
     "TRITON_KERNEL_METADATA",
+    "TRITON_GEMM_KERNEL_METADATA",
+    "MXFP_GEMM_KERNEL_METADATA",
     "fused_bias_gelu_reference",
     "fused_bias_gelu_triton",
     "fused_rope_reference",
@@ -22,4 +40,14 @@ __all__ = [
     "fused_rmsnorm_residual_triton",
     "fused_swiglu_reference",
     "fused_swiglu_triton",
+    "gemm_bf16_triton",
+    "gemm_fp16_triton",
+    "gemm_fp8_triton",
+    "gemm_int4_dequant_triton",
+    "gemm_int8_triton",
+    "gemm_mxfp_reference",
+    "gemm_mxfp_triton",
+    "gemm_reference",
+    "pack_mxfp",
+    "unpack_mxfp",
 ]

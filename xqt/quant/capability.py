@@ -39,6 +39,13 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     # awq / gptq: weight-only packing, dequant to fp16 before compute
     "awq": QuantizationNature.PSEUDO,
     "gptq": QuantizationNature.PSEUDO,
+    # svdquant: low-rank fp16 branch + quantized residual
+    # PSEUDO in Phase 1 (dequant to fp16 before MMA).
+    # Upgraded to TRUE in Phase 2-3 when CuTe W4A4 MMA + SVDQuant fusion kernels ship.
+    "svd_fp4": QuantizationNature.PSEUDO,
+    "svd_int4": QuantizationNature.PSEUDO,
+    "svdquant_fp4": QuantizationNature.PSEUDO,
+    "svdquant_int4": QuantizationNature.PSEUDO,
 }
 
 _DEFAULT_NATURE = QuantizationNature.UNKNOWN
@@ -256,6 +263,37 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         preferred_devices=("cuda",),
         notes=("Planned HF runtime quantization path for 8-bit and 4-bit model loading.",),
         limitations=("Not wired into XQT execution yet.",),
+    ),
+    "svdquant": QuantBackendCapability(
+        backend="svdquant",
+        status="available",
+        runtime="pytorch",
+        artifact_kind="pytorch_model",
+        methods=("svd_fp4", "svd_int4"),
+        model_families=(
+            "linear_heavy",
+            "transformer",
+            "vision_transformer",
+            "diffusion_transformer",
+            "moe",
+            "llm",
+            "vlm",
+        ),
+        primary_module_types=("Linear",),
+        default_high_precision=_DEFAULT_HIGH_PRECISION,
+        preferred_devices=("cuda", "cpu"),
+        requires_cuda=False,
+        notes=(
+            "SVDQuant decomposes Linear weights via SVD into a low-rank FP16 branch "
+            "and a quantized residual (INT4/FP4).",
+            "Phase 1 (current): reference dequant+GEMM path. "
+            "Phase 2-3: CuTe DSL W4A4 MMA + kernel fusion for TRUE compute speedup.",
+        ),
+        limitations=(
+            "Phase 1 is PSEUDO quantization (storage compression only, dequant to "
+            "fp16 before MMA). TRUE INT4 MMA + SVDQuant fusion kernels pending Phase 2-3.",
+            "SVD decomposition cost is O(out × in × r) per layer — batch offline, not per-inference.",
+        ),
     ),
 }
 

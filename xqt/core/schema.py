@@ -7,7 +7,7 @@ from xdl.metric.detection_utils import DetectionPostprocessConfig
 
 XQT_CONFIG_VERSION = 1
 
-COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps")
+COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
 TASK_TYPES = ("classification", "detection")
 PRUNE_GRANULARITIES = (
     "channel",

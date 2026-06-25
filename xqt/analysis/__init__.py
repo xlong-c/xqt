@@ -24,14 +24,24 @@ from .report import (
     write_json_report,
     write_markdown_report,
 )
+from .svd_analysis import (
+    SVDDecomposition,
+    SVDQuantAnalysis,
+    compute_residual_weight,
+    decompose_weight_svd,
+)
 
 __all__ = [
     "DecodedDetectionDiff",
+    "SVDDecomposition",
+    "SVDQuantAnalysis",
     "TensorDiff",
     "TensorSummary",
     "build_pareto_points",
     "compare_decoded_detections",
     "compare_tensors",
+    "compute_residual_weight",
+    "decompose_weight_svd",
     "flatten_metrics",
     "build_avoid_list",
     "build_layer_analysis_events",

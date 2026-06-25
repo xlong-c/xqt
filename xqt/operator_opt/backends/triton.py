@@ -20,6 +20,15 @@ from ..kernels.triton import (
     fused_swiglu_reference,
     fused_swiglu_triton,
 )
+from ..kernels.triton.gemm import (
+    TRITON_GEMM_KERNEL_METADATA,
+    gemm_bf16_triton,
+    gemm_fp16_triton,
+    gemm_fp8_triton,
+    gemm_int4_dequant_triton,
+    gemm_int8_triton,
+    gemm_reference,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,37 @@ TRITON_KERNEL_REGISTRY: dict[str, TritonKernelSpec] = {
         reference=fused_rope_reference,
         kernel=fused_rope_triton,
         metadata=dict(TRITON_KERNEL_METADATA["rope"]),
+    ),
+    # Multi-precision GEMM kernels
+    "gemm_fp16": TritonKernelSpec(
+        pattern="gemm_fp16",
+        reference=gemm_reference,
+        kernel=gemm_fp16_triton,
+        metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_fp16"]),
+    ),
+    "gemm_bf16": TritonKernelSpec(
+        pattern="gemm_bf16",
+        reference=gemm_reference,
+        kernel=gemm_bf16_triton,
+        metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_bf16"]),
+    ),
+    "gemm_int8": TritonKernelSpec(
+        pattern="gemm_int8",
+        reference=gemm_reference,
+        kernel=gemm_int8_triton,
+        metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_int8"]),
+    ),
+    "gemm_fp8": TritonKernelSpec(
+        pattern="gemm_fp8",
+        reference=gemm_reference,
+        kernel=gemm_fp8_triton,
+        metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_fp8"]),
+    ),
+    "gemm_int4_dequant": TritonKernelSpec(
+        pattern="gemm_int4_dequant",
+        reference=gemm_reference,
+        kernel=gemm_int4_dequant_triton,
+        metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_int4_dequant"]),
     ),
 }
 

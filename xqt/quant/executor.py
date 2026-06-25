@@ -17,6 +17,7 @@ from .fp4_backend import quantize_with_reference_fp4
 from .onnx_qdq import quantize_onnx_qdq_static
 from .calibration_summary import build_calibration_summary
 from .capability import describe_quant_backend_capability, _resolve_nature
+from .svd_quant import quantize_with_svd
 from .torchao_backend import quantize_with_torchao
 from .types import (
     QuantizationComponentPlan,
@@ -355,6 +356,73 @@ def _execute_reference_fp4_component(
     return updated_model, report
 
 
+def _execute_svdquant_component(
+    context: XQTContext,
+    root_model: nn.Module,
+    component: QuantizationComponentPlan,
+) -> tuple[nn.Module, QuantizationReport]:
+    target_model = _resolve_component_model(root_model, component.target_path)
+    effective_policy = _build_torchao_policy(component)
+    configured_rank = int(effective_policy.get("rank", 32))
+    configured_group_size = int(effective_policy.get("group_size", 128))
+    configured_quant_dtype = str(effective_policy.get("quant_dtype", "int4"))
+    result = quantize_with_svd(
+        target_model,
+        policy=effective_policy,
+        strategy=component.strategy or effective_policy.get("strategy"),
+        rank=configured_rank,
+        group_size=configured_group_size,
+        quant_dtype=configured_quant_dtype,
+        inplace=True,
+        collect_analysis=True,
+    )
+    updated_model = _replace_component_model(root_model, component.target_path, result.model)
+    high_precision_modules = _prefix_module_names(
+        component.keep_high_precision,
+        component.target_path,
+    )
+    skipped_modules = _ordered_unique(
+        [
+            *_prefix_module_names(component.skip_quantize, component.target_path),
+            *high_precision_modules,
+        ]
+    )
+    quantized_modules = _prefix_module_names(result.quantized_modules, component.target_path)
+    module_selection_reasons = _module_selection_reason_metadata(
+        component,
+        quantized_modules=quantized_modules,
+        skipped_modules=skipped_modules,
+        high_precision_modules=high_precision_modules,
+    )
+    nature = _resolve_nature(component.strategy, component.policy)
+    report = QuantizationReport(
+        component_name=component.name,
+        backend=result.backend,
+        runtime="pytorch",
+        method=component.method,
+        strategy=result.strategy,
+        target_path=component.target_path,
+        quantized_modules=quantized_modules,
+        skipped_modules=skipped_modules,
+        high_precision_modules=high_precision_modules,
+        nature=nature,
+        compute_speedup_expected=None,
+        metadata={
+            **dict(result.metadata),
+            "analysis_only": component.analysis_only,
+            "policy": effective_policy,
+            "selection_policy": _selection_policy_metadata(component),
+            "module_selection_reasons": module_selection_reasons,
+            "executed": True,
+            "execution_state": "svdquant_reference",
+            "rank": configured_rank,
+            "group_size": configured_group_size,
+            "quant_dtype": configured_quant_dtype,
+        },
+    )
+    return updated_model, report
+
+
 def _execute_onnx_qdq_component(
     context: XQTContext,
     root_model: nn.Module | None,
@@ -600,6 +668,17 @@ def execute_quantization_plan(
             and component.strategy == "fp4_weight_only"
         ):
             current_model, report = _execute_reference_fp4_component(
+                context,
+                current_model,
+                component,
+            )
+            reports.append(report)
+            continue
+        if component.backend == "svdquant" or (
+            component.backend == "pytorch"
+            and component.strategy in {"svd_fp4", "svd_int4"}
+        ):
+            current_model, report = _execute_svdquant_component(
                 context,
                 current_model,
                 component,
