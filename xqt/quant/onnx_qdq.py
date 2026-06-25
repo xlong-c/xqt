@@ -13,6 +13,7 @@ from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
 from xqt.core.inputs import extract_model_inputs
 from xqt.export.input_utils import build_onnx_feed
+from .calibration_summary import build_calibration_summary
 
 
 @dataclass
@@ -65,37 +66,13 @@ class IterableCalibrationDataReader:
     def summary(self) -> dict[str, Any]:
         """Return a lightweight summary of captured calibration inputs."""
 
-        input_names: list[str] = []
-        shapes: dict[str, list[list[int]]] = {}
-        dtypes: dict[str, list[str]] = {}
-        if self._records:
-            input_names = sorted(self._records[0].keys())
-        for record in self._records:
-            for name, value in record.items():
-                shapes.setdefault(name, []).append(list(value.shape))
-                dtypes.setdefault(name, []).append(str(value.dtype))
-        return {
-            "input_names": input_names,
-            "sample_count": len(self._records),
-            "batch_count": len(self._records),
-            "shapes": {
-                name: shape_list[: min(3, len(shape_list))]
-                for name, shape_list in shapes.items()
-            },
-            "dtypes": {
-                name: sorted(set(dtype_list))
-                for name, dtype_list in dtypes.items()
-            },
-            "input_signature": {
-                name: {
-                    "shapes": shape_list[: min(3, len(shape_list))],
-                    "dtypes": sorted(set(dtypes.get(name, []))),
-                }
-                for name, shape_list in shapes.items()
-            },
-            "calibrator_type": type(self).__name__,
-            "observer_type": "onnxruntime.quantization.CalibrationDataReader",
-        }
+        return build_calibration_summary(
+            self._records,
+            input_names=self.input_names,
+            sample_limit=self.sample_limit,
+            calibrator_type=type(self).__name__,
+            observer_type="onnxruntime.quantization.CalibrationDataReader",
+        )
 
     def get_next(self) -> Optional[dict[str, np.ndarray]]:
         """Return the next calibration sample for ONNX Runtime."""

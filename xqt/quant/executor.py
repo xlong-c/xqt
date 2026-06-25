@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from itertools import chain
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from torch import nn
 
@@ -15,6 +15,7 @@ from xqt.export.input_utils import default_input_names
 
 from .fp4_backend import quantize_with_reference_fp4
 from .onnx_qdq import quantize_onnx_qdq_static
+from .calibration_summary import build_calibration_summary
 from .capability import describe_quant_backend_capability, _resolve_nature
 from .torchao_backend import quantize_with_torchao
 from .types import (
@@ -96,6 +97,24 @@ def _resolve_calibration_inputs(
         "calibration_inputs are required for component "
         f"'{component.name}' backend '{component.backend}'"
     )
+
+
+def _optional_calibration_summary(
+    context: XQTContext,
+    component: QuantizationComponentPlan,
+) -> tuple[int | None, dict[str, Any] | None]:
+    calibration_inputs = context.calibration_inputs
+    if calibration_inputs is None:
+        return None, None
+    input_names = component.policy.get("input_names")
+    summary = build_calibration_summary(
+        calibration_inputs,
+        input_names=input_names if isinstance(input_names, Sequence) else None,
+        sample_limit=component.policy.get("sample_limit"),
+        calibrator_type="XQTCalibrationInputSummary",
+        observer_type=f"{component.backend}.calibration_inputs",
+    )
+    return int(summary["sample_count"]), summary
 
 
 def _build_torchao_policy(component: QuantizationComponentPlan) -> dict[str, Any]:
@@ -213,6 +232,7 @@ def _infer_qdq_quantized_op_types(qdq_graph: dict[str, Any]) -> list[str]:
 
 
 def _execute_torchao_component(
+    context: XQTContext,
     root_model: nn.Module,
     component: QuantizationComponentPlan,
 ) -> tuple[nn.Module, QuantizationReport]:
@@ -242,6 +262,10 @@ def _execute_torchao_component(
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
     )
+    calibration_samples, calibration_summary = _optional_calibration_summary(
+        context,
+        component,
+    )
     nature = _resolve_nature(component.strategy, component.policy)
     compute_speedup = 1.0 if nature == QuantizationNature.TRUE else None
     report = QuantizationReport(
@@ -254,6 +278,8 @@ def _execute_torchao_component(
         quantized_modules=quantized_modules,
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
+        calibration_samples=calibration_samples,
+        calibration_summary=calibration_summary,
         nature=nature,
         compute_speedup_expected=compute_speedup,
         metadata={
@@ -268,6 +294,7 @@ def _execute_torchao_component(
 
 
 def _execute_reference_fp4_component(
+    context: XQTContext,
     root_model: nn.Module,
     component: QuantizationComponentPlan,
 ) -> tuple[nn.Module, QuantizationReport]:
@@ -297,6 +324,10 @@ def _execute_reference_fp4_component(
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
     )
+    calibration_samples, calibration_summary = _optional_calibration_summary(
+        context,
+        component,
+    )
     report = QuantizationReport(
         component_name=component.name,
         backend=result.backend,
@@ -307,6 +338,8 @@ def _execute_reference_fp4_component(
         quantized_modules=quantized_modules,
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
+        calibration_samples=calibration_samples,
+        calibration_summary=calibration_summary,
         nature=QuantizationNature.PSEUDO,
         compute_speedup_expected=None,
         metadata={
@@ -559,14 +592,18 @@ def execute_quantization_plan(
                 f"'{component.name}' backend '{component.backend}'"
             )
         if component.backend == "torchao":
-            current_model, report = _execute_torchao_component(current_model, component)
+            current_model, report = _execute_torchao_component(context, current_model, component)
             reports.append(report)
             continue
         if (
             component.backend == "pytorch"
             and component.strategy == "fp4_weight_only"
         ):
-            current_model, report = _execute_reference_fp4_component(current_model, component)
+            current_model, report = _execute_reference_fp4_component(
+                context,
+                current_model,
+                component,
+            )
             reports.append(report)
             continue
         if component.backend == "onnxruntime_qdq":

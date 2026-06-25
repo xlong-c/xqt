@@ -16,6 +16,7 @@ from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.registry import register_pass
 from xqt.core.types import XQTContext
 from xqt.analysis import (
+    build_layer_analysis_payload,
     layer_statistics_rows,
     records_to_rows,
     write_csv_report,
@@ -88,6 +89,87 @@ def _call_model(model: nn.Module, inputs: Any) -> Any:
     if isinstance(inputs, tuple):
         return model(*inputs)
     return model(inputs)
+
+
+def _build_quant_layer_analysis_summary(context: XQTContext) -> dict[str, object]:
+    """Return layer diff and sensitivity summary for a quantized PyTorch model."""
+
+    if context.reference_model is None:
+        return {"available": False, "reason": "reference_model_missing"}
+    if not isinstance(context.model, nn.Module):
+        return {"available": False, "reason": "quantized_pytorch_model_missing"}
+    if context.example_inputs is None:
+        return {"available": False, "reason": "example_inputs_missing"}
+
+    analysis_config = context.config.analysis
+    device = torch.device(context.config.model.device)
+    candidate_model = context.model.to(device).eval()
+    reference_model = context.reference_model.to(device).eval()
+    example_input = _move_to_device(
+        extract_model_inputs(
+            context.example_inputs,
+            expected_input_count=infer_model_input_count(candidate_model),
+        ),
+        device,
+    )
+    try:
+        payload = build_layer_analysis_payload(
+            reference_model,
+            candidate_model,
+            example_input,
+            module_names=analysis_config.module_names,
+            atol=context.config.validation.output_diff.atol,
+            rtol=context.config.validation.output_diff.rtol,
+            include_weight_diff=analysis_config.include_weight_diff,
+            include_sensitivity=True,
+            include_statistics=False,
+            include_avoid_list=True,
+            metrics=analysis_config.metrics,
+            row_top_k=analysis_config.top_k,
+            avoid_top_k=analysis_config.top_k,
+            sample_budget=analysis_config.sample_budget,
+            sample_seed=analysis_config.sample_seed,
+            runtime="quantized_pytorch",
+            avoid_used_by="quant_keep_high_precision",
+            per_channel=analysis_config.structured.per_channel,
+            per_token=analysis_config.structured.per_token,
+        )
+        module_names = list(analysis_config.module_names or [])
+        if not module_names:
+            module_names = [
+                name
+                for name, module in candidate_model.named_modules()
+                if name and hasattr(module, "weight")
+            ]
+        payload["layer_statistics"] = layer_statistics_rows(
+            reference_model,
+            candidate_model,
+            example_input,
+            module_names=module_names,
+            sample_budget=analysis_config.sample_budget,
+            sample_seed=analysis_config.sample_seed,
+        )
+        payload["available"] = True
+        payload["layer_error_count"] = len(payload.get("layer_errors", []))
+        payload["layer_sensitivity_count"] = len(payload.get("layer_sensitivity", []))
+        payload["layer_statistics_count"] = len(payload.get("layer_statistics", []))
+        if not payload["layer_errors"] and payload["layer_statistics"]:
+            payload["layer_error_rows_from_statistics"] = True
+        return payload
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": "analysis_failed",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "layer_errors": [],
+            "layer_sensitivity": [],
+            "layer_statistics": [],
+            "avoid_list": [],
+            "layer_error_count": 0,
+            "layer_sensitivity_count": 0,
+            "layer_statistics_count": 0,
+        }
 
 
 def _resolve_export_model(context: XQTContext) -> tuple[nn.Module, dict[str, object]]:
@@ -655,8 +737,26 @@ class QuantPass:
         )
         context.model = execution.model
         context.artifacts.update(execution.artifacts)
-        context.metrics["quant"] = summarize_quantization_reports(execution.reports)
+        quant_metrics = summarize_quantization_reports(execution.reports)
+        quant_metrics["layer_analysis"] = _build_quant_layer_analysis_summary(context)
+        context.metrics["quant"] = quant_metrics
         if context.manifest is not None:
+            layer_analysis = quant_metrics["layer_analysis"]
+            context.manifest.add_metric(
+                MetricRecord(
+                    name="quant.layer_analysis.available",
+                    value=bool(layer_analysis.get("available")),
+                    passed=bool(layer_analysis.get("available")),
+                    metadata={
+                        "reason": layer_analysis.get("reason"),
+                        "layer_error_count": layer_analysis.get("layer_error_count", 0),
+                        "layer_sensitivity_count": layer_analysis.get(
+                            "layer_sensitivity_count",
+                            0,
+                        ),
+                    },
+                )
+            )
             for report in execution.reports:
                 if report.runtime == "onnxruntime" and "path" in report.metadata:
                     context.manifest.add_artifact(

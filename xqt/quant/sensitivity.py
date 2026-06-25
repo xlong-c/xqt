@@ -79,10 +79,18 @@ def _shared_module_names(
         for candidate in list_quantizable_modules(candidate_model, policy)
         if candidate.quantize
     }
+    candidate_modules = dict(candidate_model.named_modules())
     return [
         candidate.name
         for candidate in reference_candidates
         if candidate.name in candidate_names
+        or (
+            candidate.name in candidate_modules
+            and (
+                hasattr(candidate_modules[candidate.name], "dequantize_weight")
+                or hasattr(candidate_modules[candidate.name], "weight")
+            )
+        )
     ]
 
 
