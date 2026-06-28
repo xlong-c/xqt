@@ -470,9 +470,33 @@ class _TileLangDequantGemmWrapper(nn.Module):
         activation: str | None = None
         kernel_pattern = "dequant_gemm_epilogue"
         extra_kwargs: dict[str, Any] = {}
+        nvfp4_bridge = getattr(self.module, "tilelang_packed_nvfp4_dequant_gemm_args", None)
         packed_bridge = getattr(self.module, "tilelang_packed_dequant_gemm_args", None)
         dense_bridge = getattr(self.module, "tilelang_dequant_gemm_args", None)
-        if callable(packed_bridge):
+        if callable(nvfp4_bridge):
+            (
+                packed_weight,
+                scale,
+                bias,
+                activation,
+                input_features,
+                group_size,
+                weight_global_scale,
+            ) = nvfp4_bridge(
+                dtype=x.dtype,
+                device=x.device,
+            )
+            qweight = packed_weight
+            kernel_pattern = "nvfp4_packed_dequant_gemm_epilogue"
+            extra_kwargs = {
+                "input_features": int(input_features),
+                "group_size": int(group_size),
+                "weight_global_scale": weight_global_scale,
+            }
+            self.last_weight_source = "compressed_tensors_nvfp4_packed_bridge"
+            self.last_weight_representation = "packed_nvfp4_e2m1_plus_group_scale"
+            self.last_consumes_packed_weight = True
+        elif callable(packed_bridge):
             packed_weight, scale, bias, activation, input_features, group_size = packed_bridge(
                 dtype=x.dtype,
                 device=x.device,
@@ -514,9 +538,9 @@ class _TileLangDequantGemmWrapper(nn.Module):
         self.last_kernel_pattern = kernel_pattern
         self.last_unpack_stage = (
             "tilelang_fused_gemm_kernel"
-            if uses_cuda and kernel_pattern == "fp4_packed_dequant_gemm_epilogue"
+            if uses_cuda and kernel_pattern in {"fp4_packed_dequant_gemm_epilogue", "nvfp4_packed_dequant_gemm_epilogue"}
             else "eager_reference_fallback"
-            if kernel_pattern == "fp4_packed_dequant_gemm_epilogue"
+            if kernel_pattern in {"fp4_packed_dequant_gemm_epilogue", "nvfp4_packed_dequant_gemm_epilogue"}
             else None
         )
         self.last_execution_reason = (
@@ -557,9 +581,14 @@ class _TileLangDequantGemmWrapper(nn.Module):
                 "batch_multiple_of_block_m": True,
                 "out_features_multiple_of_block_n": True,
                 "supported_activations": [None, "gelu", "silu", "relu"],
-                "supported_patterns": ["dequant_gemm_epilogue"],
+                "supported_patterns": [
+                    "dequant_gemm_epilogue",
+                    "fp4_packed_dequant_gemm_epilogue",
+                    "nvfp4_packed_dequant_gemm_epilogue",
+                ],
                 "supports_reference_fp4_linear_bridge": True,
                 "supports_packed_fp4_bridge": True,
+                "supports_packed_nvfp4_bridge": True,
             },
             "kernel_pattern": self.last_kernel_pattern,
             "weight_source": self.last_weight_source,
@@ -616,9 +645,14 @@ def _build_tilelang_candidate_model(
         raise XQTBackendError(
             "TileLang attention target requires nn.MultiheadAttention or a module with an .attention submodule"
         )
-    if patterns == ["dequant_gemm_epilogue"]:
+    if patterns in (
+        ["dequant_gemm_epilogue"],
+        ["fp4_packed_dequant_gemm_epilogue"],
+        ["nvfp4_packed_dequant_gemm_epilogue"],
+    ):
         if (
-            callable(getattr(target_model, "tilelang_packed_dequant_gemm_args", None))
+            callable(getattr(target_model, "tilelang_packed_nvfp4_dequant_gemm_args", None))
+            or callable(getattr(target_model, "tilelang_packed_dequant_gemm_args", None))
             or callable(getattr(target_model, "tilelang_dequant_gemm_args", None))
         ) or all(
             hasattr(target_model, name) for name in ("qweight", "scale")
@@ -630,7 +664,8 @@ def _build_tilelang_candidate_model(
             )
         for child_name, child in target_model.named_children():
             if (
-                callable(getattr(child, "tilelang_packed_dequant_gemm_args", None))
+                callable(getattr(child, "tilelang_packed_nvfp4_dequant_gemm_args", None))
+                or callable(getattr(child, "tilelang_packed_dequant_gemm_args", None))
                 or callable(getattr(child, "tilelang_dequant_gemm_args", None))
             ) or all(
                 hasattr(child, name) for name in ("qweight", "scale")
