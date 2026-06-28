@@ -312,8 +312,10 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
     group_size: int,
     *,
     block_m: int = 64,
-    block_n: int = 64,
+    block_n: int = 16,
+    block_k: int = 128,
     threads: int = 128,
+    num_stages: int = 2,
     target_arch: str | None = None,
     has_bias: bool = False,
     activation: str | None = None,
@@ -325,6 +327,8 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
         raise ValueError("m, n, input_features, and group_size must be positive")
     if m % block_m != 0 or n % block_n != 0:
         raise ValueError("minimal fused NVFP4 TileLang GEMM requires m,n to be multiples of block sizes")
+    if input_features % block_k != 0:
+        raise ValueError("minimal fused NVFP4 TileLang GEMM requires input_features to be a multiple of block_k")
     if activation not in {None, "gelu", "silu", "relu"}:
         raise ValueError(f"unsupported activation: {activation}")
 
@@ -441,32 +445,40 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                 T.ceildiv(n, block_n),
                 threads=threads,
             ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, input_features], dtype)
-                b_shared = T.alloc_shared([block_n, input_features], dtype)
+                a_shared = T.alloc_shared([block_m, block_k], dtype)
+                b_shared = T.alloc_shared([block_n, block_k], dtype)
                 o_shared = T.alloc_shared([block_m, block_n], dtype)
                 acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
-                T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-                for row_offset, feature in T.Parallel(block_n, input_features):
-                    row = by * block_n + row_offset
-                    byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
-                    low = T.bitwise_and(byte_u16, 15)
-                    high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
-                    nibble = T.if_then_else(feature % 2 == 0, low, high)
-                    decoded = _decode_nvfp4(nibble.astype(T.int16))
-                    b_shared[row_offset, feature] = (
-                        decoded.astype(dtype)
-                        * scale[row, feature // group_size, 0]
-                        * global_scale[0]
-                    )
                 T.fill(acc_o, 0)
-                T.gemm(
-                    a_shared,
-                    b_shared,
-                    acc_o,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
+                for k_tile in T.Pipelined(T.ceildiv(input_features, block_k), num_stages=num_stages):
+                    T.copy(
+                        a[
+                            bx * block_m : (bx + 1) * block_m,
+                            k_tile * block_k : (k_tile + 1) * block_k,
+                        ],
+                        a_shared,
+                    )
+                    for row_offset, feature_offset in T.Parallel(block_n, block_k):
+                        row = by * block_n + row_offset
+                        feature = k_tile * block_k + feature_offset
+                        byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
+                        low = T.bitwise_and(byte_u16, 15)
+                        high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
+                        nibble = T.if_then_else(feature % 2 == 0, low, high)
+                        decoded = _decode_nvfp4(nibble.astype(T.int16))
+                        b_shared[row_offset, feature_offset] = (
+                            decoded.astype(dtype)
+                            * scale[row, feature // group_size, 0]
+                            / global_scale[0]
+                        )
+                    T.gemm(
+                        a_shared,
+                        b_shared,
+                        acc_o,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
                 for row_offset, column_offset in T.Parallel(block_m, block_n):
                     value = (
                         acc_o[row_offset, column_offset]
@@ -497,32 +509,40 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                 T.ceildiv(n, block_n),
                 threads=threads,
             ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, input_features], dtype)
-                b_shared = T.alloc_shared([block_n, input_features], dtype)
+                a_shared = T.alloc_shared([block_m, block_k], dtype)
+                b_shared = T.alloc_shared([block_n, block_k], dtype)
                 o_shared = T.alloc_shared([block_m, block_n], dtype)
                 acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
-                T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-                for row_offset, feature in T.Parallel(block_n, input_features):
-                    row = by * block_n + row_offset
-                    byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
-                    low = T.bitwise_and(byte_u16, 15)
-                    high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
-                    nibble = T.if_then_else(feature % 2 == 0, low, high)
-                    decoded = _decode_nvfp4(nibble.astype(T.int16))
-                    b_shared[row_offset, feature] = (
-                        decoded.astype(dtype)
-                        * scale[row, feature // group_size, 0]
-                        * global_scale[0]
-                    )
                 T.fill(acc_o, 0)
-                T.gemm(
-                    a_shared,
-                    b_shared,
-                    acc_o,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
+                for k_tile in T.Pipelined(T.ceildiv(input_features, block_k), num_stages=num_stages):
+                    T.copy(
+                        a[
+                            bx * block_m : (bx + 1) * block_m,
+                            k_tile * block_k : (k_tile + 1) * block_k,
+                        ],
+                        a_shared,
+                    )
+                    for row_offset, feature_offset in T.Parallel(block_n, block_k):
+                        row = by * block_n + row_offset
+                        feature = k_tile * block_k + feature_offset
+                        byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
+                        low = T.bitwise_and(byte_u16, 15)
+                        high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
+                        nibble = T.if_then_else(feature % 2 == 0, low, high)
+                        decoded = _decode_nvfp4(nibble.astype(T.int16))
+                        b_shared[row_offset, feature_offset] = (
+                            decoded.astype(dtype)
+                            * scale[row, feature // group_size, 0]
+                            / global_scale[0]
+                        )
+                    T.gemm(
+                        a_shared,
+                        b_shared,
+                        acc_o,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
                 for row_offset, column_offset in T.Parallel(block_m, block_n):
                     acc_o[row_offset, column_offset] = _apply_activation(
                         acc_o[row_offset, column_offset]
@@ -541,4 +561,5 @@ __all__ = [
     "build_tilelang_fp4_fused_dequant_gemm_kernel",
     "build_tilelang_fp4_unpack_dequant_kernel",
     "build_tilelang_gemm_kernel",
+    "build_tilelang_nvfp4_fused_dequant_gemm_kernel",
 ]

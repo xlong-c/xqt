@@ -46,17 +46,26 @@ def unpack_nvfp4e2m1(packed_weight: torch.Tensor, *, input_features: int) -> tor
     return codebook[unpacked.long()]
 
 
+def _normalize_group_scale(weight_scale: torch.Tensor) -> torch.Tensor:
+    if weight_scale.ndim == 2:
+        return weight_scale.unsqueeze(-1)
+    if weight_scale.ndim == 3 and weight_scale.shape[2] == 1:
+        return weight_scale
+    raise ValueError(
+        "weight_scale must have shape [out_features, groups] or [out_features, groups, 1]"
+    )
+
+
 def expand_group_scale(
     weight_scale: torch.Tensor,
     *,
     group_size: int,
     input_features: int,
 ) -> torch.Tensor:
-    """Expand `[out_features, groups, 1]` scale to `[out_features, input_features]`."""
+    """Expand per-group scale to `[out_features, input_features]`."""
 
-    if weight_scale.ndim != 3 or weight_scale.shape[2] != 1:
-        raise ValueError("weight_scale must have shape [out_features, groups, 1]")
-    expanded = weight_scale.expand(-1, -1, int(group_size)).reshape(weight_scale.shape[0], -1)
+    normalized = _normalize_group_scale(weight_scale)
+    expanded = normalized.expand(-1, -1, int(group_size)).reshape(normalized.shape[0], -1)
     return expanded[:, : int(input_features)]
 
 
@@ -94,7 +103,7 @@ class NVFP4LinearBridge(nn.Module):
         self.group_size = int(group_size)
         self.source_module_type = str(source_module_type)
         self.register_buffer("packed_weight", packed_weight.to(torch.uint8))
-        self.register_buffer("weight_scale", weight_scale.to(torch.float32))
+        self.register_buffer("weight_scale", _normalize_group_scale(weight_scale).to(torch.float32))
         if weight_global_scale is None:
             self.register_buffer("weight_global_scale", None)
         else:
@@ -133,7 +142,7 @@ class NVFP4LinearBridge(nn.Module):
     def expanded_weight_scale(self) -> torch.Tensor:
         scale = self.weight_scale
         if self.weight_global_scale is not None:
-            scale = scale * self.weight_global_scale.reshape(1, 1, 1)
+            scale = scale / self.weight_global_scale.reshape(1, 1, 1)
         return expand_group_scale(
             scale,
             group_size=self.group_size,
@@ -194,26 +203,33 @@ def infer_nvfp4_tensor_layout(module: nn.Module) -> NVFP4TensorLayout | None:
     weight_scale_name = None
     for candidate in ("weight_scale", "scales", "weight_scales"):
         value = getattr(module, candidate, None)
-        if isinstance(value, torch.Tensor) and value.ndim == 3:
+        if isinstance(value, torch.Tensor) and value.ndim in {2, 3}:
             weight_scale_name = candidate
             break
     if weight_scale_name is None:
         return None
 
+    packed_weight = getattr(module, packed_weight_name)
+    weight_scale = getattr(module, weight_scale_name)
+    if weight_scale.ndim == 3 and weight_scale.shape[2] != 1:
+        return None
     input_features = int(getattr(module, "in_features", 0) or 0)
+    if input_features <= 0:
+        input_features = int(packed_weight.shape[1]) * 2
     output_features = int(getattr(module, "out_features", 0) or 0)
+    if output_features <= 0:
+        output_features = int(packed_weight.shape[0])
     if input_features <= 0 or output_features <= 0:
         return None
 
-    weight_scale = getattr(module, weight_scale_name)
     groups = int(weight_scale.shape[1])
     if groups <= 0:
         return None
-    group_size = int((weight_scale.shape[2] if weight_scale.shape[2] > 1 else input_features // groups) or 0)
+    padded_input_features = int(packed_weight.shape[1]) * 2
+    group_size = int(padded_input_features // groups)
     if group_size <= 0:
-        padded_input_features = int(getattr(module, packed_weight_name).shape[1]) * 2
-        group_size = padded_input_features // groups
-    if group_size <= 0:
+        return None
+    if groups * group_size != padded_input_features:
         return None
 
     weight_global_scale_name = None

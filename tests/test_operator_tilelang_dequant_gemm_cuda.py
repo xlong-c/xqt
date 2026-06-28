@@ -83,6 +83,7 @@ def test_tilelang_dequant_gemm_operator_executor_uses_cuda_kernel_entry() -> Non
     assert report.metadata["execution_mode"] == "cuda_tilelang_entry"
     assert report.metadata["kernel_kind"] == "minimal_cuda_jit"
     assert report.metadata["kernel_constraints"]["dtype"] == "float16"
-    assert report.metadata["kernel_constraints"]["supported_patterns"] == [
+    assert (
         "dequant_gemm_epilogue"
-    ]
+        in report.metadata["kernel_constraints"]["supported_patterns"]
+    )

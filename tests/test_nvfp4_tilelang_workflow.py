@@ -12,7 +12,10 @@ class _FakeCompressedNVFP4Linear(torch.nn.Module):
         self.in_features = 64
         self.out_features = 64
         self.register_buffer("qweight", torch.full((64, 32), 0x21, dtype=torch.uint8))
-        self.register_buffer("weight_scale", torch.ones((64, 1, 1), dtype=torch.float32))
+        self.register_buffer(
+            "weight_scale",
+            torch.ones((64, 4), dtype=torch.float32).to(torch.float8_e4m3fn),
+        )
         self.register_buffer("weight_global_scale", torch.tensor([1.0], dtype=torch.float32))
         self.register_buffer("bias", torch.zeros(64, dtype=torch.float32))
         self.bridge = bridge_module_to_nvfp4_linear(self)

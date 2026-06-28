@@ -548,20 +548,30 @@ class _TileLangDequantGemmWrapper(nn.Module):
             if uses_cuda
             else "TileLang dequant GEMM kernel requires CUDA tensors; using configured fallback."
         )
+        tile_kwargs: dict[str, Any] = {
+            "activation": activation,
+            **extra_kwargs,
+            "block_m": int(self.settings.get("block_m", 64)),
+            "block_n": int(
+                self.settings.get(
+                    "block_n",
+                    16 if kernel_pattern == "nvfp4_packed_dequant_gemm_epilogue" else 64,
+                )
+            ),
+            "threads": int(self.settings.get("threads", 128)),
+            "num_stages": int(self.settings.get("num_stages", 2)),
+            "target_arch": self.settings.get("target_arch"),
+            "fallback": self.fallback,
+        }
+        if kernel_pattern == "nvfp4_packed_dequant_gemm_epilogue":
+            tile_kwargs["block_k"] = int(self.settings.get("block_k", 128))
         return run_tilelang_kernel(
             kernel_pattern,
             x,
             qweight,
             scale,
             bias,
-            activation=activation,
-            **extra_kwargs,
-            block_m=int(self.settings.get("block_m", 64)),
-            block_n=int(self.settings.get("block_n", 64)),
-            threads=int(self.settings.get("threads", 128)),
-            num_stages=int(self.settings.get("num_stages", 2)),
-            target_arch=self.settings.get("target_arch"),
-            fallback=self.fallback,
+            **tile_kwargs,
         )
 
     def execution_metadata(self) -> dict[str, Any]:

@@ -84,9 +84,10 @@ def test_fp4_quant_stage_can_feed_tilelang_dequant_gemm_operator_stage() -> None
     assert target["metadata"]["execution_state"] in {"executed", "fallback"}
     assert target["metadata"]["execution_mode"] == "reference_fallback"
     assert target["metadata"]["kernel_kind"] == "reference_fallback"
-    assert target["metadata"]["kernel_constraints"]["supported_patterns"] == [
+    assert (
         "dequant_gemm_epilogue"
-    ]
+        in target["metadata"]["kernel_constraints"]["supported_patterns"]
+    )
     assert (
         target["metadata"]["kernel_constraints"]["supports_reference_fp4_linear_bridge"]
         is True

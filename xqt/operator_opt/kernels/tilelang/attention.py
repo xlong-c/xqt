@@ -401,6 +401,12 @@ def dequant_gemm_epilogue_tilelang(
     raise ValueError(f"unsupported activation: {activation}")
 
 
+def _normalize_group_scale_for_tilelang(scale: torch.Tensor) -> torch.Tensor:
+    if scale.ndim == 2:
+        return scale.unsqueeze(-1)
+    return scale
+
+
 def fp4_packed_dequant_gemm_epilogue_tilelang(
     x: torch.Tensor,
     packed_weight: torch.Tensor,
@@ -481,9 +487,9 @@ def nvfp4_packed_dequant_gemm_epilogue_reference(
         packed_weight.to(device=x.device),
         input_features=padded_input_features,
     ).to(dtype=x.dtype, device=x.device)
-    weight_scale = scale.to(dtype=x.dtype, device=x.device)
+    weight_scale = _normalize_group_scale_for_tilelang(scale).to(dtype=x.dtype, device=x.device)
     if weight_global_scale is not None:
-        weight_scale = weight_scale * weight_global_scale.to(dtype=x.dtype, device=x.device).reshape(1, 1, 1)
+        weight_scale = weight_scale / weight_global_scale.to(dtype=x.dtype, device=x.device).reshape(1, 1, 1)
     grouped = qweight.reshape(qweight.shape[0], -1, int(group_size))
     weight = (grouped * weight_scale).reshape(qweight.shape[0], padded_input_features)[
         :, : int(input_features)
@@ -513,16 +519,17 @@ def nvfp4_packed_dequant_gemm_epilogue_tilelang(
     weight_global_scale: torch.Tensor | None = None,
     activation: str | None = None,
     block_m: int = 64,
-    block_n: int = 64,
+    block_n: int = 16,
+    block_k: int = 128,
     threads: int = 128,
     num_stages: int = 2,
     target_arch: str | None = None,
 ) -> torch.Tensor:
     """CUDA-only packed NVFP4 entry using fused TileLang unpack/dequant GEMM."""
 
-    del num_stages
     tensors = (x, packed_weight, scale) if bias is None else (x, packed_weight, scale, bias)
     _require_cuda_tensors(*tensors)
+    scale = _normalize_group_scale_for_tilelang(scale)
     if weight_global_scale is not None:
         _require_cuda_tensors(weight_global_scale)
     if x.dtype != torch.float16 or scale.dtype != torch.float16:
@@ -567,7 +574,9 @@ def nvfp4_packed_dequant_gemm_epilogue_tilelang(
         group_size=int(group_size),
         block_m=int(block_m),
         block_n=int(block_n),
+        block_k=int(block_k),
         threads=int(threads),
+        num_stages=int(num_stages),
         target_arch=target_arch,
         has_bias=bias is not None,
         activation=activation,
@@ -614,8 +623,8 @@ TILELANG_KERNEL_METADATA: dict[str, dict[str, Any]] = {
     "nvfp4_packed_dequant_gemm_epilogue": {
         "kernel_name": "nvfp4_packed_dequant_gemm_epilogue",
         "block_m": 64,
-        "block_n": 64,
-        "block_k": 64,
+        "block_n": 16,
+        "block_k": 128,
         "threads": 128,
         "num_stages": 2,
         "baseline": "fused TileLang packed NVFP4 unpack/dequant GEMM + bias/activation epilogue",
