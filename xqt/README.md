@@ -4,8 +4,12 @@
 
 ## 先看什么
 
-- 长期事实源: [../docs/md/XQT.md](../docs/md/XQT.md)
-- 摘要入口: [../docs/md/XQT_SUMMARY.md](../docs/md/XQT_SUMMARY.md)
+- Markdown 总入口: [../docs/md/index.md](../docs/md/index.md)
+- 架构正文: [../docs/md/architecture/xqt.md](../docs/md/architecture/xqt.md)
+- 概念说明: [../docs/md/explanation/xqt-concepts.md](../docs/md/explanation/xqt-concepts.md)
+- 工作流入口: [../docs/md/usage/xqt-workflows.md](../docs/md/usage/xqt-workflows.md)
+- 兼容事实源: [../docs/md/XQT.md](../docs/md/XQT.md)
+- 兼容摘要入口: [../docs/md/XQT_SUMMARY.md](../docs/md/XQT_SUMMARY.md)
 - 包内工程契约: [FRAMEWORK.md](FRAMEWORK.md)
 
 ## 核心边界
@@ -20,6 +24,7 @@ XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,�
 
 ## 修改顺序
 
-1. 先看 `docs/md/XQT.md`.
-2. 再看 `xqt/FRAMEWORK.md`.
-3. 最后看相关 `recipes/*.yaml` 和测试.
+1. 先看 `docs/md/architecture/xqt.md`.
+2. 再看 `docs/md/usage/xqt-workflows.md`.
+3. 再看 `xqt/FRAMEWORK.md`.
+4. 最后看相关 `recipes/*.yaml` 和测试.
