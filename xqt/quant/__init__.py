@@ -46,6 +46,14 @@ from .fp4_backend import (
     ReferenceFP4Linear,
     quantize_with_reference_fp4,
 )
+from .nvfp4_bridge import (
+    NVFP4LinearBridge,
+    NVFP4TensorLayout,
+    bridge_module_to_nvfp4_linear,
+    expand_group_scale,
+    infer_nvfp4_tensor_layout,
+    unpack_nvfp4e2m1,
+)
 from .svd_quant import (
     LowRankBranch,
     SVDQuantLinear,
@@ -62,6 +70,8 @@ __all__ = [
     "LayerAnalysisRecord",
     "LayerSensitivityRecord",
     "LowRankBranch",
+    "NVFP4LinearBridge",
+    "NVFP4TensorLayout",
     "ONNXQDQQuantizationResult",
     "QuantBackendCapability",
     "QuantizationCandidate",
@@ -80,9 +90,12 @@ __all__ = [
     "analyze_layer_sensitivity",
     "build_quantization_plan",
     "build_fake_qdq_surrogate",
+    "bridge_module_to_nvfp4_linear",
     "calibrate_activation_statistics",
     "describe_quant_backend_capability",
     "execute_quantization_plan",
+    "expand_group_scale",
+    "infer_nvfp4_tensor_layout",
     "list_quant_backend_capabilities",
     "list_quantizable_modules",
     "quantize_onnx_qdq_static",
@@ -93,4 +106,5 @@ __all__ = [
     "should_quantize_module",
     "summarize_quantization_reports",
     "suggest_high_precision_modules",
+    "unpack_nvfp4e2m1",
 ]

@@ -1,0 +1,255 @@
+"""NVFP4 weight bridge helpers for XQT TileLang operator optimization."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+
+_NVFP4_CODEBOOK = torch.tensor(
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
+    dtype=torch.float32,
+)
+
+
+def unpack_nvfp4e2m1(packed_weight: torch.Tensor, *, input_features: int) -> torch.Tensor:
+    """Decode packed NVFP4 E2M1 weights into float32 codes."""
+
+    if packed_weight.dtype != torch.uint8:
+        raise TypeError("packed_weight must be uint8")
+    low = packed_weight & 0x0F
+    high = (packed_weight >> 4) & 0x0F
+    unpacked = torch.stack((low, high), dim=-1).reshape(packed_weight.shape[0], -1)
+    unpacked = unpacked[:, : int(input_features)]
+    codebook = _NVFP4_CODEBOOK.to(device=packed_weight.device)
+    return codebook[unpacked.long()]
+
+
+def expand_group_scale(
+    weight_scale: torch.Tensor,
+    *,
+    group_size: int,
+    input_features: int,
+) -> torch.Tensor:
+    """Expand `[out_features, groups, 1]` scale to `[out_features, input_features]`."""
+
+    if weight_scale.ndim != 3 or weight_scale.shape[2] != 1:
+        raise ValueError("weight_scale must have shape [out_features, groups, 1]")
+    expanded = weight_scale.expand(-1, -1, int(group_size)).reshape(weight_scale.shape[0], -1)
+    return expanded[:, : int(input_features)]
+
+
+@dataclass(frozen=True)
+class NVFP4TensorLayout:
+    """Resolved tensor contract for packed NVFP4 linear weights."""
+
+    input_features: int
+    output_features: int
+    group_size: int
+    packed_weight_name: str
+    weight_scale_name: str
+    weight_global_scale_name: str | None
+    bias_name: str | None
+
+
+class NVFP4LinearBridge(nn.Module):
+    """Thin adapter that exposes packed NVFP4 weights to XQT TileLang wrappers."""
+
+    def __init__(
+        self,
+        *,
+        packed_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_global_scale: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        input_features: int,
+        output_features: int,
+        group_size: int,
+        source_module_type: str = "unknown",
+    ) -> None:
+        super().__init__()
+        self.input_features = int(input_features)
+        self.output_features = int(output_features)
+        self.group_size = int(group_size)
+        self.source_module_type = str(source_module_type)
+        self.register_buffer("packed_weight", packed_weight.to(torch.uint8))
+        self.register_buffer("weight_scale", weight_scale.to(torch.float32))
+        if weight_global_scale is None:
+            self.register_buffer("weight_global_scale", None)
+        else:
+            self.register_buffer("weight_global_scale", weight_global_scale.to(torch.float32))
+        if bias is None:
+            self.register_buffer("bias", None)
+        else:
+            self.register_buffer("bias", bias.detach().clone().to(torch.float32))
+
+    @classmethod
+    def from_tensor_layout(
+        cls,
+        module: nn.Module,
+        *,
+        layout: NVFP4TensorLayout,
+    ) -> "NVFP4LinearBridge":
+        packed_weight = getattr(module, layout.packed_weight_name)
+        weight_scale = getattr(module, layout.weight_scale_name)
+        weight_global_scale = (
+            getattr(module, layout.weight_global_scale_name)
+            if layout.weight_global_scale_name is not None
+            else None
+        )
+        bias = getattr(module, layout.bias_name) if layout.bias_name is not None else None
+        return cls(
+            packed_weight=packed_weight,
+            weight_scale=weight_scale,
+            weight_global_scale=weight_global_scale,
+            bias=bias,
+            input_features=layout.input_features,
+            output_features=layout.output_features,
+            group_size=layout.group_size,
+            source_module_type=type(module).__name__,
+        )
+
+    def expanded_weight_scale(self) -> torch.Tensor:
+        scale = self.weight_scale
+        if self.weight_global_scale is not None:
+            scale = scale * self.weight_global_scale.reshape(1, 1, 1)
+        return expand_group_scale(
+            scale,
+            group_size=self.group_size,
+            input_features=self.input_features,
+        )
+
+    def dequantize_weight(self) -> torch.Tensor:
+        codes = unpack_nvfp4e2m1(self.packed_weight, input_features=self.input_features)
+        scale = self.expanded_weight_scale().to(device=codes.device, dtype=codes.dtype)
+        return codes * scale
+
+    def tilelang_packed_nvfp4_dequant_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, int, int, torch.Tensor | None]:
+        """Expose packed NVFP4 tensors for TileLang wrappers."""
+
+        packed_weight = self.packed_weight.to(device=device)
+        weight_scale = self.weight_scale.to(device=device, dtype=dtype)
+        weight_global_scale = None
+        if self.weight_global_scale is not None:
+            weight_global_scale = self.weight_global_scale.to(device=device, dtype=dtype)
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=device, dtype=dtype)
+        return (
+            packed_weight,
+            weight_scale,
+            bias,
+            None,
+            self.input_features,
+            self.group_size,
+            weight_global_scale,
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        weight = self.dequantize_weight().to(device=inputs.device, dtype=inputs.dtype)
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=inputs.device, dtype=inputs.dtype)
+        return F.linear(inputs, weight, bias)
+
+
+def infer_nvfp4_tensor_layout(module: nn.Module) -> NVFP4TensorLayout | None:
+    """Infer a packed NVFP4 tensor contract from a module by attribute names."""
+
+    packed_weight_name = None
+    for candidate in ("qweight", "weight_packed", "packed_weight", "weight"):
+        value = getattr(module, candidate, None)
+        if isinstance(value, torch.Tensor) and value.dtype == torch.uint8 and value.ndim == 2:
+            packed_weight_name = candidate
+            break
+    if packed_weight_name is None:
+        return None
+
+    weight_scale_name = None
+    for candidate in ("weight_scale", "scales", "weight_scales"):
+        value = getattr(module, candidate, None)
+        if isinstance(value, torch.Tensor) and value.ndim == 3:
+            weight_scale_name = candidate
+            break
+    if weight_scale_name is None:
+        return None
+
+    input_features = int(getattr(module, "in_features", 0) or 0)
+    output_features = int(getattr(module, "out_features", 0) or 0)
+    if input_features <= 0 or output_features <= 0:
+        return None
+
+    weight_scale = getattr(module, weight_scale_name)
+    groups = int(weight_scale.shape[1])
+    if groups <= 0:
+        return None
+    group_size = int((weight_scale.shape[2] if weight_scale.shape[2] > 1 else input_features // groups) or 0)
+    if group_size <= 0:
+        padded_input_features = int(getattr(module, packed_weight_name).shape[1]) * 2
+        group_size = padded_input_features // groups
+    if group_size <= 0:
+        return None
+
+    weight_global_scale_name = None
+    for candidate in ("weight_global_scale", "global_scale", "weight_scale_global"):
+        value = getattr(module, candidate, None)
+        if isinstance(value, torch.Tensor) and value.numel() == 1:
+            weight_global_scale_name = candidate
+            break
+
+    bias_name = "bias" if isinstance(getattr(module, "bias", None), torch.Tensor) else None
+
+    return NVFP4TensorLayout(
+        input_features=input_features,
+        output_features=output_features,
+        group_size=group_size,
+        packed_weight_name=packed_weight_name,
+        weight_scale_name=weight_scale_name,
+        weight_global_scale_name=weight_global_scale_name,
+        bias_name=bias_name,
+    )
+
+
+def bridge_module_to_nvfp4_linear(module: nn.Module) -> NVFP4LinearBridge | None:
+    """Best-effort bridge from an external packed NVFP4 module to XQT protocol."""
+
+    layout = infer_nvfp4_tensor_layout(module)
+    if layout is None:
+        return None
+    return NVFP4LinearBridge.from_tensor_layout(module, layout=layout)
+
+
+__all__ = [
+    "NVFP4LinearBridge",
+    "NVFP4TensorLayout",
+    "bridge_module_to_nvfp4_linear",
+    "expand_group_scale",
+    "infer_nvfp4_tensor_layout",
+    "unpack_nvfp4e2m1",
+]
