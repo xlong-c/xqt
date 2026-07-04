@@ -143,6 +143,62 @@ def test_fp4_tilelang_operator_stage_uses_packed_cuda_entry() -> None:
     )
 
     target = operator_stage.metrics["targets"][0]
+    assert target["metadata"]["execution_mode"] == "cuda_native_fastpath"
+    assert target["metadata"]["kernel_kind"] == "native_runtime_fastpath"
+    assert target["metadata"]["kernel_pattern"] == "dense_linear_epilogue"
+    assert target["metadata"]["weight_source"] == "reference_fp4_linear_dense_cache_bridge"
+    assert target["metadata"]["consumes_packed_weight"] is False
+    assert target["metadata"]["unpack_stage"] == "one_time_eager_dequant_cache"
+    assert target["metadata"]["fusion_status"] == "tilelang_dense_half_gemm_epilogue"
+    assert target["metadata"]["epilogue_stage"] == "torch_bias_activation"
+
+
+@requires_cuda
+@requires_tilelang
+def test_fp4_tilelang_operator_stage_can_force_packed_cuda_entry() -> None:
+    torch.manual_seed(2)
+    model = _TinyMLP().eval()
+    session = XQTOptimizationSession(
+        project={
+            "name": "fp4_tilelang_cuda_workflow_packed",
+            "artifact_dir": "artifacts/xqt/tests/fp4_tilelang_cuda_workflow_packed",
+        },
+        model=model,
+        device="cuda",
+        example_inputs=torch.randn(64, 64, dtype=torch.float16, device="cuda"),
+    )
+
+    session.quant(
+        name="fp4_quant",
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={
+            "dtype": "fp4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc1"],
+            "group_size": 64,
+        },
+    )
+    operator_stage = session.operator(
+        name="tilelang_fp4_fc1_packed",
+        from_stage="fp4_quant",
+        targets=[
+            {
+                "name": "fc1_tilelang",
+                "target": "fc1",
+                "backend": "tilelang",
+                "patterns": ["fp4_packed_dequant_gemm_epilogue"],
+                "min_speedup": 1.01,
+                "tilelang": {
+                    "linear_runtime": "tilelang",
+                    "linear_fastpath": "packed",
+                },
+            }
+        ],
+    )
+
+    target = operator_stage.metrics["targets"][0]
     assert target["metadata"]["execution_mode"] == "cuda_tilelang_entry"
     assert target["metadata"]["kernel_kind"] == "minimal_cuda_jit"
     assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"

@@ -13,7 +13,7 @@ from xqt.operator_opt.backends.tilelang_validation import (
     validate_tilelang_packed_fp4_fused_gemm,
 )
 from xqt.operator_opt.kernels.tilelang import build_tilelang_fp4_fused_dequant_gemm_kernel
-from xqt.operator_opt.kernels.tilelang.attention import (
+from xqt.operator_opt.kernels.tilelang.dequant_gemm import (
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
     fp4_packed_dequant_gemm_epilogue_reference,

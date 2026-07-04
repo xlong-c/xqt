@@ -43,7 +43,10 @@ def test_tilelang_capability_reports_reference_fallback_when_package_missing() -
     assert capability.status == "available"
     assert capability.available is True
     assert any("reference fallback" in note for note in capability.notes)
-    assert any("attention and dequant_gemm_epilogue patterns" in limitation for limitation in capability.limitations)
+    assert any(
+        "attention, conv, linear, norm, and dequant_gemm_epilogue" in limitation
+        for limitation in capability.limitations
+    )
 
 
 def test_preflight_warns_but_does_not_fail_when_tilelang_package_missing() -> None:

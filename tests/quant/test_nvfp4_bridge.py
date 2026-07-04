@@ -5,6 +5,7 @@ import torch
 from xqt.quant import (
     NVFP4LinearBridge,
     bridge_module_to_nvfp4_linear,
+    bridge_module_to_nvfp4_linear_shared,
     expand_group_scale,
     infer_nvfp4_tensor_layout,
     unpack_nvfp4e2m1,
@@ -165,3 +166,38 @@ def test_nvfp4_linear_bridge_forward_dequantizes_weight() -> None:
     dequantized = bridge.dequantize_weight()
     expected = torch.nn.functional.linear(x, dequantized, bridge.bias)
     assert torch.allclose(output, expected)
+
+
+def test_nvfp4_linear_bridge_dense_linear_args_cache_weight_and_bias() -> None:
+    module = _FakeCompressedNVFP4Linear()
+    bridge = bridge_module_to_nvfp4_linear(module)
+    assert bridge is not None
+
+    weight_a, bias_a, activation_a = bridge.tilelang_dense_linear_args(
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
+    weight_b, bias_b, activation_b = bridge.tilelang_dense_linear_args(
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
+
+    assert activation_a is None and activation_b is None
+    assert weight_a.dtype == torch.float16
+    assert bias_a is not None and bias_a.dtype == torch.float16
+    assert weight_a.data_ptr() == weight_b.data_ptr()
+    assert bias_a.data_ptr() == bias_b.data_ptr()
+
+
+def test_bridge_module_to_nvfp4_linear_shared_reuses_source_storage() -> None:
+    module = _FakeCompressedNVFP4LinearWithFlatScale()
+
+    bridge = bridge_module_to_nvfp4_linear_shared(module)
+
+    assert bridge is not None
+    assert bridge.packed_weight.data_ptr() == module.weight_packed.data_ptr()
+    assert bridge.weight_scale.shape == (2, 2, 1)
+    assert torch.equal(
+        bridge.weight_scale.squeeze(-1).float(),
+        module.weight_scale.float(),
+    )

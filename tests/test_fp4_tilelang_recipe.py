@@ -35,9 +35,10 @@ def test_fp4_tilelang_workflow_recipe_runs_via_optimize_model() -> None:
     assert target["backend"] == "tilelang"
     assert target["module_path"] == "fc1"
     assert target["metadata"]["execution_mode"] == "reference_fallback"
-    assert target["metadata"]["kernel_constraints"]["supported_patterns"] == [
+    assert (
         "dequant_gemm_epilogue"
-    ]
+        in target["metadata"]["kernel_constraints"]["supported_patterns"]
+    )
     assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
     assert target["metadata"]["weight_source"] == "reference_fp4_linear_packed_bridge"
     assert target["metadata"]["weight_representation"] == "packed_signed_int4_plus_group_scale"
