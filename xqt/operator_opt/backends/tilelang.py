@@ -12,16 +12,36 @@ import torch
 
 from xqt.core.errors import XQTBackendError
 
-from ..kernels.tilelang import (
-    TILELANG_KERNEL_METADATA,
+from ..kernels.tilelang.attention import (
+    build_tilelang_attention_design,
+    fused_attention_forward_reference,
+    fused_attention_forward_tilelang,
+)
+from ..kernels.tilelang.conv import (
+    TILELANG_CONV_KERNEL_METADATA,
+    conv2d_reference,
+    conv2d_tilelang,
+)
+from ..kernels.tilelang.dequant_gemm import (
+    TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
     fp4_packed_dequant_gemm_epilogue_reference,
     fp4_packed_dequant_gemm_epilogue_tilelang,
-    fused_attention_forward_reference,
-    fused_attention_forward_tilelang,
     nvfp4_packed_dequant_gemm_epilogue_reference,
     nvfp4_packed_dequant_gemm_epilogue_tilelang,
+)
+from ..kernels.tilelang.linear import (
+    TILELANG_LINEAR_KERNEL_METADATA,
+    dense_linear_epilogue_reference,
+    dense_linear_epilogue_tilelang,
+    half_linear_reference,
+    half_linear_tilelang,
+)
+from ..kernels.tilelang.norm import (
+    TILELANG_NORM_KERNEL_METADATA,
+    layer_norm_reference,
+    layer_norm_tilelang,
 )
 
 
@@ -76,6 +96,24 @@ TILELANG_DTYPE_VALIDATION_THRESHOLDS: dict[str, dict[str, float]] = {
     "torch.float8_e5m2": {"atol": 1e-1, "rtol": 1e-1},
 }
 
+_ATTENTION_DESIGN = build_tilelang_attention_design()
+
+TILELANG_KERNEL_METADATA: dict[str, dict[str, Any]] = {
+    "attention": {
+        "kernel_name": "fused_attention_forward",
+        "block_m": _ATTENTION_DESIGN.default_block_m,
+        "block_n": _ATTENTION_DESIGN.default_block_n,
+        "threads": _ATTENTION_DESIGN.default_threads,
+        "num_stages": _ATTENTION_DESIGN.default_num_stages,
+        "baseline": "torch.nn.functional.scaled_dot_product_attention",
+        "design": _ATTENTION_DESIGN.to_dict(),
+    },
+    **TILELANG_CONV_KERNEL_METADATA,
+    **TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
+    **TILELANG_LINEAR_KERNEL_METADATA,
+    **TILELANG_NORM_KERNEL_METADATA,
+}
+
 
 TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
     "attention": TileLangKernelSpec(
@@ -84,11 +122,36 @@ TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
         kernel=fused_attention_forward_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["attention"]),
     ),
+    "conv": TileLangKernelSpec(
+        pattern="conv",
+        reference=conv2d_reference,
+        kernel=conv2d_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["conv"]),
+        cuda_only=False,
+    ),
     "dequant_gemm_epilogue": TileLangKernelSpec(
         pattern="dequant_gemm_epilogue",
         reference=dequant_gemm_epilogue_reference,
         kernel=dequant_gemm_epilogue_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["dequant_gemm_epilogue"]),
+    ),
+    "dense_linear_epilogue": TileLangKernelSpec(
+        pattern="dense_linear_epilogue",
+        reference=dense_linear_epilogue_reference,
+        kernel=dense_linear_epilogue_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["dense_linear_epilogue"]),
+    ),
+    "linear": TileLangKernelSpec(
+        pattern="linear",
+        reference=half_linear_reference,
+        kernel=half_linear_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["linear"]),
+    ),
+    "norm": TileLangKernelSpec(
+        pattern="norm",
+        reference=layer_norm_reference,
+        kernel=layer_norm_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["norm"]),
     ),
     "fp4_packed_dequant_gemm_epilogue": TileLangKernelSpec(
         pattern="fp4_packed_dequant_gemm_epilogue",

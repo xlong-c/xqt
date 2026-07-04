@@ -1,5 +1,11 @@
 """Operator optimization helpers for XQT."""
 
+from .advisor import (
+    PrecisionRecommendation,
+    ProfilingPlan,
+    build_profiling_plan,
+    recommend_precision_strategy,
+)
 from .capability import (
     OperatorOptimizationBackendCapability,
     describe_operator_backend_capability,
@@ -43,6 +49,7 @@ from .executor import (
     build_operator_optimization_plan,
     execute_operator_optimization_plan,
     materialize_operator_candidate_model,
+    materialize_operator_candidate_models,
     summarize_operator_optimization_reports,
 )
 from .patterns import (
@@ -84,7 +91,10 @@ __all__ = [
     "OperatorPatternCandidate",
     "OperatorOptimizationReport",
     "OperatorOptimizationTargetPlan",
+    "PrecisionRecommendation",
+    "ProfilingPlan",
     "build_operator_optimization_plan",
+    "build_profiling_plan",
     "build_cutile_artifact_metadata",
     "build_cutlass_artifact_metadata",
     "build_cute_dsl_artifact_metadata",
@@ -116,6 +126,8 @@ __all__ = [
     "list_tilelang_kernel_specs",
     "list_triton_kernel_specs",
     "materialize_operator_candidate_model",
+    "materialize_operator_candidate_models",
+    "recommend_precision_strategy",
     "run_tilelang_kernel",
     "run_triton_kernel",
     "run_cutile_kernel",

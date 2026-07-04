@@ -238,20 +238,20 @@ def describe_gemm_precision_capability(
                 capability["available"] = True
                 capability["backend"] = "triton"
                 capability["hardware_native"] = True
-                capability["notes"].append("Tensor Core FP8 MMA available (SM89+ Hopper H100)")
+                capability["notes"].append("Tensor Core FP8 path available on Ada or newer NVIDIA architectures")
             else:
-                capability["notes"].append("FP8 requires SM89+ (Hopper H100)")
+                capability["notes"].append("FP8 requires SM89+ or newer NVIDIA architecture support")
         elif precision == "int4":
             capability["available"] = True
             capability["backend"] = "triton"
             capability["hardware_native"] = False
             capability["notes"].append("INT4 via unpacking + FP16 MMA")
         elif precision in {"mxfp8", "mxfp6", "mxfp4"}:
-            if sm >= 120:
+            if sm >= 100:
                 capability["available"] = True
                 capability["backend"] = "triton"
                 capability["hardware_native"] = True
-                capability["notes"].append("MXFP native support (SM120+ Blackwell)")
+                capability["notes"].append("MXFP native support on Blackwell-class NVIDIA architectures")
             else:
                 capability["available"] = True
                 capability["backend"] = "triton"

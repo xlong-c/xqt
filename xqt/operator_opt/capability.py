@@ -115,12 +115,13 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         exportable=False,
         requires_cuda=True,
         notes=(
-            "Built-in executor ships minimal attention and dequant_gemm_epilogue targets with reference fallback metadata.",
-            "Minimal CUDA TileLang attention, dequant GEMM, and fused packed FP4 unpack/dequant GEMM epilogue paths are available when tilelang and CUDA are present.",
+            "Built-in executor ships operator-family routing for attention, conv, direct half linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
+            "Ada-class GPUs can use native runtime fastpaths under the TileLang backend for attention, conv, direct half linear, direct half norm, and one-time-dequantized dense Linear paths.",
+            "Packed FP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future Blackwell-class FP4 extensions.",
         ),
         limitations=(
-            "Current built-in execution is limited to the attention and dequant_gemm_epilogue patterns.",
-            "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q, dequant GEMM shapes aligned to the minimal block constraints, and packed FP4 runtime correctness/performance still requiring real CUDA hardware validation.",
+            "Current built-in execution is limited to the attention, conv, linear, norm, and dequant_gemm_epilogue operator families/patterns.",
+            "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q, direct half linear and half norm paths, dense/dequant GEMM shapes aligned to the minimal block constraints when TileLang kernels are used, and packed FP4 runtime correctness/performance still requiring real CUDA hardware validation.",
         ),
     ),
     "cutile": OperatorOptimizationBackendCapability(

@@ -161,6 +161,55 @@ class ToyAttentionClassifier(nn.Module):
         return self.head(self.attention_block(x).mean(dim=1))
 
 
+class ToyConvBlock(nn.Module):
+    """Small Conv2d block with a named conv target for operator-family routing tests."""
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        hidden_channels: int = 8,
+        out_channels: int = 4,
+    ) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1)
+        self.proj = nn.Conv2d(hidden_channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(F.silu(self.conv(x)))
+
+
+class ToyLinearBlock(nn.Module):
+    """Small Linear block with a named linear target for direct half operator routing tests."""
+
+    def __init__(
+        self,
+        input_dim: int = 64,
+        hidden_dim: int = 64,
+        output_dim: int = 32,
+    ) -> None:
+        super().__init__()
+        self.linear = nn.Linear(input_dim, hidden_dim)
+        self.proj = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(F.relu(self.linear(x)))
+
+
+class ToyNormBlock(nn.Module):
+    """Small LayerNorm block with a named norm target for direct half operator routing tests."""
+
+    def __init__(
+        self,
+        hidden_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.proj(x))
+
+
 def build_toy_dequant_gemm_block(
     input_dim: int = 32,
     output_dim: int = 64,
@@ -230,17 +279,59 @@ def build_toy_attention_classifier(
     )
 
 
+def build_toy_conv_block(
+    in_channels: int = 3,
+    hidden_channels: int = 8,
+    out_channels: int = 4,
+) -> ToyConvBlock:
+    """Build a small Conv2d block for operator-family routing tests."""
+
+    return ToyConvBlock(
+        in_channels=in_channels,
+        hidden_channels=hidden_channels,
+        out_channels=out_channels,
+    )
+
+
+def build_toy_linear_block(
+    input_dim: int = 64,
+    hidden_dim: int = 64,
+    output_dim: int = 32,
+) -> ToyLinearBlock:
+    """Build a small Linear block for direct TileLang half Linear tests."""
+
+    return ToyLinearBlock(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
+    )
+
+
+def build_toy_norm_block(
+    hidden_dim: int = 64,
+) -> ToyNormBlock:
+    """Build a small LayerNorm block for direct TileLang half norm tests."""
+
+    return ToyNormBlock(hidden_dim=hidden_dim)
+
+
 __all__ = [
     "ToyDequantGemmBlock",
     "ToyFP4MLP",
     "ToyAttentionBlock",
     "ToyAttentionClassifier",
+    "ToyConvBlock",
+    "ToyLinearBlock",
     "ToyLLMMLPClassifier",
+    "ToyNormBlock",
     "ToySwiGLUMLP",
     "ToyTransformerClassifier",
     "build_toy_attention_classifier",
+    "build_toy_conv_block",
     "build_toy_dequant_gemm_block",
     "build_toy_fp4_mlp",
+    "build_toy_linear_block",
     "build_toy_llm_mlp_classifier",
+    "build_toy_norm_block",
     "build_toy_transformer_classifier",
 ]
