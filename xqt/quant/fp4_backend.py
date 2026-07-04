@@ -14,6 +14,20 @@ from .policy import QuantizationPolicy, should_quantize_module
 from .strategy import normalize_quant_strategy
 
 
+def _can_mutate_runtime_cache() -> bool:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling) and bool(is_compiling()):
+            return False
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling) and bool(is_compiling()):
+            return False
+    return not torch.jit.is_tracing()
+
+
 @dataclass
 class FP4QuantizationResult:
     """Result returned by the reference FP4 quantization backend."""
@@ -92,6 +106,8 @@ class ReferenceFP4Linear(nn.Module):
         self.output_features = int(output_features)
         self.group_size = int(group_size)
         self.padded_input_features = int(padded_input_features)
+        self._dense_weight_cache: dict[tuple[str, str], torch.Tensor] = {}
+        self._dense_bias_cache: dict[tuple[str, str], torch.Tensor | None] = {}
         self.register_buffer("packed_weight", packed_weight.to(torch.uint8))
         self.register_buffer("weight_scale", scale.to(torch.float32))
         if bias is None:
@@ -183,11 +199,54 @@ class ReferenceFP4Linear(nn.Module):
             bias = self.bias.to(device=device, dtype=dtype)
         return packed_weight, scale, bias, None, self.input_features, self.group_size
 
+    def dense_weight(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if not _can_mutate_runtime_cache():
+            return self.dequantize_weight().to(device=device, dtype=dtype).detach()
+        key = (str(device), str(dtype))
+        cached = self._dense_weight_cache.get(key)
+        if cached is not None and cached.device == device and cached.dtype == dtype:
+            return cached
+        weight = self.dequantize_weight().to(device=device, dtype=dtype).detach()
+        self._dense_weight_cache[key] = weight
+        return weight
+
+    def dense_bias(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if not _can_mutate_runtime_cache():
+            return None if self.bias is None else self.bias.to(device=device, dtype=dtype).detach()
+        key = (str(device), str(dtype))
+        if key in self._dense_bias_cache:
+            return self._dense_bias_cache[key]
+        bias = None if self.bias is None else self.bias.to(device=device, dtype=dtype).detach()
+        self._dense_bias_cache[key] = bias
+        return bias
+
+    def tilelang_dense_linear_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, None]:
+        """Expose cached dense weights for Ada native linear fastpaths."""
+
+        return (
+            self.dense_weight(dtype=dtype, device=device),
+            self.dense_bias(dtype=dtype, device=device),
+            None,
+        )
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize_weight().to(device=inputs.device, dtype=inputs.dtype)
-        bias = None
-        if self.bias is not None:
-            bias = self.bias.to(device=inputs.device, dtype=inputs.dtype)
+        weight = self.dense_weight(dtype=inputs.dtype, device=inputs.device)
+        bias = self.dense_bias(dtype=inputs.dtype, device=inputs.device)
         return F.linear(inputs, weight, bias)
 
 

@@ -33,6 +33,20 @@ _NVFP4_CODEBOOK = torch.tensor(
 )
 
 
+def _can_mutate_runtime_cache() -> bool:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling) and bool(is_compiling()):
+            return False
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling) and bool(is_compiling()):
+            return False
+    return not torch.jit.is_tracing()
+
+
 def unpack_nvfp4e2m1(packed_weight: torch.Tensor, *, input_features: int) -> torch.Tensor:
     """Decode packed NVFP4 E2M1 weights into float32 codes."""
 
@@ -102,6 +116,8 @@ class NVFP4LinearBridge(nn.Module):
         self.output_features = int(output_features)
         self.group_size = int(group_size)
         self.source_module_type = str(source_module_type)
+        self._dense_weight_cache: dict[tuple[str, str], torch.Tensor] = {}
+        self._dense_bias_cache: dict[tuple[str, str], torch.Tensor | None] = {}
         self.register_buffer("packed_weight", packed_weight.to(torch.uint8))
         self.register_buffer("weight_scale", _normalize_group_scale(weight_scale).to(torch.float32))
         if weight_global_scale is None:
@@ -113,12 +129,26 @@ class NVFP4LinearBridge(nn.Module):
         else:
             self.register_buffer("bias", bias.detach().clone().to(torch.float32))
 
+    def _apply(self, fn: Any) -> "NVFP4LinearBridge":
+        """Preserve calibration tensors in float32 across parent .to(dtype=...) calls."""
+
+        super()._apply(fn)
+        self._dense_weight_cache.clear()
+        self._dense_bias_cache.clear()
+        self.weight_scale = self.weight_scale.to(dtype=torch.float32)
+        if self.weight_global_scale is not None:
+            self.weight_global_scale = self.weight_global_scale.to(dtype=torch.float32)
+        if self.bias is not None:
+            self.bias = self.bias.to(dtype=torch.float32)
+        return self
+
     @classmethod
     def from_tensor_layout(
         cls,
         module: nn.Module,
         *,
         layout: NVFP4TensorLayout,
+        clone_tensors: bool = True,
     ) -> "NVFP4LinearBridge":
         packed_weight = getattr(module, layout.packed_weight_name)
         weight_scale = getattr(module, layout.weight_scale_name)
@@ -128,6 +158,13 @@ class NVFP4LinearBridge(nn.Module):
             else None
         )
         bias = getattr(module, layout.bias_name) if layout.bias_name is not None else None
+        if clone_tensors:
+            packed_weight = packed_weight.detach().clone()
+            weight_scale = weight_scale.detach().clone()
+            if weight_global_scale is not None:
+                weight_global_scale = weight_global_scale.detach().clone()
+            if bias is not None:
+                bias = bias.detach().clone()
         return cls(
             packed_weight=packed_weight,
             weight_scale=weight_scale,
@@ -153,6 +190,55 @@ class NVFP4LinearBridge(nn.Module):
         codes = unpack_nvfp4e2m1(self.packed_weight, input_features=self.input_features)
         scale = self.expanded_weight_scale().to(device=codes.device, dtype=codes.dtype)
         return codes * scale
+
+    def dense_weight(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return a cached dense dequantized weight for static inference workloads."""
+
+        if not _can_mutate_runtime_cache():
+            return self.dequantize_weight().to(device=device, dtype=dtype).detach()
+        key = (str(device), str(dtype))
+        cached = self._dense_weight_cache.get(key)
+        if cached is not None and cached.device == device and cached.dtype == dtype:
+            return cached
+        weight = self.dequantize_weight().to(device=device, dtype=dtype).detach()
+        self._dense_weight_cache[key] = weight
+        return weight
+
+    def dense_bias(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Return a cached dense bias matching the requested runtime dtype/device."""
+
+        if not _can_mutate_runtime_cache():
+            return None if self.bias is None else self.bias.to(device=device, dtype=dtype).detach()
+        key = (str(device), str(dtype))
+        if key in self._dense_bias_cache:
+            return self._dense_bias_cache[key]
+        bias = None if self.bias is None else self.bias.to(device=device, dtype=dtype).detach()
+        self._dense_bias_cache[key] = bias
+        return bias
+
+    def tilelang_dense_linear_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, None]:
+        """Expose cached dense weights for Ada/Hopper native half GEMM fastpaths."""
+
+        return (
+            self.dense_weight(dtype=dtype, device=device),
+            self.dense_bias(dtype=dtype, device=device),
+            None,
+        )
 
     def tilelang_packed_nvfp4_dequant_gemm_args(
         self,
@@ -181,10 +267,8 @@ class NVFP4LinearBridge(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize_weight().to(device=inputs.device, dtype=inputs.dtype)
-        bias = None
-        if self.bias is not None:
-            bias = self.bias.to(device=inputs.device, dtype=inputs.dtype)
+        weight = self.dense_weight(dtype=inputs.dtype, device=inputs.device)
+        bias = self.dense_bias(dtype=inputs.dtype, device=inputs.device)
         return F.linear(inputs, weight, bias)
 
 
@@ -261,10 +345,24 @@ def bridge_module_to_nvfp4_linear(module: nn.Module) -> NVFP4LinearBridge | None
     return NVFP4LinearBridge.from_tensor_layout(module, layout=layout)
 
 
+def bridge_module_to_nvfp4_linear_shared(module: nn.Module) -> NVFP4LinearBridge | None:
+    """Create an NVFP4 bridge that shares source tensor storage with the module."""
+
+    layout = infer_nvfp4_tensor_layout(module)
+    if layout is None:
+        return None
+    return NVFP4LinearBridge.from_tensor_layout(
+        module,
+        layout=layout,
+        clone_tensors=False,
+    )
+
+
 __all__ = [
     "NVFP4LinearBridge",
     "NVFP4TensorLayout",
     "bridge_module_to_nvfp4_linear",
+    "bridge_module_to_nvfp4_linear_shared",
     "expand_group_scale",
     "infer_nvfp4_tensor_layout",
     "unpack_nvfp4e2m1",
