@@ -36,10 +36,21 @@
 - 半可用: TensorRT engine / plugin preflight, TileLang 的受限 kernel target, FP4 packed weight 到 TileLang operator stage 的桥接
 - 偏实验: 更完整的 AWQ / GPTQ packed megakernel, 以及更广泛的 backend capability 闭环
 
+当前 `TileLang` 的受限 kernel target 主要覆盖:
+
+- `attention`
+- `conv`
+- direct half `linear`
+- direct half `LayerNorm`
+- `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体
+
+这些路径并不是同等成熟度. `attention` / direct half `linear` / dequant GEMM 路径已经进入受限的 TileLang operator coverage. `conv` 当前通过 `torch.unfold` / im2col lowered input 加 TileLang half GEMM 执行, 尚不是 fully fused conv kernel, 且只覆盖 fp16, CUDA, `groups=1` 的路径. direct half `LayerNorm` 已接入 TileLang `reduce_sum` kernel, 限制为 CUDA fp16 和 last-dim normalization. CPU 路径只使用 PyTorch eager fallback.
+
 ## 常见误区
 
 - 不要把 `XQT` 当成训练恢复或 QAT 工具
 - 不要把 profiler 诊断结果和 benchmark 指标混为一谈
+- 不要把 `TileLang available` 理解成所有 pattern 都已经是同等成熟的通用 executor
 - 不要在 recipe 里声明 dataset 来源
 
 ## 继续阅读
