@@ -1,13 +1,11 @@
 project:
   name: yolo_detection_practice
   artifact_dir: artifacts/xqt/detection/yolo_practice
-
 model:
   target: xqt.model.build_smoke_detection_module
   params:
     num_classes: 80
     input_channels: 3
-
 task:
   type: detection
   detection_postprocess:
@@ -16,57 +14,67 @@ task:
     score_activation: sigmoid
   params:
     imgsz: 640
-
 stages:
-  - name: baseline_latency
-    kind: benchmark
-    params:
-      warmup: 2
-      iterations: 5
-
-  - name: export_fp32_onnx
-    kind: export
-    save_model: false
-    params:
-      targets:
-        - format: onnx
-          output_path: artifacts/xqt/detection/yolo_practice/export_fp32_onnx/smoke_detection_fp32.onnx
-          opset: 18
-          params:
-            input_names: [images]
-            output_names: [predictions]
-            dynamo: false
-            runtime_diff: false
-
-  - name: quant_qdq
-    kind: quant
-    save_model: false
-    params:
-      backend: onnxruntime_qdq
-      strategy: static_qdq_int8
-      policy:
-        source_name: smoke_detection_source.onnx
-        output_path: artifacts/xqt/detection/yolo_practice/quant_qdq/smoke_detection_qdq.onnx
-        input_names: [images]
-        output_names: [predictions]
+- name: baseline_latency
+  kind: benchmark
+  params:
+    warmup: 2
+    iterations: 5
+- name: export_fp32_onnx
+  kind: export
+  save_model: false
+  params:
+    targets:
+    - format: onnx
+      output_path: artifacts/xqt/detection/yolo_practice/export_fp32_onnx/smoke_detection_fp32.onnx
+      opset: 18
+      params:
+        input_names:
+        - images
+        output_names:
+        - predictions
         dynamo: false
-        sample_limit: 4
-        activation_type: QUInt8
-        weight_type: QInt8
-        op_types_to_quantize: [Conv, MatMul, Gemm]
-        extra_options:
-          ActivationSymmetric: false
-
-  - name: prune_sparse
-    kind: prune
-    from_stage: initial
-    params:
-      method: global_l1_unstructured
-      target_sparsity: 0.2
-
-  - name: prune_latency
-    kind: benchmark
-    compare_to: baseline_latency
-    params:
-      warmup: 1
-      iterations: 3
+        runtime_diff: false
+- name: quant_qdq
+  kind: quant
+  save_model: false
+  params:
+    backend: onnxruntime_qdq
+    strategy: static_qdq_int8
+    policy:
+      source_name: smoke_detection_source.onnx
+      output_path: artifacts/xqt/detection/yolo_practice/quant_qdq/smoke_detection_qdq.onnx
+      input_names:
+      - images
+      output_names:
+      - predictions
+      dynamo: false
+      sample_limit: 4
+      activation_type: QUInt8
+      weight_type: QInt8
+      op_types_to_quantize:
+      - Conv
+      - MatMul
+      - Gemm
+      extra_options:
+        ActivationSymmetric: false
+- name: prune_sparse
+  kind: prune
+  from_stage: initial
+  params:
+    method: global_l1_unstructured
+    target_sparsity: 0.2
+- name: prune_latency
+  kind: benchmark
+  compare_to: baseline_latency
+  params:
+    warmup: 1
+    iterations: 3
+compression_axes:
+- precision
+- sparsity
+hardware:
+  device: cpu
+  backends:
+  - onnx
+  - onnxruntime_qdq

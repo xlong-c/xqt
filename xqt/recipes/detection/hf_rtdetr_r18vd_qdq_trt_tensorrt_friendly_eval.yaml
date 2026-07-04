@@ -1,9 +1,7 @@
 project:
   name: hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval
   artifact_dir: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval
-
 device: cuda:0
-
 task:
   type: detection
   detection_postprocess:
@@ -11,47 +9,71 @@ task:
     score_activation: sigmoid
   params:
     imgsz: 640
-
 stages:
-  - name: quant_qdq
-    kind: quant
-    save_model: false
-    params:
-      backend: onnxruntime_qdq
-      strategy: static_qdq_int8
-      policy:
-        onnx_path: /root/others/rtdetr-artifacts/onnx-community-rtdetr_r18vd-direct.onnx
-        output_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval/quant/hf_rtdetr_r18vd_qdq.onnx
-        input_names: [pixel_values]
-        op_types_to_quantize: [Conv, MatMul]
-        activation_type: QInt8
-        weight_type: QInt8
-        sample_limit: 2
-        extra_options:
-          ActivationSymmetric: true
-          WeightSymmetric: true
-
-  - name: build_trt_int8_engine
-    kind: deploy
-    save_model: false
-    params:
-      targets:
-        - format: tensorrt
-          output_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval/deploy/hf_rtdetr_r18vd_qdq.engine
-          precision: int8
-          profiles:
+- name: quant_qdq
+  kind: quant
+  save_model: false
+  params:
+    backend: onnxruntime_qdq
+    strategy: static_qdq_int8
+    policy:
+      onnx_path: /root/others/rtdetr-artifacts/onnx-community-rtdetr_r18vd-direct.onnx
+      output_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval/quant/hf_rtdetr_r18vd_qdq.onnx
+      input_names:
+      - pixel_values
+      op_types_to_quantize:
+      - Conv
+      - MatMul
+      activation_type: QInt8
+      weight_type: QInt8
+      sample_limit: 2
+      extra_options:
+        ActivationSymmetric: true
+        WeightSymmetric: true
+- name: build_trt_int8_engine
+  kind: deploy
+  save_model: false
+  params:
+    targets:
+    - format: tensorrt
+      output_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval/deploy/hf_rtdetr_r18vd_qdq.engine
+      precision: int8
+      profiles:
+        pixel_values:
+          min:
+          - 1
+          - 3
+          - 640
+          - 640
+          opt:
+          - 1
+          - 3
+          - 640
+          - 640
+          max:
+          - 1
+          - 3
+          - 640
+          - 640
+      params:
+        backend: python_api
+        dry_run: false
+        onnx_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval/quant/hf_rtdetr_r18vd_qdq.onnx
+        runtime_benchmark:
+          enabled: true
+          input_shapes:
             pixel_values:
-              min: [1, 3, 640, 640]
-              opt: [1, 3, 640, 640]
-              max: [1, 3, 640, 640]
-          params:
-            backend: python_api
-            dry_run: false
-            onnx_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_tensorrt_friendly_eval/quant/hf_rtdetr_r18vd_qdq.onnx
-            runtime_benchmark:
-              enabled: true
-              input_shapes:
-                pixel_values: [1, 3, 640, 640]
-              warmup: 10
-              iterations: 50
-              device: cuda:0
+            - 1
+            - 3
+            - 640
+            - 640
+          warmup: 10
+          iterations: 50
+          device: cuda:0
+compression_axes:
+- precision
+hardware:
+  device: cuda:0
+  backends:
+  - onnxruntime_qdq
+  - tensorrt
