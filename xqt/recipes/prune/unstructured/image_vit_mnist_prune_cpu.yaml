@@ -1,7 +1,6 @@
 project:
   name: prune_unstructured_vit_mnist
   artifact_dir: artifacts/xqt/prune/unstructured/vit_mnist
-
 model:
   target: xdl.model.vit_tiny_patch16_224
   params:
@@ -9,14 +8,21 @@ model:
     in_channels: 1
     dropout: 0.0
     attn_dropout: 0.0
-
-compression:
-  axes:
-    - sparsity
-  prune:
-    enabled: true
-    target_sparsity: 0.5
-
 benchmark:
   warmup: 0
   iterations: 1
+compression_axes:
+- sparsity
+hardware:
+  device: cpu
+  backends: []
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    target_sparsity: 0.5
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

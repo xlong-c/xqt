@@ -1,7 +1,6 @@
 project:
   name: prune_structured_vit
   artifact_dir: artifacts/xqt/prune/structured/vit
-
 model:
   target: xdl.model.VisionTransformer
   params:
@@ -15,13 +14,20 @@ model:
     mlp_ratio: 2.0
     dropout: 0.0
     attn_dropout: 0.0
-
-compression:
-  axes:
-    - width
-    - depth
-  prune:
-    enabled: true
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- width
+- depth
+- sparsity
+hardware:
+  device: cpu
+  backends: []
+stages:
+- name: prune_model
+  kind: prune
+  params:
     method: structured
     granularity: mlp_neuron
     scope: per_layer
@@ -30,7 +36,8 @@ compression:
       metric: l2
     selection:
       min_keep: 1
-
-benchmark:
-  warmup: 0
-  iterations: 1
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

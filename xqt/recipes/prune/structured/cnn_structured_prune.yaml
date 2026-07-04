@@ -1,7 +1,6 @@
 project:
   name: prune_structured_cnn
   artifact_dir: artifacts/xqt/prune/structured/cnn
-
 model:
   target: xqt.prune.StructuredPruningToyCNN
   params:
@@ -9,13 +8,19 @@ model:
     hidden_channels: 8
     out_channels: 16
     num_classes: 4
-
-compression:
-  axes:
-    - width
-    - sparsity
-  prune:
-    enabled: true
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- width
+- sparsity
+hardware:
+  device: cpu
+  backends: []
+stages:
+- name: prune_model
+  kind: prune
+  params:
     method: structured
     granularity: channel
     target_sparsity: 0.25
@@ -23,7 +28,8 @@ compression:
       metric: l1
     selection:
       min_keep: 1
-
-benchmark:
-  warmup: 0
-  iterations: 1
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1
