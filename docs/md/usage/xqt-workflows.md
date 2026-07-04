@@ -49,6 +49,18 @@
 - 需要把优化流程交给下一个人或 agent
 - 需要稳定复跑和归档
 
+YAML workflow 只保留一种配置项集合:
+
+- `project`: 项目名和输出目录, `artifact_dir` 是优化模型,导出产物,report 和 manifest 的落点
+- `model`: 输入模型,也可以由调用方通过 `optimize_model(..., model=...)` 传入
+- `task`: 模型侧 task metadata,不声明数据集或 evaluation provider
+- `compression_axes`: 本次优化涉及的模型轴,如 `precision`,`sparsity`,`width`,`depth`
+- `hardware`: 运行和产物约束,如 `device` 和 `backends`
+- `benchmark`: 默认 benchmark 参数
+- `stages`: 唯一的优化和导出路径,包含 `quant`,`prune`,`operator`,`export`,`deploy`,`benchmark`,`analyze`
+
+不要在 `xqt/recipes` 使用旧顶层 `compression`,`export`,`operator_optimization`,`analysis`,`validation` 或 `config_version`. 公开 recipe 必须能直接由 `load_optimization_config()` 加载.
+
 ## readiness / report / artifact
 
 当前可用落点:
