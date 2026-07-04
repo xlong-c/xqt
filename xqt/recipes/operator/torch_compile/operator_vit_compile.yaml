@@ -1,7 +1,6 @@
 project:
   name: operator_torch_compile_vit
   artifact_dir: artifacts/xqt/operator/torch_compile/vit
-
 model:
   target: xqt.operator_opt.toy_models.build_toy_transformer_classifier
   params:
@@ -10,14 +9,20 @@ model:
     num_heads: 2
     dim_feedforward: 16
     num_classes: 2
-
-compression:
-  axes:
-    - precision
-
-operator_optimization:
-  enabled: true
-  targets:
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+hardware:
+  device: cpu
+  backends:
+  - torch_compile
+stages:
+- name: optimize_operators
+  kind: operator
+  params:
+    targets:
     - name: encoder_compile
       target: encoder
       backend: torch_compile
@@ -26,7 +31,8 @@ operator_optimization:
       options:
         backend: inductor
       min_speedup: 1.000001
-
-benchmark:
-  warmup: 0
-  iterations: 1
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

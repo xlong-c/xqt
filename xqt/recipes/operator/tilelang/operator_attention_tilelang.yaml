@@ -1,27 +1,32 @@
 project:
   name: operator_tilelang_attention
   artifact_dir: artifacts/xqt/operator/tilelang/attention
-
 model:
   target: xqt.operator_opt.toy_models.build_toy_attention_classifier
   params:
     hidden_dim: 8
     num_heads: 2
     num_classes: 2
-
-compression:
-  axes:
-    - precision
-
-operator_optimization:
-  enabled: true
-  default_backend: tilelang
-  targets:
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+hardware:
+  device: cuda
+  backends:
+  - tilelang
+stages:
+- name: optimize_operators
+  kind: operator
+  params:
+    default_backend: tilelang
+    targets:
     - name: attention_tilelang
       target: attention_block
       backend: tilelang
       patterns:
-        - attention
+      - attention
       tilelang:
         target_arch: null
         cache_dir: /tmp/xqt_tilelang_cache
@@ -29,14 +34,10 @@ operator_optimization:
           TL_ENABLE_FAST_MATH: true
       min_speedup: 1.15
       validate:
-        atol: 1.0e-3
-        rtol: 1.0e-3
-
-validation:
-  output_diff:
-    atol: 1.0e-3
-    rtol: 1.0e-3
-
-benchmark:
-  warmup: 0
-  iterations: 1
+        atol: 0.001
+        rtol: 0.001
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1
