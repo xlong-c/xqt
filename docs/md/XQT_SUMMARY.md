@@ -30,7 +30,7 @@ XQT 只关注模型本身. 它做模型压缩,图变换,导出适配,误差分�
 ## 能力概览
 
 - 已基本可用: PTQ / QDQ / torchao 量化,常规剪枝,ONNX / torch.export / TorchScript / TensorRT / OpenVINO / ExecuTorch / ncnn / MNN 导出,output diff,layer analysis,latency / memory benchmark,manifest.
-- 半可用: TensorRT engine / plugin preflight,TileLang 的受限 kernel target,FP4 packed weight 到 TileLang operator stage 的桥接.
+- 半可用: TensorRT engine / plugin preflight,TileLang 的受限 kernel target (attention / conv / half linear / half norm / dequant GEMM),FP4 packed weight 到 TileLang operator stage 的桥接.
 - 偏实验: 更完整的 AWQ / GPTQ packed megakernel,以及更广泛的 backend capability 闭环.
 
 ## 性能分析工具
@@ -45,7 +45,7 @@ XQT 只关注模型本身. 它做模型压缩,图变换,导出适配,误差分�
 | 场景 | 状态 | 备注 |
 | --- | --- | --- |
 | FP4 量化 | 半可用 | 有 reference 路径和 TileLang 桥接,仍缺真实 CUDA runtime 数值与性能验证. |
-| TileLang megakernel | 半可用 | 已覆盖受限 attention 和 dequant GEMM 路径. |
+| TileLang megakernel | 半可用 | 已覆盖受限 attention / conv / half linear / half norm / dequant GEMM 路径; conv 当前是 unfold + half GEMM lowering, CPU 只走 PyTorch fallback. |
 | TensorRT + `.so` 插件 | 半可用 | 已有 build / inspect / preflight / loadability 检查. |
 | 常规剪枝 / 误差分析 | 已基本可用 | layer diff, sensitivity, distribution stats 和 benchmark 已接通. |
 

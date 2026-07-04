@@ -24,10 +24,9 @@
 
 ```text
 PyTorch model / checkpoint / exported artifact
-    -> model compression or graph transform
-    -> model-side diff / layer analysis
-    -> export target artifact
-    -> benchmark / manifest
+    -> YAML workflow or XQTOptimizationSession
+    -> quant / prune / operator / export / deploy / analyze / benchmark stages
+    -> optimized model, export target artifact, report and manifest
 ```
 
 ## 核心边界
@@ -55,6 +54,8 @@ PyTorch model / checkpoint / exported artifact
 2. YAML workflow, 通过 `optimize_model()` 运行
 
 原则上不要新增 CLI 参数解析, JSON shaped workflow 或其他配置路径.
+
+YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compression_axes`, `hardware`, `benchmark`, `stages`, `device`. 其中 `stages` 是唯一的优化和导出路径描述; 旧式顶层 `compression`, `export`, `operator_optimization`, `analysis`, `validation` 和 `config_version` 只属于内部 `XQTConfig` 形态,不能出现在 `xqt/recipes`.
 
 ## 关键抽象
 

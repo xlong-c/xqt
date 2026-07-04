@@ -8,7 +8,7 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 
 | 概念 | 说明 |
 |---|---|
-| `OptimizationConfig` | 对外 stage workflow schema,包含 `project` / `model` / `task` / `stages`. |
+| `OptimizationConfig` | 对外唯一 YAML workflow schema,包含 `project` / `model` / `task` / `compression_axes` / `hardware` / `stages`. |
 | `XQTConfig` | 旧 pass recipe schema,仅作为内部实现. |
 | `load_optimization_config()` | `OptimizationConfig` 加载器. |
 | `load_xqt_config()` | `XQTConfig` 加载器,内部保留. |
@@ -28,6 +28,18 @@ XQT 只提供两种配置方式:
 2. YAML workflow,通过 `optimize_model()` 运行.
 
 原则上不要新增 CLI 参数解析,JSON shaped workflow 或其他配置路径.
+
+YAML workflow 只保留一种配置形态:
+
+- `project`: 项目名和输出目录,`project.artifact_dir` 是优化模型,导出产物,report 和 manifest 的落点.
+- `model`: 输入模型或 checkpoint 信息. 调用方也可以通过 `optimize_model(..., model=...)` 直接传入模型对象.
+- `task`: 只描述模型侧 task metadata,不引入 dataset / dataloader 或 evaluation provider.
+- `compression_axes`: 本 workflow 涉及的模型优化轴,例如 `precision`,`sparsity`,`width`,`depth`.
+- `hardware`: 运行和产物硬件约束,例如 `device` 和 `backends`.
+- `benchmark`: workflow 默认 benchmark 参数.
+- `stages`: 唯一的优化和导出路径描述. `quant`,`prune`,`operator`,`export`,`deploy`,`benchmark`,`analyze` 都只能作为 stage 出现.
+
+不要在 `xqt/recipes` 新增顶层 `compression`,`export`,`operator_optimization`,`analysis`,`validation` 或 `config_version`. 这些属于旧 `XQTConfig` 内部实现形态,不能再作为公开 recipe schema.
 
 ## Stage 约定
 

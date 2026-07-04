@@ -38,6 +38,8 @@ Recipe 按技术栈分层组织在 `recipes/` 下:
 - `detection/` - 检测模型部署和后端产物适配.
 - `smoke/` - 综合冒烟测试.
 
+`recipes/` 下所有 YAML 都必须是 stage workflow, 且必须能由 `load_optimization_config()` 加载. 顶层只保留 `project`, `model`, `task`, `compression_axes`, `hardware`, `benchmark`, `stages`, `device`; 优化和导出路径全部写入 `stages`. 不要再新增旧式顶层 `compression`, `export`, `operator_optimization`, `analysis`, `validation` 或 `config_version`.
+
 不要新增 XQT 训练 recipe. `finetune`,`distill`,`recovery`,`QAT training` 等 recipe 应放到 XDL 或外部训练工具侧.
 
 ### 配置方式
