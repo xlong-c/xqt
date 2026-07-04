@@ -1,6 +1,14 @@
 """Minimal TileLang GEMM builders used by XQT operator kernels."""
 
+# TileLang DSL patterns (T.Tensor, T.ceildiv, .astype(), PassConfigKey enum keys
+# in @tilelang.jit pass_configs) trigger Pylance false positives; these rules are
+# not applicable inside DSL-decorated builder functions.
+# pyright: reportInvalidTypeForm=false
+# pyright: reportArgumentType=false
+# pyright: reportAttributeAccessIssue=false
+
 from functools import lru_cache
+
 
 @lru_cache(maxsize=32)
 def build_tilelang_gemm_kernel(
@@ -10,8 +18,12 @@ def build_tilelang_gemm_kernel(
     *,
     block_m: int = 64,
     block_n: int = 64,
+    block_k: int = 64,
     threads: int = 128,
+    num_stages: int = 2,
     target_arch: str | None = None,
+    has_bias: bool = False,
+    activation: str | None = None,
 ):
     import tilelang
     import tilelang.language as T
@@ -19,7 +31,15 @@ def build_tilelang_gemm_kernel(
     if m <= 0 or n <= 0 or k <= 0:
         raise ValueError("m, n, k must be positive")
     if m % block_m != 0 or n % block_n != 0:
-        raise ValueError("minimal TileLang GEMM builder currently requires m,n to be multiples of block sizes")
+        raise ValueError(
+            "minimal TileLang GEMM builder currently requires m,n to be multiples of block sizes"
+        )
+    if k % block_k != 0:
+        raise ValueError(
+            "minimal TileLang GEMM builder currently requires k to be a multiple of block_k"
+        )
+    if activation not in {None, "gelu", "silu", "relu"}:
+        raise ValueError(f"unsupported activation: {activation}")
 
     pass_configs = {
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -27,16 +47,83 @@ def build_tilelang_gemm_kernel(
     target = {"kind": "cuda", "arch": str(target_arch)} if target_arch else None
     a_shape = [m, k]
     b_shape = [n, k]
+    bias_shape = [n]
     c_shape = [m, n]
     dtype = T.float16
     accum_dtype = T.float32
 
+    def _apply_activation(value):
+        if activation is None:
+            return value
+        if activation == "relu":
+            return T.max(value, 0.0)
+        if activation == "silu":
+            return value * T.sigmoid(value)
+        return 0.5 * value * (1.0 + T.erf(value / T.sqrt(2.0)))
+
+    if has_bias:
+        out_idx = [3]
+    else:
+        out_idx = [2]
+
     @tilelang.jit(
-        out_idx=[2],
+        out_idx=out_idx,
         target=target,
         pass_configs=pass_configs,
     )
-    def gemm():
+    def gemm_with_bias():
+        @T.prim_func
+        def main(
+            a: T.Tensor(a_shape, dtype),
+            b: T.Tensor(b_shape, dtype),
+            bias: T.Tensor(bias_shape, dtype),
+            out: T.Tensor(c_shape, dtype),
+        ):
+            with T.Kernel(
+                T.ceildiv(m, block_m),
+                T.ceildiv(n, block_n),
+                threads=threads,
+            ) as (bx, by):
+                a_shared = T.alloc_shared([block_m, block_k], dtype)
+                b_shared = T.alloc_shared([block_n, block_k], dtype)
+                acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+
+                T.fill(acc_o, 0)
+                for k_tile in T.Pipelined(T.ceildiv(k, block_k), num_stages=num_stages):
+                    T.copy(
+                        a[
+                            bx * block_m : (bx + 1) * block_m,
+                            k_tile * block_k : (k_tile + 1) * block_k,
+                        ],
+                        a_shared,
+                    )
+                    T.copy(
+                        b[
+                            by * block_n : (by + 1) * block_n,
+                            k_tile * block_k : (k_tile + 1) * block_k,
+                        ],
+                        b_shared,
+                    )
+                    T.gemm(
+                        a_shared,
+                        b_shared,
+                        acc_o,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
+                for row, col in T.Parallel(block_m, block_n):
+                    out[bx * block_m + row, by * block_n + col] = _apply_activation(
+                        acc_o[row, col] + bias[by * block_n + col]
+                    )
+
+        return main
+
+    @tilelang.jit(
+        out_idx=out_idx,
+        target=target,
+        pass_configs=pass_configs,
+    )
+    def gemm_without_bias():
         @T.prim_func
         def main(
             a: T.Tensor(a_shape, dtype),
@@ -48,27 +135,43 @@ def build_tilelang_gemm_kernel(
                 T.ceildiv(n, block_n),
                 threads=threads,
             ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, k], dtype)
-                b_shared = T.alloc_shared([block_n, k], dtype)
-                o_shared = T.alloc_shared([block_m, block_n], dtype)
+                a_shared = T.alloc_shared([block_m, block_k], dtype)
+                b_shared = T.alloc_shared([block_n, block_k], dtype)
                 acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
-                T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-                T.copy(b[by * block_n : (by + 1) * block_n, :], b_shared)
                 T.fill(acc_o, 0)
-                T.gemm(
-                    a_shared,
-                    b_shared,
-                    acc_o,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
-                T.copy(acc_o, o_shared)
-                T.copy(o_shared, out[bx * block_m : (bx + 1) * block_m, by * block_n : (by + 1) * block_n])
+                for k_tile in T.Pipelined(T.ceildiv(k, block_k), num_stages=num_stages):
+                    T.copy(
+                        a[
+                            bx * block_m : (bx + 1) * block_m,
+                            k_tile * block_k : (k_tile + 1) * block_k,
+                        ],
+                        a_shared,
+                    )
+                    T.copy(
+                        b[
+                            by * block_n : (by + 1) * block_n,
+                            k_tile * block_k : (k_tile + 1) * block_k,
+                        ],
+                        b_shared,
+                    )
+                    T.gemm(
+                        a_shared,
+                        b_shared,
+                        acc_o,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
+                for row, col in T.Parallel(block_m, block_n):
+                    out[bx * block_m + row, by * block_n + col] = _apply_activation(
+                        acc_o[row, col]
+                    )
 
         return main
 
-    return gemm()
+    if has_bias:
+        return gemm_with_bias()
+    return gemm_without_bias()
 
 
 @lru_cache(maxsize=32)
@@ -90,7 +193,9 @@ def build_tilelang_fp4_unpack_dequant_kernel(
     if block_n <= 0 or block_k <= 0:
         raise ValueError("block_n and block_k must be positive")
 
-    padded_input_features = ((input_features + group_size - 1) // group_size) * group_size
+    padded_input_features = (
+        (input_features + group_size - 1) // group_size
+    ) * group_size
     packed_k = (padded_input_features + 1) // 2
     groups = padded_input_features // group_size
     packed_shape = [n, packed_k]
@@ -126,7 +231,10 @@ def build_tilelang_fp4_unpack_dequant_kernel(
                                 nibble.astype(T.int16) - 16,
                                 nibble.astype(T.int16),
                             )
-                            out[row, feature] = signed.astype(dtype) * scale[row, feature // group_size, 0]
+                            out[row, feature] = (
+                                signed.astype(dtype)
+                                * scale[row, feature // group_size, 0]
+                            )
 
         return main
 
@@ -153,7 +261,9 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
     if m <= 0 or n <= 0 or input_features <= 0 or group_size <= 0:
         raise ValueError("m, n, input_features, and group_size must be positive")
     if m % block_m != 0 or n % block_n != 0:
-        raise ValueError("minimal fused FP4 TileLang GEMM requires m,n to be multiples of block sizes")
+        raise ValueError(
+            "minimal fused FP4 TileLang GEMM requires m,n to be multiples of block sizes"
+        )
     if activation not in {None, "gelu", "silu", "relu"}:
         raise ValueError(f"unsupported activation: {activation}")
 
@@ -161,7 +271,9 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     }
     target = {"kind": "cuda", "arch": str(target_arch)} if target_arch else None
-    padded_input_features = ((input_features + group_size - 1) // group_size) * group_size
+    padded_input_features = (
+        (input_features + group_size - 1) // group_size
+    ) * group_size
     packed_k = (padded_input_features + 1) // 2
     groups = padded_input_features // group_size
     a_shape = [m, input_features]
@@ -234,13 +346,18 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
                     policy=T.GemmWarpPolicy.FullRow,
                 )
                 for row_offset, column_offset in T.Parallel(block_m, block_n):
-                    value = (
-                        acc_o[row_offset, column_offset]
-                        + bias[by * block_n + column_offset].astype(accum_dtype)
-                    )
+                    value = acc_o[row_offset, column_offset] + bias[
+                        by * block_n + column_offset
+                    ].astype(accum_dtype)
                     acc_o[row_offset, column_offset] = _apply_activation(value)
                 T.copy(acc_o, o_shared)
-                T.copy(o_shared, out[bx * block_m : (bx + 1) * block_m, by * block_n : (by + 1) * block_n])
+                T.copy(
+                    o_shared,
+                    out[
+                        bx * block_m : (bx + 1) * block_m,
+                        by * block_n : (by + 1) * block_n,
+                    ],
+                )
 
         return main
 
@@ -295,7 +412,13 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
                         acc_o[row_offset, column_offset]
                     )
                 T.copy(acc_o, o_shared)
-                T.copy(o_shared, out[bx * block_m : (bx + 1) * block_m, by * block_n : (by + 1) * block_n])
+                T.copy(
+                    o_shared,
+                    out[
+                        bx * block_m : (bx + 1) * block_m,
+                        by * block_n : (by + 1) * block_n,
+                    ],
+                )
 
         return main
 
@@ -326,9 +449,13 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
     if m <= 0 or n <= 0 or input_features <= 0 or group_size <= 0:
         raise ValueError("m, n, input_features, and group_size must be positive")
     if m % block_m != 0 or n % block_n != 0:
-        raise ValueError("minimal fused NVFP4 TileLang GEMM requires m,n to be multiples of block sizes")
+        raise ValueError(
+            "minimal fused NVFP4 TileLang GEMM requires m,n to be multiples of block sizes"
+        )
     if input_features % block_k != 0:
-        raise ValueError("minimal fused NVFP4 TileLang GEMM requires input_features to be a multiple of block_k")
+        raise ValueError(
+            "minimal fused NVFP4 TileLang GEMM requires input_features to be a multiple of block_k"
+        )
     if activation not in {None, "gelu", "silu", "relu"}:
         raise ValueError(f"unsupported activation: {activation}")
 
@@ -336,7 +463,9 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     }
     target = {"kind": "cuda", "arch": str(target_arch)} if target_arch else None
-    padded_input_features = ((input_features + group_size - 1) // group_size) * group_size
+    padded_input_features = (
+        (input_features + group_size - 1) // group_size
+    ) * group_size
     packed_k = (padded_input_features + 1) // 2
     groups = padded_input_features // group_size
     a_shape = [m, input_features]
@@ -357,68 +486,20 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
             return value * T.sigmoid(value)
         return 0.5 * value * (1.0 + T.erf(value / T.sqrt(2.0)))
 
-    def _decode_nvfp4(nibble):
-        return T.if_then_else(
-            nibble == 0,
-            0.0,
+    def _decode_nvfp4_e2m1(nibble):
+        unsigned_nibble = nibble.astype(T.uint16)
+        magnitude_code = T.bitwise_and(unsigned_nibble, 7)
+        sign_bit = T.bitwise_and(unsigned_nibble, 8)
+        magnitude = T.if_then_else(
+            magnitude_code <= 4,
+            magnitude_code.astype(accum_dtype) * 0.5,
             T.if_then_else(
-                nibble == 1,
-                0.5,
-                T.if_then_else(
-                    nibble == 2,
-                    1.0,
-                    T.if_then_else(
-                        nibble == 3,
-                        1.5,
-                        T.if_then_else(
-                            nibble == 4,
-                            2.0,
-                            T.if_then_else(
-                                nibble == 5,
-                                3.0,
-                                T.if_then_else(
-                                    nibble == 6,
-                                    4.0,
-                                    T.if_then_else(
-                                        nibble == 7,
-                                        6.0,
-                                        T.if_then_else(
-                                            nibble == 8,
-                                            -0.0,
-                                            T.if_then_else(
-                                                nibble == 9,
-                                                -0.5,
-                                                T.if_then_else(
-                                                    nibble == 10,
-                                                    -1.0,
-                                                    T.if_then_else(
-                                                        nibble == 11,
-                                                        -1.5,
-                                                        T.if_then_else(
-                                                            nibble == 12,
-                                                            -2.0,
-                                                            T.if_then_else(
-                                                                nibble == 13,
-                                                                -3.0,
-                                                                T.if_then_else(
-                                                                    nibble == 14,
-                                                                    -4.0,
-                                                                    -6.0,
-                                                                ),
-                                                            ),
-                                                        ),
-                                                    ),
-                                                ),
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
+                magnitude_code == 5,
+                3.0,
+                T.if_then_else(magnitude_code == 6, 4.0, 6.0),
             ),
         )
+        return T.if_then_else(sign_bit == 0, magnitude, -magnitude)
 
     if has_bias:
         out_idx = [5]
@@ -451,7 +532,9 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                 acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
                 T.fill(acc_o, 0)
-                for k_tile in T.Pipelined(T.ceildiv(input_features, block_k), num_stages=num_stages):
+                for k_tile in T.Pipelined(
+                    T.ceildiv(input_features, block_k), num_stages=num_stages
+                ):
                     T.copy(
                         a[
                             bx * block_m : (bx + 1) * block_m,
@@ -466,7 +549,7 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                         low = T.bitwise_and(byte_u16, 15)
                         high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
                         nibble = T.if_then_else(feature % 2 == 0, low, high)
-                        decoded = _decode_nvfp4(nibble.astype(T.int16))
+                        decoded = _decode_nvfp4_e2m1(nibble)
                         b_shared[row_offset, feature_offset] = (
                             decoded.astype(dtype)
                             * scale[row, feature // group_size, 0]
@@ -480,13 +563,18 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                         policy=T.GemmWarpPolicy.FullRow,
                     )
                 for row_offset, column_offset in T.Parallel(block_m, block_n):
-                    value = (
-                        acc_o[row_offset, column_offset]
-                        + bias[by * block_n + column_offset].astype(accum_dtype)
-                    )
+                    value = acc_o[row_offset, column_offset] + bias[
+                        by * block_n + column_offset
+                    ].astype(accum_dtype)
                     acc_o[row_offset, column_offset] = _apply_activation(value)
                 T.copy(acc_o, o_shared)
-                T.copy(o_shared, out[bx * block_m : (bx + 1) * block_m, by * block_n : (by + 1) * block_n])
+                T.copy(
+                    o_shared,
+                    out[
+                        bx * block_m : (bx + 1) * block_m,
+                        by * block_n : (by + 1) * block_n,
+                    ],
+                )
 
         return main
 
@@ -515,7 +603,9 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                 acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
                 T.fill(acc_o, 0)
-                for k_tile in T.Pipelined(T.ceildiv(input_features, block_k), num_stages=num_stages):
+                for k_tile in T.Pipelined(
+                    T.ceildiv(input_features, block_k), num_stages=num_stages
+                ):
                     T.copy(
                         a[
                             bx * block_m : (bx + 1) * block_m,
@@ -530,7 +620,7 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                         low = T.bitwise_and(byte_u16, 15)
                         high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
                         nibble = T.if_then_else(feature % 2 == 0, low, high)
-                        decoded = _decode_nvfp4(nibble.astype(T.int16))
+                        decoded = _decode_nvfp4_e2m1(nibble)
                         b_shared[row_offset, feature_offset] = (
                             decoded.astype(dtype)
                             * scale[row, feature // group_size, 0]
@@ -548,7 +638,13 @@ def build_tilelang_nvfp4_fused_dequant_gemm_kernel(
                         acc_o[row_offset, column_offset]
                     )
                 T.copy(acc_o, o_shared)
-                T.copy(o_shared, out[bx * block_m : (bx + 1) * block_m, by * block_n : (by + 1) * block_n])
+                T.copy(
+                    o_shared,
+                    out[
+                        bx * block_m : (bx + 1) * block_m,
+                        by * block_n : (by + 1) * block_n,
+                    ],
+                )
 
         return main
 

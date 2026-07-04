@@ -27,10 +27,20 @@ from .mxfp_gemm import (
     pack_mxfp,
     unpack_mxfp,
 )
+from .linear import (
+    TRITON_LINEAR_KERNEL_METADATA,
+    linear_bf16_triton,
+    linear_fp16_triton,
+    linear_fp8_triton,
+    linear_int4_dequant_triton,
+    linear_int8_triton,
+    linear_reference,
+)
 
 __all__ = [
     "TRITON_KERNEL_METADATA",
     "TRITON_GEMM_KERNEL_METADATA",
+    "TRITON_LINEAR_KERNEL_METADATA",
     "MXFP_GEMM_KERNEL_METADATA",
     "fused_bias_gelu_reference",
     "fused_bias_gelu_triton",
@@ -48,6 +58,12 @@ __all__ = [
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",
+    "linear_bf16_triton",
+    "linear_fp16_triton",
+    "linear_fp8_triton",
+    "linear_int4_dequant_triton",
+    "linear_int8_triton",
+    "linear_reference",
     "pack_mxfp",
     "unpack_mxfp",
 ]
