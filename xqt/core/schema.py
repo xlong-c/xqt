@@ -157,6 +157,11 @@ class TileLangKernelConfig:
     num_stages: int = 2
     cache_dir: Optional[str] = None
     pass_configs: Dict[str, Any] = field(default_factory=dict)
+    linear_runtime: str = "auto"
+    linear_fastpath: str = "auto"
+    attention_fastpath: str = "auto"
+    conv_fastpath: str = "auto"
+    norm_fastpath: str = "auto"
 
 
 @dataclass

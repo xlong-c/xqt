@@ -50,6 +50,40 @@ def _percentile(sorted_values: List[float], percentile: float) -> float:
     return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
 
 
+def measure_callable_ms(
+    fn: Callable[[], object],
+    *,
+    sync_cuda: bool,
+    device: Optional[str] = None,
+) -> float:
+    """Measure one callable invocation in milliseconds.
+
+    CUDA paths prefer `torch.cuda.Event` timing so sub-millisecond kernels are
+    measured on-device instead of through host wall-clock noise.
+    """
+
+    torch_device = torch.device(device) if device is not None else None
+    should_sync_cuda = sync_cuda and (
+        torch_device is None or torch_device.type == "cuda"
+    )
+    use_cuda_events = should_sync_cuda and torch.cuda.is_available()
+
+    _sync_if_needed(should_sync_cuda)
+    if use_cuda_events:
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        fn()
+        end_event.record()
+        end_event.synchronize()
+        return float(start_event.elapsed_time(end_event))
+
+    start = perf_counter()
+    fn()
+    _sync_if_needed(should_sync_cuda)
+    return float((perf_counter() - start) * 1000.0)
+
+
 def benchmark_callable(
     fn: Callable[[], object],
     *,
@@ -77,11 +111,13 @@ def benchmark_callable(
 
         samples_ms: List[float] = []
         for _ in range(iterations):
-            _sync_if_needed(should_sync_cuda)
-            start = perf_counter()
-            fn()
-            _sync_if_needed(should_sync_cuda)
-            samples_ms.append((perf_counter() - start) * 1000.0)
+            samples_ms.append(
+                measure_callable_ms(
+                    fn,
+                    sync_cuda=should_sync_cuda,
+                    device=device,
+                )
+            )
 
     sorted_samples = sorted(samples_ms)
     mean_ms = sum(samples_ms) / len(samples_ms)
@@ -95,5 +131,4 @@ def benchmark_callable(
         samples_ms=samples_ms,
     )
 
-
-__all__ = ["LatencyReport", "benchmark_callable"]
+__all__ = ["LatencyReport", "benchmark_callable", "measure_callable_ms"]

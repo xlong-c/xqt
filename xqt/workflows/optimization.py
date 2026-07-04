@@ -81,6 +81,9 @@ class OptimizationConfig:
     )
     model: ModelConfig = field(default_factory=ModelConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
+    compression_axes: list[str] = field(default_factory=list)
+    hardware: dict[str, Any] = field(default_factory=dict)
     stages: list[OptimizationStageConfig] = field(default_factory=list)
     device: Optional[str] = None
 
@@ -181,6 +184,7 @@ def _base_xqt_config(
             "project": _project(config, stage_name=stage_name),
             "model": _model_config(config),
             "task": _task_config(config),
+            "benchmark": asdict(config.benchmark) if is_dataclass(config.benchmark) else dict(config.benchmark),
         }
     )
 
@@ -387,6 +391,9 @@ def _run_operator(
     _stage_context(config, stage, context=context)
     params = dict(stage.params)
     params.pop("enabled", None)
+    benchmark_params = params.pop("benchmark", None)
+    if isinstance(benchmark_params, Mapping):
+        context.config.benchmark = _benchmark_config(benchmark_params)
     context.config.operator_optimization = load_xqt_config(
         {"operator_optimization": {"enabled": True, **params}}
     ).operator_optimization
