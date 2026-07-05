@@ -12,7 +12,7 @@ from .conv import (
     conv2d_reference,
     conv2d_tilelang,
 )
-from .dequant_gemm import (
+from .gemm import (
     TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
@@ -27,6 +27,14 @@ from .linear import (
     dense_linear_epilogue_tilelang,
     half_linear_reference,
     half_linear_tilelang,
+)
+from .linear_marlin import (
+    TILELANG_MARLIN_LINEAR_KERNEL_METADATA,
+    build_tilelang_marlin_linear_kernel,
+    linear_marlin_reference,
+    linear_marlin_tilelang,
+    quantize_int4_weight,
+    quantize_int8_weight,
 )
 from .norm import (
     TILELANG_NORM_KERNEL_METADATA,
@@ -53,6 +61,7 @@ TILELANG_KERNEL_METADATA = {
     **TILELANG_CONV_KERNEL_METADATA,
     **TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     **TILELANG_LINEAR_KERNEL_METADATA,
+    **TILELANG_MARLIN_LINEAR_KERNEL_METADATA,
     **TILELANG_NORM_KERNEL_METADATA,
 }
 
@@ -61,6 +70,7 @@ __all__ = [
     "TILELANG_CONV_KERNEL_METADATA",
     "TILELANG_DEQUANT_GEMM_KERNEL_METADATA",
     "TILELANG_LINEAR_KERNEL_METADATA",
+    "TILELANG_MARLIN_LINEAR_KERNEL_METADATA",
     "TILELANG_NORM_KERNEL_METADATA",
     "TileLangAttentionDesign",
     "build_tilelang_attention_design",
@@ -68,6 +78,7 @@ __all__ = [
     "build_tilelang_fp4_fused_dequant_gemm_kernel",
     "build_tilelang_fp4_unpack_dequant_kernel",
     "build_tilelang_gemm_kernel",
+    "build_tilelang_marlin_linear_kernel",
     "build_tilelang_nvfp4_fused_dequant_gemm_kernel",
     "conv2d_reference",
     "conv2d_tilelang",
@@ -85,4 +96,8 @@ __all__ = [
     "half_linear_tilelang",
     "layer_norm_reference",
     "layer_norm_tilelang",
+    "linear_marlin_reference",
+    "linear_marlin_tilelang",
+    "quantize_int4_weight",
+    "quantize_int8_weight",
 ]

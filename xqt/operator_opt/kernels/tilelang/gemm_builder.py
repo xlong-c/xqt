@@ -65,113 +65,127 @@ def build_tilelang_gemm_kernel(
         out_idx = [3]
     else:
         out_idx = [2]
-
-    @tilelang.jit(
-        out_idx=out_idx,
-        target=target,
-        pass_configs=pass_configs,
+    shape_suffix = (
+        f"m{m}_n{n}_k{k}_bm{block_m}_bn{block_n}_bk{block_k}_"
+        f"t{threads}_s{num_stages}_{activation or 'none'}"
     )
+
+    def tilelang_gemm_with_bias_main(
+        a: T.Tensor(a_shape, dtype),
+        b: T.Tensor(b_shape, dtype),
+        bias: T.Tensor(bias_shape, dtype),
+        out: T.Tensor(c_shape, dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(m, block_m),
+            T.ceildiv(n, block_n),
+            threads=threads,
+        ) as (bx, by):
+            a_shared = T.alloc_shared([block_m, block_k], dtype)
+            b_shared = T.alloc_shared([block_n, block_k], dtype)
+            acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+
+            T.fill(acc_o, 0)
+            for k_tile in T.Pipelined(T.ceildiv(k, block_k), num_stages=num_stages):
+                T.copy(
+                    a[
+                        bx * block_m : (bx + 1) * block_m,
+                        k_tile * block_k : (k_tile + 1) * block_k,
+                    ],
+                    a_shared,
+                )
+                T.copy(
+                    b[
+                        by * block_n : (by + 1) * block_n,
+                        k_tile * block_k : (k_tile + 1) * block_k,
+                    ],
+                    b_shared,
+                )
+                T.gemm(
+                    a_shared,
+                    b_shared,
+                    acc_o,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+            for row, col in T.Parallel(block_m, block_n):
+                out[bx * block_m + row, by * block_n + col] = _apply_activation(
+                    acc_o[row, col] + bias[by * block_n + col]
+                )
+
+    tilelang_gemm_with_bias_main.__name__ = (
+        f"tilelang_gemm_with_bias_main_{shape_suffix}"
+    )
+    tilelang_gemm_with_bias_prim = T.prim_func(tilelang_gemm_with_bias_main)
+
+    def tilelang_gemm_without_bias_main(
+        a: T.Tensor(a_shape, dtype),
+        b: T.Tensor(b_shape, dtype),
+        out: T.Tensor(c_shape, dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(m, block_m),
+            T.ceildiv(n, block_n),
+            threads=threads,
+        ) as (bx, by):
+            a_shared = T.alloc_shared([block_m, block_k], dtype)
+            b_shared = T.alloc_shared([block_n, block_k], dtype)
+            acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+
+            T.fill(acc_o, 0)
+            for k_tile in T.Pipelined(T.ceildiv(k, block_k), num_stages=num_stages):
+                T.copy(
+                    a[
+                        bx * block_m : (bx + 1) * block_m,
+                        k_tile * block_k : (k_tile + 1) * block_k,
+                    ],
+                    a_shared,
+                )
+                T.copy(
+                    b[
+                        by * block_n : (by + 1) * block_n,
+                        k_tile * block_k : (k_tile + 1) * block_k,
+                    ],
+                    b_shared,
+                )
+                T.gemm(
+                    a_shared,
+                    b_shared,
+                    acc_o,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+            for row, col in T.Parallel(block_m, block_n):
+                out[bx * block_m + row, by * block_n + col] = _apply_activation(
+                    acc_o[row, col]
+                )
+
+    tilelang_gemm_without_bias_main.__name__ = (
+        f"tilelang_gemm_without_bias_main_{shape_suffix}"
+    )
+    tilelang_gemm_without_bias_prim = T.prim_func(tilelang_gemm_without_bias_main)
+
     def gemm_with_bias():
-        @T.prim_func
-        def main(
-            a: T.Tensor(a_shape, dtype),
-            b: T.Tensor(b_shape, dtype),
-            bias: T.Tensor(bias_shape, dtype),
-            out: T.Tensor(c_shape, dtype),
-        ):
-            with T.Kernel(
-                T.ceildiv(m, block_m),
-                T.ceildiv(n, block_n),
-                threads=threads,
-            ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, block_k], dtype)
-                b_shared = T.alloc_shared([block_n, block_k], dtype)
-                acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
-
-                T.fill(acc_o, 0)
-                for k_tile in T.Pipelined(T.ceildiv(k, block_k), num_stages=num_stages):
-                    T.copy(
-                        a[
-                            bx * block_m : (bx + 1) * block_m,
-                            k_tile * block_k : (k_tile + 1) * block_k,
-                        ],
-                        a_shared,
-                    )
-                    T.copy(
-                        b[
-                            by * block_n : (by + 1) * block_n,
-                            k_tile * block_k : (k_tile + 1) * block_k,
-                        ],
-                        b_shared,
-                    )
-                    T.gemm(
-                        a_shared,
-                        b_shared,
-                        acc_o,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                for row, col in T.Parallel(block_m, block_n):
-                    out[bx * block_m + row, by * block_n + col] = _apply_activation(
-                        acc_o[row, col] + bias[by * block_n + col]
-                    )
-
-        return main
-
-    @tilelang.jit(
+        return tilelang_gemm_with_bias_prim
+    gemm_with_bias.__name__ = f"tilelang_gemm_with_bias_builder_{shape_suffix}"
+    gemm_with_bias_jit = tilelang.jit(
         out_idx=out_idx,
         target=target,
         pass_configs=pass_configs,
-    )
+    )(gemm_with_bias)
+
     def gemm_without_bias():
-        @T.prim_func
-        def main(
-            a: T.Tensor(a_shape, dtype),
-            b: T.Tensor(b_shape, dtype),
-            out: T.Tensor(c_shape, dtype),
-        ):
-            with T.Kernel(
-                T.ceildiv(m, block_m),
-                T.ceildiv(n, block_n),
-                threads=threads,
-            ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, block_k], dtype)
-                b_shared = T.alloc_shared([block_n, block_k], dtype)
-                acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
-
-                T.fill(acc_o, 0)
-                for k_tile in T.Pipelined(T.ceildiv(k, block_k), num_stages=num_stages):
-                    T.copy(
-                        a[
-                            bx * block_m : (bx + 1) * block_m,
-                            k_tile * block_k : (k_tile + 1) * block_k,
-                        ],
-                        a_shared,
-                    )
-                    T.copy(
-                        b[
-                            by * block_n : (by + 1) * block_n,
-                            k_tile * block_k : (k_tile + 1) * block_k,
-                        ],
-                        b_shared,
-                    )
-                    T.gemm(
-                        a_shared,
-                        b_shared,
-                        acc_o,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                for row, col in T.Parallel(block_m, block_n):
-                    out[bx * block_m + row, by * block_n + col] = _apply_activation(
-                        acc_o[row, col]
-                    )
-
-        return main
+        return tilelang_gemm_without_bias_prim
+    gemm_without_bias.__name__ = f"tilelang_gemm_without_bias_builder_{shape_suffix}"
+    gemm_without_bias_jit = tilelang.jit(
+        out_idx=out_idx,
+        target=target,
+        pass_configs=pass_configs,
+    )(gemm_without_bias)
 
     if has_bias:
-        return gemm_with_bias()
-    return gemm_without_bias()
+        return gemm_with_bias_jit()
+    return gemm_without_bias_jit()
 
 
 @lru_cache(maxsize=32)

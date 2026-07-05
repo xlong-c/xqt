@@ -32,7 +32,11 @@ XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,�
 
 如果你要更新当前能力范围, 半可用 / 实验性状态或能力地图, 优先更新上面的说明层页面.
 
-当前 `TileLang` 的受限 kernel target 已覆盖 `attention`, `conv`, direct half `linear`, direct half `LayerNorm`, `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体. 这些 pattern 不是同等成熟度: `attention` 和 direct half `linear` 已有受限 CUDA fp16 kernel 入口, `conv` 当前是 `torch.unfold` / im2col 加 TileLang half GEMM 的 lowering 路径而不是 fully fused conv, direct half `LayerNorm` 已接入 TileLang `reduce_sum` kernel 且限制为 last-dim fp16. CPU 路径只使用 PyTorch eager fallback.
+当前 `TileLang` 的受限 kernel target 已覆盖 `attention`, `conv`, direct half `linear`, `linear_marlin`, direct half `LayerNorm`, `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体. 这些 pattern 不是同等成熟度: `attention` 和 direct half `linear` 已有受限 CUDA fp16 kernel 入口, `conv` 当前是 `torch.unfold` / im2col 加 TileLang half GEMM 的 lowering 路径而不是 fully fused conv, direct half `LayerNorm` 已接入 TileLang `reduce_sum` kernel 且限制为 last-dim fp16. CPU 路径只使用 PyTorch eager fallback.
+
+当前 `CuTile` 的 kernel catalog 已对齐上述 `TileLang` pattern, 即 `attention`, `conv`, `linear`, `norm`, `dense_linear_epilogue`, `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体, 并保留原有 `bias_silu` pointwise scaffold. `CuTile` 仍是 metadata-first / reference-guarded backend: XQT 记录 artifact 和 capability, 并通过 `cuda.tile` 或兼容的 `cutile` 模块探测运行时; 内置 executor 可 materialize 线性 / dequant GEMM 的 reference-guarded 推理 wrapper, 但不把它当作完整通用执行器.
+
+当前 `CuTe DSL` adapter 覆盖 `gemm_epilogue` 和 `grouped_gemm` metadata. 内置 executor 可把 NVFP4 dense-cache bridge 路由到 `gemm_epilogue` reference-guarded 推理 wrapper; packed NVFP4 权重不会由 CuTe DSL 直接消费.
 
 ## 4. 性能分析工具
 

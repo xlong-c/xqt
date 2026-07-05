@@ -94,6 +94,7 @@ class NVFP4TensorLayout:
     weight_scale_name: str
     weight_global_scale_name: str | None
     bias_name: str | None
+    invert_weight_global_scale: bool = False
 
 
 class NVFP4LinearBridge(nn.Module):
@@ -165,6 +166,8 @@ class NVFP4LinearBridge(nn.Module):
                 weight_global_scale = weight_global_scale.detach().clone()
             if bias is not None:
                 bias = bias.detach().clone()
+        if weight_global_scale is not None and layout.invert_weight_global_scale:
+            weight_global_scale = torch.reciprocal(weight_global_scale)
         return cls(
             packed_weight=packed_weight,
             weight_scale=weight_scale,
@@ -317,10 +320,17 @@ def infer_nvfp4_tensor_layout(module: nn.Module) -> NVFP4TensorLayout | None:
         return None
 
     weight_global_scale_name = None
-    for candidate in ("weight_global_scale", "global_scale", "weight_scale_global"):
+    invert_weight_global_scale = False
+    for candidate in (
+        "weight_global_scale",
+        "global_scale",
+        "weight_scale_global",
+        "weight_scale_2",
+    ):
         value = getattr(module, candidate, None)
         if isinstance(value, torch.Tensor) and value.numel() == 1:
             weight_global_scale_name = candidate
+            invert_weight_global_scale = candidate == "weight_scale_2"
             break
 
     bias_name = "bias" if isinstance(getattr(module, "bias", None), torch.Tensor) else None
@@ -333,6 +343,7 @@ def infer_nvfp4_tensor_layout(module: nn.Module) -> NVFP4TensorLayout | None:
         weight_scale_name=weight_scale_name,
         weight_global_scale_name=weight_global_scale_name,
         bias_name=bias_name,
+        invert_weight_global_scale=invert_weight_global_scale,
     )
 
 

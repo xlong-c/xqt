@@ -12,8 +12,10 @@ from xqt.operator_opt.backends.tilelang_validation import (
     TileLangFP4ValidationResult,
     validate_tilelang_packed_fp4_fused_gemm,
 )
-from xqt.operator_opt.kernels.tilelang import build_tilelang_fp4_fused_dequant_gemm_kernel
-from xqt.operator_opt.kernels.tilelang.dequant_gemm import (
+from xqt.operator_opt.kernels.tilelang import (
+    build_tilelang_fp4_fused_dequant_gemm_kernel,
+)
+from xqt.operator_opt.kernels.tilelang.gemm import (
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
     fp4_packed_dequant_gemm_epilogue_reference,
@@ -43,7 +45,10 @@ def test_tilelang_fp4_registry_reports_tilelang_unpack_stage() -> None:
     metadata = specs["fp4_packed_dequant_gemm_epilogue"]["metadata"]
 
     assert metadata["unpack_stage"] == "tilelang_fused_gemm_kernel"
-    assert metadata["fusion_status"] == "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue"
+    assert (
+        metadata["fusion_status"]
+        == "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue"
+    )
     assert metadata["epilogue_stage"] == "tilelang_fused_bias_activation"
 
 
@@ -174,7 +179,9 @@ def test_tilelang_packed_fp4_dequant_gemm_cuda_matches_reference() -> None:
     x = torch.randn(64, 32, device="cuda", dtype=torch.float16)
     packed_weight = fp4_linear.packed_weight
     scale = fp4_linear.weight_scale.to(dtype=torch.float16)
-    bias = fp4_linear.bias.to(dtype=torch.float16) if fp4_linear.bias is not None else None
+    bias = (
+        fp4_linear.bias.to(dtype=torch.float16) if fp4_linear.bias is not None else None
+    )
 
     output = fp4_packed_dequant_gemm_epilogue_tilelang(
         x,

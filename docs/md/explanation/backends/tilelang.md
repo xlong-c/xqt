@@ -39,6 +39,7 @@ XQT 当前 TileLang adapter 的重点不是在 import 时真正编译所有 kern
 - `dequant_gemm_epilogue`
 - `dense_linear_epilogue`
 - `linear`
+- `linear_marlin`
 - `norm`
 - `fp4_packed_dequant_gemm_epilogue`
 - `nvfp4_packed_dequant_gemm_epilogue`
@@ -127,4 +128,3 @@ out = run_tilelang_kernel("linear", x, w, bias, fallback="eager")
 
 - TileLang GitHub: <https://github.com/tile-ai/tilelang>
 - TileLang documentation: <https://tilelang.com/>
-

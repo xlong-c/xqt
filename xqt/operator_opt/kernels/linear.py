@@ -8,6 +8,12 @@ from .tilelang.linear import (
     half_linear_reference,
     half_linear_tilelang,
 )
+from .tilelang.linear_marlin import (
+    linear_marlin_reference,
+    linear_marlin_tilelang,
+    quantize_int4_weight,
+    quantize_int8_weight,
+)
 from .triton.linear import (
     linear_bf16_triton,
     linear_fp16_triton,
@@ -27,5 +33,9 @@ __all__ = [
     "linear_fp8_triton",
     "linear_int4_dequant_triton",
     "linear_int8_triton",
+    "linear_marlin_reference",
+    "linear_marlin_tilelang",
     "linear_reference",
+    "quantize_int4_weight",
+    "quantize_int8_weight",
 ]

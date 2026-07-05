@@ -116,6 +116,22 @@ def _module_metadata(module_name: str) -> dict[str, Any]:
     return metadata
 
 
+def _cutile_available() -> bool:
+    try:
+        from xqt.operator_opt.backends.cutile import cutile_available
+    except Exception:
+        return _package_available("cutile")
+    return cutile_available()
+
+
+def _cutile_metadata() -> dict[str, Any]:
+    try:
+        from xqt.operator_opt.kernels.cutile._common import cutile_module_metadata
+    except Exception:
+        return _module_metadata("cutile")
+    return cutile_module_metadata()
+
+
 def _check_executable(report: PreflightReport, executable: str, name: str) -> None:
     path = shutil.which(executable)
     report.add(
@@ -202,7 +218,10 @@ def _check_model_device(report: PreflightReport, device: str | None) -> None:
             device_count=torch.cuda.device_count(),
         )
         return
-    if torch_device.index is not None and torch_device.index >= torch.cuda.device_count():
+    if (
+        torch_device.index is not None
+        and torch_device.index >= torch.cuda.device_count()
+    ):
         report.add(
             "model.device",
             False,
@@ -315,7 +334,9 @@ def _check_quant_component_policy(
         )
 
 
-def _check_quant_runtime_mix(report: PreflightReport, quant_config: QuantConfig) -> None:
+def _check_quant_runtime_mix(
+    report: PreflightReport, quant_config: QuantConfig
+) -> None:
     backends: list[str] = []
     if quant_config.component_policies:
         backends = [
@@ -366,18 +387,36 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
     report.add(
         "operator_optimization.torch_compile",
         torch_compile_available,
-        "torch.compile available" if torch_compile_available else "torch.compile unavailable",
+        "torch.compile available"
+        if torch_compile_available
+        else "torch.compile unavailable",
         torch_version=torch.__version__,
     )
     target_backends = {
         target.backend or operator_config.default_backend
         for target in operator_config.targets
     }
-    if target_backends & {"triton", "tilelang", "cutile", "cutlass", "cute_dsl", "custom_cuda"}:
+    if target_backends & {
+        "triton",
+        "tilelang",
+        "cutile",
+        "cutlass",
+        "cute_dsl",
+        "custom_cuda",
+    }:
         _check_cuda(report, "operator_optimization.hardware.cuda")
-    for package_backend in ("triton", "tilelang", "cutile", "cutlass"):
+    for package_backend in ("triton", "tilelang", "cutlass"):
         if package_backend in target_backends:
             _check_dependency(report, package_backend)
+    if "cutile" in target_backends:
+        available = _cutile_available()
+        report.add(
+            "dependency.cuda.tile",
+            available,
+            "available" if available else "missing optional dependency",
+            package="cuda.tile",
+            legacy_package="cutile",
+        )
     if "cute_dsl" in target_backends:
         _check_dependency(report, "cutlass.cute")
     for index, target in enumerate(operator_config.targets):
@@ -411,7 +450,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             report.add(
                 f"{prefix}.cutile.runtime",
                 False,
-                "cutile backend is configured but cutile is not importable",
+                "cutile backend is configured but cuda.tile is not importable",
                 level="warning",
                 target_name=target.name,
                 module_path=target.target,
@@ -462,7 +501,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "threads": target.cutile.threads,
                 "pass_configs": dict(target.cutile.pass_configs),
             }
-            cutile_metadata.update(_module_metadata("cutile"))
+            cutile_metadata.update(_cutile_metadata())
             report.add(
                 f"{prefix}.cutile.config",
                 True,
@@ -661,7 +700,9 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                 level="error",
             )
     if prune.enabled and prune.method == "block_sparse":
-        block_shape_raw = prune.selection.get("block_shape") or prune.params.get("block_shape")
+        block_shape_raw = prune.selection.get("block_shape") or prune.params.get(
+            "block_shape"
+        )
         if isinstance(block_shape_raw, (list, tuple)) and len(block_shape_raw) == 2:
             block_shape = (int(block_shape_raw[0]), int(block_shape_raw[1]))
             capability = describe_prune_runtime_capability(
@@ -735,7 +776,11 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
                             path=plugin_check.path,
                             validation=plugin_check.to_dict(),
                         )
-                        if bool(target.params.get("validate_plugin_libraries_loadable", False)):
+                        if bool(
+                            target.params.get(
+                                "validate_plugin_libraries_loadable", False
+                            )
+                        ):
                             if plugin_check.loadable is True:
                                 report.add(
                                     f"{prefix}.plugin_libraries.{plugin_index}.loadable",

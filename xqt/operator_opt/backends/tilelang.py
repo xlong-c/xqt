@@ -22,7 +22,7 @@ from ..kernels.tilelang.conv import (
     conv2d_reference,
     conv2d_tilelang,
 )
-from ..kernels.tilelang.dequant_gemm import (
+from ..kernels.tilelang.gemm import (
     TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
@@ -37,6 +37,11 @@ from ..kernels.tilelang.linear import (
     dense_linear_epilogue_tilelang,
     half_linear_reference,
     half_linear_tilelang,
+)
+from ..kernels.tilelang.linear_marlin import (
+    TILELANG_MARLIN_LINEAR_KERNEL_METADATA,
+    linear_marlin_reference,
+    linear_marlin_tilelang,
 )
 from ..kernels.tilelang.norm import (
     TILELANG_NORM_KERNEL_METADATA,
@@ -111,6 +116,7 @@ TILELANG_KERNEL_METADATA: dict[str, dict[str, Any]] = {
     **TILELANG_CONV_KERNEL_METADATA,
     **TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     **TILELANG_LINEAR_KERNEL_METADATA,
+    **TILELANG_MARLIN_LINEAR_KERNEL_METADATA,
     **TILELANG_NORM_KERNEL_METADATA,
 }
 
@@ -147,6 +153,12 @@ TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
         kernel=half_linear_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["linear"]),
     ),
+    "linear_marlin": TileLangKernelSpec(
+        pattern="linear_marlin",
+        reference=linear_marlin_reference,
+        kernel=linear_marlin_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["linear_marlin"]),
+    ),
     "norm": TileLangKernelSpec(
         pattern="norm",
         reference=layer_norm_reference,
@@ -172,7 +184,11 @@ def tilelang_validation_thresholds(dtype: torch.dtype | str | None) -> dict[str,
     """Return default TileLang numeric thresholds for a tensor dtype."""
 
     key = str(dtype) if dtype is not None else "torch.float32"
-    return dict(TILELANG_DTYPE_VALIDATION_THRESHOLDS.get(key, TILELANG_DTYPE_VALIDATION_THRESHOLDS["torch.float32"]))
+    return dict(
+        TILELANG_DTYPE_VALIDATION_THRESHOLDS.get(
+            key, TILELANG_DTYPE_VALIDATION_THRESHOLDS["torch.float32"]
+        )
+    )
 
 
 def get_tilelang_kernel_spec(pattern: str) -> TileLangKernelSpec:
@@ -182,7 +198,9 @@ def get_tilelang_kernel_spec(pattern: str) -> TileLangKernelSpec:
         return TILELANG_KERNEL_REGISTRY[pattern]
     except KeyError as exc:
         allowed = ", ".join(sorted(TILELANG_KERNEL_REGISTRY))
-        raise XQTBackendError(f"Unsupported TileLang pattern: {pattern}. Known: {allowed}") from exc
+        raise XQTBackendError(
+            f"Unsupported TileLang pattern: {pattern}. Known: {allowed}"
+        ) from exc
 
 
 def tilelang_version() -> str | None:
@@ -205,9 +223,7 @@ def build_tilelang_artifact_metadata(
     resolved = settings or TileLangCompileSettings()
     cache_dir = Path(resolved.cache_dir) if resolved.cache_dir is not None else None
     artifact_path = (
-        str(cache_dir / f"{pattern}.tilelang.json")
-        if cache_dir is not None
-        else None
+        str(cache_dir / f"{pattern}.tilelang.json") if cache_dir is not None else None
     )
     return {
         "backend": "tilelang",
@@ -244,9 +260,7 @@ def run_tilelang_kernel(
         if fallback == "eager":
             allowed = set(inspect.signature(spec.reference).parameters)
             filtered_kwargs = {
-                key: value
-                for key, value in kwargs.items()
-                if key in allowed
+                key: value for key, value in kwargs.items() if key in allowed
             }
             return spec.reference(*args, **filtered_kwargs)
         raise XQTBackendError(f"TileLang pattern '{pattern}' requires CUDA tensors")
@@ -256,7 +270,9 @@ def run_tilelang_kernel(
 def list_tilelang_kernel_specs() -> dict[str, dict[str, Any]]:
     """Return TileLang kernel registry metadata."""
 
-    return {name: spec.to_dict() for name, spec in sorted(TILELANG_KERNEL_REGISTRY.items())}
+    return {
+        name: spec.to_dict() for name, spec in sorted(TILELANG_KERNEL_REGISTRY.items())
+    }
 
 
 __all__ = [

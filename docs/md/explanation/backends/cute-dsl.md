@@ -9,7 +9,7 @@ CuTe 是 CUTLASS 中的 tensor layout 和 tiling 抽象. CuTe DSL 把这些思�
 XQT 当前的 CuTe DSL adapter 只覆盖少量 GEMM pattern, 主要用于:
 
 - registry 和 metadata 记录.
-- reference fallback.
+- reference-guarded dense GEMM epilogue fallback.
 - 为后续真实 CuTe DSL kernel 编译和 benchmark 留出结构.
 
 ## 适合的使用场景
@@ -18,6 +18,7 @@ XQT 当前的 CuTe DSL adapter 只覆盖少量 GEMM pattern, 主要用于:
 - 研究 tile shape, cluster shape 和 target arch 对 kernel 的影响.
 - 在 CUTLASS / CuTe DSL 生态里探索更细粒度的 kernel 控制.
 - 为后续 custom kernel backend 记录稳定 metadata.
+- 为 FLUX.2 klein NVFP4 这类 packed Linear 模块的一次性 dense-cache bridge 提供可调用推理 wrapper.
 
 ## 不适合的场景
 
@@ -86,6 +87,7 @@ out = run_cute_dsl_kernel("gemm_epilogue", a, b, bias, fallback="eager")
 - CuTe DSL 和 CUTLASS 概念相近, 但文档中要区分 Python DSL prototype 与 C++ template library.
 - target arch 对可用指令和性能影响很大, 尤其是 Hopper / Blackwell 相关 MMA.
 - cluster shape, tile shape 和 epilogue 语义要写入 metadata.
+- 当前 CuTe DSL wrapper 消费 dense weight cache, 不直接消费 packed NVFP4 权重.
 - 如果接入真实编译, 要记录 generated source, build config, compile latency 和 runtime latency.
 
 ## 常见问题
@@ -100,4 +102,3 @@ out = run_cute_dsl_kernel("gemm_epilogue", a, b, bias, fallback="eager")
 - CUTLASS GitHub: <https://github.com/NVIDIA/cutlass>
 - CUTLASS documentation: <https://docs.nvidia.com/cutlass/>
 - CuTe documentation in CUTLASS: <https://docs.nvidia.com/cutlass/media/docs/cpp/cute/00_quickstart.html>
-

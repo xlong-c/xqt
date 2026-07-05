@@ -4,9 +4,12 @@ import importlib.util
 
 import pytest
 import torch
+from torch import nn
 
 from xqt.core.config import load_xqt_config
+from xqt.operator_opt import OperatorOptimizationTargetPlan
 from xqt.operator_opt.executor import (
+    _build_tilelang_candidate_model,
     build_operator_optimization_plan,
     execute_operator_optimization_plan,
 )
@@ -30,6 +33,7 @@ def _tilelang_linear_operator_config(
     *,
     linear_runtime: str = "tilelang",
     min_speedup: float = 1.01,
+    patterns: list[str] | None = None,
 ) -> dict:
     return {
         "config_version": 1,
@@ -54,7 +58,7 @@ def _tilelang_linear_operator_config(
                     "name": "linear_tilelang",
                     "target": "linear",
                     "backend": "tilelang",
-                    "patterns": ["linear"],
+                    "patterns": patterns or ["linear"],
                     "min_speedup": min_speedup,
                     "tilelang": {
                         "target_arch": "sm_89",
@@ -88,6 +92,26 @@ def test_tilelang_linear_operator_stage_uses_reference_fallback_on_cpu() -> None
     assert target["metadata"]["operator_family"] == "linear"
     assert target["metadata"]["selected_fastpath"] == "eager_reference_fallback"
     assert target["metadata"]["settings"]["preferred_patterns"] == ["linear"]
+
+
+def test_tilelang_linear_marlin_operator_pattern_uses_reference_fallback_on_cpu() -> None:
+    config = load_xqt_config(
+        _tilelang_linear_operator_config("cpu", patterns=["linear_marlin"])
+    )
+    context = create_context(
+        config,
+        model=None,
+        example_inputs=torch.randn(64, 64, dtype=torch.float32),
+    )
+    LoadModelPass().run(context)
+    plan = build_operator_optimization_plan(config.operator_optimization)
+    execution = execute_operator_optimization_plan(context, plan)
+
+    target = execution.reports[0].to_dict()
+    assert target["metadata"]["execution_mode"] == "reference_fallback"
+    assert target["metadata"]["kernel_kind"] == "reference_fallback"
+    assert target["metadata"]["operator_family"] == "linear"
+    assert target["metadata"]["settings"]["preferred_patterns"] == ["linear_marlin"]
 
 
 @requires_cuda
@@ -145,3 +169,57 @@ def test_tilelang_linear_operator_stage_uses_native_cuda_fastpath_on_ada() -> No
     assert target["metadata"]["selected_fastpath"] == "native_torch_linear"
     assert target["metadata"]["settings"]["linear_runtime"] == "auto"
     assert target["metadata"]["settings"]["preferred_patterns"] == ["linear"]
+
+
+def test_tilelang_dequant_materialization_prefers_fp16_for_float32_only_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeNVFP4Linear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_features = 8
+            self.out_features = 4
+            self.dense_weight = object()
+            self.register_buffer("weight", torch.ones(4, 4, dtype=torch.uint8))
+            self.register_buffer("weight_scale", torch.ones(4, 2, 1, dtype=torch.float32))
+            self.register_buffer("weight_scale_2", torch.ones(1, dtype=torch.float32))
+            self.register_buffer("bias", torch.zeros(4, dtype=torch.float32))
+
+        def tilelang_dense_linear_args(
+            self,
+            *,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> tuple[torch.Tensor, torch.Tensor | None, None]:
+            weight = torch.ones(
+                self.out_features,
+                self.in_features,
+                dtype=dtype,
+                device=device,
+            )
+            bias = torch.zeros(self.out_features, dtype=dtype, device=device)
+            return weight, bias, None
+
+    target = OperatorOptimizationTargetPlan(
+        name="tilelang_nvfp4",
+        backend="tilelang",
+        target_path="",
+        patterns=["dequant_gemm_epilogue"],
+        fallback="eager",
+        tilelang={
+            "target_arch": "sm_89",
+            "linear_runtime": "auto",
+            "linear_fastpath": "auto",
+        },
+    )
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.executor._module_has_cuda_state",
+        lambda module: True,
+    )
+    candidate = _build_tilelang_candidate_model(_FakeNVFP4Linear(), target)
+
+    assert type(candidate).__name__ == "_TileLangEagerDenseLinearModule"
+    assert candidate.linear.weight.dtype == torch.float16
+    assert candidate.linear.bias is not None
+    assert candidate.linear.bias.dtype == torch.float16

@@ -1,4 +1,4 @@
-"""CuTile operator optimization references and guarded entry points."""
+"""CuTile pointwise operator references and guarded entry points."""
 
 from __future__ import annotations
 
@@ -7,24 +7,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from xqt.core.errors import XQTBackendError
-
-
-def _require_cuda_tensors(*tensors: torch.Tensor) -> None:
-    if not tensors:
-        raise XQTBackendError("at least one tensor is required")
-    if not all(tensor.is_cuda for tensor in tensors):
-        raise XQTBackendError("CuTile kernels require CUDA tensors")
-
-
-def _require_cutile() -> object:
-    try:
-        import cutile
-    except ImportError as exc:
-        raise XQTBackendError(
-            "cutile is required for CuTile operator kernels. Install the nvvc/cutile extras."
-        ) from exc
-    return cutile
+from ._common import require_cuda_tensors, require_cutile
 
 
 def fused_bias_silu_reference(x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
@@ -47,8 +30,8 @@ def fused_bias_silu_cutile(
     """CUDA-only CuTile placeholder entry point for bias + SiLU."""
 
     del block_size, num_warps
-    _require_cuda_tensors(x, bias)
-    _require_cutile()
+    require_cuda_tensors(x, bias)
+    require_cutile()
     return fused_bias_silu_reference(x, bias)
 
 

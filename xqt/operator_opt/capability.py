@@ -97,7 +97,9 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         notes=(
             "Represents TensorRT, OpenVINO, or ONNX Runtime deployment fusion rather than PyTorch custom kernels.",
         ),
-        limitations=("Built-in executor records capability only and does not rewrite the runtime module.",),
+        limitations=(
+            "Built-in executor records capability only and does not rewrite the runtime module.",
+        ),
     ),
     "triton": OperatorOptimizationBackendCapability(
         backend="triton",
@@ -130,9 +132,12 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
-        notes=("Reserved for CUDA-only nvvc CuTile Python DSL kernels.",),
+        notes=(
+            "Reserved for CUDA-only nvvc CuTile Python DSL kernels.",
+            "Built-in executor can materialize reference-guarded linear/dequant GEMM inference wrappers, including packed NVFP4 fallback paths.",
+        ),
         limitations=(
-            "Built-in executor records metadata and reference fallback only.",
+            "CuTile linear/dequant execution is reference-guarded until real CuTile codegen is validated on target hardware.",
             "CuTile package availability and target architecture must be checked per environment.",
         ),
     ),
@@ -154,9 +159,12 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
-        notes=("Reserved for CUDA-only CUTLASS CuTe DSL kernels through cutlass.cute.",),
+        notes=(
+            "Reserved for CUDA-only CUTLASS CuTe DSL kernels through cutlass.cute.",
+            "Built-in executor can materialize reference-guarded dense GEMM epilogue inference wrappers for NVFP4 dense-cache bridges.",
+        ),
         limitations=(
-            "Built-in executor records metadata and reference fallback only.",
+            "CuTe DSL linear execution is reference-guarded and does not yet consume packed NVFP4 weights directly.",
             "CuTe DSL support is version, Python package, CUDA toolkit, and architecture sensitive.",
         ),
     ),
@@ -167,7 +175,9 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         exportable=False,
         requires_cuda=True,
         notes=("Reserved for optional custom CUDA extensions.",),
-        limitations=("Built-in executor does not yet build or load custom CUDA extensions.",),
+        limitations=(
+            "Built-in executor does not yet build or load custom CUDA extensions.",
+        ),
     ),
 }
 
@@ -205,15 +215,16 @@ def describe_operator_backend_capability(
             from .backends.triton import list_triton_kernel_specs
 
             notes.append(
-                "Registered patterns: "
-                + ", ".join(sorted(list_triton_kernel_specs()))
+                "Registered patterns: " + ", ".join(sorted(list_triton_kernel_specs()))
             )
         except Exception:
             pass
     elif backend == "tilelang":
         available = True
         if not _package_available("tilelang"):
-            notes.append("tilelang package is not importable; built-in execution is limited to reference fallback.")
+            notes.append(
+                "tilelang package is not importable; built-in execution is limited to reference fallback."
+            )
         try:
             from .backends.tilelang import list_tilelang_kernel_specs
 
@@ -224,24 +235,22 @@ def describe_operator_backend_capability(
         except Exception:
             pass
     elif backend == "cutile":
-        available = _package_available("cutile")
         try:
-            from .backends.cutile import list_cutile_kernel_specs
+            from .backends.cutile import cutile_available, list_cutile_kernel_specs
 
+            available = cutile_available()
             notes.append(
-                "Registered patterns: "
-                + ", ".join(sorted(list_cutile_kernel_specs()))
+                "Registered patterns: " + ", ".join(sorted(list_cutile_kernel_specs()))
             )
         except Exception:
-            pass
+            available = _package_available("cutile")
     elif backend == "cutlass":
         available = _package_available("cutlass")
         try:
             from .backends.cutlass import list_cutlass_kernel_specs
 
             notes.append(
-                "Registered patterns: "
-                + ", ".join(sorted(list_cutlass_kernel_specs()))
+                "Registered patterns: " + ", ".join(sorted(list_cutlass_kernel_specs()))
             )
         except Exception:
             pass
@@ -264,8 +273,7 @@ def describe_operator_backend_capability(
             available = extension.available
             notes.extend(extension.notes)
             notes.append(
-                "Registered custom ops: "
-                + ", ".join(extension.registered_ops)
+                "Registered custom ops: " + ", ".join(extension.registered_ops)
             )
             if not extension.compiled:
                 notes.append("Optional nvcc extension module is not compiled.")

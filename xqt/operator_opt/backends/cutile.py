@@ -7,7 +7,8 @@ capability and artifact metadata without compiling at import time.
 
 from __future__ import annotations
 
-import importlib
+import inspect
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -18,9 +19,38 @@ from xqt.core.errors import XQTBackendError
 
 from ..kernels.cutile import (
     CUTILE_KERNEL_METADATA,
+    conv2d_cutile,
+    conv2d_reference,
+    dense_linear_epilogue_cutile,
+    dense_linear_epilogue_reference,
+    dequant_gemm_epilogue_cutile,
+    dequant_gemm_epilogue_reference,
+    fp4_packed_dequant_gemm_epilogue_cutile,
+    fp4_packed_dequant_gemm_epilogue_reference,
+    fused_attention_forward_cutile,
+    fused_attention_forward_reference,
     fused_bias_silu_cutile,
     fused_bias_silu_reference,
+    half_linear_cutile,
+    half_linear_reference,
+    layer_norm_cutile,
+    layer_norm_reference,
+    nvfp4_packed_dequant_gemm_epilogue_cutile,
+    nvfp4_packed_dequant_gemm_epilogue_reference,
 )
+from ..kernels.cutile._common import cutile_module_metadata
+
+
+def cutile_available() -> bool:
+    """Return whether the current cuTile Python runtime is importable."""
+
+    for module_name in ("cuda.tile", "cutile"):
+        try:
+            if importlib.util.find_spec(module_name) is not None:
+                return True
+        except ModuleNotFoundError:
+            continue
+    return False
 
 
 @dataclass(frozen=True)
@@ -65,11 +95,59 @@ class CuTileCompileSettings:
 
 
 CUTILE_KERNEL_REGISTRY: dict[str, CuTileKernelSpec] = {
+    "attention": CuTileKernelSpec(
+        pattern="attention",
+        reference=fused_attention_forward_reference,
+        kernel=fused_attention_forward_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["attention"]),
+    ),
     "bias_silu": CuTileKernelSpec(
         pattern="bias_silu",
         reference=fused_bias_silu_reference,
         kernel=fused_bias_silu_cutile,
         metadata=dict(CUTILE_KERNEL_METADATA["bias_silu"]),
+    ),
+    "conv": CuTileKernelSpec(
+        pattern="conv",
+        reference=conv2d_reference,
+        kernel=conv2d_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["conv"]),
+    ),
+    "dense_linear_epilogue": CuTileKernelSpec(
+        pattern="dense_linear_epilogue",
+        reference=dense_linear_epilogue_reference,
+        kernel=dense_linear_epilogue_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["dense_linear_epilogue"]),
+    ),
+    "dequant_gemm_epilogue": CuTileKernelSpec(
+        pattern="dequant_gemm_epilogue",
+        reference=dequant_gemm_epilogue_reference,
+        kernel=dequant_gemm_epilogue_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["dequant_gemm_epilogue"]),
+    ),
+    "fp4_packed_dequant_gemm_epilogue": CuTileKernelSpec(
+        pattern="fp4_packed_dequant_gemm_epilogue",
+        reference=fp4_packed_dequant_gemm_epilogue_reference,
+        kernel=fp4_packed_dequant_gemm_epilogue_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["fp4_packed_dequant_gemm_epilogue"]),
+    ),
+    "linear": CuTileKernelSpec(
+        pattern="linear",
+        reference=half_linear_reference,
+        kernel=half_linear_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["linear"]),
+    ),
+    "norm": CuTileKernelSpec(
+        pattern="norm",
+        reference=layer_norm_reference,
+        kernel=layer_norm_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["norm"]),
+    ),
+    "nvfp4_packed_dequant_gemm_epilogue": CuTileKernelSpec(
+        pattern="nvfp4_packed_dequant_gemm_epilogue",
+        reference=nvfp4_packed_dequant_gemm_epilogue_reference,
+        kernel=nvfp4_packed_dequant_gemm_epilogue_cutile,
+        metadata=dict(CUTILE_KERNEL_METADATA["nvfp4_packed_dequant_gemm_epilogue"]),
     ),
 }
 
@@ -77,11 +155,8 @@ CUTILE_KERNEL_REGISTRY: dict[str, CuTileKernelSpec] = {
 def cutile_version() -> str | None:
     """Return the installed CuTile version when importable."""
 
-    try:
-        module = importlib.import_module("cutile")
-    except ImportError:
-        return None
-    return str(getattr(module, "__version__", "unknown"))
+    metadata = cutile_module_metadata()
+    return str(metadata.get("version", "unknown")) if metadata else None
 
 
 def get_cutile_kernel_spec(pattern: str) -> CuTileKernelSpec:
@@ -91,7 +166,9 @@ def get_cutile_kernel_spec(pattern: str) -> CuTileKernelSpec:
         return CUTILE_KERNEL_REGISTRY[pattern]
     except KeyError as exc:
         allowed = ", ".join(sorted(CUTILE_KERNEL_REGISTRY))
-        raise XQTBackendError(f"Unsupported CuTile pattern: {pattern}. Known: {allowed}") from exc
+        raise XQTBackendError(
+            f"Unsupported CuTile pattern: {pattern}. Known: {allowed}"
+        ) from exc
 
 
 def build_cutile_artifact_metadata(
@@ -104,14 +181,13 @@ def build_cutile_artifact_metadata(
     resolved = settings or CuTileCompileSettings()
     cache_dir = Path(resolved.cache_dir) if resolved.cache_dir is not None else None
     artifact_path = (
-        str(cache_dir / f"{pattern}.cutile.json")
-        if cache_dir is not None
-        else None
+        str(cache_dir / f"{pattern}.cutile.json") if cache_dir is not None else None
     )
     return {
         "backend": "cutile",
         "pattern": pattern,
         "version": cutile_version(),
+        "module": cutile_module_metadata().get("module"),
         "kernel": dict(spec.metadata),
         "compile": resolved.to_dict(),
         "compile_status": "metadata_only",
@@ -132,11 +208,16 @@ def run_cutile_kernel(
     """Run a CuTile kernel when CUDA is available, otherwise use configured fallback."""
 
     spec = get_cutile_kernel_spec(pattern)
-    if not all(isinstance(arg, torch.Tensor) for arg in args):
-        raise TypeError("CuTile kernel arguments must be tensors")
-    if spec.cuda_only and not all(arg.is_cuda for arg in args):
+    if not all(isinstance(arg, torch.Tensor) for arg in args if arg is not None):
+        raise TypeError("CuTile kernel arguments must be tensors or None")
+    tensor_args = tuple(arg for arg in args if isinstance(arg, torch.Tensor))
+    if spec.cuda_only and not all(arg.is_cuda for arg in tensor_args):
         if fallback == "eager":
-            return spec.reference(*args, **kwargs)
+            allowed = set(inspect.signature(spec.reference).parameters)
+            filtered_kwargs = {
+                key: value for key, value in kwargs.items() if key in allowed
+            }
+            return spec.reference(*args, **filtered_kwargs)
         raise XQTBackendError(f"CuTile pattern '{pattern}' requires CUDA tensors")
     return spec.kernel(*args, **kwargs)
 
@@ -144,7 +225,9 @@ def run_cutile_kernel(
 def list_cutile_kernel_specs() -> dict[str, dict[str, Any]]:
     """Return CuTile kernel registry metadata."""
 
-    return {name: spec.to_dict() for name, spec in sorted(CUTILE_KERNEL_REGISTRY.items())}
+    return {
+        name: spec.to_dict() for name, spec in sorted(CUTILE_KERNEL_REGISTRY.items())
+    }
 
 
 __all__ = [
@@ -152,6 +235,7 @@ __all__ = [
     "CuTileCompileSettings",
     "CuTileKernelSpec",
     "build_cutile_artifact_metadata",
+    "cutile_available",
     "cutile_version",
     "get_cutile_kernel_spec",
     "list_cutile_kernel_specs",

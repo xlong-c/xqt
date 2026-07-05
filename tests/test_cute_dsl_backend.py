@@ -90,7 +90,10 @@ def test_cute_dsl_capability_reports_missing_runtime() -> None:
 
 
 def test_preflight_records_cute_dsl_config_and_missing_dependency() -> None:
-    with patch("xqt.pipeline.preflight._package_available", return_value=False):
+    with (
+        patch("xqt.operator_opt.capability._package_available", return_value=False),
+        patch("xqt.pipeline.preflight._package_available", return_value=False),
+    ):
         report = preflight_xqt_config(_cute_dsl_operator_config())
 
     checks = {check.name: check for check in report.checks}
@@ -107,7 +110,7 @@ def test_preflight_records_cute_dsl_config_and_missing_dependency() -> None:
     assert config_check.metadata["cluster_shape"] == [1, 1, 1]
 
 
-def test_cute_dsl_operator_executor_returns_metadata_only_report() -> None:
+def test_cute_dsl_operator_executor_returns_reference_guarded_report() -> None:
     config = load_xqt_config(_cute_dsl_operator_config())
     context = create_context(
         config,
@@ -125,12 +128,11 @@ def test_cute_dsl_operator_executor_returns_metadata_only_report() -> None:
     report = execution.reports[0]
     assert report.backend == "cute_dsl"
     assert report.applied is False
-    assert report.metadata["execution_state"] == "skipped"
+    assert report.metadata["execution_state"] == "fallback"
+    assert report.metadata["execution_mode"] == "reference_fallback"
+    assert report.metadata["kernel_kind"] == "reference_fallback"
     assert "cute_dsl_artifacts" in report.metadata
     assert "gemm_epilogue" in report.metadata["cute_dsl_artifacts"]
     assert report.metadata["cute_dsl_artifacts"]["gemm_epilogue"]["compile"]["target_arch"] == "sm_90"
     assert report.metadata["cute_dsl_artifacts"]["gemm_epilogue"]["compile"]["cluster_shape"] == [1, 1, 1]
-    assert report.skip_reason in {
-        "cute_dsl requires CUDA-capable hardware",
-        "cute_dsl backend is configured but not implemented in the built-in executor",
-    }
+    assert report.skip_reason is not None

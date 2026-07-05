@@ -35,7 +35,11 @@ from .linear import (
     linear_fp8_triton,
     linear_int4_dequant_triton,
     linear_int8_triton,
+    linear_marlin_reference,
+    linear_marlin_tilelang,
     linear_reference,
+    quantize_int4_weight,
+    quantize_int8_weight,
 )
 
 __all__ = [
@@ -66,9 +70,13 @@ __all__ = [
     "linear_fp8_triton",
     "linear_int4_dequant_triton",
     "linear_int8_triton",
+    "linear_marlin_reference",
+    "linear_marlin_tilelang",
     "linear_reference",
     "nvfp4_packed_dequant_gemm_epilogue_reference",
     "nvfp4_packed_dequant_gemm_epilogue_tilelang",
     "pack_mxfp",
+    "quantize_int4_weight",
+    "quantize_int8_weight",
     "unpack_mxfp",
 ]

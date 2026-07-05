@@ -60,6 +60,19 @@ class _FakeCompressedNVFP4LinearWithFlatScale(torch.nn.Module):
         self.register_buffer("weight_global_scale", torch.tensor([0.5], dtype=torch.float32))
 
 
+class _FakeModelOptNVFP4LinearWithScale2(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_features = 4
+        self.out_features = 1
+        self.register_buffer("weight", torch.tensor([[0x10, 0x32]], dtype=torch.uint8))
+        self.register_buffer(
+            "weight_scale",
+            torch.tensor([[1.0, 1.0]], dtype=torch.float32).to(torch.float8_e4m3fn),
+        )
+        self.register_buffer("weight_scale_2", torch.tensor([2.0], dtype=torch.float32))
+
+
 def test_unpack_nvfp4e2m1_matches_enumerated_codebook() -> None:
     packed = torch.tensor([[0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE]], dtype=torch.uint8)
 
@@ -119,6 +132,21 @@ def test_infer_nvfp4_tensor_layout_from_compressed_tensors_flat_scale() -> None:
     assert layout.output_features == 2
 
 
+def test_infer_nvfp4_tensor_layout_from_modelopt_scale2() -> None:
+    module = _FakeModelOptNVFP4LinearWithScale2()
+
+    layout = infer_nvfp4_tensor_layout(module)
+
+    assert layout is not None
+    assert layout.packed_weight_name == "weight"
+    assert layout.weight_scale_name == "weight_scale"
+    assert layout.weight_global_scale_name == "weight_scale_2"
+    assert layout.invert_weight_global_scale is True
+    assert layout.group_size == 2
+    assert layout.input_features == 4
+    assert layout.output_features == 1
+
+
 def test_bridge_module_to_nvfp4_linear_exposes_tilelang_args() -> None:
     module = _FakeCompressedNVFP4Linear()
 
@@ -166,6 +194,22 @@ def test_nvfp4_linear_bridge_forward_dequantizes_weight() -> None:
     dequantized = bridge.dequantize_weight()
     expected = torch.nn.functional.linear(x, dequantized, bridge.bias)
     assert torch.allclose(output, expected)
+
+
+def test_nvfp4_linear_bridge_inverts_modelopt_weight_scale2() -> None:
+    module = _FakeModelOptNVFP4LinearWithScale2()
+    bridge = bridge_module_to_nvfp4_linear(module)
+    assert bridge is not None
+
+    assert bridge.weight_global_scale is not None
+    torch.testing.assert_close(
+        bridge.weight_global_scale,
+        torch.tensor([0.5], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        bridge.dequantize_weight(),
+        torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=torch.float32),
+    )
 
 
 def test_nvfp4_linear_bridge_dense_linear_args_cache_weight_and_bias() -> None:

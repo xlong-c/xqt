@@ -42,11 +42,11 @@ XQT 的 operator backend adapter 在 `xqt/operator_opt/backends/` 中声明, 当
 
 | backend | 主要 pattern | 当前定位 |
 | --- | --- | --- |
-| `tilelang` | `attention`, `conv`, `linear`, `norm`, `dequant_gemm_epilogue`, FP4 / NVFP4 packed GEMM | 受限 CUDA kernel + eager fallback / metadata |
+| `tilelang` | `attention`, `conv`, `linear`, `linear_marlin`, `norm`, `dequant_gemm_epilogue`, FP4 / NVFP4 packed GEMM | 受限 CUDA kernel + eager fallback / metadata |
 | `triton` | fused activation / norm / rope, fp16 / bf16 / int8 / fp8 / int4 GEMM | Python Triton kernel adapter |
 | `cutlass` | `gemm_epilogue`, `grouped_gemm` | CUTLASS Python GEMM metadata / fallback adapter |
-| `cute_dsl` | `gemm_epilogue`, `grouped_gemm` | CuTe DSL GEMM metadata / fallback adapter |
-| `cutile` | `bias_silu` | CuTile DSL metadata / fallback adapter |
+| `cute_dsl` | `gemm_epilogue`, `grouped_gemm` | CuTe DSL GEMM metadata / reference-guarded dense wrapper |
+| `cutile` | `attention`, `conv`, `linear`, `norm`, `dequant_gemm_epilogue`, FP4 / NVFP4 packed GEMM, `bias_silu` | CuTile DSL metadata / reference-guarded wrapper |
 
 ## 阅读建议
 
@@ -74,4 +74,3 @@ XQT 的 operator backend adapter 在 `xqt/operator_opt/backends/` 中声明, 当
 - custom op, plugin, delegate, fallback 信息.
 - benchmark 的 warmup, repeat, batch size, thread, provider, device.
 - correctness 对比 baseline, tolerance 和误差摘要.
-
