@@ -1,5 +1,8 @@
 """Experimental model compression and deployment toolkit."""
 
+import importlib
+from typing import Any
+
 from .workflows import (
     OptimizedModelResult,
     OptimizationConfig,
@@ -41,3 +44,22 @@ __all__ = [
     "xdl_checkpoint_to_xqt_context",
     "xdl_setup_to_xqt_context",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "convert":
+        from .conversion import convert
+
+        return convert
+    if name in {
+        "ConvertResult",
+        "FeedForwardPrecisionPolicy",
+        "MatmulPrecisionSpec",
+        "PrecisionPolicy",
+    }:
+        from . import conversion
+
+        return getattr(conversion, name)
+    if name == "nn":
+        return importlib.import_module(".nn", __name__)
+    raise AttributeError(f"module 'xqt' has no attribute {name!r}")
