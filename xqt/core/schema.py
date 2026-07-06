@@ -23,9 +23,9 @@ PRUNE_GRANULARITIES = (
     "block_sparse",
 )
 PRUNE_SCOPES = ("global", "per_layer", "per_stage", "custom")
-OPERATOR_OPT_BACKENDS = (
+OPERATOR_OPT_ENGINES = (
     "torch_compile",
-    "deployment_backend",
+    "deployment_engine",
     "triton",
     "tilelang",
     "cutile",
@@ -203,7 +203,7 @@ class OperatorOptimizationTargetConfig:
 
     name: str = ""
     target: Optional[str] = None
-    backend: Optional[str] = None
+    engine: Optional[str] = None
     mode: Optional[str] = None
     fullgraph: bool = False
     dynamic: Optional[bool] = None
@@ -226,7 +226,7 @@ class OperatorOptimizationConfig:
 
     enabled: bool = False
     stage: str = "after_compression"
-    default_backend: str = "torch_compile"
+    default_engine: str = "torch_compile"
     targets: List[OperatorOptimizationTargetConfig] = field(default_factory=list)
 
 
@@ -356,7 +356,7 @@ __all__ = [
     "CUTILE_PASS_CONFIG_KEYS",
     "CUTLASS_PASS_CONFIG_KEYS",
     "CUTE_DSL_PASS_CONFIG_KEYS",
-    "OPERATOR_OPT_BACKENDS",
+    "OPERATOR_OPT_ENGINES",
     "PRUNE_GRANULARITIES",
     "PRUNE_SCOPES",
     "TASK_TYPES",

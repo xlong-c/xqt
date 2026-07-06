@@ -106,7 +106,7 @@ class OptimizationCapability:
 
     kind: str
     name: str
-    backend: str
+    engine: str
     status: str
     runtime: str
     artifact_kind: str
@@ -129,7 +129,7 @@ class OptimizationCapability:
         return {
             "kind": self.kind,
             "name": self.name,
-            "backend": self.backend,
+            "engine": self.engine,
             "status": self.status,
             "runtime": self.runtime,
             "artifact_kind": self.artifact_kind,
@@ -154,9 +154,9 @@ class OptimizationCapability:
         *,
         kind: str,
         name: str,
-        backend: str | None = None,
+        engine: str | None = None,
     ) -> "OptimizationCapability":
-        """Create a unified capability from a legacy capability dictionary."""
+        """Create a unified capability from a capability dictionary."""
 
         raw_status = str(payload.get("status", "not_verified"))
         runtime = str(payload.get("runtime", "unknown"))
@@ -164,7 +164,7 @@ class OptimizationCapability:
         return cls(
             kind=kind,
             name=name,
-            backend=str(backend or payload.get("backend") or name),
+            engine=str(engine or payload.get("engine") or name),
             status=normalize_capability_status(raw_status),
             runtime=runtime,
             artifact_kind=artifact_kind,
@@ -192,7 +192,7 @@ class OptimizationCapability:
                 for key, value in payload.items()
                 if key
                 not in {
-                    "backend",
+                    "engine",
                     "status",
                     "runtime",
                     "artifact_kind",
@@ -315,7 +315,7 @@ class StageReport:
     status: str
     accepted: bool
     message: str
-    backend: str | None = None
+    engine: str | None = None
     target_module: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
@@ -334,7 +334,7 @@ class StageReport:
             "status": self.status,
             "accepted": self.accepted,
             "message": self.message,
-            "backend": self.backend,
+            "engine": self.engine,
             "target_module": self.target_module,
             "metrics": _json_safe(self.metrics),
             "artifacts": _json_safe(self.artifacts),
@@ -428,7 +428,7 @@ def build_stage_report(
     message: str,
     metrics: Mapping[str, Any],
     artifacts: Mapping[str, Any],
-    backend: str | None = None,
+    engine: str | None = None,
     target_module: str | None = None,
     capability: Mapping[str, Any] | None = None,
     lineage: Mapping[str, Any] | None = None,
@@ -443,9 +443,9 @@ def build_stage_report(
         status=status,
         accepted=accepted,
         message=message,
-        backend=backend
-        or _find_first_text(metrics, "backend")
-        or _find_first_text(metrics, "backends"),
+        engine=engine
+        or _find_first_text(metrics, "engine")
+        or _find_first_text(metrics, "engines"),
         target_module=target_module
         or _find_first_text(metrics, "target_module")
         or _find_first_text(metrics, "module_path")

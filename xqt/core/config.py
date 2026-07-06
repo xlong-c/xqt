@@ -20,7 +20,7 @@ from .schema import (
     COMPRESSION_AXES,
     CUTILE_PASS_CONFIG_KEYS,
     CUTLASS_PASS_CONFIG_KEYS,
-    OPERATOR_OPT_BACKENDS,
+    OPERATOR_OPT_ENGINES,
     PRUNE_GRANULARITIES,
     PRUNE_SCOPES,
     QuantComponentPolicyConfig,
@@ -257,10 +257,10 @@ def _validate_quant_config(quant_config: QuantConfig) -> None:
 
 def _validate_operator_optimization_config(config: XQTConfig) -> None:
     operator_config = config.operator_optimization
-    if operator_config.default_backend not in OPERATOR_OPT_BACKENDS:
-        allowed = ", ".join(OPERATOR_OPT_BACKENDS)
+    if operator_config.default_engine not in OPERATOR_OPT_ENGINES:
+        allowed = ", ".join(OPERATOR_OPT_ENGINES)
         raise XQTConfigError(
-            "operator_optimization.default_backend must be one of: "
+            "operator_optimization.default_engine must be one of: "
             f"{allowed}"
         )
     if operator_config.stage not in {"after_compression"}:
@@ -278,19 +278,19 @@ def _validate_operator_optimization_config(config: XQTConfig) -> None:
                 f"operator_optimization.targets[*].name must be unique: {target.name}"
             )
         seen_names.add(target.name)
-        if target.backend is None:
-            raise XQTConfigError(f"{location}.backend is required")
-        if target.backend not in OPERATOR_OPT_BACKENDS:
-            allowed = ", ".join(OPERATOR_OPT_BACKENDS)
-            raise XQTConfigError(f"{location}.backend must be one of: {allowed}")
+        if target.engine is None:
+            raise XQTConfigError(f"{location}.engine is required")
+        if target.engine not in OPERATOR_OPT_ENGINES:
+            allowed = ", ".join(OPERATOR_OPT_ENGINES)
+            raise XQTConfigError(f"{location}.engine must be one of: {allowed}")
         if (
             target.target is None
             and target.name != "model"
-            and target.backend != "deployment_backend"
+            and target.engine != "deployment_engine"
         ):
             raise XQTConfigError(
                 f"{location}.target is required unless {location}.name=model "
-                "or backend=deployment_backend"
+                "or engine=deployment_engine"
             )
         if target.fallback not in {"eager"}:
             raise XQTConfigError(f"{location}.fallback must be eager")
@@ -304,7 +304,7 @@ def _validate_operator_optimization_config(config: XQTConfig) -> None:
             raise XQTConfigError(f"{location}.patterns must be a list of strings")
         if any(not isinstance(pattern, str) or not pattern for pattern in target.patterns):
             raise XQTConfigError(f"{location}.patterns must contain only non-empty strings")
-        if target.backend == "torch_compile":
+        if target.engine == "torch_compile":
             if target.mode is not None and target.mode not in {
                 "default",
                 "reduce-overhead",
@@ -314,7 +314,7 @@ def _validate_operator_optimization_config(config: XQTConfig) -> None:
                 raise XQTConfigError(
                     f"{location}.mode is not a supported torch.compile mode"
                 )
-        if target.backend == "tilelang":
+        if target.engine == "tilelang":
             if target.tilelang.target != "cuda":
                 raise XQTConfigError(f"{location}.tilelang.target must be cuda")
             unknown_keys = sorted(
@@ -326,7 +326,7 @@ def _validate_operator_optimization_config(config: XQTConfig) -> None:
                     f"{location}.tilelang.pass_configs contains unknown keys {unknown_keys}. "
                     f"Allowed: {allowed}"
                 )
-        if target.backend == "cutile":
+        if target.engine == "cutile":
             if target.cutile.target != "cuda":
                 raise XQTConfigError(f"{location}.cutile.target must be cuda")
             unknown_keys = sorted(
@@ -338,7 +338,7 @@ def _validate_operator_optimization_config(config: XQTConfig) -> None:
                     f"{location}.cutile.pass_configs contains unknown keys {unknown_keys}. "
                     f"Allowed: {allowed}"
                 )
-        if target.backend == "cutlass":
+        if target.engine == "cutlass":
             if len(target.cutlass.tile_shape) != 3:
                 raise XQTConfigError(f"{location}.cutlass.tile_shape must contain three integers")
             if any(not isinstance(value, int) or value <= 0 for value in target.cutlass.tile_shape):

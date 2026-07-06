@@ -19,7 +19,7 @@ from xqt.operator_opt.backends.tilelang_validation import (
     TileLangFP4ValidationResult,
     validate_tilelang_packed_fp4_fused_gemm,
 )
-from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.prune.capability import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
 
@@ -313,15 +313,15 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
         ).to_optimization_capability(),
     ]
     operator = [
-        describe_operator_backend_capability("torch_compile").to_optimization_capability(),
-        describe_operator_backend_capability("tilelang").to_optimization_capability(),
-        describe_operator_backend_capability("cute_dsl").to_optimization_capability(),
+        describe_operator_engine_capability("torch_compile").to_optimization_capability(),
+        describe_operator_engine_capability("tilelang").to_optimization_capability(),
+        describe_operator_engine_capability("cute_dsl").to_optimization_capability(),
     ]
     pruning = [
         OptimizationCapability(
             kind="pruning",
             name="structured",
-            backend="pytorch_rewrite",
+            engine="pytorch_rewrite",
             status="available",
             runtime="pytorch",
             artifact_kind="pytorch_model",
@@ -365,7 +365,7 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
         OptimizationCapability(
             kind="runtime_feature",
             name="llm_runtime_metadata",
-            backend="adapter_only",
+            engine="adapter_only",
             status="planned",
             runtime="external_serving",
             artifact_kind="metadata",
@@ -405,7 +405,7 @@ def _fp4_tilelang_readiness(
         strategy="fp4_weight_only",
         policy={"dtype": "fp4", "scheme": "weight_only"},
     )
-    operator_capability = describe_operator_backend_capability("tilelang")
+    operator_capability = describe_operator_engine_capability("tilelang")
     checks: dict[str, Any] = {
         "quantization": quant_capability.to_dict(),
         "operator_backend": operator_capability.to_dict(),

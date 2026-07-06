@@ -15,10 +15,19 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 | `XQTOptimizationSession` | 交互式 stage 编排入口. |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪. |
 | `MetricRecord` | 结构化指标记录. |
-| `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 backend,status,runtime,artifact_kind 和硬件/校准/导出要求. |
+| `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 engine,status,runtime,artifact_kind 和硬件/校准/导出要求. |
 | `XQTReadinessReport` / `assess_xqt_readiness()` | readiness 汇总入口,输出场景状态,capability matrix 和 reporting schema. |
 | `example_inputs` | 导出 / benchmark / layer analysis / operator_opt 所需输入. |
 | `calibration_inputs` | PTQ / QDQ calibration 所需输入. |
+
+## Engine 术语
+
+XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.*` facade 和后续 runtime manager.
+
+- `engine`: XQT 内部实现选择和公开 report 字段, 例如 `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda`, `torch_compile`. `xqt.convert(...)`, 单算子 dispatcher, `OptimizationCapability`, `StageReport`, `operator_optimization.default_engine` 和 `targets[*].engine` 统一使用这个字段.
+- 不保留 `backend` alias. 旧 recipe 或调用点要直接迁移到 `engine`.
+
+不要把 `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 写成和 TensorRT / ONNX Runtime 并列的外部 inference backend. 对推理优化来说, 对外主体是 `xqt`; engine 描述 XQT 如何 lower 某个语义块或算子 contract.
 
 ## 配置方式
 
@@ -48,7 +57,7 @@ YAML workflow 只保留一种配置形态:
 - 量化 recipe 必须显式写 `backend` 和 `policy`.
 - `calibration_inputs` 由调用方传入,recipe 不声明数据来源.
 - planned / capability-only 后端必须在 preflight 和文档中标注.
-- workflow stage 必须写入 `stage_reports` 和 manifest stage metric,保留 stage name,backend,target module,artifact 和 lineage.
+- workflow stage 必须写入 `stage_reports` 和 manifest stage metric,保留 stage name,engine,target module,artifact 和 lineage.
 
 ## Profiling 约定
 
@@ -56,7 +65,7 @@ XQT 允许理解和记录性能分析工具,但 profiling 只作为模型侧 ben
 
 - `benchmark` 负责稳定 latency / memory / throughput 基线,profiler 负责解释瓶颈,二者在 report 中不能混为一个指标.
 - 外部 profiler 输出应作为 artifact 挂到 manifest,例如 NVIDIA `.ncu-rep` / `.nsys-rep`,ROCm trace,VTune result,Ascend `msprof` 输出目录或 TensorBoard profile 目录.
-- report 至少记录 backend,device,target artifact,input shape,warmup,repeat,precision,batch size,profiler 名称,profiler 命令关键参数和环境版本.
+- report 至少记录 engine,device,target artifact,input shape,warmup,repeat,precision,batch size,profiler 名称,profiler 命令关键参数和环境版本.
 - XQT 可以提供 profiler preflight 和命令模板,但不要封装厂商 profiler 的完整 CLI,不要隐藏驱动,权限,硬件 counter 和 GUI 依赖.
 - profiling 不能引入 dataset / dataloader,evaluation provider,task-level validation 或训练循环.
 
