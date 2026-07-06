@@ -11,7 +11,7 @@
 ## 不负责什么
 
 - 不重复完整架构边界.
-- 不替代具体 backend 的官方安装文档.
+- 不替代具体 runtime / engine 的官方安装文档.
 - 不承载训练相关流程.
 
 ## 先看什么
@@ -27,12 +27,17 @@
 当前公开入口:
 
 - `from xqt import XQTOptimizationSession`
+- `xqt.convert(model_or_module, engine=..., policy=...)`
+- `xqt.nn.Linear` / `xqt.nn.Conv2d` / `xqt.nn.LayerNorm` / `xqt.nn.FeedForward`
 
 适用场景:
 
 - 需要逐 stage 试验
 - 需要在 Python 中动态拼装流程
 - 需要更细粒度控制 artifact 和 report
+- 需要以 Python 模块替换表达 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock` 这类推理语义块
+
+其中 `engine` 指 XQT 内部实现选择和 report 字段, 例如 `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda`, `torch_compile`. 它不是把 TensorRT / ONNX Runtime 这类外部 runtime 和 XQT 并列. 对推理优化来说, 用户入口仍然是 `xqt`.
 
 ## 主路径 2: YAML workflow
 
@@ -48,6 +53,8 @@
 - 需要保存可复现实验配置
 - 需要把优化流程交给下一个人或 agent
 - 需要稳定复跑和归档
+
+YAML workflow 和 `xqt-run-workflow` 是 Python 主入口的声明式封装和薄 CLI. 不要在 CLI 参数里重新发明一套并行配置语义.
 
 YAML workflow 只保留一种配置项集合:
 
