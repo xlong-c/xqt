@@ -1,4 +1,4 @@
-"""Backend capability matrix for XQT operator optimization."""
+"""Engine capability matrix for XQT operator optimization."""
 
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ def _package_available(package_name: str) -> bool:
 
 
 @dataclass(frozen=True)
-class OperatorOptimizationBackendCapability:
-    """Static and environment-derived capability description for one backend."""
+class OperatorOptimizationEngineCapability:
+    """Static and environment-derived capability description for one engine."""
 
-    backend: str
+    engine: str
     status: str
     runtime: str
     exportable: bool
@@ -35,12 +35,12 @@ class OperatorOptimizationBackendCapability:
     limitations: tuple[str, ...] = ()
 
     def to_optimization_capability(self) -> OptimizationCapability:
-        """Project operator backend capability onto the shared optimization schema."""
+        """Project operator engine capability onto the shared optimization schema."""
 
         return OptimizationCapability(
             kind="operator",
-            name=self.backend,
-            backend=self.backend,
+            name=self.engine,
+            engine=self.engine,
             status=self.status,
             runtime=self.runtime,
             artifact_kind=self.artifact_kind,
@@ -58,7 +58,7 @@ class OperatorOptimizationBackendCapability:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "backend": self.backend,
+            "engine": self.engine,
             "status": self.status,
             "runtime": self.runtime,
             "exportable": self.exportable,
@@ -73,9 +73,9 @@ class OperatorOptimizationBackendCapability:
         }
 
 
-_BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
-    "torch_compile": OperatorOptimizationBackendCapability(
-        backend="torch_compile",
+_BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
+    "torch_compile": OperatorOptimizationEngineCapability(
+        engine="torch_compile",
         status="available",
         runtime="pytorch",
         exportable=False,
@@ -87,10 +87,10 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
             "Dynamic Python control flow or graph breaks can reduce optimization effectiveness.",
         ),
     ),
-    "deployment_backend": OperatorOptimizationBackendCapability(
-        backend="deployment_backend",
+    "deployment_engine": OperatorOptimizationEngineCapability(
+        engine="deployment_engine",
         status="planned",
-        runtime="deployment_backend",
+        runtime="deployment_engine",
         exportable=True,
         artifact_kind="deployment_artifact",
         requires_exportable_graph=True,
@@ -101,8 +101,8 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
             "Built-in executor records capability only and does not rewrite the runtime module.",
         ),
     ),
-    "triton": OperatorOptimizationBackendCapability(
-        backend="triton",
+    "triton": OperatorOptimizationEngineCapability(
+        engine="triton",
         status="planned",
         runtime="pytorch",
         exportable=False,
@@ -110,15 +110,15 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
         notes=("Reserved for CUDA-only Triton fused kernels.",),
         limitations=("Built-in executor does not yet ship Triton kernels.",),
     ),
-    "tilelang": OperatorOptimizationBackendCapability(
-        backend="tilelang",
+    "tilelang": OperatorOptimizationEngineCapability(
+        engine="tilelang",
         status="available",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
         notes=(
             "Built-in executor ships operator-family routing for attention, conv, direct half linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
-            "Ada-class GPUs can use native runtime fastpaths under the TileLang backend for attention, conv, direct half linear, direct half norm, and one-time-dequantized dense Linear paths.",
+            "Ada-class GPUs can use native runtime fastpaths under the TileLang engine for attention, conv, direct half linear, direct half norm, and one-time-dequantized dense Linear paths.",
             "Packed FP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future Blackwell-class FP4 extensions.",
         ),
         limitations=(
@@ -126,8 +126,8 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
             "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q, direct half linear and half norm paths, dense/dequant GEMM shapes aligned to the minimal block constraints when TileLang kernels are used, and packed FP4 runtime correctness/performance still requiring real CUDA hardware validation.",
         ),
     ),
-    "cutile": OperatorOptimizationBackendCapability(
-        backend="cutile",
+    "cutile": OperatorOptimizationEngineCapability(
+        engine="cutile",
         status="planned",
         runtime="pytorch",
         exportable=False,
@@ -141,8 +141,8 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
             "CuTile package availability and target architecture must be checked per environment.",
         ),
     ),
-    "cutlass": OperatorOptimizationBackendCapability(
-        backend="cutlass",
+    "cutlass": OperatorOptimizationEngineCapability(
+        engine="cutlass",
         status="planned",
         runtime="pytorch",
         exportable=False,
@@ -153,8 +153,8 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
             "CUTLASS Python DSL support is version and architecture sensitive.",
         ),
     ),
-    "cute_dsl": OperatorOptimizationBackendCapability(
-        backend="cute_dsl",
+    "cute_dsl": OperatorOptimizationEngineCapability(
+        engine="cute_dsl",
         status="planned",
         runtime="pytorch",
         exportable=False,
@@ -168,8 +168,8 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
             "CuTe DSL support is version, Python package, CUDA toolkit, and architecture sensitive.",
         ),
     ),
-    "custom_cuda": OperatorOptimizationBackendCapability(
-        backend="custom_cuda",
+    "custom_cuda": OperatorOptimizationEngineCapability(
+        engine="custom_cuda",
         status="planned",
         runtime="pytorch",
         exportable=False,
@@ -182,25 +182,25 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationBackendCapability] = {
 }
 
 
-def describe_operator_backend_capability(
-    backend: str,
+def describe_operator_engine_capability(
+    engine: str,
     *,
     torch_compile_available: Optional[bool] = None,
-) -> OperatorOptimizationBackendCapability:
-    """Return a capability description for an operator optimization backend."""
+) -> OperatorOptimizationEngineCapability:
+    """Return a capability description for an operator optimization engine."""
 
     try:
-        base = _BASE_CAPABILITIES[backend]
+        base = _BASE_CAPABILITIES[engine]
     except KeyError as exc:
         allowed = ", ".join(sorted(_BASE_CAPABILITIES))
         raise ValueError(
-            f"Unsupported operator optimization backend: {backend}. Known: {allowed}"
+            f"Unsupported operator optimization engine: {engine}. Known: {allowed}"
         ) from exc
 
     available = False
     status = base.status
     notes = list(base.notes)
-    if backend == "torch_compile":
+    if engine == "torch_compile":
         available = (
             bool(torch_compile_available)
             if torch_compile_available is not None
@@ -209,7 +209,7 @@ def describe_operator_backend_capability(
         if not available:
             status = "unavailable"
             notes.append("torch.compile is not available in the current PyTorch build.")
-    elif backend == "triton":
+    elif engine == "triton":
         available = _package_available("triton")
         try:
             from .backends.triton import list_triton_kernel_specs
@@ -219,7 +219,7 @@ def describe_operator_backend_capability(
             )
         except Exception:
             pass
-    elif backend == "tilelang":
+    elif engine == "tilelang":
         available = True
         if not _package_available("tilelang"):
             notes.append(
@@ -234,7 +234,7 @@ def describe_operator_backend_capability(
             )
         except Exception:
             pass
-    elif backend == "cutile":
+    elif engine == "cutile":
         try:
             from .backends.cutile import cutile_available, list_cutile_kernel_specs
 
@@ -244,7 +244,7 @@ def describe_operator_backend_capability(
             )
         except Exception:
             available = _package_available("cutile")
-    elif backend == "cutlass":
+    elif engine == "cutlass":
         available = _package_available("cutlass")
         try:
             from .backends.cutlass import list_cutlass_kernel_specs
@@ -254,7 +254,7 @@ def describe_operator_backend_capability(
             )
         except Exception:
             pass
-    elif backend == "cute_dsl":
+    elif engine == "cute_dsl":
         available = _package_available("cutlass.cute")
         try:
             from .backends.cute_dsl import list_cute_dsl_kernel_specs
@@ -265,7 +265,7 @@ def describe_operator_backend_capability(
             )
         except Exception:
             pass
-    elif backend == "custom_cuda":
+    elif engine == "custom_cuda":
         try:
             from .cuda_extension import describe_custom_cuda_extension_capability
 
@@ -279,23 +279,23 @@ def describe_operator_backend_capability(
                 notes.append("Optional nvcc extension module is not compiled.")
         except Exception:
             available = False
-    elif backend == "deployment_backend":
+    elif engine == "deployment_engine":
         available = True
 
     return replace(base, status=status, available=available, notes=tuple(notes))
 
 
-def list_operator_backend_capabilities() -> dict[str, dict[str, Any]]:
-    """Return the operator optimization backend matrix as plain dictionaries."""
+def list_operator_engine_capabilities() -> dict[str, dict[str, Any]]:
+    """Return the operator optimization engine matrix as plain dictionaries."""
 
     return {
-        name: describe_operator_backend_capability(name).to_dict()
+        name: describe_operator_engine_capability(name).to_dict()
         for name in sorted(_BASE_CAPABILITIES)
     }
 
 
 __all__ = [
-    "OperatorOptimizationBackendCapability",
-    "describe_operator_backend_capability",
-    "list_operator_backend_capabilities",
+    "OperatorOptimizationEngineCapability",
+    "describe_operator_engine_capability",
+    "list_operator_engine_capabilities",
 ]

@@ -7,9 +7,9 @@ from .advisor import (
     recommend_precision_strategy,
 )
 from .capability import (
-    OperatorOptimizationBackendCapability,
-    describe_operator_backend_capability,
-    list_operator_backend_capabilities,
+    OperatorOptimizationEngineCapability,
+    describe_operator_engine_capability,
+    list_operator_engine_capabilities,
 )
 from .compile_backend import compile_with_torch
 from .cuda_extension import (
@@ -86,7 +86,7 @@ from .types import (
 )
 
 __all__ = [
-    "OperatorOptimizationBackendCapability",
+    "OperatorOptimizationEngineCapability",
     "OperatorOptimizationExecutionPlan",
     "OperatorOptimizationExecutionResult",
     "OperatorPatternCandidate",
@@ -113,7 +113,7 @@ __all__ = [
     "CuteDSLCompileSettings",
     "CuteDSLKernelSpec",
     "describe_custom_cuda_extension_capability",
-    "describe_operator_backend_capability",
+    "describe_operator_engine_capability",
     "execute_operator_optimization_plan",
     "get_cutile_kernel_spec",
     "get_cutlass_kernel_spec",
@@ -124,7 +124,7 @@ __all__ = [
     "list_cutile_kernel_specs",
     "list_cutlass_kernel_specs",
     "list_cute_dsl_kernel_specs",
-    "list_operator_backend_capabilities",
+    "list_operator_engine_capabilities",
     "list_tilelang_kernel_specs",
     "list_triton_kernel_specs",
     "materialize_operator_candidate_model",

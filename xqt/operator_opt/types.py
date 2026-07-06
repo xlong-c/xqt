@@ -13,7 +13,7 @@ class OperatorOptimizationTargetPlan:
     """Resolved operator optimization plan for one model or submodule target."""
 
     name: str
-    backend: str
+    engine: str
     target_path: Optional[str] = None
     mode: Optional[str] = None
     fullgraph: bool = False
@@ -31,7 +31,7 @@ class OperatorOptimizationTargetPlan:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "backend": self.backend,
+            "engine": self.engine,
             "target_path": self.target_path,
             "mode": self.mode,
             "fullgraph": self.fullgraph,
@@ -53,14 +53,14 @@ class OperatorOptimizationExecutionPlan:
     """Operator optimization pass execution plan."""
 
     targets: list[OperatorOptimizationTargetPlan] = field(default_factory=list)
-    default_backend: str = "torch_compile"
+    default_engine: str = "torch_compile"
     stage: str = "after_compression"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "targets": [target.to_dict() for target in self.targets],
-            "default_backend": self.default_backend,
+            "default_engine": self.default_engine,
             "stage": self.stage,
             "metadata": dict(self.metadata),
         }
@@ -68,11 +68,11 @@ class OperatorOptimizationExecutionPlan:
 
 @dataclass
 class OperatorOptimizationReport:
-    """Unified backend-agnostic operator optimization result for one target."""
+    """Unified engine-agnostic operator optimization result for one target."""
 
     target_name: str
     module_path: Optional[str]
-    backend: str
+    engine: str
     runtime: str
     applied: bool
     fallback: str
@@ -93,7 +93,7 @@ class OperatorOptimizationReport:
         return {
             "target_name": self.target_name,
             "module_path": self.module_path,
-            "backend": self.backend,
+            "engine": self.engine,
             "runtime": self.runtime,
             "applied": self.applied,
             "fallback": self.fallback,

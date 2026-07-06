@@ -55,7 +55,7 @@ class PrecisionRecommendation:
     target_sm: str | None
     recommended_precision: str
     fallback_precision: str
-    backend: str
+    engine: str
     hardware_native: bool
     rationale: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
@@ -68,7 +68,7 @@ class PrecisionRecommendation:
             "target_sm": self.target_sm,
             "recommended_precision": self.recommended_precision,
             "fallback_precision": self.fallback_precision,
-            "backend": self.backend,
+            "engine": self.engine,
             "hardware_native": self.hardware_native,
             "rationale": list(self.rationale),
             "risks": list(self.risks),
@@ -106,7 +106,7 @@ def _capability_from_sm(precision: str, sm: int | None) -> dict[str, Any]:
         "precision": precision,
         "device": "cuda",
         "available": False,
-        "backend": "none",
+        "engine": "none",
         "hardware_native": False,
         "notes": [],
     }
@@ -114,36 +114,36 @@ def _capability_from_sm(precision: str, sm: int | None) -> dict[str, Any]:
         return capability
     if precision == "fp16":
         capability["available"] = True
-        capability["backend"] = "triton"
+        capability["engine"] = "triton"
         capability["hardware_native"] = sm >= 70
         if sm >= 70:
             capability["notes"].append("Tensor Core FP16 MMA available")
     elif precision == "bf16":
         capability["available"] = True
-        capability["backend"] = "triton"
+        capability["engine"] = "triton"
         capability["hardware_native"] = sm >= 80
         if sm >= 80:
             capability["notes"].append("Tensor Core BF16 MMA available")
     elif precision == "int8":
         capability["available"] = True
-        capability["backend"] = "triton"
+        capability["engine"] = "triton"
         capability["hardware_native"] = sm >= 75
         if sm >= 75:
             capability["notes"].append("Tensor Core INT8 MMA available")
     elif precision == "fp8":
         capability["available"] = sm >= 89
-        capability["backend"] = "triton" if capability["available"] else "none"
+        capability["engine"] = "triton" if capability["available"] else "none"
         capability["hardware_native"] = sm >= 89
         if capability["available"]:
             capability["notes"].append("FP8 path available on Ada or newer NVIDIA architectures")
     elif precision == "int4":
         capability["available"] = True
-        capability["backend"] = "triton"
+        capability["engine"] = "triton"
         capability["hardware_native"] = False
         capability["notes"].append("INT4 uses unpack plus higher-precision MMA in current XQT paths")
     elif precision in {"mxfp8", "mxfp6", "mxfp4"}:
         capability["available"] = True
-        capability["backend"] = "triton"
+        capability["engine"] = "triton"
         capability["hardware_native"] = sm >= 100
         if capability["hardware_native"]:
             capability["notes"].append("Blackwell-class native microscaling support")
@@ -251,7 +251,7 @@ def recommend_precision_strategy(
         target_sm=sm,
         recommended_precision=recommended,
         fallback_precision=fallback,
-        backend=str(capability.get("backend", "none")),
+        engine=str(capability.get("engine", "none")),
         hardware_native=bool(capability.get("hardware_native", False)),
         rationale=rationale + [str(note) for note in capability.get("notes", [])],
         risks=risks,

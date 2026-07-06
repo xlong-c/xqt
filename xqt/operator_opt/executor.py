@@ -28,7 +28,7 @@ from xqt.quant.nvfp4_bridge import (
 )
 from xqt.quant.capability import describe_quant_backend_capability
 
-from .capability import describe_operator_backend_capability
+from .capability import describe_operator_engine_capability
 from .compile_backend import compile_with_torch
 from .patterns import (
     scan_export_candidates,
@@ -477,7 +477,7 @@ def _effective_validation_thresholds(
         "atol": float(target.validate.get("atol", 1e-5)),
         "rtol": float(target.validate.get("rtol", 1e-5)),
     }
-    if target.backend != "tilelang":
+    if target.engine != "tilelang":
         return thresholds
     patterns = list(getattr(target, "patterns", []) or [])
     if patterns == ["attention"]:
@@ -666,22 +666,22 @@ def _quant_runtime_guard(
     return None
 
 
-def _backend_metadata(
+def _engine_metadata(
     target: OperatorOptimizationTargetPlan,
     *,
     dtype: str | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    if target.backend == "deployment_backend":
+    if target.engine == "deployment_engine":
         metadata["deployment_target"] = {
             "runtime": target.options.get("runtime"),
             "stage": target.options.get("stage"),
             "semantic_target": target.options.get("semantic_target") or target.name,
             "fallback_reason": target.options.get("fallback_reason"),
         }
-    if target.backend == "triton":
+    if target.engine == "triton":
         metadata["kernel_registry"] = list_triton_kernel_specs()
-    if target.backend == "tilelang":
+    if target.engine == "tilelang":
         settings = TileLangCompileSettings(
             target=str(target.tilelang.get("target", "cuda")),
             target_arch=target.tilelang.get("target_arch"),
@@ -707,7 +707,7 @@ def _backend_metadata(
             "execution_latency_ms": None,
             "status": "not_executed",
         }
-    if target.backend == "cutile":
+    if target.engine == "cutile":
         settings = CuTileCompileSettings(
             target=str(target.cutile.get("target", "cuda")),
             target_arch=target.cutile.get("target_arch"),
@@ -727,7 +727,7 @@ def _backend_metadata(
             "execution_latency_ms": None,
             "status": "not_executed",
         }
-    if target.backend == "cutlass":
+    if target.engine == "cutlass":
         tile_shape_raw = target.cutlass.get("tile_shape", [128, 128, 64])
         cluster_shape_raw = target.cutlass.get("cluster_shape")
         settings = CutlassCompileSettings(
@@ -753,7 +753,7 @@ def _backend_metadata(
             "execution_latency_ms": None,
             "status": "not_executed",
         }
-    if target.backend == "cute_dsl":
+    if target.engine == "cute_dsl":
         tile_shape_raw = target.cute_dsl.get("tile_shape", [128, 128, 64])
         cluster_shape_raw = target.cute_dsl.get("cluster_shape")
         settings = CuteDSLCompileSettings(
@@ -782,19 +782,19 @@ def _backend_metadata(
     return metadata
 
 
-def _artifact_paths_from_backend_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+def _artifact_paths_from_engine_metadata(metadata: dict[str, Any]) -> dict[str, str]:
     artifact_paths: dict[str, str] = {}
-    for backend in ("tilelang", "cutile", "cutlass", "cute_dsl"):
-        backend_artifacts = metadata.get(f"{backend}_artifacts")
-        if not isinstance(backend_artifacts, Mapping):
+    for engine in ("tilelang", "cutile", "cutlass", "cute_dsl"):
+        engine_artifacts = metadata.get(f"{engine}_artifacts")
+        if not isinstance(engine_artifacts, Mapping):
             continue
-        for pattern, artifact_metadata in backend_artifacts.items():
+        for pattern, artifact_metadata in engine_artifacts.items():
             if not isinstance(artifact_metadata, Mapping):
                 continue
             artifact_path = artifact_metadata.get("artifact_path")
             if artifact_path is None:
                 continue
-            artifact_paths[f"{backend}.{pattern}"] = str(artifact_path)
+            artifact_paths[f"{engine}.{pattern}"] = str(artifact_path)
     return artifact_paths
 
 
@@ -2154,7 +2154,7 @@ class _TileLangDequantGemmWrapper(nn.Module):
 
 
 class _ReferenceGuardedLinearWrapper(nn.Module):
-    """Executable linear/dequant GEMM wrapper for reference-guarded backends."""
+    """Executable linear/dequant GEMM wrapper for reference-guarded engines."""
 
     _REFERENCE_ONLY_PRODUCTION_STATUSES = {"", "metadata_only", "reference_guarded"}
 
@@ -2162,15 +2162,15 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         self,
         module: nn.Module,
         *,
-        backend: str,
+        engine: str,
         fallback: str,
         settings: dict[str, Any],
     ) -> None:
         super().__init__()
-        if backend not in {"cutile", "cute_dsl"}:
-            raise XQTBackendError(f"unsupported reference-guarded backend: {backend}")
+        if engine not in {"cutile", "cute_dsl"}:
+            raise XQTBackendError(f"unsupported reference-guarded engine: {engine}")
         self.module = module
-        self.backend = backend
+        self.engine = engine
         self.fallback = fallback
         self.settings = dict(settings)
         self.last_execution_mode = "not_run"
@@ -2206,26 +2206,26 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         return [self._default_kernel_pattern()]
 
     def _default_kernel_pattern(self) -> str:
-        if self.backend == "cute_dsl":
+        if self.engine == "cute_dsl":
             return "gemm_epilogue"
         return "dense_linear_epilogue"
 
-    def _backend_display_name(self) -> str:
-        return "CuTe DSL" if self.backend == "cute_dsl" else "CuTile"
+    def _engine_display_name(self) -> str:
+        return "CuTe DSL" if self.engine == "cute_dsl" else "CuTile"
 
     def _get_kernel_spec(self, pattern: str) -> Any:
-        if self.backend == "cute_dsl":
+        if self.engine == "cute_dsl":
             return get_cute_dsl_kernel_spec(pattern)
         return get_cutile_kernel_spec(pattern)
 
-    def _run_backend_kernel(
+    def _run_engine_kernel(
         self,
         pattern: str,
         *args: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
         try:
-            if self.backend == "cute_dsl":
+            if self.engine == "cute_dsl":
                 return run_cute_dsl_kernel(
                     pattern,
                     *args,
@@ -2250,7 +2250,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
             }
             self.last_execution_mode = "reference_fallback"
             self.last_execution_reason = (
-                f"{self._backend_display_name()} {pattern} runtime fallback: {exc}"
+                f"{self._engine_display_name()} {pattern} runtime fallback: {exc}"
             )
             self.last_fastpath = "eager_reference_fallback"
             return spec.reference(*args, **filtered_kwargs)
@@ -2283,7 +2283,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None, str | None] | None:
         if callable(self._dense_linear_bridge):
-            self.last_weight_source = f"{self.backend}_dense_cache_bridge"
+            self.last_weight_source = f"{self.engine}_dense_cache_bridge"
             self.last_weight_representation = "dense_dequantized_weight_cache"
             return self._dense_linear_bridge(dtype=x.dtype, device=x.device)
         bridge = self._resolved_nvfp4_bridge()
@@ -2401,7 +2401,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
     @staticmethod
     def _flatten_input(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
         if x.ndim == 0:
-            raise XQTBackendError("linear backends require at least one input dimension")
+            raise XQTBackendError("linear engines require at least one input dimension")
         prefix_shape = tuple(x.shape[:-1])
         return x.reshape(-1, x.shape[-1]), prefix_shape
 
@@ -2432,12 +2432,12 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         self.last_unpack_stage = unpack_stage
         self.last_fastpath = fastpath
         if x.is_cuda:
-            self.last_execution_mode = f"cuda_{self.backend}_entry"
+            self.last_execution_mode = f"cuda_{self.engine}_entry"
             self.last_execution_reason = None
         else:
             self.last_execution_mode = "reference_fallback"
             self.last_execution_reason = (
-                f"{self._backend_display_name()} {pattern} requires CUDA tensors; using configured fallback."
+                f"{self._engine_display_name()} {pattern} requires CUDA tensors; using configured fallback."
             )
 
     def _forward_cute_dsl(self, x: torch.Tensor) -> torch.Tensor:
@@ -2454,7 +2454,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
             unpack_stage="one_time_eager_dequant_cache",
             fastpath="cute_dsl_dense_gemm_epilogue",
         )
-        return self._run_backend_kernel(
+        return self._run_engine_kernel(
             "gemm_epilogue",
             x,
             weight,
@@ -2481,7 +2481,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
             ),
             fastpath="packed_nvfp4_cutile_reference_guarded_kernel",
         )
-        output = self._run_backend_kernel(
+        output = self._run_engine_kernel(
             "nvfp4_packed_dequant_gemm_epilogue",
             flat_x,
             packed_weight,
@@ -2509,7 +2509,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
             unpack_stage="cutile_reference_guarded_dequant",
             fastpath="cutile_dequant_gemm_epilogue",
         )
-        output = self._run_backend_kernel(
+        output = self._run_engine_kernel(
             "dequant_gemm_epilogue",
             flat_x,
             qweight,
@@ -2545,7 +2545,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         }
         if kernel_pattern != "linear":
             kernel_kwargs["activation"] = activation
-        output = self._run_backend_kernel(
+        output = self._run_engine_kernel(
             kernel_pattern,
             flat_x,
             weight,
@@ -2555,7 +2555,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         return self._restore_flattened_output(output, prefix_shape)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.backend == "cute_dsl":
+        if self.engine == "cute_dsl":
             return self._forward_cute_dsl(x)
         pattern = self._select_cutile_pattern()
         if pattern == "nvfp4_packed_dequant_gemm_epilogue":
@@ -2584,7 +2584,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
                 "dtype": "float16",
                 "supported_patterns": list(self._preferred_patterns()),
                 "operator_families": ["linear"],
-                "supports_packed_nvfp4_bridge": self.backend == "cutile",
+                "supports_packed_nvfp4_bridge": self.engine == "cutile",
                 "supports_dense_nvfp4_cache_bridge": True,
             },
             "kernel_pattern": self.last_kernel_pattern,
@@ -2596,7 +2596,7 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
             "unpack_stage": self.last_unpack_stage,
             "fusion_status": kernel_metadata.get(
                 "fusion_status",
-                f"{self.backend}_reference_guarded_gemm_epilogue",
+                f"{self.engine}_reference_guarded_gemm_epilogue",
             ),
             "epilogue_stage": kernel_metadata.get("epilogue_stage", "torch_bias_activation"),
             "fallback": self.fallback,
@@ -2893,7 +2893,7 @@ def _build_tilelang_candidate_model(
     )
 
 
-def _supports_reference_guarded_linear_backend(module: nn.Module) -> bool:
+def _supports_reference_guarded_linear_engine(module: nn.Module) -> bool:
     if isinstance(module, nn.Linear):
         return True
     if infer_nvfp4_tensor_layout(module) is not None:
@@ -2911,19 +2911,19 @@ def _build_reference_guarded_linear_candidate_model(
     target_model: nn.Module,
     target: OperatorOptimizationTargetPlan,
     *,
-    backend: str,
+    engine: str,
 ) -> nn.Module:
-    settings = dict(target.cutile if backend == "cutile" else target.cute_dsl)
+    settings = dict(target.cutile if engine == "cutile" else target.cute_dsl)
     settings["preferred_patterns"] = list(target.patterns or [])
-    if _supports_reference_guarded_linear_backend(target_model):
+    if _supports_reference_guarded_linear_engine(target_model):
         return _ReferenceGuardedLinearWrapper(
             target_model,
-            backend=backend,
+            engine=engine,
             fallback=target.fallback,
             settings=settings,
         )
     for child_name, child in target_model.named_children():
-        if _supports_reference_guarded_linear_backend(child):
+        if _supports_reference_guarded_linear_engine(child):
             target_model = copy.deepcopy(target_model)
             wrapped_child = target_model.get_submodule(child_name)
             setattr(
@@ -2931,14 +2931,14 @@ def _build_reference_guarded_linear_candidate_model(
                 child_name,
                 _ReferenceGuardedLinearWrapper(
                     wrapped_child,
-                    backend=backend,
+                    engine=engine,
                     fallback=target.fallback,
                     settings=settings,
                 ),
             )
             return target_model
     raise XQTBackendError(
-        f"{backend} inference target requires nn.Linear, qweight/scale tensors, or an NVFP4 bridge"
+        f"{engine} inference target requires nn.Linear, qweight/scale tensors, or an NVFP4 bridge"
     )
 
 
@@ -2989,18 +2989,18 @@ def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
     }
 
 
-def _operator_backend_execution_metadata(
+def _operator_engine_execution_metadata(
     model: nn.Module,
     *,
-    backend: str,
+    engine: str,
 ) -> dict[str, Any]:
-    if backend == "tilelang":
+    if engine == "tilelang":
         return _tilelang_execution_metadata(model)
-    if backend in {"cutile", "cute_dsl"}:
+    if engine in {"cutile", "cute_dsl"}:
         if isinstance(model, _ReferenceGuardedLinearWrapper):
             return model.execution_metadata()
         for module in model.modules():
-            if isinstance(module, _ReferenceGuardedLinearWrapper) and module.backend == backend:
+            if isinstance(module, _ReferenceGuardedLinearWrapper) and module.engine == engine:
                 return module.execution_metadata()
         return {
             "execution_mode": "unknown",
@@ -3022,7 +3022,7 @@ def _scan_candidate_report(
             "error": str(exc),
             "candidate_count": 0,
             "patterns": [],
-            "recommended_backends": [],
+            "recommended_engines": [],
             "candidates": [],
         }
     report["status"] = "ok"
@@ -3083,7 +3083,7 @@ def materialize_operator_candidate_model(
 
     candidate_root = copy.deepcopy(model)
     candidate_target = _resolve_component_model(candidate_root, target.target_path)
-    if target.backend == "torch_compile":
+    if target.engine == "torch_compile":
         compiled_candidate, compile_time_ms = compile_with_torch(candidate_target, target)
         candidate_root = _replace_component_model(
             candidate_root,
@@ -3091,7 +3091,7 @@ def materialize_operator_candidate_model(
             compiled_candidate,
         )
         return candidate_root, compile_time_ms
-    if target.backend == "tilelang":
+    if target.engine == "tilelang":
         tilelang_candidate = _build_tilelang_candidate_model(candidate_target, target)
         candidate_root = _replace_component_model(
             candidate_root,
@@ -3099,20 +3099,20 @@ def materialize_operator_candidate_model(
             tilelang_candidate,
         )
         return candidate_root, None
-    if target.backend in {"cutile", "cute_dsl"}:
-        backend_candidate = _build_reference_guarded_linear_candidate_model(
+    if target.engine in {"cutile", "cute_dsl"}:
+        engine_candidate = _build_reference_guarded_linear_candidate_model(
             candidate_target,
             target,
-            backend=target.backend,
+            engine=target.engine,
         )
         candidate_root = _replace_component_model(
             candidate_root,
             target.target_path,
-            backend_candidate,
+            engine_candidate,
         )
         return candidate_root, None
     raise XQTBackendError(
-        f"Operator optimization backend '{target.backend}' is not executable yet"
+        f"Operator optimization engine '{target.engine}' is not executable yet"
     )
 
 
@@ -3127,7 +3127,7 @@ def materialize_operator_candidate_models(
     candidate_root = model if inplace else copy.deepcopy(model)
     for target in targets:
         candidate_target = _resolve_component_model(candidate_root, target.target_path)
-        if target.backend == "torch_compile":
+        if target.engine == "torch_compile":
             compiled_candidate, _ = compile_with_torch(candidate_target, target)
             candidate_root = _replace_component_model(
                 candidate_root,
@@ -3135,7 +3135,7 @@ def materialize_operator_candidate_models(
                 compiled_candidate,
             )
             continue
-        if target.backend == "tilelang":
+        if target.engine == "tilelang":
             tilelang_candidate = _build_tilelang_candidate_model(candidate_target, target)
             candidate_root = _replace_component_model(
                 candidate_root,
@@ -3143,20 +3143,20 @@ def materialize_operator_candidate_models(
                 tilelang_candidate,
             )
             continue
-        if target.backend in {"cutile", "cute_dsl"}:
-            backend_candidate = _build_reference_guarded_linear_candidate_model(
+        if target.engine in {"cutile", "cute_dsl"}:
+            engine_candidate = _build_reference_guarded_linear_candidate_model(
                 candidate_target,
                 target,
-                backend=target.backend,
+                engine=target.engine,
             )
             candidate_root = _replace_component_model(
                 candidate_root,
                 target.target_path,
-                backend_candidate,
+                engine_candidate,
             )
             continue
         raise XQTBackendError(
-            f"Operator optimization backend '{target.backend}' is not executable yet"
+            f"Operator optimization engine '{target.engine}' is not executable yet"
         )
     return candidate_root
 
@@ -3173,7 +3173,7 @@ def build_operator_optimization_plan(
     if not operator_config.enabled:
         return OperatorOptimizationExecutionPlan(
             targets=[],
-            default_backend=operator_config.default_backend,
+            default_engine=operator_config.default_engine,
             stage=operator_config.stage,
         )
 
@@ -3182,7 +3182,7 @@ def build_operator_optimization_plan(
         targets.append(
             OperatorOptimizationTargetPlan(
                 name=target.name,
-                backend=target.backend or operator_config.default_backend,
+                engine=target.engine or operator_config.default_engine,
                 target_path=target.target,
                 mode=target.mode,
                 fullgraph=target.fullgraph,
@@ -3241,7 +3241,7 @@ def build_operator_optimization_plan(
         )
     return OperatorOptimizationExecutionPlan(
         targets=targets,
-        default_backend=operator_config.default_backend,
+        default_engine=operator_config.default_engine,
         stage=operator_config.stage,
         metadata={"target_names": _ordered_unique(target.name for target in targets)},
     )
@@ -3286,7 +3286,7 @@ def execute_operator_optimization_plan(
     artifacts["operator_optimization_candidates"] = candidate_reports
 
     for target in plan.targets:
-        capability = describe_operator_backend_capability(target.backend)
+        capability = describe_operator_engine_capability(target.engine)
         target_model = _resolve_component_model(current_model, target.target_path)
         module_inputs = root_inputs
         if target.target_path:
@@ -3299,11 +3299,11 @@ def execute_operator_optimization_plan(
                 target_device,
             )
         device, dtype = _infer_module_device_dtype(target_model, module_inputs)
-        backend_metadata = _backend_metadata(target, dtype=dtype)
-        artifact_paths = _artifact_paths_from_backend_metadata(backend_metadata)
+        engine_metadata = _engine_metadata(target, dtype=dtype)
+        artifact_paths = _artifact_paths_from_engine_metadata(engine_metadata)
         compile_explain = (
             _torch_compile_explain_report(target_model, module_inputs)
-            if target.backend == "torch_compile"
+            if target.engine == "torch_compile"
             else {
                 "status": "not_applicable",
                 "error": None,
@@ -3316,26 +3316,26 @@ def execute_operator_optimization_plan(
         )
 
         skip_reason = _quant_runtime_guard(context, target)
-        if skip_reason is None and target.backend == "torch_compile" and not capability.available:
+        if skip_reason is None and target.engine == "torch_compile" and not capability.available:
             skip_reason = "torch.compile is not available in the current PyTorch build"
-        if skip_reason is None and target.backend in {"triton", "cutlass", "custom_cuda"}:
+        if skip_reason is None and target.engine in {"triton", "cutlass", "custom_cuda"}:
             if not torch.cuda.is_available():
-                skip_reason = f"{target.backend} requires CUDA-capable hardware"
+                skip_reason = f"{target.engine} requires CUDA-capable hardware"
             else:
                 skip_reason = _planned_operator_skip_reason(target) or (
-                    f"{target.backend} backend is configured but not implemented in the built-in executor"
+                    f"{target.engine} engine is configured but not implemented in the built-in executor"
                 )
         if (
             skip_reason is None
-            and target.backend in {"cutile", "cute_dsl"}
+            and target.engine in {"cutile", "cute_dsl"}
             and not torch.cuda.is_available()
             and target.fallback != "eager"
         ):
-            skip_reason = f"{target.backend} requires CUDA-capable hardware"
-        if skip_reason is None and target.backend == "deployment_backend":
-            skip_reason = "deployment_backend is metadata-only in the built-in executor"
+            skip_reason = f"{target.engine} requires CUDA-capable hardware"
+        if skip_reason is None and target.engine == "deployment_engine":
+            skip_reason = "deployment_engine is metadata-only in the built-in executor"
         fallback_detail = {
-            "backend": target.backend,
+            "engine": target.engine,
             "fallback": target.fallback,
             "reason": skip_reason,
             "graph_break_count": compile_explain.get("graph_break_count"),
@@ -3348,10 +3348,10 @@ def execute_operator_optimization_plan(
             _call_module_no_grad(target_model, module_inputs)
         )
         baseline_execution_detail: dict[str, Any] = {}
-        if target.backend in {"tilelang", "cutile", "cute_dsl"}:
-            baseline_execution_detail = _operator_backend_execution_metadata(
+        if target.engine in {"tilelang", "cutile", "cute_dsl"}:
+            baseline_execution_detail = _operator_engine_execution_metadata(
                 target_model,
-                backend=target.backend,
+                engine=target.engine,
             )
         latency_before, baseline_benchmark_strategy = _benchmark_callable_for_execution(
             lambda: _call_module_no_grad(target_model, module_inputs),
@@ -3367,7 +3367,7 @@ def execute_operator_optimization_plan(
                 OperatorOptimizationReport(
                     target_name=target.name,
                     module_path=target.target_path,
-                    backend=target.backend,
+                    engine=target.engine,
                     runtime=capability.runtime,
                     applied=False,
                     fallback=target.fallback,
@@ -3394,7 +3394,7 @@ def execute_operator_optimization_plan(
                         "mode": target.mode,
                         "patterns": list(target.patterns),
                         "capability": capability.to_dict(),
-                        **backend_metadata,
+                        **engine_metadata,
                     },
                 )
             )
@@ -3403,26 +3403,26 @@ def execute_operator_optimization_plan(
         compiled_model = None
         compile_time_ms = None
         try:
-            if target.backend == "torch_compile":
+            if target.engine == "torch_compile":
                 compiled_model, compile_time_ms = compile_with_torch(target_model, target)
-            elif target.backend == "tilelang":
+            elif target.engine == "tilelang":
                 compiled_model = _build_tilelang_candidate_model(target_model, target)
-            elif target.backend in {"cutile", "cute_dsl"}:
+            elif target.engine in {"cutile", "cute_dsl"}:
                 compiled_model = _build_reference_guarded_linear_candidate_model(
                     target_model,
                     target,
-                    backend=target.backend,
+                    engine=target.engine,
                 )
             else:
                 raise XQTBackendError(
-                    f"Operator optimization backend '{target.backend}' is not executable yet"
+                    f"Operator optimization engine '{target.engine}' is not executable yet"
                 )
         except Exception as exc:
             reports.append(
                 OperatorOptimizationReport(
                     target_name=target.name,
                     module_path=target.target_path,
-                    backend=target.backend,
+                    engine=target.engine,
                     runtime=capability.runtime,
                     applied=False,
                     fallback=target.fallback,
@@ -3444,7 +3444,7 @@ def execute_operator_optimization_plan(
                     metadata={
                         "execution_state": "fallback",
                         "fallback_detail": {
-                            "backend": target.backend,
+                            "engine": target.engine,
                             "fallback": target.fallback,
                             "reason": str(exc),
                             "graph_break_count": compile_explain.get("graph_break_count"),
@@ -3457,7 +3457,7 @@ def execute_operator_optimization_plan(
                         "mode": target.mode,
                         "patterns": list(target.patterns),
                         "capability": capability.to_dict(),
-                        **backend_metadata,
+                        **engine_metadata,
                     },
                 )
             )
@@ -3465,30 +3465,30 @@ def execute_operator_optimization_plan(
 
         candidate_root = copy.deepcopy(current_model)
         candidate_target = _resolve_component_model(candidate_root, target.target_path)
-        if target.backend == "torch_compile":
+        if target.engine == "torch_compile":
             compiled_candidate, _ = compile_with_torch(candidate_target, target)
             candidate_root = _replace_component_model(
                 candidate_root,
                 target.target_path,
                 compiled_candidate,
             )
-        elif target.backend == "tilelang" and compiled_model is target_model:
+        elif target.engine == "tilelang" and compiled_model is target_model:
             candidate_root = current_model
             candidate_target = compiled_model
-        elif target.backend == "tilelang":
+        elif target.engine == "tilelang":
             candidate_root = _replace_component_model(
                 candidate_root,
                 target.target_path,
                 _build_tilelang_candidate_model(candidate_target, target),
             )
-        elif target.backend in {"cutile", "cute_dsl"}:
+        elif target.engine in {"cutile", "cute_dsl"}:
             candidate_root = _replace_component_model(
                 candidate_root,
                 target.target_path,
                 _build_reference_guarded_linear_candidate_model(
                     candidate_target,
                     target,
-                    backend=target.backend,
+                    engine=target.engine,
                 ),
             )
         candidate_target = _resolve_component_model(candidate_root, target.target_path)
@@ -3496,10 +3496,10 @@ def execute_operator_optimization_plan(
             _call_module_no_grad(candidate_target, module_inputs)
         )
         execution_detail: dict[str, Any] = {}
-        if target.backend in {"tilelang", "cutile", "cute_dsl"}:
-            execution_detail = _operator_backend_execution_metadata(
+        if target.engine in {"tilelang", "cutile", "cute_dsl"}:
+            execution_detail = _operator_engine_execution_metadata(
                 candidate_target,
-                backend=target.backend,
+                engine=target.engine,
             )
         identity_candidate = candidate_target is target_model
         effective_thresholds = _effective_validation_thresholds(
@@ -3507,8 +3507,8 @@ def execute_operator_optimization_plan(
             baseline_output=baseline_output,
             optimized_output=optimized_output,
         )
-        if target.backend == "tilelang":
-            backend_metadata["validation_thresholds"] = dict(effective_thresholds)
+        if target.engine == "tilelang":
+            engine_metadata["validation_thresholds"] = dict(effective_thresholds)
         numeric_diff = compare_tensors(
             baseline_output,
             optimized_output,
@@ -3604,10 +3604,10 @@ def execute_operator_optimization_plan(
                     else None
                 ),
             }
-        if target.backend in {"tilelang", "cutile", "cute_dsl"}:
-            execution_detail = _operator_backend_execution_metadata(
+        if target.engine in {"tilelang", "cutile", "cute_dsl"}:
+            execution_detail = _operator_engine_execution_metadata(
                 candidate_target,
-                backend=target.backend,
+                engine=target.engine,
             )
         effective_min_speedup = _effective_min_speedup(
             target,
@@ -3633,11 +3633,11 @@ def execute_operator_optimization_plan(
             )
         if applied:
             current_model = _replace_component_model(current_model, target.target_path, compiled_model)
-        elif target.backend == "tilelang" and compiled_model is target_model:
+        elif target.engine == "tilelang" and compiled_model is target_model:
             if hasattr(compiled_model, "_xqt_tilelang_execution_metadata"):
                 delattr(compiled_model, "_xqt_tilelang_execution_metadata")
         fallback_detail = {
-            "backend": target.backend,
+            "engine": target.engine,
             "fallback": target.fallback,
             "reason": skip_reason,
             "graph_break_count": compile_explain.get("graph_break_count"),
@@ -3649,7 +3649,7 @@ def execute_operator_optimization_plan(
             OperatorOptimizationReport(
                 target_name=target.name,
                 module_path=target.target_path,
-                backend=target.backend,
+                engine=target.engine,
                 runtime=capability.runtime,
                 applied=applied,
                 fallback=target.fallback,
@@ -3677,7 +3677,7 @@ def execute_operator_optimization_plan(
                         "speedup_metric": speedup_metric,
                         "speedup_statistics": speedup_statistics,
                         "capability": capability.to_dict(),
-                        **backend_metadata,
+                        **engine_metadata,
                         **execution_detail,
                 },
             )
@@ -3719,7 +3719,7 @@ def summarize_operator_optimization_reports(
         "applied_count": len(applied),
         "skipped_count": len(skipped),
         "targets": items,
-        "backends": _ordered_unique(report.backend for report in reports),
+        "engines": _ordered_unique(report.engine for report in reports),
         "runtimes": _ordered_unique(report.runtime for report in reports),
         "applied_targets": [report.target_name for report in applied],
         "skipped_targets": [report.target_name for report in skipped],

@@ -22,11 +22,11 @@ def compile_with_torch(
     if not hasattr(torch, "compile"):
         raise XQTBackendError("torch.compile is not available in the current PyTorch build")
 
-    backend = str(plan.options.get("backend", "inductor"))
+    engine = str(plan.options.get("engine", "inductor"))
     mode = None if plan.mode in {None, "default"} else plan.mode
     compile_options: dict[str, Any] | None = dict(plan.options) if plan.options else None
     if compile_options is not None:
-        compile_options.pop("backend", None)
+        compile_options.pop("engine", None)
         if not compile_options:
             compile_options = None
     start = perf_counter()
@@ -35,7 +35,7 @@ def compile_with_torch(
             module,
             fullgraph=plan.fullgraph,
             dynamic=plan.dynamic,
-            backend=backend,
+            backend=engine,
             mode=mode,
             options=compile_options,
         )
