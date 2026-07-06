@@ -1,12 +1,12 @@
-# Triton 后端
+# Triton Engine
 
-本文介绍 XQT 中的 Triton operator optimization 后端. Triton 在这里指 OpenAI Triton Python GPU kernel DSL, 不是 NVIDIA Triton Inference Server.
+本文介绍 XQT 中的 Triton operator optimization engine. Triton 在这里指 OpenAI Triton Python GPU kernel DSL, 不是 NVIDIA Triton Inference Server.
 
-## 后端介绍
+## Engine 介绍
 
 Triton 是用 Python 编写自定义 GPU kernel 的 DSL 和 compiler. 它让开发者用接近 Python 的方式表达 block-level 并行程序, 编译成 GPU kernel, 常用于编写 fused activation, normalization, rope, GEMM 和 dequant kernel.
 
-在 XQT 中, Triton backend 的定位是 "特定 pattern 的 kernel adapter", 不是整模型 runtime. 当前 adapter 提供 registry, eager reference fallback 和 pattern 执行入口.
+在 XQT 中, Triton engine 的定位是 "特定 pattern 的 kernel adapter", 不是整模型 runtime. 当前 adapter 提供 registry, eager reference fallback 和 pattern 执行入口.
 
 ## 适合的使用场景
 
@@ -83,7 +83,7 @@ bias = torch.randn(1024)
 out = run_triton_kernel("bias_gelu", x, bias, fallback="eager")
 ```
 
-## 后端实现注意点
+## Engine 实现注意点
 
 - Triton kernel 参数必须是 tensor, 当前 adapter 会检查输入类型.
 - CUDA-only pattern 在 CPU 输入上只有 eager fallback 或报错.
@@ -105,4 +105,3 @@ out = run_triton_kernel("bias_gelu", x, bias, fallback="eager")
 - Triton documentation: <https://triton-lang.org/main/>
 - Triton language API: <https://triton-lang.org/main/python-api/triton.language.html>
 - Triton tutorials: <https://triton-lang.org/main/getting-started/tutorials/index.html>
-

@@ -1,8 +1,8 @@
-# CuTe DSL 后端
+# CuTe DSL Engine
 
-本文介绍 XQT 中的 CuTe DSL backend. CuTe DSL 是 NVIDIA CUTLASS 生态中的 Python DSL 路线, 用于表达 tile-level tensor 程序和 GEMM 类 kernel.
+本文介绍 XQT 中的 CuTe DSL engine. CuTe DSL 是 NVIDIA CUTLASS 生态中的 Python DSL 路线, 用于表达 tile-level tensor 程序和 GEMM 类 kernel.
 
-## 后端介绍
+## Engine 介绍
 
 CuTe 是 CUTLASS 中的 tensor layout 和 tiling 抽象. CuTe DSL 把这些思想暴露到 Python DSL 中, 让开发者用更高层的 Python 表达 tile, layout, copy, MMA 和 epilogue 等 GPU kernel 结构.
 
@@ -17,7 +17,7 @@ XQT 当前的 CuTe DSL adapter 只覆盖少量 GEMM pattern, 主要用于:
 - GEMM epilogue 和 grouped GEMM 的 DSL 原型.
 - 研究 tile shape, cluster shape 和 target arch 对 kernel 的影响.
 - 在 CUTLASS / CuTe DSL 生态里探索更细粒度的 kernel 控制.
-- 为后续 custom kernel backend 记录稳定 metadata.
+- 为后续 custom CUDA engine 记录稳定 metadata.
 - 为 FLUX.2 klein NVFP4 这类 packed Linear 模块的一次性 dense-cache bridge 提供可调用推理 wrapper.
 
 ## 不适合的场景
@@ -81,7 +81,7 @@ bias = torch.randn(128)
 out = run_cute_dsl_kernel("gemm_epilogue", a, b, bias, fallback="eager")
 ```
 
-## 后端实现注意点
+## Engine 实现注意点
 
 - 当前 adapter 的 artifact 多为 metadata, 不是完整 binary.
 - CuTe DSL 和 CUTLASS 概念相近, 但文档中要区分 Python DSL prototype 与 C++ template library.

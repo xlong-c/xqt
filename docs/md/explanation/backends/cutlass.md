@@ -1,12 +1,12 @@
-# CUTLASS 后端
+# CUTLASS Engine
 
-本文介绍 XQT 中的 CUTLASS backend. 这里的 CUTLASS 指 NVIDIA CUDA Templates for Linear Algebra Subroutines 及其 Python 入口在 XQT 中的受限 adapter.
+本文介绍 XQT 中的 CUTLASS engine. 这里的 CUTLASS 指 NVIDIA CUDA Templates for Linear Algebra Subroutines 及其 Python 入口在 XQT 中的受限 adapter.
 
-## 后端介绍
+## Engine 介绍
 
 CUTLASS 是 NVIDIA 提供的 CUDA C++ template library, 用于构建高性能 GEMM, convolution 和相关 linear algebra kernel. 它大量覆盖 NVIDIA GPU 上的 tile-level GEMM 实现策略, epilogue fusion, tensor core 指令和 architecture-specific 优化.
 
-XQT 当前的 CUTLASS adapter 不是完整 C++ extension build system. 它把 CUTLASS 当成 operator backend, 为少数 GEMM pattern 建立 registry, reference fallback 和 metadata 记录.
+XQT 当前的 CUTLASS adapter 不是完整 C++ extension build system. 它把 CUTLASS 当成 operator engine, 为少数 GEMM pattern 建立 registry, reference fallback 和 metadata 记录.
 
 ## 适合的使用场景
 
@@ -19,7 +19,7 @@ XQT 当前的 CUTLASS adapter 不是完整 C++ extension build system. 它把 CU
 
 - 直接加载完整模型并执行.
 - 在 XQT 当前 adapter 中期待自动 nvcc 编译完整 CUTLASS 工程.
-- CPU 或非 NVIDIA GPU 后端.
+- CPU 或非 NVIDIA GPU engine.
 - 没有明确 GEMM shape 和 dtype 的泛化优化.
 
 ## 当前支持 pattern
@@ -79,7 +79,7 @@ bias = torch.randn(128)
 out = run_cutlass_kernel("gemm_epilogue", a, b, bias, fallback="eager")
 ```
 
-## 后端实现注意点
+## Engine 实现注意点
 
 - 当前 metadata 中 `compile_status` 是 `metadata_only`, 不代表已经生成可加载 CUDA artifact.
 - `tile_shape` 和 `cluster_shape` 是性能核心参数, 必须进入 report.
@@ -98,4 +98,3 @@ out = run_cutlass_kernel("gemm_epilogue", a, b, bias, fallback="eager")
 
 - CUTLASS GitHub: <https://github.com/NVIDIA/cutlass>
 - CUTLASS documentation: <https://docs.nvidia.com/cutlass/>
-

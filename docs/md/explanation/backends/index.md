@@ -1,6 +1,13 @@
-# XQT 后端文档入口
+# XQT 后端与 Engine 文档入口
 
-本文汇总 XQT 当前涉及的导出, runtime 和 operator optimization 后端. 这个目录只做后端背景介绍, 使用场景, 简单例子和核心 API 说明, 不定义新的 XQT workflow schema 或兼容承诺.
+本文汇总 XQT 当前涉及的导出 backend, runtime backend 和内部 kernel engine. 这个目录只做背景介绍, 使用场景, 简单例子和核心 API 说明, 不定义新的 XQT workflow schema 或兼容承诺.
+
+术语约定:
+
+- `backend`: 对外导出或部署 runtime, 例如 TensorRT, ONNX Runtime, OpenVINO, ExecuTorch, ncnn, MNN.
+- `engine`: XQT 内部 kernel 实现选择, 例如 Triton, TileLang, CUTLASS, CuTe DSL, CuTile, custom CUDA.
+
+XQT 推理优化的对外主体是 `xqt`, 不是一组并列外部 inference backend. `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 只表示 XQT 对某个语义算子的 lowering engine.
 
 ## 文档分组
 
@@ -15,13 +22,13 @@
 - [ncnn.md](ncnn.md): ncnn param/bin, pnnx 和 onnx2ncnn 转换链路.
 - [mnn.md](mnn.md): MNNConvert, `.mnn` 产物和移动端 runtime.
 
-### Operator Optimization 后端
+### Operator Optimization Engine
 
-- [tilelang.md](tilelang.md): TileLang Python DSL kernel 后端.
-- [triton.md](triton.md): Triton Python GPU kernel 后端.
-- [cutlass.md](cutlass.md): CUTLASS Python / GEMM 后端.
-- [cute-dsl.md](cute-dsl.md): NVIDIA CuTe DSL 后端.
-- [cutile.md](cutile.md): CuTile Python DSL 后端.
+- [tilelang.md](tilelang.md): TileLang Python DSL kernel engine.
+- [triton.md](triton.md): Triton Python GPU kernel engine.
+- [cutlass.md](cutlass.md): CUTLASS Python / GEMM engine.
+- [cute-dsl.md](cute-dsl.md): NVIDIA CuTe DSL engine.
+- [cutile.md](cutile.md): CuTile Python DSL engine.
 
 ## 当前 XQT 能力对应
 
@@ -38,9 +45,9 @@ XQT 的导出能力矩阵在 `xqt/export/capability.py` 中声明, 当前包含:
 | `ncnn` | P2 | `ncnn` | adapter |
 | `mnn` | P2 | `mnn` | adapter |
 
-XQT 的 operator backend adapter 在 `xqt/operator_opt/backends/` 中声明, 当前包含:
+XQT 的 operator engine adapter 在 `xqt/operator_opt/backends/` 中声明. 目录名仍叫 `backends` 是历史工程命名; 文档和新 API 使用 `engine` 描述这些 DSL / custom kernel 选择.
 
-| backend | 主要 pattern | 当前定位 |
+| engine | 主要 pattern | 当前定位 |
 | --- | --- | --- |
 | `tilelang` | `attention`, `conv`, `linear`, `linear_marlin`, `norm`, `dequant_gemm_epilogue`, FP4 / NVFP4 packed GEMM | 受限 CUDA kernel + eager fallback / metadata |
 | `triton` | fused activation / norm / rope, fp16 / bf16 / int8 / fp8 / int4 GEMM | Python Triton kernel adapter |
@@ -56,17 +63,17 @@ XQT 的 operator backend adapter 在 `xqt/operator_opt/backends/` 中声明, 当
 2. [onnx-runtime.md](onnx-runtime.md)
 3. 目标后端文档, 例如 [tensorrt.md](tensorrt.md) 或 [openvino.md](openvino.md)
 
-如果你在写 operator backend, 先读:
+如果你在写 operator engine, 先读:
 
 1. [triton.md](triton.md)
 2. [tilelang.md](tilelang.md)
 3. 目标 DSL 文档, 例如 [cutlass.md](cutlass.md), [cute-dsl.md](cute-dsl.md), [cutile.md](cutile.md)
 
-## 写后端时统一记录
+## 写 backend / engine 时统一记录
 
-每个后端文档都会重复强调一件事: 后端产物必须能复现. 记录 metadata 时至少包含:
+每个 backend / engine 文档都会重复强调一件事: 产物必须能复现. 记录 metadata 时至少包含:
 
-- backend 名称和版本.
+- backend 或 engine 名称和版本.
 - runtime / compiler / SDK 版本.
 - target device 和硬件能力.
 - 输入模型路径, checksum, input / output 名称和 shape.

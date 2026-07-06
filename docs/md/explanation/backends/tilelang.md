@@ -1,8 +1,8 @@
-# TileLang 后端
+# TileLang Engine
 
-本文介绍 XQT 中的 TileLang operator optimization 后端. TileLang 在这里不是通用模型部署 runtime, 而是面向特定算子 pattern 的 Python DSL kernel 后端.
+本文介绍 XQT 中的 TileLang operator optimization engine. TileLang 在这里不是通用模型部署 runtime, 而是面向特定算子 pattern 的 Python DSL kernel engine.
 
-## 后端介绍
+## Engine 介绍
 
 TileLang 是面向高性能 tensor kernel 编写和编译的 Python DSL. 它的定位接近 "用 Python 描述 tile-level GPU kernel, 再编译到目标设备". 对 XQT 来说, TileLang 适合承载受限但高价值的融合算子, 例如 attention, linear, norm, dequant GEMM epilogue 和 packed FP4 / NVFP4 GEMM.
 
@@ -19,7 +19,7 @@ XQT 当前 TileLang adapter 的重点不是在 import 时真正编译所有 kern
 - 对少数热点算子做 kernel-level 优化.
 - 研究 quantized GEMM, dequant epilogue, packed FP4 / NVFP4 路径.
 - 对 attention, linear, layer norm 等固定 pattern 做专项 benchmark.
-- 在 XQT operator stage 中记录 backend artifact metadata 和 validation 结果.
+- 在 XQT operator stage 中记录 engine artifact metadata 和 validation 结果.
 
 ## 不适合的场景
 
@@ -108,7 +108,7 @@ bias = torch.randn(8)
 out = run_tilelang_kernel("linear", x, w, bias, fallback="eager")
 ```
 
-## 后端实现注意点
+## Engine 实现注意点
 
 - 大多数 pattern 要求 CUDA tensor; CPU 路径通常只是 eager reference fallback.
 - dtype threshold 要随 dtype 放宽, FP4 / FP8 类路径不能沿用 FP32 阈值.
