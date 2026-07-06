@@ -32,6 +32,16 @@ def _next_power_of_2(value: int) -> int:
     return 1 << (value - 1).bit_length()
 
 
+def _tl_dtype_from_torch(dtype: torch.dtype) -> tl.dtype:
+    if dtype == torch.float16:
+        return tl.float16
+    if dtype == torch.bfloat16:
+        return tl.bfloat16
+    if dtype == torch.float32:
+        return tl.float32
+    raise XQTBackendError(f"unsupported Triton dtype mapping: {dtype}")
+
+
 # ============================================================================
 # Reference Implementations
 # ============================================================================
@@ -167,6 +177,7 @@ def _gemm_kernel(
     stride_cm, stride_cn,
     has_bias: tl.constexpr,
     activation: tl.constexpr,
+    ACC_TYPE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -190,7 +201,7 @@ def _gemm_kernel(
     a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
 
     for k in range(0, K, BLOCK_K):
         a_mask = (offs_m[:, None] < M) & ((k + offs_k[None, :]) < K)
@@ -199,12 +210,12 @@ def _gemm_kernel(
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
 
-        accumulator += tl.dot(a, b)
+        accumulator = tl.dot(a, b, accumulator)
 
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
-    c = accumulator.to(tl.float16)
+    c = accumulator.to(c_ptr.dtype.element_ty)
 
     # Apply bias
     if has_bias:
@@ -318,6 +329,8 @@ def gemm_fp16_triton(
     *,
     activation: str | None = None,
     transpose_b: bool = True,
+    accum_dtype: torch.dtype = torch.float32,
+    output_dtype: torch.dtype = torch.float16,
     block_m: int = 128,
     block_n: int = 128,
     block_k: int = 32,
@@ -329,10 +342,12 @@ def gemm_fp16_triton(
     _require_triton()
     _require_cuda_tensors(a, b)
 
-    if a.dtype != torch.float16:
+    if a.dtype not in {torch.float16, torch.bfloat16}:
         a = a.to(torch.float16)
-    if b.dtype != torch.float16:
+    if b.dtype not in {torch.float16, torch.bfloat16}:
         b = b.to(torch.float16)
+    if bias is not None and bias.dtype != output_dtype:
+        bias = bias.to(output_dtype)
 
     # Prepare dimensions
     assert a.dim() == 2 and b.dim() == 2
@@ -345,7 +360,7 @@ def gemm_fp16_triton(
         K_b, N = b.shape
         assert K == K_b
 
-    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+    c = torch.empty((M, N), device=a.device, dtype=output_dtype)
 
     # Encode activation
     act_code = 0
@@ -369,6 +384,7 @@ def gemm_fp16_triton(
         c.stride(0), c.stride(1),
         has_bias=bias is not None,
         activation=act_code,
+        ACC_TYPE=_tl_dtype_from_torch(accum_dtype),
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
@@ -387,6 +403,8 @@ def gemm_bf16_triton(
     *,
     activation: str | None = None,
     transpose_b: bool = True,
+    accum_dtype: torch.dtype = torch.float32,
+    output_dtype: torch.dtype = torch.bfloat16,
     block_m: int = 128,
     block_n: int = 128,
     block_k: int = 32,
@@ -394,18 +412,23 @@ def gemm_bf16_triton(
     num_warps: int = 4,
     num_stages: int = 3,
 ) -> torch.Tensor:
-    """BF16 GEMM using Triton (converts to FP16 internally for Triton compatibility)."""
+    """BF16 GEMM using Triton."""
     _require_triton()
     _require_cuda_tensors(a, b)
 
-    # Convert BF16 to FP16 for Triton (Triton kernel uses FP16 accumulation)
-    a_fp16 = a.to(torch.float16) if a.dtype == torch.bfloat16 else a
-    b_fp16 = b.to(torch.float16) if b.dtype == torch.bfloat16 else b
+    if a.dtype != torch.bfloat16:
+        a = a.to(torch.bfloat16)
+    if b.dtype != torch.bfloat16:
+        b = b.to(torch.bfloat16)
+    if bias is not None and bias.dtype != output_dtype:
+        bias = bias.to(output_dtype)
 
     result = gemm_fp16_triton(
-        a_fp16, b_fp16, bias,
+        a, b, bias,
         activation=activation,
         transpose_b=transpose_b,
+        accum_dtype=accum_dtype,
+        output_dtype=output_dtype,
         block_m=block_m,
         block_n=block_n,
         block_k=block_k,
@@ -413,10 +436,6 @@ def gemm_bf16_triton(
         num_warps=num_warps,  # type: ignore[call-arg]
         num_stages=num_stages,  # type: ignore[call-arg]
     )
-
-    # Convert back to BF16 if needed
-    if a.dtype == torch.bfloat16:
-        result = result.to(torch.bfloat16)
 
     return result
 

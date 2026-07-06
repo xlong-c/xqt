@@ -85,6 +85,23 @@ if triton is not None and tl is not None:
         tl.store(out_ptr + offsets, out, mask=mask)
 
     @triton.jit
+    def _geglu_kernel(
+        gate_ptr,
+        up_ptr,
+        out_ptr,
+        n_elements: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        program_id = tl.program_id(0)
+        offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0)
+        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)
+        cdf = 0.5 * (1.0 + tl.erf(gate * 0.7071067811865476))
+        out = gate * cdf * up
+        tl.store(out_ptr + offsets, out, mask=mask)
+
+    @triton.jit
     def _rmsnorm_residual_kernel(
         x_ptr,
         residual_ptr,
@@ -136,6 +153,7 @@ if triton is not None and tl is not None:
 else:
     _bias_gelu_kernel = None
     _swiglu_kernel = None
+    _geglu_kernel = None
     _rmsnorm_residual_kernel = None
     _rope_kernel = None
 
@@ -185,6 +203,12 @@ def fused_swiglu_reference(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor
     return F.silu(gate) * up
 
 
+def fused_geglu_reference(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Reference implementation for GEGLU fusion."""
+
+    return F.gelu(gate) * up
+
+
 def fused_swiglu_triton(
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -208,6 +232,40 @@ def fused_swiglu_triton(
     grid = (_require_triton().cdiv(gate_flat.numel(), launch_block),)
     assert _swiglu_kernel is not None
     _swiglu_kernel[grid](
+        gate_flat,
+        up_flat,
+        out,
+        gate_flat.numel(),
+        BLOCK_SIZE=launch_block,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return out.reshape_as(gate)
+
+
+def fused_geglu_triton(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    block_size: int = 1024,
+    num_warps: int = 4,
+    num_stages: int = 4,
+) -> torch.Tensor:
+    """CUDA-only Triton entry point for GEGLU."""
+
+    _require_triton()
+    _require_cuda_tensors(gate, up)
+    if gate.shape != up.shape:
+        raise ValueError(
+            f"gate and up must share shape, got {tuple(gate.shape)} and {tuple(up.shape)}"
+        )
+    gate_flat = gate.contiguous().flatten()
+    up_flat = up.contiguous().flatten()
+    out = torch.empty_like(gate_flat)
+    launch_block = _pointwise_block_size(gate_flat.numel(), block_size)
+    grid = (_require_triton().cdiv(gate_flat.numel(), launch_block),)
+    assert _geglu_kernel is not None
+    _geglu_kernel[grid](
         gate_flat,
         up_flat,
         out,
@@ -350,6 +408,14 @@ TRITON_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "autotune_key": ["numel"],
         "usage": "Transformer MLP gate/up projection epilogue.",
     },
+    "geglu": {
+        "kernel_name": "fused_geglu",
+        "block_size": 1024,
+        "num_warps": 4,
+        "num_stages": 4,
+        "autotune_key": ["numel"],
+        "usage": "Transformer MLP GEGLU gate/up projection epilogue.",
+    },
     "rmsnorm_residual": {
         "kernel_name": "fused_rmsnorm_residual",
         "block_size": 1024,
@@ -373,6 +439,8 @@ __all__ = [
     "TRITON_KERNEL_METADATA",
     "fused_bias_gelu_reference",
     "fused_bias_gelu_triton",
+    "fused_geglu_reference",
+    "fused_geglu_triton",
     "fused_rope_reference",
     "fused_rope_triton",
     "fused_rmsnorm_residual_reference",
