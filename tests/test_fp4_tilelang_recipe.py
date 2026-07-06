@@ -32,7 +32,7 @@ def test_fp4_tilelang_workflow_recipe_runs_via_optimize_model() -> None:
     operator_metrics = result.stages[1].metrics
     assert operator_metrics["target_count"] == 1
     target = operator_metrics["targets"][0]
-    assert target["backend"] == "tilelang"
+    assert target["engine"] == "tilelang"
     assert target["module_path"] == "fc1"
     assert target["metadata"]["execution_mode"] == "reference_fallback"
     assert (

@@ -42,11 +42,11 @@ def _tilelang_dequant_gemm_cuda_operator_config() -> dict:
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "model",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": ["dequant_gemm_epilogue"],
                     "min_speedup": 1.01,
                 }
@@ -79,7 +79,7 @@ def test_tilelang_dequant_gemm_operator_executor_uses_cuda_kernel_entry() -> Non
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "tilelang"
+    assert report.engine == "tilelang"
     assert report.metadata["execution_mode"] == "cuda_tilelang_entry"
     assert report.metadata["kernel_kind"] == "minimal_cuda_jit"
     assert report.metadata["kernel_constraints"]["dtype"] == "float16"

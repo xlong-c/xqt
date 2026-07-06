@@ -51,12 +51,12 @@ def _tilelang_conv_operator_config(
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "conv_tilelang",
                     "target": "conv",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": ["conv"],
                     "min_speedup": min_speedup,
                     "tilelang": {

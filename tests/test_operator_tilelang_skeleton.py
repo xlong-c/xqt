@@ -28,11 +28,11 @@ def _base_tilelang_operator_config() -> dict:
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "model",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": ["attention"],
                 }
             ],
@@ -63,7 +63,7 @@ def test_tilelang_operator_skeleton_returns_planned_report() -> None:
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "tilelang"
+    assert report.engine == "tilelang"
     assert report.metadata["execution_state"] in {"executed", "fallback"}
     assert report.metadata["execution_mode"] == "reference_fallback"
     assert "requires CUDA tensors" in str(report.metadata["execution_reason"])

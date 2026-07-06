@@ -63,7 +63,7 @@ def test_fp4_quant_stage_can_feed_tilelang_dequant_gemm_operator_stage() -> None
             {
                 "name": "fc1_tilelang",
                 "target": "fc1",
-                "backend": "tilelang",
+                "engine": "tilelang",
                 "patterns": ["dequant_gemm_epilogue"],
                 "min_speedup": 1.01,
                 "tilelang": {
@@ -79,7 +79,7 @@ def test_fp4_quant_stage_can_feed_tilelang_dequant_gemm_operator_stage() -> None
     quant_metrics = operator_stage.metrics
     assert quant_metrics["target_count"] == 1
     target = quant_metrics["targets"][0]
-    assert target["backend"] == "tilelang"
+    assert target["engine"] == "tilelang"
     assert target["module_path"] == "fc1"
     assert target["metadata"]["execution_state"] in {"executed", "fallback"}
     assert target["metadata"]["execution_mode"] == "reference_fallback"
@@ -135,7 +135,7 @@ def test_fp4_tilelang_operator_stage_uses_packed_cuda_entry() -> None:
             {
                 "name": "fc1_tilelang",
                 "target": "fc1",
-                "backend": "tilelang",
+                "engine": "tilelang",
                 "patterns": ["dequant_gemm_epilogue"],
                 "min_speedup": 1.01,
             }
@@ -187,7 +187,7 @@ def test_fp4_tilelang_operator_stage_can_force_packed_cuda_entry() -> None:
             {
                 "name": "fc1_tilelang",
                 "target": "fc1",
-                "backend": "tilelang",
+                "engine": "tilelang",
                 "patterns": ["fp4_packed_dequant_gemm_epilogue"],
                 "min_speedup": 1.01,
                 "tilelang": {

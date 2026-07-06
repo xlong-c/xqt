@@ -48,12 +48,12 @@ def _tilelang_norm_operator_config(
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "norm_tilelang",
                     "target": "norm",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": ["norm"],
                     "min_speedup": min_speedup,
                     "tilelang": {

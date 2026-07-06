@@ -52,12 +52,12 @@ def _tilelang_linear_operator_config(
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "linear_tilelang",
                     "target": "linear",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": patterns or ["linear"],
                     "min_speedup": min_speedup,
                     "tilelang": {
@@ -202,7 +202,7 @@ def test_tilelang_dequant_materialization_prefers_fp16_for_float32_only_buffers(
 
     target = OperatorOptimizationTargetPlan(
         name="tilelang_nvfp4",
-        backend="tilelang",
+        engine="tilelang",
         target_path="",
         patterns=["dequant_gemm_epilogue"],
         fallback="eager",

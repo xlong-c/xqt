@@ -100,7 +100,7 @@ def test_nvfp4_tilelang_operator_stage_uses_nvfp4_metadata() -> None:
             {
                 "name": "fc1_tilelang",
                 "target": "fc1",
-                "backend": "tilelang",
+                "engine": "tilelang",
                 "patterns": ["nvfp4_packed_dequant_gemm_epilogue"],
                 "min_speedup": 1.01,
                 "tilelang": {
@@ -111,7 +111,7 @@ def test_nvfp4_tilelang_operator_stage_uses_nvfp4_metadata() -> None:
     )
 
     target = operator_stage.metrics["targets"][0]
-    assert target["backend"] == "tilelang"
+    assert target["engine"] == "tilelang"
     assert target["module_path"] == "fc1"
     assert target["metadata"]["kernel_pattern"] == "nvfp4_packed_dequant_gemm_epilogue"
     assert target["metadata"]["weight_source"] == "compressed_tensors_nvfp4_packed_bridge"
@@ -139,7 +139,7 @@ def test_nvfp4_tilelang_operator_stage_can_force_packed_metadata() -> None:
             {
                 "name": "fc1_tilelang",
                 "target": "fc1",
-                "backend": "tilelang",
+                "engine": "tilelang",
                 "patterns": ["nvfp4_packed_dequant_gemm_epilogue"],
                 "min_speedup": 1.01,
                 "tilelang": {
@@ -168,7 +168,7 @@ def test_materialize_tilelang_candidate_accepts_external_nvfp4_linear_layout() -
         module,
         OperatorOptimizationTargetPlan(
             name="external_nvfp4_tilelang",
-            backend="tilelang",
+            engine="tilelang",
             patterns=["dequant_gemm_epilogue"],
             min_speedup=1.000001,
             tilelang={
@@ -202,7 +202,7 @@ def test_materialize_tilelang_candidate_accepts_external_nvfp4_linear_layout_for
         module,
         OperatorOptimizationTargetPlan(
             name="external_nvfp4_tilelang_packed",
-            backend="tilelang",
+            engine="tilelang",
             patterns=["nvfp4_packed_dequant_gemm_epilogue"],
             min_speedup=1.000001,
             tilelang={
@@ -236,7 +236,7 @@ def test_materialize_tilelang_candidate_models_replaces_multiple_external_nvfp4_
     targets = [
         OperatorOptimizationTargetPlan(
             name="proj1_tilelang",
-            backend="tilelang",
+            engine="tilelang",
             target_path="proj1",
             patterns=["dequant_gemm_epilogue"],
             min_speedup=1.000001,
@@ -249,7 +249,7 @@ def test_materialize_tilelang_candidate_models_replaces_multiple_external_nvfp4_
         ),
         OperatorOptimizationTargetPlan(
             name="proj2_tilelang",
-            backend="tilelang",
+            engine="tilelang",
             target_path="proj2",
             patterns=["dequant_gemm_epilogue"],
             min_speedup=1.000001,

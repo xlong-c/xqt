@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.pipeline.preflight import preflight_xqt_config
 
 
@@ -24,11 +24,11 @@ def _tilelang_operator_config() -> dict:
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "model",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": ["attention"],
                 }
             ],
@@ -38,7 +38,7 @@ def _tilelang_operator_config() -> dict:
 
 def test_tilelang_capability_reports_reference_fallback_when_package_missing() -> None:
     with patch("xqt.operator_opt.capability._package_available", return_value=False):
-        capability = describe_operator_backend_capability("tilelang")
+        capability = describe_operator_engine_capability("tilelang")
 
     assert capability.status == "available"
     assert capability.available is True

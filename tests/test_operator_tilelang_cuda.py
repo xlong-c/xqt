@@ -47,11 +47,11 @@ def _tilelang_cuda_operator_config(
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "tilelang",
+            "default_engine": "tilelang",
             "targets": [
                 {
                     "name": "model",
-                    "backend": "tilelang",
+                    "engine": "tilelang",
                     "patterns": ["attention"],
                     "min_speedup": min_speedup,
                     "tilelang": {
@@ -88,7 +88,7 @@ def test_tilelang_operator_executor_uses_cuda_kernel_entry() -> None:
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "tilelang"
+    assert report.engine == "tilelang"
     assert report.metadata["execution_mode"] == "cuda_tilelang_entry"
     assert report.metadata["kernel_kind"] == "minimal_cuda_jit"
     assert report.metadata["operator_family"] == "attention"
@@ -122,7 +122,7 @@ def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> N
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "tilelang"
+    assert report.engine == "tilelang"
     assert report.metadata["execution_mode"] == "cuda_native_fastpath"
     assert report.metadata["kernel_kind"] == "native_runtime_fastpath"
     assert report.metadata["operator_family"] == "attention"
@@ -156,7 +156,7 @@ def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath() -> None
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "tilelang"
+    assert report.engine == "tilelang"
     assert report.metadata["execution_mode"] == "cuda_graph_tilelang_entry"
     assert report.metadata["kernel_kind"] == "cuda_graph_replay"
     assert report.metadata["operator_family"] == "attention"
