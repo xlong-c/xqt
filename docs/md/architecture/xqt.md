@@ -12,13 +12,15 @@
 
 - 不提供完整训练流程.
 - 不承载 task-level validation 设计.
-- 不替代具体 backend 官方文档.
+- 不替代具体 runtime / engine 官方文档.
 
 ## 项目定位
 
 `XQT` 只关注模型本身. 它接收 PyTorch 模型, checkpoint 或导出产物, 执行模型侧压缩, 图变换, 导出适配, 误差分析和 benchmark.
 
 需要梯度更新的流程归 `XDL` 或第三方训练工具, 再把训练后的模型或 checkpoint 交给 `XQT`.
+
+在本仓库内, `XQT` 是唯一推理优化主体. `XDL` 不直接接管推理优化, 也不把 TensorRT / ONNX Runtime / OpenVINO 这类外部 runtime 包装成训练侧能力. XQT 自己拥有模型替换, 算子 contract, runtime 状态, benchmark, report 和 manifest.
 
 主链路:
 
@@ -37,6 +39,8 @@ PyTorch model / checkpoint / exported artifact
 - 覆盖 PTQ / QDQ, 权重量化, 剪枝, 算子优化, 导出前适配和部署格式转换.
 - 能导出 ONNX, TensorRT, OpenVINO, torch.export, TorchScript, ExecuTorch, ncnn, MNN 等产物.
 - 记录配置, 源 checkpoint, 指标, 产物校验和执行阶段, 保证结果可复现.
+- 以 Python API 为主入口表达模型变换, 例如 `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.Linear`, `xqt.nn.Conv2d`, `xqt.nn.LayerNorm`, `xqt.nn.FeedForward` 和后续 `Attention` / `TransformerBlock` facade.
+- 以语义块替换作为推理优化入口: Python 层替换 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock`; engine 层再决定落成一个 kernel, 一组 kernel 或 megakernel.
 
 非目标:
 
@@ -45,6 +49,34 @@ PyTorch model / checkpoint / exported artifact
 - 不运行 `zero_grad() -> backward() -> step()` 训练循环.
 - 不做 task-level validation 或 accuracy / mAP 评测闭环.
 - 不重新实现 TensorRT, OpenVINO, ONNX Runtime, ExecuTorch, ncnn, MNN 等后端.
+
+## Engine 术语
+
+XQT 文档和代码中统一使用 `engine` 表达 XQT 自己的实现选择和 report 字段:
+
+- `xqt.convert(..., engine=...)`
+- `operator_optimization.default_engine`
+- `operator_optimization.targets[*].engine`
+- `OptimizationCapability.engine`
+- `StageReport.engine`
+
+用户入口不应把 `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 理解成和 TensorRT / ONNX Runtime 并列的外部后端. 对推理优化来说, 对外主体是 `xqt`; engine 只是 XQT lowering contract 的实现选择.
+
+推荐抽象:
+
+```text
+Public API:
+  xqt.convert(model, engine=..., policy=...)
+  xqt.nn.Linear / Conv2d / LayerNorm / FeedForward / Attention / TransformerBlock
+
+XQT contract:
+  precision, layout, packing, fusion, runtime state, target architecture
+
+XQT engine:
+  triton, tilelang, cutlass, cute_dsl, cutile, custom_cuda
+```
+
+`engine="auto"` 这类策略未来应由 XQT capability 和 benchmark/report 决定. 文档不能把 metadata-only engine 写成已验证 executable path.
 
 ## 配置方式
 
@@ -83,7 +115,7 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 
 - `benchmark` 负责稳定 latency / memory / throughput 基线, profiler 负责解释瓶颈
 - 外部 profiler 输出应作为 artifact 挂到 manifest
-- report 至少记录 backend, device, target artifact, input shape, warmup, repeat, precision, batch size, profiler 名称和关键参数
+- report 至少记录 engine, device, target artifact, input shape, warmup, repeat, precision, batch size, profiler 名称和关键参数
 - `XQT` 可以提供 profiler preflight 和命令模板, 但不要封装厂商 profiler 的完整 CLI
 - profiling 不能引入 dataset / dataloader, evaluation provider, task-level validation 或训练循环
 

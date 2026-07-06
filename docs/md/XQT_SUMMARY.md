@@ -4,6 +4,8 @@
 
 XQT 只关注模型本身. 它做模型压缩,图变换,导出适配,误差分析和 benchmark,不接管训练,QAT,finetune,distillation,recovery 或 dataset / provider 语义.
 
+XQT 是仓库内唯一推理优化主体. Python API 是主入口; `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda` 是 XQT 内部 engine, 不是外部 inference backend.
+
 ## 三层入口
 
 - 架构层: [architecture/xqt.md](architecture/xqt.md)
@@ -31,7 +33,7 @@ XQT 只关注模型本身. 它做模型压缩,图变换,导出适配,误差分�
 
 - 已基本可用: PTQ / QDQ / torchao 量化,常规剪枝,ONNX / torch.export / TorchScript / TensorRT / OpenVINO / ExecuTorch / ncnn / MNN 导出,output diff,layer analysis,latency / memory benchmark,manifest.
 - 半可用: TensorRT engine / plugin preflight,TileLang 的受限 kernel target (attention / conv / half linear / half norm / dequant GEMM),FP4 packed weight 到 TileLang operator stage 的桥接.
-- 偏实验: 更完整的 AWQ / GPTQ packed megakernel,以及更广泛的 backend capability 闭环.
+- 偏实验: 更完整的 AWQ / GPTQ packed megakernel,以及更广泛的 engine capability 闭环.
 
 ## 性能分析工具
 

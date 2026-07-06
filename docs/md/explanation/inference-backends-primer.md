@@ -2,7 +2,7 @@
 
 本文是一份部署和推理后端的总览介绍. 它只解释常见后端本身是什么, 适合什么场景, 典型产物是什么, 使用时容易卡在哪里. 本文不定义 `XQT` 的 adapter 设计, recipe schema, workflow 约束或能力承诺.
 
-如果要按 XQT 当前后端逐个阅读, 优先看 [backends/index.md](backends/index.md). 该目录已经把 `torch_export`, ONNX, ONNX Runtime, TensorRT, OpenVINO, ExecuTorch, ncnn, MNN, TileLang, Triton, CUTLASS, CuTe DSL 和 CuTile 分成独立文档.
+如果要按 XQT 当前后端和 engine 逐个阅读, 优先看 [backends/index.md](backends/index.md). 该目录把 `torch_export`, ONNX, ONNX Runtime, TensorRT, OpenVINO, ExecuTorch, ncnn, MNN 归为导出 / runtime backend, 把 TileLang, Triton, CUTLASS, CuTe DSL 和 CuTile 归为 XQT 内部 kernel engine.
 
 ## 读这份文档前先分清三类东西
 

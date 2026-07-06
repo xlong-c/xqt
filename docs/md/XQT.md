@@ -6,6 +6,8 @@ XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,�
 
 需要梯度更新的流程归 XDL 或第三方训练工具,再把训练后的模型或 checkpoint 交给 XQT.
 
+在本仓库内, XQT 是唯一推理优化主体. Python API 是主入口: `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.*` facade 和 runtime manager 用来表达模型替换, 算子 contract, runtime 状态和 benchmark/report. `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda` 是 XQT 内部 engine, 不是和 TensorRT / ONNX Runtime / OpenVINO 并列的外部 backend.
+
 ## 1. 项目定位
 
 本章节保留为兼容锚点. `XQT` 的系统定位和模型侧边界已经迁到:
@@ -34,9 +36,11 @@ XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,�
 
 当前 `TileLang` 的受限 kernel target 已覆盖 `attention`, `conv`, direct half `linear`, `linear_marlin`, direct half `LayerNorm`, `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体. 这些 pattern 不是同等成熟度: `attention` 和 direct half `linear` 已有受限 CUDA fp16 kernel 入口, `conv` 当前是 `torch.unfold` / im2col 加 TileLang half GEMM 的 lowering 路径而不是 fully fused conv, direct half `LayerNorm` 已接入 TileLang `reduce_sum` kernel 且限制为 last-dim fp16. CPU 路径只使用 PyTorch eager fallback.
 
-当前 `CuTile` 的 kernel catalog 已对齐上述 `TileLang` pattern, 即 `attention`, `conv`, `linear`, `norm`, `dense_linear_epilogue`, `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体, 并保留原有 `bias_silu` pointwise scaffold. `CuTile` 仍是 metadata-first / reference-guarded backend: XQT 记录 artifact 和 capability, 并通过 `cuda.tile` 或兼容的 `cutile` 模块探测运行时; 内置 executor 可 materialize 线性 / dequant GEMM 的 reference-guarded 推理 wrapper, 但不把它当作完整通用执行器.
+当前 `CuTile` 的 kernel catalog 已对齐上述 `TileLang` pattern, 即 `attention`, `conv`, `linear`, `norm`, `dense_linear_epilogue`, `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体, 并保留原有 `bias_silu` pointwise scaffold. `CuTile` 仍是 metadata-first / reference-guarded engine: XQT 记录 artifact 和 capability, 并通过 `cuda.tile` 或兼容的 `cutile` 模块探测运行时; 内置 executor 可 materialize 线性 / dequant GEMM 的 reference-guarded 推理 wrapper, 但不把它当作完整通用执行器.
 
-当前 `CuTe DSL` adapter 覆盖 `gemm_epilogue` 和 `grouped_gemm` metadata. 内置 executor 可把 NVFP4 dense-cache bridge 路由到 `gemm_epilogue` reference-guarded 推理 wrapper; packed NVFP4 权重不会由 CuTe DSL 直接消费.
+当前 `CuTe DSL` engine adapter 覆盖 `gemm_epilogue` 和 `grouped_gemm` metadata. 内置 executor 可把 NVFP4 dense-cache bridge 路由到 `gemm_epilogue` reference-guarded 推理 wrapper; packed NVFP4 权重不会由 CuTe DSL 直接消费.
+
+新增的轻量算子转换入口使用 `xqt.convert(...)` 和 `xqt.nn.Linear` / `xqt.nn.Conv2d` / `xqt.nn.LayerNorm` / `xqt.nn.FeedForward` 语义 facade. 这条入口面向单模块或小范围 operator conversion, 对外保持函数形态, 对内通过状态化 converter 完成 contract lowering 和 engine materialization. 其中 `xqt.nn.FeedForward` 采用固定 FFN 骨架 `norm? -> project-in -> activation/gate -> dropout? -> project-out`, 把 `norm`, `activation` 和 `fusion` 显式暴露为顶层配置, 并在模块内部优先复用现有 Triton GEMM epilogue 与 pointwise fastpath. 当前 `xqt.convert(feedforward, engine=..., policy=..., projection_policies=...)` 会把 `PrecisionPolicy` 注入 FFN runtime 配置: `policy` 作为整个 FFN 的默认精度意图, `projection_policies` 可进一步分别覆写 `proj_in` / `proj_gate` / `proj_out` 的 `activation/weight/bias/mma/accum/output` 字段. 同一套精度契约也接受 `A x B + C = O` 角色写法, 例如 `PrecisionPolicy.from_matmul(A="nvfp4", B="fp16", C="fp32", mma="fp16", accum="fp32", O="fp16")` 或 `policy={"A": "nvfp4", "B": "fp16", "C": "fp32", "MMA": "fp16", "ACCUM": "fp32", "O": "fp16"}`. 若希望避免长期直接传裸字典, 还可以使用结构化 `FeedForwardPrecisionPolicy(default=..., proj_in=..., proj_gate=..., proj_out=...)` 作为 `policy`. 对单次 GEMM / Linear 级别, `xqt.operator_opt.backends.gemm_precision.gemm_with_precision(...)` 现在也支持 `engine=...`, 结构化 `MatmulPrecisionSpec(activation, weight, bias, mma, accum, output)` 及 `MatmulPrecisionSpec.from_roles(...)`, 作为更底层的统一 matmul 精度契约. `runtime_config()` 返回的是 engine, FFN 默认值, fusion report 和每个投影的最终生效配置. 当前 `activation/weight/bias/mma/output` 已进入模块内部 matmul 与输出路径; `accum` 已真实下推到 FFN 所复用的 Triton half/BF16 GEMM kernel, 并可通过统一 `MatmulPrecisionSpec` 进入相同的 GEMM 路径. 更低精度 GEMM 的真实执行仍依赖 packed contract 和 fused dequant GEMM path: `fp4` / `nvfp4` 可作为 Linear/FFN contract 的存储精度意图, dense eager fallback 不会伪装成真实低比特输出. FFN 当前仍是 runtime-configured 模块, 不是统一 executor 下的通用 FFN candidate lowering; fusion report 描述的是当前已接入的 GEMM epilogue / gated pointwise fusion 边界, 不是单个完整 FFN mega-kernel. 后续 `Attention` / `TransformerBlock` 也应沿用语义块替换入口, engine 层再决定是一组 kernel 还是 megakernel. 它属于 `xqt` 子模块级 Provisional / Internal 能力, 不改变 `xqt.__all__` 顶层工作流入口集合.
 
 ## 4. 性能分析工具
 
