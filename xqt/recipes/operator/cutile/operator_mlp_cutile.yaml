@@ -23,7 +23,7 @@ stages:
     targets:
     - name: mlp_cutile
       target: mlp
-      backend: cutile
+      engine: cutile
       patterns:
       - bias_silu
       min_speedup: 1.1

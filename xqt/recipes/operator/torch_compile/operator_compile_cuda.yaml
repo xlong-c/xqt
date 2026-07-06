@@ -23,11 +23,11 @@ stages:
   params:
     targets:
     - name: model
-      backend: torch_compile
+      engine: torch_compile
       mode: reduce-overhead
       dynamic: false
       options:
-        backend: inductor
+        engine: inductor
       min_speedup: 1.000001
 - name: benchmark_model
   kind: benchmark

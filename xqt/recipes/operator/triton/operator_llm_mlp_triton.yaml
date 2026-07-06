@@ -20,11 +20,11 @@ stages:
 - name: optimize_operators
   kind: operator
   params:
-    default_backend: triton
+    default_engine: triton
     targets:
     - name: mlp_triton
       target: mlp
-      backend: triton
+      engine: triton
       patterns:
       - swiglu
       min_speedup: 1.1

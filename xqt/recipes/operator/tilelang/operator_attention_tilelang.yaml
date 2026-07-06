@@ -20,11 +20,11 @@ stages:
 - name: optimize_operators
   kind: operator
   params:
-    default_backend: tilelang
+    default_engine: tilelang
     targets:
     - name: attention_tilelang
       target: attention_block
-      backend: tilelang
+      engine: tilelang
       patterns:
       - attention
       tilelang:

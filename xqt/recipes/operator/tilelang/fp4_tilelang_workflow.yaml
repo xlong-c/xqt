@@ -22,11 +22,11 @@ stages:
   kind: operator
   from_stage: fp4_quant
   params:
-    default_backend: tilelang
+    default_engine: tilelang
     targets:
     - name: fc1_tilelang
       target: fc1
-      backend: tilelang
+      engine: tilelang
       patterns:
       - dequant_gemm_epilogue
       min_speedup: 1.01

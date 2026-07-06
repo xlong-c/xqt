@@ -33,7 +33,7 @@ stages:
   params:
     targets:
     - name: model
-      backend: torch_compile
+      engine: torch_compile
       min_speedup: 1.000001
 - name: export_model
   kind: export

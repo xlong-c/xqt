@@ -23,7 +23,7 @@ stages:
     targets:
     - name: mlp_cutlass
       target: mlp
-      backend: cutlass
+      engine: cutlass
       patterns:
       - gemm_epilogue
       min_speedup: 1.1
