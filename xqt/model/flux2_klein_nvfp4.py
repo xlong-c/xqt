@@ -1,4 +1,4 @@
-"""FLUX.2 klein NVFP4 model-side backend inference helpers."""
+"""FLUX.2 klein NVFP4 model-side engine inference helpers."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from xqt.analysis.compare import compare_tensors
 from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
 from xqt.operator_opt import (
@@ -20,15 +21,21 @@ from xqt.operator_opt import (
     materialize_operator_candidate_models,
 )
 from xqt.operator_opt.compile_backend import compile_with_torch
+from xqt.operator_opt.executor import (
+    _benchmark_paired_callables,
+    _capture_cuda_graph_with_static_state,
+    _cuda_graph_tensor_signature,
+    _replay_cuda_graph_tensor_callable,
+)
 from xqt.quant import bridge_module_to_nvfp4_linear_shared, infer_nvfp4_tensor_layout
 
 
 FLUX2_KLEIN_4B_REPO_ID = "black-forest-labs/FLUX.2-klein-4b"
 FLUX2_KLEIN_4B_NVFP4_REPO_ID = "black-forest-labs/FLUX.2-klein-4b-nvfp4"
 FLUX2_KLEIN_4B_NVFP4_FILENAME = "flux-2-klein-4b-nvfp4.safetensors"
-FLUX2_KLEIN_NVFP4_BACKENDS = ("cute_dsl", "cutile", "tilelang")
+FLUX2_KLEIN_NVFP4_ENGINES = ("cute_dsl", "cutile", "tilelang")
 
-_BACKEND_ALIASES = {
+_ENGINE_ALIASES = {
     "cutedsl": "cute_dsl",
     "cute-dsl": "cute_dsl",
     "cute_dsl": "cute_dsl",
@@ -63,7 +70,7 @@ class Flux2KleinNVFP4TargetSummary:
     """Small manifest entry for one bridgeable FLUX.2 NVFP4 Linear target."""
 
     name: str
-    backend: str
+    engine: str
     module_type: str
     input_features: int
     output_features: int
@@ -73,7 +80,7 @@ class Flux2KleinNVFP4TargetSummary:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "backend": self.backend,
+            "engine": self.engine,
             "module_type": self.module_type,
             "input_features": self.input_features,
             "output_features": self.output_features,
@@ -83,11 +90,11 @@ class Flux2KleinNVFP4TargetSummary:
 
 
 @dataclass(frozen=True)
-class Flux2KleinNVFP4BackendResult:
-    """Materialized backend inference result for a FLUX.2 klein NVFP4 model."""
+class Flux2KleinNVFP4EngineResult:
+    """Materialized engine inference result for a FLUX.2 klein NVFP4 model."""
 
     model: Any
-    backend: str
+    engine: str
     targets: list[OperatorOptimizationTargetPlan]
     target_summaries: list[Flux2KleinNVFP4TargetSummary]
 
@@ -101,9 +108,9 @@ class Flux2KleinNVFP4CompiledTransformerResult:
     """Whole-transformer compile result for FLUX.2 klein NVFP4 inference."""
 
     model: nn.Module
-    backend: str | None
+    engine: str | None
     materialized_target_count: int
-    compile_backend: str
+    compile_engine: str
     compile_mode: str | None
     compile_time_ms: float
     warmup_iterations: int
@@ -111,13 +118,63 @@ class Flux2KleinNVFP4CompiledTransformerResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "backend": self.backend,
+            "engine": self.engine,
             "materialized_target_count": self.materialized_target_count,
-            "compile_backend": self.compile_backend,
+            "compile_engine": self.compile_engine,
             "compile_mode": self.compile_mode,
             "compile_time_ms": self.compile_time_ms,
             "warmup_iterations": self.warmup_iterations,
             "warmup_time_ms": self.warmup_time_ms,
+        }
+
+
+@dataclass(frozen=True)
+class Flux2KleinNVFP4CudaGraphTransformerResult:
+    """Whole-transformer CUDA Graph capture result for fixed-shape inference."""
+
+    model: nn.Module
+    engine: str | None
+    materialized_target_count: int
+    graph_state: Mapping[str, Any]
+    input_signature: tuple[tuple[Any, ...], ...]
+    warmup_iterations: int
+    capture_time_ms: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "engine": self.engine,
+            "materialized_target_count": self.materialized_target_count,
+            "input_signature": [list(signature) for signature in self.input_signature],
+            "warmup_iterations": self.warmup_iterations,
+            "capture_time_ms": self.capture_time_ms,
+        }
+
+
+@dataclass(frozen=True)
+class Flux2KleinNVFP4PairedBenchmarkResult:
+    """Paired eager-vs-candidate benchmark for whole-transformer forward."""
+
+    reference_report: dict[str, Any]
+    candidate_report: dict[str, Any]
+    paired_speedup_ratios: list[float]
+    paired_speedup_p50: float
+    max_abs_vs_eager: float
+    mean_abs_vs_eager: float
+    allclose_vs_eager: bool
+    atol: float
+    rtol: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reference_report": dict(self.reference_report),
+            "candidate_report": dict(self.candidate_report),
+            "paired_speedup_ratios": list(self.paired_speedup_ratios),
+            "paired_speedup_p50": self.paired_speedup_p50,
+            "max_abs_vs_eager": self.max_abs_vs_eager,
+            "mean_abs_vs_eager": self.mean_abs_vs_eager,
+            "allclose_vs_eager": self.allclose_vs_eager,
+            "atol": self.atol,
+            "rtol": self.rtol,
         }
 
 
@@ -199,17 +256,27 @@ class _Flux2KleinNVFP4Linear(nn.Module):
         return F.linear(inputs, weight, bias)
 
 
-def normalize_flux2_klein_nvfp4_backend(backend: str) -> str:
-    """Normalize user-facing backend names to XQT operator backend ids."""
+def normalize_flux2_klein_nvfp4_engine(engine: str) -> str:
+    """Normalize user-facing engine names to XQT operator engine ids."""
 
-    key = str(backend).strip().lower().replace(" ", "_")
+    key = str(engine).strip().lower().replace(" ", "_")
     try:
-        return _BACKEND_ALIASES[key]
+        return _ENGINE_ALIASES[key]
     except KeyError as exc:
-        allowed = ", ".join(FLUX2_KLEIN_NVFP4_BACKENDS)
+        allowed = ", ".join(FLUX2_KLEIN_NVFP4_ENGINES)
         raise XQTBackendError(
-            f"Unsupported FLUX.2 klein NVFP4 backend: {backend}. Known: {allowed}"
+            f"Unsupported FLUX.2 klein NVFP4 engine: {engine}. Known: {allowed}"
         ) from exc
+
+
+def _resolve_flux2_klein_nvfp4_engine(
+    *,
+    engine: str | None,
+    context: str,
+) -> str:
+    if engine is None:
+        raise XQTBackendError(f"{context} requires engine=...")
+    return normalize_flux2_klein_nvfp4_engine(engine)
 
 
 def flux2_klein_nvfp4_single_file_url(
@@ -232,6 +299,22 @@ def _cuda_arch() -> str | None:
     return f"sm_{major}{minor}"
 
 
+def _should_skip_tilelang_materialization_for_cuda_graph(
+    *,
+    engine: str | None,
+    optimization_kind: str,
+    target_arch: str | None,
+) -> bool:
+    normalized_engine = None if engine is None else normalize_flux2_klein_nvfp4_engine(engine)
+    kind = str(optimization_kind).strip().lower().replace("-", "_")
+    resolved_arch = target_arch or _cuda_arch()
+    return (
+        normalized_engine == "tilelang"
+        and kind == "cuda_graph"
+        and resolved_arch == "sm_89"
+    )
+
+
 def _resolve_module(model_or_pipeline: Any) -> tuple[nn.Module, str | None]:
     if isinstance(model_or_pipeline, nn.Module):
         return model_or_pipeline, None
@@ -239,7 +322,7 @@ def _resolve_module(model_or_pipeline: Any) -> tuple[nn.Module, str | None]:
     if isinstance(transformer, nn.Module):
         return transformer, "transformer"
     raise XQTBackendError(
-        "FLUX.2 klein NVFP4 backend inference requires an nn.Module or a pipeline with an nn.Module transformer"
+        "FLUX.2 klein NVFP4 engine inference requires an nn.Module or a pipeline with an nn.Module transformer"
     )
 
 
@@ -256,39 +339,203 @@ def _matches_filters(
     return True
 
 
-def _backend_patterns(backend: str) -> list[str]:
-    if backend == "tilelang":
+def _engine_patterns(engine: str) -> list[str]:
+    if engine == "tilelang":
         return ["dequant_gemm_epilogue"]
-    if backend == "cutile":
+    if engine == "cutile":
         return ["nvfp4_packed_dequant_gemm_epilogue"]
     return ["gemm_epilogue"]
 
 
-def _target_plan_for_backend(
+def _flux2_forward_kwargs(
+    *,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None,
+    joint_attention_kwargs: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "hidden_states": hidden_states,
+        "encoder_hidden_states": encoder_hidden_states,
+        "timestep": timestep,
+        "img_ids": img_ids,
+        "txt_ids": txt_ids,
+        "guidance": guidance,
+        "joint_attention_kwargs": (
+            None if joint_attention_kwargs is None else dict(joint_attention_kwargs)
+        ),
+        "return_dict": False,
+    }
+
+
+def _flux2_dynamic_inputs(
+    *,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None,
+) -> tuple[torch.Tensor, ...]:
+    dynamic_inputs = [
+        hidden_states,
+        encoder_hidden_states,
+        timestep,
+        img_ids,
+        txt_ids,
+    ]
+    if guidance is not None:
+        dynamic_inputs.append(guidance)
+    return tuple(dynamic_inputs)
+
+
+def _split_flux2_dynamic_inputs(
+    runtime_args: tuple[torch.Tensor, ...],
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+]:
+    if len(runtime_args) not in {5, 6}:
+        raise XQTBackendError(
+            "FLUX.2 transformer CUDA Graph replay expects 5 or 6 tensor inputs"
+        )
+    guidance = runtime_args[5] if len(runtime_args) == 6 else None
+    return (
+        runtime_args[0],
+        runtime_args[1],
+        runtime_args[2],
+        runtime_args[3],
+        runtime_args[4],
+        guidance,
+    )
+
+
+def _forward_flux2_klein_nvfp4_transformer_once(
+    transformer: nn.Module,
+    *,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None = None,
+    joint_attention_kwargs: Mapping[str, Any] | None = None,
+) -> torch.Tensor:
+    with torch.no_grad():
+        output = transformer(
+            **_flux2_forward_kwargs(
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                timestep=timestep,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                guidance=guidance,
+                joint_attention_kwargs=joint_attention_kwargs,
+            )
+        )
+    if not isinstance(output, tuple) or not output:
+        raise XQTBackendError("FLUX.2 transformer forward must return a non-empty tuple")
+    first = output[0]
+    if not isinstance(first, torch.Tensor):
+        raise XQTBackendError("FLUX.2 transformer forward[0] must be a tensor")
+    return first
+
+
+def _flux2_cuda_graph_signature(
+    runtime_args: tuple[torch.Tensor, ...],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(_cuda_graph_tensor_signature(tensor) for tensor in runtime_args)
+
+
+class _Flux2KleinNVFP4CudaGraphModule(nn.Module):
+    """Callable whole-transformer CUDA Graph wrapper with strict signature checks."""
+
+    def __init__(
+        self,
+        *,
+        transformer: nn.Module,
+        graph_state: Mapping[str, Any],
+        input_signature: tuple[tuple[Any, ...], ...],
+        joint_attention_kwargs: Mapping[str, Any] | None,
+    ) -> None:
+        super().__init__()
+        self.transformer = transformer
+        self._graph_state = graph_state
+        self._input_signature = input_signature
+        self._joint_attention_kwargs = (
+            None if joint_attention_kwargs is None else dict(joint_attention_kwargs)
+        )
+
+    def forward(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        timestep: torch.Tensor,
+        img_ids: torch.Tensor,
+        txt_ids: torch.Tensor,
+        guidance: torch.Tensor | None = None,
+        joint_attention_kwargs: Mapping[str, Any] | None = None,
+        return_dict: bool = False,
+    ) -> tuple[torch.Tensor]:
+        if return_dict:
+            raise XQTBackendError("FLUX.2 CUDA Graph helper only supports return_dict=False")
+        if joint_attention_kwargs is not None and dict(joint_attention_kwargs) != dict(
+            self._joint_attention_kwargs or {}
+        ):
+            raise XQTBackendError(
+                "FLUX.2 CUDA Graph replay requires the same joint_attention_kwargs used at capture time"
+            )
+        runtime_args = _flux2_dynamic_inputs(
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            timestep=timestep,
+            img_ids=img_ids,
+            txt_ids=txt_ids,
+            guidance=guidance,
+        )
+        runtime_signature = _flux2_cuda_graph_signature(runtime_args)
+        if runtime_signature != self._input_signature:
+            raise XQTBackendError(
+                "FLUX.2 CUDA Graph replay requires matching shape/stride/dtype/device inputs"
+            )
+        with torch.no_grad():
+            output = _replay_cuda_graph_tensor_callable(self._graph_state, runtime_args)
+        return (output,)
+
+
+def _target_plan_for_engine(
     *,
     name: str,
-    backend: str,
+    engine: str,
     target_arch: str | None,
     min_speedup: float,
 ) -> OperatorOptimizationTargetPlan:
-    patterns = _backend_patterns(backend)
+    patterns = _engine_patterns(engine)
     common: dict[str, Any] = {
-        "name": f"{name}_{backend}",
-        "backend": backend,
+        "name": f"{name}_{engine}",
+        "engine": engine,
         "target_path": name,
         "patterns": patterns,
         "fallback": "eager",
         "min_speedup": float(min_speedup),
         "validate": {"atol": 1e-2, "rtol": 1e-2},
     }
-    if backend == "tilelang":
+    if engine == "tilelang":
         common["tilelang"] = {
             "target": "cuda",
             "target_arch": target_arch,
             "linear_runtime": "auto",
             "linear_fastpath": "auto",
         }
-    elif backend == "cutile":
+    elif engine == "cutile":
         common["cutile"] = {
             "target": "cuda",
             "target_arch": target_arch,
@@ -306,21 +553,24 @@ def _target_plan_for_backend(
 def collect_flux2_klein_nvfp4_targets(
     model_or_pipeline: Any,
     *,
-    backend: str,
+    engine: str | None = None,
     target_arch: str | None = None,
     max_targets: int | None = None,
     include_names: Sequence[str] | None = None,
     exclude_names: Sequence[str] | None = None,
     min_speedup: float = 0.0,
 ) -> tuple[list[OperatorOptimizationTargetPlan], list[Flux2KleinNVFP4TargetSummary]]:
-    """Collect bridgeable NVFP4 Linear targets for one backend.
+    """Collect bridgeable NVFP4 Linear targets for one XQT engine.
 
     Target paths are relative to the resolved module. For Diffusers pipelines this
-    helper scans `pipeline.transformer`, and `materialize_flux2_klein_nvfp4_backend`
+    helper scans `pipeline.transformer`, and `materialize_flux2_klein_nvfp4_engine`
     writes the optimized transformer back to the pipeline.
     """
 
-    backend = normalize_flux2_klein_nvfp4_backend(backend)
+    resolved_engine = _resolve_flux2_klein_nvfp4_engine(
+        engine=engine,
+        context="collect_flux2_klein_nvfp4_targets",
+    )
     module, _ = _resolve_module(model_or_pipeline)
     resolved_arch = target_arch or _cuda_arch()
     targets: list[OperatorOptimizationTargetPlan] = []
@@ -333,9 +583,9 @@ def collect_flux2_klein_nvfp4_targets(
         layout = infer_nvfp4_tensor_layout(child)
         if layout is None:
             continue
-        target = _target_plan_for_backend(
+        target = _target_plan_for_engine(
             name=name,
-            backend=backend,
+            engine=resolved_engine,
             target_arch=resolved_arch,
             min_speedup=min_speedup,
         )
@@ -343,7 +593,7 @@ def collect_flux2_klein_nvfp4_targets(
         summaries.append(
             Flux2KleinNVFP4TargetSummary(
                 name=name,
-                backend=backend,
+                engine=resolved_engine,
                 module_type=type(child).__name__,
                 input_features=layout.input_features,
                 output_features=layout.output_features,
@@ -356,50 +606,57 @@ def collect_flux2_klein_nvfp4_targets(
     return targets, summaries
 
 
-def collect_flux2_klein_nvfp4_backend_targets(
+def collect_flux2_klein_nvfp4_engine_targets(
     model_or_pipeline: Any,
     *,
-    backends: Iterable[str] = FLUX2_KLEIN_NVFP4_BACKENDS,
+    engines: Iterable[str] | None = None,
     target_arch: str | None = None,
     max_targets: int | None = None,
     include_names: Sequence[str] | None = None,
     exclude_names: Sequence[str] | None = None,
     min_speedup: float = 0.0,
 ) -> dict[str, tuple[list[OperatorOptimizationTargetPlan], list[Flux2KleinNVFP4TargetSummary]]]:
-    """Collect target plans for all requested FLUX.2 klein NVFP4 backends."""
+    """Collect target plans for requested FLUX.2 klein NVFP4 engines."""
+
+    requested_engines = FLUX2_KLEIN_NVFP4_ENGINES
+    if engines is not None:
+        requested_engines = tuple(engines)
 
     return {
-        normalize_flux2_klein_nvfp4_backend(backend): collect_flux2_klein_nvfp4_targets(
+        normalize_flux2_klein_nvfp4_engine(engine): collect_flux2_klein_nvfp4_targets(
             model_or_pipeline,
-            backend=backend,
+            engine=engine,
             target_arch=target_arch,
             max_targets=max_targets,
             include_names=include_names,
             exclude_names=exclude_names,
             min_speedup=min_speedup,
         )
-        for backend in backends
+        for engine in requested_engines
     }
 
 
-def materialize_flux2_klein_nvfp4_backend(
+def materialize_flux2_klein_nvfp4_engine(
     model_or_pipeline: Any,
     *,
-    backend: str,
+    engine: str | None = None,
     target_arch: str | None = None,
     max_targets: int | None = None,
     include_names: Sequence[str] | None = None,
     exclude_names: Sequence[str] | None = None,
     inplace: bool = False,
     min_speedup: float = 0.0,
-) -> Flux2KleinNVFP4BackendResult:
-    """Materialize a callable XQT backend inference path for FLUX.2 klein NVFP4."""
+) -> Flux2KleinNVFP4EngineResult:
+    """Materialize a callable XQT engine inference path for FLUX.2 klein NVFP4."""
 
-    backend = normalize_flux2_klein_nvfp4_backend(backend)
+    resolved_engine = _resolve_flux2_klein_nvfp4_engine(
+        engine=engine,
+        context="materialize_flux2_klein_nvfp4_engine",
+    )
     module, pipeline_component = _resolve_module(model_or_pipeline)
     targets, summaries = collect_flux2_klein_nvfp4_targets(
         module,
-        backend=backend,
+        engine=resolved_engine,
         target_arch=target_arch,
         max_targets=max_targets,
         include_names=include_names,
@@ -414,17 +671,17 @@ def materialize_flux2_klein_nvfp4_backend(
         inplace=inplace,
     )
     if pipeline_component is None:
-        return Flux2KleinNVFP4BackendResult(
+        return Flux2KleinNVFP4EngineResult(
             model=optimized_module,
-            backend=backend,
+            engine=resolved_engine,
             targets=targets,
             target_summaries=summaries,
         )
     pipeline = model_or_pipeline if inplace else copy.copy(model_or_pipeline)
     setattr(pipeline, pipeline_component, optimized_module)
-    return Flux2KleinNVFP4BackendResult(
+    return Flux2KleinNVFP4EngineResult(
         model=pipeline,
-        backend=backend,
+        engine=resolved_engine,
         targets=targets,
         target_summaries=summaries,
     )
@@ -433,10 +690,10 @@ def materialize_flux2_klein_nvfp4_backend(
 def compile_flux2_klein_nvfp4_transformer(
     transformer: nn.Module,
     *,
-    backend_name: str | None = None,
+    engine_name: str | None = None,
     materialized_target_count: int = 0,
-    backend: str = "inductor",
-    mode: str | None = "reduce-overhead",
+    compile_engine: str = "inductor",
+    mode: str | None = None,
     fullgraph: bool = False,
     dynamic: bool = False,
     options: Mapping[str, Any] | None = None,
@@ -449,8 +706,11 @@ def compile_flux2_klein_nvfp4_transformer(
         )
     compile_plan = OperatorOptimizationTargetPlan(
         name="flux2_klein_nvfp4_transformer_compile",
-        backend="torch_compile",
-        options={"backend": backend, **(dict(options) if options is not None else {})},
+        engine="torch_compile",
+        options={
+            "engine": compile_engine,
+            **(dict(options) if options is not None else {}),
+        },
         mode=mode,
         fullgraph=fullgraph,
         dynamic=dynamic,
@@ -458,9 +718,9 @@ def compile_flux2_klein_nvfp4_transformer(
     compiled_model, compile_time_ms = compile_with_torch(transformer, compile_plan)
     return Flux2KleinNVFP4CompiledTransformerResult(
         model=compiled_model,
-        backend=None if backend_name is None else normalize_flux2_klein_nvfp4_backend(backend_name),
+        engine=None if engine_name is None else normalize_flux2_klein_nvfp4_engine(engine_name),
         materialized_target_count=int(materialized_target_count),
-        compile_backend=str(backend),
+        compile_engine=str(compile_engine),
         compile_mode=None if mode in {None, "default"} else str(mode),
         compile_time_ms=float(compile_time_ms),
         warmup_iterations=0,
@@ -468,16 +728,91 @@ def compile_flux2_klein_nvfp4_transformer(
     )
 
 
+def capture_flux2_klein_nvfp4_transformer_cuda_graph(
+    transformer: nn.Module,
+    *,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None = None,
+    joint_attention_kwargs: Mapping[str, Any] | None = None,
+    engine_name: str | None = None,
+    materialized_target_count: int = 0,
+    warmup_iterations: int = 6,
+) -> Flux2KleinNVFP4CudaGraphTransformerResult:
+    """Capture a fixed-shape whole-transformer CUDA Graph replay path."""
+
+    runtime_args = _flux2_dynamic_inputs(
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+    )
+    if not runtime_args:
+        raise XQTBackendError("CUDA Graph capture requires tensor inputs")
+    if not all(tensor.is_cuda for tensor in runtime_args):
+        raise XQTBackendError("FLUX.2 CUDA Graph capture requires CUDA tensor inputs")
+    signature = _flux2_cuda_graph_signature(runtime_args)
+    capture_start = perf_counter()
+
+    def _capture_body(*dynamic_runtime_args: torch.Tensor) -> torch.Tensor:
+        (
+            capture_hidden_states,
+            capture_encoder_hidden_states,
+            capture_timestep,
+            capture_img_ids,
+            capture_txt_ids,
+            capture_guidance,
+        ) = _split_flux2_dynamic_inputs(dynamic_runtime_args)
+        return _forward_flux2_klein_nvfp4_transformer_once(
+            transformer,
+            hidden_states=capture_hidden_states,
+            encoder_hidden_states=capture_encoder_hidden_states,
+            timestep=capture_timestep,
+            img_ids=capture_img_ids,
+            txt_ids=capture_txt_ids,
+            guidance=capture_guidance,
+            joint_attention_kwargs=joint_attention_kwargs,
+        )
+
+    graph_state = _capture_cuda_graph_with_static_state(
+        runtime_args,
+        body=_capture_body,
+        warmup=warmup_iterations,
+    )
+    capture_time_ms = float((perf_counter() - capture_start) * 1000.0)
+    wrapped = _Flux2KleinNVFP4CudaGraphModule(
+        transformer=transformer,
+        graph_state=graph_state,
+        input_signature=signature,
+        joint_attention_kwargs=joint_attention_kwargs,
+    )
+    return Flux2KleinNVFP4CudaGraphTransformerResult(
+        model=wrapped,
+        engine=None if engine_name is None else normalize_flux2_klein_nvfp4_engine(engine_name),
+        materialized_target_count=int(materialized_target_count),
+        graph_state=graph_state,
+        input_signature=signature,
+        warmup_iterations=int(warmup_iterations),
+        capture_time_ms=capture_time_ms,
+    )
+
+
 def optimize_flux2_klein_nvfp4_transformer(
     transformer: nn.Module,
     *,
-    backend: str | None = None,
+    engine: str | None = None,
+    optimization_kind: str = "compile",
     target_arch: str | None = None,
     max_targets: int | None = None,
     include_names: Sequence[str] | None = None,
     exclude_names: Sequence[str] | None = None,
     min_speedup: float = 0.0,
-    compile_backend: str = "inductor",
+    compile_engine: str = "inductor",
     compile_mode: str | None = None,
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
@@ -491,16 +826,27 @@ def optimize_flux2_klein_nvfp4_transformer(
     joint_attention_kwargs: dict[str, Any] | None = None,
     warmup_iterations: int = 0,
     inplace: bool = False,
-) -> Flux2KleinNVFP4CompiledTransformerResult:
-    """Materialize an optional backend, compile the whole transformer, and optionally warm it up."""
+) -> Flux2KleinNVFP4CompiledTransformerResult | Flux2KleinNVFP4CudaGraphTransformerResult:
+    """Materialize an optional engine, then build compile or CUDA Graph whole-model fastpaths."""
 
     optimized_model = transformer if inplace else copy.deepcopy(transformer)
     materialized_target_count = 0
-    normalized_backend: str | None = None
-    if backend is not None:
-        backend_result = materialize_flux2_klein_nvfp4_backend(
+    normalized_engine: str | None = None
+    kind = str(optimization_kind).strip().lower().replace("-", "_")
+    if engine is not None:
+        normalized_engine = _resolve_flux2_klein_nvfp4_engine(
+            engine=engine,
+            context="optimize_flux2_klein_nvfp4_transformer",
+        )
+    skip_tilelang_materialization = _should_skip_tilelang_materialization_for_cuda_graph(
+        engine=normalized_engine,
+        optimization_kind=kind,
+        target_arch=target_arch,
+    )
+    if normalized_engine is not None and not skip_tilelang_materialization:
+        engine_result = materialize_flux2_klein_nvfp4_engine(
             optimized_model,
-            backend=backend,
+            engine=normalized_engine,
             target_arch=target_arch,
             max_targets=max_targets,
             include_names=include_names,
@@ -508,14 +854,43 @@ def optimize_flux2_klein_nvfp4_transformer(
             inplace=True,
             min_speedup=min_speedup,
         )
-        optimized_model = backend_result.model
-        normalized_backend = backend_result.backend
-        materialized_target_count = backend_result.target_count
+        optimized_model = engine_result.model
+        normalized_engine = engine_result.engine
+        materialized_target_count = engine_result.target_count
+    required_inputs = (
+        hidden_states,
+        encoder_hidden_states,
+        timestep,
+        img_ids,
+        txt_ids,
+    )
+    if kind == "cuda_graph":
+        if any(value is None for value in required_inputs):
+            raise XQTBackendError(
+                "cuda_graph optimization requires hidden_states, encoder_hidden_states, timestep, img_ids, and txt_ids"
+            )
+        return capture_flux2_klein_nvfp4_transformer_cuda_graph(
+            optimized_model,
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            timestep=timestep,
+            img_ids=img_ids,
+            txt_ids=txt_ids,
+            guidance=guidance,
+            joint_attention_kwargs=joint_attention_kwargs,
+            engine_name=normalized_engine,
+            materialized_target_count=materialized_target_count,
+            warmup_iterations=warmup_iterations,
+        )
+    if kind != "compile":
+        raise XQTBackendError(
+            "optimization_kind must be either 'compile' or 'cuda_graph'"
+        )
     compiled = compile_flux2_klein_nvfp4_transformer(
         optimized_model,
-        backend_name=normalized_backend,
+        engine_name=normalized_engine,
         materialized_target_count=materialized_target_count,
-        backend=compile_backend,
+        compile_engine=compile_engine,
         mode=compile_mode,
         fullgraph=compile_fullgraph,
         dynamic=compile_dynamic,
@@ -523,13 +898,6 @@ def optimize_flux2_klein_nvfp4_transformer(
     )
     warmup_time_ms = 0.0
     if warmup_iterations > 0:
-        required_inputs = (
-            hidden_states,
-            encoder_hidden_states,
-            timestep,
-            img_ids,
-            txt_ids,
-        )
         if any(value is None for value in required_inputs):
             raise XQTBackendError(
                 "warmup requires hidden_states, encoder_hidden_states, timestep, img_ids, and txt_ids"
@@ -547,9 +915,9 @@ def optimize_flux2_klein_nvfp4_transformer(
         )
     return Flux2KleinNVFP4CompiledTransformerResult(
         model=compiled.model,
-        backend=compiled.backend,
+        engine=compiled.engine,
         materialized_target_count=compiled.materialized_target_count,
-        compile_backend=compiled.compile_backend,
+        compile_engine=compiled.compile_engine,
         compile_mode=compiled.compile_mode,
         compile_time_ms=compiled.compile_time_ms,
         warmup_iterations=int(warmup_iterations),
@@ -579,14 +947,15 @@ def warmup_flux2_klein_nvfp4_transformer(
 
     def _forward_once() -> object:
         return transformer(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            timestep=timestep,
-            img_ids=img_ids,
-            txt_ids=txt_ids,
-            guidance=guidance,
-            joint_attention_kwargs=joint_attention_kwargs,
-            return_dict=False,
+            **_flux2_forward_kwargs(
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                timestep=timestep,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                guidance=guidance,
+                joint_attention_kwargs=joint_attention_kwargs,
+            )
         )
 
     start = perf_counter()
@@ -616,14 +985,15 @@ def benchmark_flux2_klein_nvfp4_transformer_forward(
 
     def _forward_once() -> object:
         return transformer(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            timestep=timestep,
-            img_ids=img_ids,
-            txt_ids=txt_ids,
-            guidance=guidance,
-            joint_attention_kwargs=joint_attention_kwargs,
-            return_dict=False,
+            **_flux2_forward_kwargs(
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                timestep=timestep,
+                img_ids=img_ids,
+                txt_ids=txt_ids,
+                guidance=guidance,
+                joint_attention_kwargs=joint_attention_kwargs,
+            )
         )
 
     device = str(hidden_states.device)
@@ -634,6 +1004,99 @@ def benchmark_flux2_klein_nvfp4_transformer_forward(
         sync_cuda=sync_cuda,
         device=device,
     ).to_dict()
+
+
+def benchmark_flux2_klein_nvfp4_transformer_paired(
+    *,
+    reference_transformer: nn.Module,
+    candidate_transformer: nn.Module,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None = None,
+    joint_attention_kwargs: Mapping[str, Any] | None = None,
+    warmup: int = 6,
+    iterations: int = 20,
+    sync_cuda: bool = True,
+    atol: float = 1e-2,
+    rtol: float = 1e-2,
+) -> Flux2KleinNVFP4PairedBenchmarkResult:
+    """Benchmark whole-transformer candidate against eager with paired alternating timing."""
+
+    kwargs = _flux2_forward_kwargs(
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        joint_attention_kwargs=joint_attention_kwargs,
+    )
+
+    def _reference_forward() -> object:
+        return reference_transformer(**kwargs)
+
+    def _candidate_forward() -> object:
+        return candidate_transformer(**kwargs)
+
+    reference_output = _forward_flux2_klein_nvfp4_transformer_once(
+        reference_transformer,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        joint_attention_kwargs=joint_attention_kwargs,
+    )
+    candidate_output = _forward_flux2_klein_nvfp4_transformer_once(
+        candidate_transformer,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        joint_attention_kwargs=joint_attention_kwargs,
+    )
+    diff = compare_tensors(
+        reference_output,
+        candidate_output,
+        atol=atol,
+        rtol=rtol,
+        include_summary=False,
+    )
+    reference_report, candidate_report, paired_speedup_ratios = _benchmark_paired_callables(
+        _reference_forward,
+        _candidate_forward,
+        warmup=warmup,
+        iterations=iterations,
+        sync_cuda=sync_cuda,
+        device=str(hidden_states.device),
+    )
+    sorted_ratios = sorted(paired_speedup_ratios)
+    paired_speedup_p50 = 0.0
+    if sorted_ratios:
+        midpoint = len(sorted_ratios) // 2
+        if len(sorted_ratios) % 2 == 1:
+            paired_speedup_p50 = float(sorted_ratios[midpoint])
+        else:
+            paired_speedup_p50 = float(
+                (sorted_ratios[midpoint - 1] + sorted_ratios[midpoint]) / 2.0
+            )
+    return Flux2KleinNVFP4PairedBenchmarkResult(
+        reference_report=reference_report.to_dict(),
+        candidate_report=candidate_report.to_dict(),
+        paired_speedup_ratios=paired_speedup_ratios,
+        paired_speedup_p50=paired_speedup_p50,
+        max_abs_vs_eager=float(diff.max_abs),
+        mean_abs_vs_eager=float(diff.mean_abs),
+        allclose_vs_eager=bool(diff.allclose),
+        atol=float(atol),
+        rtol=float(rtol),
+    )
 
 
 def _resolve_flux2_klein_nvfp4_model_file(
@@ -1047,16 +1510,16 @@ def run_flux2_klein_nvfp4_inference(
     pipeline: Any,
     *,
     prompt: str | list[str],
-    backend: str,
+    engine: str | None = None,
     target_arch: str | None = None,
     max_targets: int | None = None,
     **kwargs: Any,
 ) -> Any:
-    """Run a Diffusers FLUX.2 klein pipeline after XQT backend materialization."""
+    """Run a Diffusers FLUX.2 klein pipeline after XQT engine materialization."""
 
-    result = materialize_flux2_klein_nvfp4_backend(
+    result = materialize_flux2_klein_nvfp4_engine(
         pipeline,
-        backend=backend,
+        engine=engine,
         target_arch=target_arch,
         max_targets=max_targets,
         inplace=True,
@@ -1069,19 +1532,23 @@ __all__ = [
     "FLUX2_KLEIN_4B_NVFP4_FILENAME",
     "FLUX2_KLEIN_4B_NVFP4_REPO_ID",
     "FLUX2_KLEIN_4B_REPO_ID",
-    "FLUX2_KLEIN_NVFP4_BACKENDS",
-    "Flux2KleinNVFP4BackendResult",
+    "FLUX2_KLEIN_NVFP4_ENGINES",
+    "Flux2KleinNVFP4EngineResult",
     "Flux2KleinNVFP4CompiledTransformerResult",
+    "Flux2KleinNVFP4CudaGraphTransformerResult",
+    "Flux2KleinNVFP4PairedBenchmarkResult",
     "Flux2KleinNVFP4TargetSummary",
+    "benchmark_flux2_klein_nvfp4_transformer_paired",
     "benchmark_flux2_klein_nvfp4_transformer_forward",
+    "capture_flux2_klein_nvfp4_transformer_cuda_graph",
     "compile_flux2_klein_nvfp4_transformer",
-    "collect_flux2_klein_nvfp4_backend_targets",
+    "collect_flux2_klein_nvfp4_engine_targets",
     "collect_flux2_klein_nvfp4_targets",
     "flux2_klein_nvfp4_single_file_url",
     "load_flux2_klein_nvfp4_pipeline",
     "load_flux2_klein_nvfp4_transformer",
-    "materialize_flux2_klein_nvfp4_backend",
-    "normalize_flux2_klein_nvfp4_backend",
+    "materialize_flux2_klein_nvfp4_engine",
+    "normalize_flux2_klein_nvfp4_engine",
     "optimize_flux2_klein_nvfp4_transformer",
     "run_flux2_klein_nvfp4_inference",
     "warmup_flux2_klein_nvfp4_transformer",
