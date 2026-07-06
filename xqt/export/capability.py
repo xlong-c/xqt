@@ -30,7 +30,7 @@ class ExportCapability:
         return OptimizationCapability(
             kind="export",
             name=self.format,
-            backend=self.format,
+            engine=self.format,
             status=unified_status,
             runtime="/".join(self.runtimes) if self.runtimes else "unknown",
             artifact_kind=f"{self.format}_artifact",

@@ -30,7 +30,7 @@ class PruneRuntimeCapability:
         return OptimizationCapability(
             kind="pruning",
             name=self.method,
-            backend=self.runtime,
+            engine=self.runtime,
             status=status,
             runtime=self.runtime,
             artifact_kind=self.artifact_kind,

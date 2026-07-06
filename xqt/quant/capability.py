@@ -101,7 +101,7 @@ class QuantBackendCapability:
         return OptimizationCapability(
             kind="quantization",
             name=self.backend,
-            backend=self.backend,
+            engine=self.backend,
             status=self.status,
             runtime=self.runtime,
             artifact_kind=self.artifact_kind,

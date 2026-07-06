@@ -798,7 +798,7 @@ class QuantPass:
 
 @register_pass("operator_optimization")
 class OperatorOptimizationPass:
-    """Apply configured operator optimization backend."""
+    """Apply configured operator optimization engine."""
 
     name = "operator_optimization"
 
@@ -836,7 +836,7 @@ class OperatorOptimizationPass:
                         name=f"operator_optimization.{report.target_name}.applied",
                         value=report.applied,
                         metadata={
-                            "backend": report.backend,
+                            "engine": report.engine,
                             "runtime": report.runtime,
                             "fallback": report.fallback,
                             "skip_reason": report.skip_reason,
@@ -851,7 +851,7 @@ class OperatorOptimizationPass:
                         MetricRecord(
                             name=f"operator_optimization.{report.target_name}.compile_time_ms",
                             value=report.compile_time_ms,
-                            metadata={"backend": report.backend},
+                            metadata={"engine": report.engine},
                         )
                     )
         del model

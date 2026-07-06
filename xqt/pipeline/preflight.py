@@ -19,7 +19,7 @@ from xqt.core.schema import (
     TASK_TYPES,
     XQTConfig,
 )
-from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.operator_opt.cuda_extension import describe_custom_cuda_extension_capability
 from xqt.prune import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
@@ -381,7 +381,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         True,
         "operator optimization targets configured",
         count=len(operator_config.targets),
-        default_backend=operator_config.default_backend,
+        default_engine=operator_config.default_engine,
     )
     torch_compile_available = hasattr(torch, "compile")
     report.add(
@@ -392,11 +392,11 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         else "torch.compile unavailable",
         torch_version=torch.__version__,
     )
-    target_backends = {
-        target.backend or operator_config.default_backend
+    target_engines = {
+        target.engine or operator_config.default_engine
         for target in operator_config.targets
     }
-    if target_backends & {
+    if target_engines & {
         "triton",
         "tilelang",
         "cutile",
@@ -405,10 +405,10 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         "custom_cuda",
     }:
         _check_cuda(report, "operator_optimization.hardware.cuda")
-    for package_backend in ("triton", "tilelang", "cutlass"):
-        if package_backend in target_backends:
-            _check_dependency(report, package_backend)
-    if "cutile" in target_backends:
+    for package_engine in ("triton", "tilelang", "cutlass"):
+        if package_engine in target_engines:
+            _check_dependency(report, package_engine)
+    if "cutile" in target_engines:
         available = _cutile_available()
         report.add(
             "dependency.cuda.tile",
@@ -417,19 +417,19 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             package="cuda.tile",
             legacy_package="cutile",
         )
-    if "cute_dsl" in target_backends:
+    if "cute_dsl" in target_engines:
         _check_dependency(report, "cutlass.cute")
     for index, target in enumerate(operator_config.targets):
         prefix = f"operator_optimization.targets.{index}"
-        target_backend = target.backend or operator_config.default_backend
-        capability = describe_operator_backend_capability(
-            target_backend,
+        target_engine = target.engine or operator_config.default_engine
+        capability = describe_operator_engine_capability(
+            target_engine,
             torch_compile_available=torch_compile_available,
         )
         report.add(
             f"{prefix}.capability",
             capability.available or capability.status == "planned",
-            "operator optimization backend capability described",
+            "operator optimization engine capability described",
             level="info"
             if capability.available or capability.status == "available"
             else "warning",
@@ -437,7 +437,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
             module_path=target.target,
             **capability.to_dict(),
         )
-        if target_backend == "tilelang" and not _package_available("tilelang"):
+        if target_engine == "tilelang" and not _package_available("tilelang"):
             report.add(
                 f"{prefix}.tilelang.runtime",
                 True,
@@ -446,34 +446,34 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target_backend == "cutile" and not capability.available:
+        if target_engine == "cutile" and not capability.available:
             report.add(
                 f"{prefix}.cutile.runtime",
                 False,
-                "cutile backend is configured but cuda.tile is not importable",
+                "cutile engine is configured but cuda.tile is not importable",
                 level="warning",
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target_backend == "cutlass" and not capability.available:
+        if target_engine == "cutlass" and not capability.available:
             report.add(
                 f"{prefix}.cutlass.runtime",
                 False,
-                "cutlass backend is configured but cutlass is not importable",
+                "cutlass engine is configured but cutlass is not importable",
                 level="warning",
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target_backend == "cute_dsl" and not capability.available:
+        if target_engine == "cute_dsl" and not capability.available:
             report.add(
                 f"{prefix}.cute_dsl.runtime",
                 False,
-                "cute_dsl backend is configured but cutlass.cute is not importable",
+                "cute_dsl engine is configured but cutlass.cute is not importable",
                 level="warning",
                 target_name=target.name,
                 module_path=target.target,
             )
-        if target_backend == "tilelang":
+        if target_engine == "tilelang":
             tilelang_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -491,7 +491,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "tilelang compile configuration recorded",
                 **tilelang_metadata,
             )
-        if target_backend == "cutile":
+        if target_engine == "cutile":
             cutile_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -508,7 +508,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "cutile compile configuration recorded",
                 **cutile_metadata,
             )
-        if target_backend == "cutlass":
+        if target_engine == "cutlass":
             cutlass_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -529,7 +529,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "cutlass compile configuration recorded",
                 **cutlass_metadata,
             )
-        if target_backend == "cute_dsl":
+        if target_engine == "cute_dsl":
             cute_dsl_metadata = {
                 "target_name": target.name,
                 "module_path": target.target,
@@ -550,7 +550,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
                 "cute_dsl compile configuration recorded",
                 **cute_dsl_metadata,
             )
-        if target_backend == "custom_cuda":
+        if target_engine == "custom_cuda":
             extension = describe_custom_cuda_extension_capability()
             report.add(
                 f"{prefix}.custom_cuda.extension",
