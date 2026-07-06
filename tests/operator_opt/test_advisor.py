@@ -13,7 +13,7 @@ class TestPrecisionAdvisor:
 
         assert recommendation.recommended_precision == "fp8"
         assert recommendation.fallback_precision == "bf16"
-        assert recommendation.backend == "triton"
+        assert recommendation.engine == "triton"
         assert recommendation.hardware_native is True
         assert "fp8" in recommendation.alternatives
 
