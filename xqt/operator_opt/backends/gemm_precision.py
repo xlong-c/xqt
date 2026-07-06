@@ -2,11 +2,198 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 import torch
 
 from xqt.core.errors import XQTBackendError
+
+
+@dataclass(frozen=True)
+class MatmulPrecisionSpec:
+    """Structured precision contract for one GEMM invocation."""
+
+    activation: str = "fp16"
+    weight: str = "fp16"
+    bias: str = "fp16"
+    mma: str = "fp16"
+    accum: str = "fp32"
+    output: str = "fp16"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "activation": self.activation,
+            "weight": self.weight,
+            "bias": self.bias,
+            "mma": self.mma,
+            "accum": self.accum,
+            "output": self.output,
+        }
+
+    @classmethod
+    def from_roles(
+        cls,
+        *,
+        A: str | None = None,
+        B: str | None = None,
+        C: str | None = None,
+        O: str | None = None,
+        activation: str | None = None,
+        weight: str | None = None,
+        bias: str | None = None,
+        mma: str = "fp16",
+        accum: str = "fp32",
+        output: str | None = None,
+    ) -> "MatmulPrecisionSpec":
+        """Build a GEMM precision spec from ``A x B + C = O`` role names."""
+
+        return _resolve_matmul_precision(
+            {
+                "A": A
+                if A is not None
+                else activation
+                if activation is not None
+                else "fp16",
+                "B": B if B is not None else weight if weight is not None else "fp16",
+                "C": C if C is not None else bias if bias is not None else "fp16",
+                "mma": mma,
+                "accum": accum,
+                "O": O if O is not None else output if output is not None else "fp16",
+            }
+        )
+
+
+_DTYPE_PRECISIONS: dict[str, torch.dtype] = {
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+    "fp32": torch.float32,
+}
+_LOW_BIT_PRECISIONS = {
+    "int8",
+    "fp8",
+    "int4",
+    "fp4",
+    "nvfp4",
+    "mxfp8",
+    "mxfp6",
+    "mxfp4",
+}
+_SUPPORTED_PRECISION_NAMES = set(_DTYPE_PRECISIONS) | _LOW_BIT_PRECISIONS
+_PRECISION_ALIASES = {
+    "float16": "fp16",
+    "half": "fp16",
+    "bfloat16": "bf16",
+    "float32": "fp32",
+    "float": "fp32",
+    "fp4e2m1": "fp4",
+    "nv_fp4": "nvfp4",
+    "nv-fp4": "nvfp4",
+}
+_ROLE_ALIASES = {
+    "a": "activation",
+    "lhs": "activation",
+    "input": "activation",
+    "activation": "activation",
+    "activation_dtype": "activation",
+    "b": "weight",
+    "rhs": "weight",
+    "weight": "weight",
+    "weight_dtype": "weight",
+    "c": "bias",
+    "bias": "bias",
+    "bias_dtype": "bias",
+    "addend": "bias",
+    "addend_dtype": "bias",
+    "mma": "mma",
+    "mma_dtype": "mma",
+    "acc": "accum",
+    "accum": "accum",
+    "accum_dtype": "accum",
+    "accumulator": "accum",
+    "accumulator_dtype": "accum",
+    "o": "output",
+    "out": "output",
+    "output": "output",
+    "output_dtype": "output",
+}
+
+
+def _canonical_precision_name(name: str) -> str:
+    normalized = str(name).strip().lower()
+    canonical = _PRECISION_ALIASES.get(normalized, normalized)
+    if canonical not in _SUPPORTED_PRECISION_NAMES:
+        choices = ", ".join(sorted(_SUPPORTED_PRECISION_NAMES))
+        raise XQTBackendError(
+            f"Unsupported GEMM precision name: {name}. Allowed: {choices}"
+        )
+    return canonical
+
+
+def _canonical_precision_key(name: str) -> str:
+    normalized = str(name).strip().lower()
+    try:
+        return _ROLE_ALIASES[normalized]
+    except KeyError as exc:
+        choices = ", ".join(sorted(_ROLE_ALIASES))
+        raise XQTBackendError(
+            f"Unsupported GEMM precision field: {name}. Allowed: {choices}"
+        ) from exc
+
+
+def _precision_name_to_dtype(
+    name: str,
+    *,
+    fallback: torch.dtype | None = None,
+    role: str = "precision",
+) -> torch.dtype:
+    canonical = _canonical_precision_name(name)
+    dtype = _DTYPE_PRECISIONS.get(canonical)
+    if dtype is not None:
+        return dtype
+    if fallback is not None:
+        return fallback
+    raise XQTBackendError(
+        f"GEMM dtype mapping is not defined for {role} precision {name}"
+    )
+
+
+def _resolve_matmul_precision(
+    precision: str | MatmulPrecisionSpec | Mapping[str, str],
+) -> MatmulPrecisionSpec:
+    if isinstance(precision, MatmulPrecisionSpec):
+        return precision
+    if isinstance(precision, str):
+        canonical = _canonical_precision_name(precision)
+        return MatmulPrecisionSpec(
+            activation=canonical,
+            weight=canonical,
+            bias=canonical,
+            mma=canonical,
+            accum="fp32",
+            output=canonical,
+        )
+    payload = {
+        _canonical_precision_key(str(key)): _canonical_precision_name(str(value))
+        for key, value in precision.items()
+    }
+    return MatmulPrecisionSpec(
+        activation=payload.get("activation", "fp16"),
+        weight=payload.get("weight", payload.get("activation", "fp16")),
+        bias=payload.get(
+            "bias", payload.get("output", payload.get("activation", "fp16"))
+        ),
+        mma=payload.get("mma", payload.get("activation", "fp16")),
+        accum=payload.get("accum", "fp32"),
+        output=payload.get("output", payload.get("activation", "fp16")),
+    )
+
+
+def _resolve_gemm_engine(
+    *,
+    engine: str,
+) -> str:
+    return str(engine).strip().lower()
 
 
 def gemm_with_precision(
@@ -14,8 +201,8 @@ def gemm_with_precision(
     b: torch.Tensor,
     bias: torch.Tensor | None = None,
     *,
-    precision: str = "fp16",
-    backend: str = "triton",
+    precision: str | MatmulPrecisionSpec | Mapping[str, str] = "fp16",
+    engine: str = "triton",
     activation: str | None = None,
     transpose_b: bool = True,
     **kwargs: Any,
@@ -25,39 +212,46 @@ def gemm_with_precision(
     Args:
         a: Left matrix (M, K)
         b: Right matrix (N, K) if transpose_b else (K, N)
-        bias: Optional bias vector (N,)
-        precision: Precision mode - "fp16", "bf16", "int8", "fp8", "int4", "mxfp8", "mxfp6", "mxfp4"
-        backend: Backend - "triton", "tilelang", "torch", "auto"
+        bias: Optional addend vector C with shape (N,)
+        precision: Precision mode or role spec. Supported names include
+            "fp16", "bf16", "fp32", "int8", "fp8", "int4", "fp4",
+            "nvfp4", "mxfp8", "mxfp6", "mxfp4". Mapping inputs may use
+            A/B/C/O aliases for activation/weight/bias/output.
+        engine: XQT GEMM engine - "triton", "tilelang", "torch", "auto"
         activation: Optional activation - "relu", "gelu", "silu"
         transpose_b: Whether to transpose b before matmul
-        **kwargs: Backend-specific parameters (scales, group_size, etc.)
+        **kwargs: Engine-specific parameters (scales, group_size, etc.)
 
     Returns:
         Output tensor (M, N)
     """
-    if backend == "auto":
-        backend = _select_backend(precision, a.device)
+    precision_spec = _resolve_matmul_precision(precision)
+    resolved_engine = _resolve_gemm_engine(engine=engine)
+    if resolved_engine == "auto":
+        resolved_engine = _select_engine(precision_spec.mma, a.device)
 
-    if backend == "triton":
-        return _gemm_triton(a, b, bias, precision, activation, transpose_b, kwargs)
-    elif backend == "tilelang":
-        return _gemm_tilelang(a, b, bias, precision, activation, transpose_b, kwargs)
-    elif backend == "torch":
-        return _gemm_torch(a, b, bias, precision, activation, transpose_b, kwargs)
+    if resolved_engine == "triton":
+        return _gemm_triton(a, b, bias, precision_spec, activation, transpose_b, kwargs)
+    elif resolved_engine == "tilelang":
+        return _gemm_tilelang(
+            a, b, bias, precision_spec, activation, transpose_b, kwargs
+        )
+    elif resolved_engine == "torch":
+        return _gemm_torch(a, b, bias, precision_spec, activation, transpose_b, kwargs)
     else:
-        raise XQTBackendError(f"Unsupported GEMM backend: {backend}")
+        raise XQTBackendError(f"Unsupported GEMM engine: {resolved_engine}")
 
 
-def _select_backend(precision: str, device: torch.device) -> str:
-    """Auto-select best backend for given precision and device."""
+def _select_engine(precision: str, device: torch.device) -> str:
+    """Auto-select best XQT engine for given precision and device."""
     if not device.type == "cuda":
         return "torch"
 
-    # Triton优先（覆盖面广）
+    # Triton first: it currently has the broadest GEMM coverage.
     if precision in {"fp16", "bf16", "int8", "fp8", "mxfp8", "mxfp6", "mxfp4"}:
         return "triton"
 
-    # INT4需要特殊处理
+    # INT4 needs a dequantizing path.
     if precision == "int4":
         return "triton"
 
@@ -68,12 +262,12 @@ def _gemm_triton(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
-    precision: str,
+    precision: MatmulPrecisionSpec,
     activation: str | None,
     transpose_b: bool,
     kwargs: dict[str, Any],
 ) -> torch.Tensor:
-    """Triton backend dispatcher."""
+    """Triton engine dispatcher."""
     from ..kernels.triton.gemm import (
         gemm_bf16_triton,
         gemm_fp16_triton,
@@ -82,69 +276,103 @@ def _gemm_triton(
         gemm_int8_triton,
     )
 
-    if precision == "fp16":
-        return gemm_fp16_triton(a, b, bias, activation=activation, transpose_b=transpose_b, **kwargs)
-    elif precision == "bf16":
-        return gemm_bf16_triton(a, b, bias, activation=activation, transpose_b=transpose_b, **kwargs)
-    elif precision == "int8":
+    if precision.mma == "fp16":
+        return gemm_fp16_triton(
+            a,
+            b,
+            bias,
+            activation=activation,
+            transpose_b=transpose_b,
+            accum_dtype=_precision_name_to_dtype(precision.accum, role="accum"),
+            output_dtype=_precision_name_to_dtype(precision.output, role="output"),
+            **kwargs,
+        )
+    elif precision.mma == "bf16":
+        return gemm_bf16_triton(
+            a,
+            b,
+            bias,
+            activation=activation,
+            transpose_b=transpose_b,
+            accum_dtype=_precision_name_to_dtype(precision.accum, role="accum"),
+            output_dtype=_precision_name_to_dtype(precision.output, role="output"),
+            **kwargs,
+        )
+    elif precision.mma == "int8":
         a_scale = kwargs.get("a_scale")
         b_scale = kwargs.get("b_scale")
         return gemm_int8_triton(
-            a, b, a_scale, b_scale, bias,
+            a,
+            b,
+            a_scale,
+            b_scale,
+            bias,
             activation=activation,
             transpose_b=transpose_b,
             **{k: v for k, v in kwargs.items() if k not in {"a_scale", "b_scale"}},
         )
-    elif precision == "fp8":
+    elif precision.mma == "fp8":
         a_scale = kwargs.get("a_scale")
         b_scale = kwargs.get("b_scale")
         fp8_format = kwargs.get("fp8_format", "e4m3")
         return gemm_fp8_triton(
-            a, b, a_scale, b_scale, bias,
+            a,
+            b,
+            a_scale,
+            b_scale,
+            bias,
             activation=activation,
             transpose_b=transpose_b,
             fp8_format=fp8_format,
         )
-    elif precision == "int4":
+    elif precision.mma == "int4":
         b_scale = kwargs.get("b_scale")
         b_zero = kwargs.get("b_zero")
         group_size = kwargs.get("group_size", 128)
         if b_scale is None:
             raise ValueError("int4 precision requires b_scale")
         return gemm_int4_dequant_triton(
-            a, b, b_scale, b_zero, bias,
+            a,
+            b,
+            b_scale,
+            b_zero,
+            bias,
             group_size=group_size,
             activation=activation,
         )
-    elif precision in {"mxfp8", "mxfp6", "mxfp4"}:
+    elif precision.mma in {"mxfp8", "mxfp6", "mxfp4"}:
         from ..kernels.triton.mxfp_gemm import gemm_mxfp_triton
+
         b_scales = kwargs.get("b_scales")
         block_size = kwargs.get("block_size", 32)
-        mx_precision = int(precision.replace("mxfp", ""))
+        mx_precision = int(precision.mma.replace("mxfp", ""))
         return gemm_mxfp_triton(
-            a, b, b_scales, bias,
+            a,
+            b,
+            b_scales,
+            bias,
             mx_precision=mx_precision,
             block_size=block_size,
             activation=activation,
             transpose_b=transpose_b,
         )
     else:
-        raise XQTBackendError(f"Unsupported Triton precision: {precision}")
+        raise XQTBackendError(f"Unsupported Triton precision: {precision.mma}")
 
 
 def _gemm_tilelang(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
-    precision: str,
+    precision: MatmulPrecisionSpec,
     activation: str | None,
     transpose_b: bool,
     kwargs: dict[str, Any],
 ) -> torch.Tensor:
-    """TileLang backend dispatcher."""
+    """TileLang engine dispatcher."""
     from ..kernels.tilelang.gemm_builder import build_tilelang_gemm_kernel
 
-    if precision == "fp16":
+    if precision.mma == "fp16":
         M, K = a.shape
         if transpose_b:
             N, K_b = b.shape
@@ -154,7 +382,11 @@ def _gemm_tilelang(
 
         kernel = build_tilelang_gemm_kernel(M, N, K, **kwargs)
         b_t = b.t().contiguous() if transpose_b else b.contiguous()
-        output = torch.empty((M, N), device=a.device, dtype=torch.float16)
+        output = torch.empty(
+            (M, N),
+            device=a.device,
+            dtype=_precision_name_to_dtype(precision.output, role="output"),
+        )
         kernel(a, b_t, output)
 
         if bias is not None:
@@ -168,14 +400,14 @@ def _gemm_tilelang(
 
         return output
     else:
-        raise XQTBackendError(f"TileLang precision {precision} not implemented yet")
+        raise XQTBackendError(f"TileLang precision {precision.mma} not implemented yet")
 
 
 def _gemm_torch(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
-    precision: str,
+    precision: MatmulPrecisionSpec,
     activation: str | None,
     transpose_b: bool,
     kwargs: dict[str, Any],
@@ -183,7 +415,40 @@ def _gemm_torch(
     """PyTorch fallback dispatcher."""
     from ..kernels.triton.gemm import gemm_reference
 
-    return gemm_reference(a, b, bias, activation=activation, transpose_b=transpose_b)
+    del kwargs
+    compute_dtype = _precision_name_to_dtype(
+        precision.mma,
+        role="mma",
+    )
+    lhs = a.to(
+        _precision_name_to_dtype(
+            precision.activation,
+            fallback=compute_dtype,
+            role="activation",
+        )
+    )
+    rhs = b.to(
+        _precision_name_to_dtype(
+            precision.weight,
+            fallback=compute_dtype,
+            role="weight",
+        )
+    )
+    bias_value = (
+        None
+        if bias is None
+        else bias.to(
+            _precision_name_to_dtype(
+                precision.bias,
+                fallback=compute_dtype,
+                role="bias",
+            )
+        )
+    )
+    output = gemm_reference(
+        lhs, rhs, bias_value, activation=activation, transpose_b=transpose_b
+    )
+    return output.to(_precision_name_to_dtype(precision.output, role="output"))
 
 
 def describe_gemm_precision_capability(
@@ -198,7 +463,7 @@ def describe_gemm_precision_capability(
         "precision": precision,
         "device": str(device),
         "available": False,
-        "backend": "none",
+        "engine": "none",
         "hardware_native": False,
         "notes": [],
     }
@@ -207,7 +472,7 @@ def describe_gemm_precision_capability(
         capability["notes"].append("CUDA required for most precision modes")
         if precision in {"fp16", "bf16"}:
             capability["available"] = True
-            capability["backend"] = "torch"
+            capability["engine"] = "torch"
         return capability
 
     # 检查CUDA compute capability
@@ -217,44 +482,66 @@ def describe_gemm_precision_capability(
 
         if precision == "fp16":
             capability["available"] = True
-            capability["backend"] = "triton"
+            capability["engine"] = "triton"
             capability["hardware_native"] = sm >= 70
             if sm >= 70:
                 capability["notes"].append("Tensor Core FP16 MMA available (SM70+)")
         elif precision == "bf16":
             capability["available"] = True
-            capability["backend"] = "triton"
+            capability["engine"] = "triton"
             capability["hardware_native"] = sm >= 80
             if sm >= 80:
-                capability["notes"].append("Tensor Core BF16 MMA available (SM80+ Ampere)")
+                capability["notes"].append(
+                    "Tensor Core BF16 MMA available (SM80+ Ampere)"
+                )
         elif precision == "int8":
             capability["available"] = True
-            capability["backend"] = "triton"
+            capability["engine"] = "triton"
             capability["hardware_native"] = sm >= 75
             if sm >= 75:
-                capability["notes"].append("Tensor Core INT8 MMA available (SM75+ Turing)")
+                capability["notes"].append(
+                    "Tensor Core INT8 MMA available (SM75+ Turing)"
+                )
         elif precision == "fp8":
             if sm >= 89:
                 capability["available"] = True
-                capability["backend"] = "triton"
+                capability["engine"] = "triton"
                 capability["hardware_native"] = True
-                capability["notes"].append("Tensor Core FP8 path available on Ada or newer NVIDIA architectures")
+                capability["notes"].append(
+                    "Tensor Core FP8 path available on Ada or newer NVIDIA architectures"
+                )
             else:
-                capability["notes"].append("FP8 requires SM89+ or newer NVIDIA architecture support")
+                capability["notes"].append(
+                    "FP8 requires SM89+ or newer NVIDIA architecture support"
+                )
         elif precision == "int4":
             capability["available"] = True
-            capability["backend"] = "triton"
+            capability["engine"] = "triton"
             capability["hardware_native"] = False
             capability["notes"].append("INT4 via unpacking + FP16 MMA")
+        elif precision in {"fp4", "nvfp4"}:
+            capability["available"] = True
+            capability["engine"] = "tilelang"
+            capability["hardware_native"] = sm >= 100
+            if sm >= 100:
+                capability["notes"].append(
+                    "FP4/NVFP4 tensor-core path is a Blackwell-first target"
+                )
+            else:
+                capability["notes"].append(
+                    "FP4/NVFP4 requires packed weight contracts and fused dequant GEMM kernels"
+                )
         elif precision in {"mxfp8", "mxfp6", "mxfp4"}:
             if sm >= 100:
                 capability["available"] = True
-                capability["backend"] = "triton"
+                capability["engine"] = "triton"
                 capability["hardware_native"] = True
-                capability["notes"].append("MXFP native support on Blackwell-class NVIDIA architectures")
+                capability["notes"].append(
+                    "MXFP native support on Blackwell-class NVIDIA architectures"
+                )
             else:
                 capability["available"] = True
-                capability["backend"] = "triton"
+                capability["engine"] = "triton"
                 capability["hardware_native"] = False
                 capability["notes"].append("MXFP emulated via block scaling")
 
@@ -263,7 +550,18 @@ def describe_gemm_precision_capability(
 
 def list_available_precisions(device: torch.device | None = None) -> list[str]:
     """List all precisions available on the given device."""
-    precisions = ["fp16", "bf16", "int8", "fp8", "int4", "mxfp8", "mxfp6", "mxfp4"]
+    precisions = [
+        "fp16",
+        "bf16",
+        "int8",
+        "fp8",
+        "int4",
+        "fp4",
+        "nvfp4",
+        "mxfp8",
+        "mxfp6",
+        "mxfp4",
+    ]
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -280,4 +578,5 @@ __all__ = [
     "describe_gemm_precision_capability",
     "gemm_with_precision",
     "list_available_precisions",
+    "MatmulPrecisionSpec",
 ]

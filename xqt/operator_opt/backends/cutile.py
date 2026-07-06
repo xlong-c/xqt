@@ -1,6 +1,6 @@
 """CuTile backend adapter for XQT operator optimization.
 
-CuTile is treated as a Python DSL backend, closer to TileLang/CuTe DSL than to
+CuTile is treated as a Python DSL engine, closer to TileLang/CuTe DSL than to
 an nvcc-built custom CUDA extension. This adapter intentionally records
 capability and artifact metadata without compiling at import time.
 """
@@ -184,7 +184,7 @@ def build_cutile_artifact_metadata(
         str(cache_dir / f"{pattern}.cutile.json") if cache_dir is not None else None
     )
     return {
-        "backend": "cutile",
+        "engine": "cutile",
         "pattern": pattern,
         "version": cutile_version(),
         "module": cutile_module_metadata().get("module"),

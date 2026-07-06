@@ -117,7 +117,7 @@ def build_cute_dsl_artifact_metadata(
         else None
     )
     return {
-        "backend": "cute_dsl",
+        "engine": "cute_dsl",
         "pattern": pattern,
         "version": cute_dsl_version(),
         "kernel": dict(spec.metadata),

@@ -110,7 +110,7 @@ def build_cutlass_artifact_metadata(
         else None
     )
     return {
-        "backend": "cutlass",
+        "engine": "cutlass",
         "pattern": pattern,
         "version": cutlass_version(),
         "kernel": dict(spec.metadata),

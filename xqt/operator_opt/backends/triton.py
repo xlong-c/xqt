@@ -13,6 +13,8 @@ from ..kernels.triton import (
     TRITON_KERNEL_METADATA,
     fused_bias_gelu_reference,
     fused_bias_gelu_triton,
+    fused_geglu_reference,
+    fused_geglu_triton,
     fused_rope_reference,
     fused_rope_triton,
     fused_rmsnorm_residual_reference,
@@ -63,6 +65,12 @@ TRITON_KERNEL_REGISTRY: dict[str, TritonKernelSpec] = {
         reference=fused_swiglu_reference,
         kernel=fused_swiglu_triton,
         metadata=dict(TRITON_KERNEL_METADATA["swiglu"]),
+    ),
+    "geglu": TritonKernelSpec(
+        pattern="geglu",
+        reference=fused_geglu_reference,
+        kernel=fused_geglu_triton,
+        metadata=dict(TRITON_KERNEL_METADATA["geglu"]),
     ),
     "rmsnorm_residual": TritonKernelSpec(
         pattern="rmsnorm_residual",

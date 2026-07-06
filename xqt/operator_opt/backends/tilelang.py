@@ -226,7 +226,7 @@ def build_tilelang_artifact_metadata(
         str(cache_dir / f"{pattern}.tilelang.json") if cache_dir is not None else None
     )
     return {
-        "backend": "tilelang",
+        "engine": "tilelang",
         "pattern": pattern,
         "version": tilelang_version(),
         "kernel": dict(spec.metadata),
