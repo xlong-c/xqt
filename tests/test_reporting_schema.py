@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from xqt.core.reporting import build_stage_report, reporting_schema_payload
 from xqt.export.capability import deployment_capability_matrix
-from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.prune.capability import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
 from xqt.readiness import assess_xqt_readiness
@@ -16,7 +16,7 @@ def test_optimization_capability_projection_uses_shared_fields() -> None:
         method="static_qdq_int8",
         strategy="static_qdq_int8",
     ).to_dict()["optimization_capability"]
-    operator = describe_operator_backend_capability("cute_dsl").to_dict()[
+    operator = describe_operator_engine_capability("cute_dsl").to_dict()[
         "optimization_capability"
     ]
     prune = describe_prune_runtime_capability(
@@ -34,7 +34,7 @@ def test_optimization_capability_projection_uses_shared_fields() -> None:
         assert {
             "kind",
             "name",
-            "backend",
+            "engine",
             "status",
             "runtime",
             "artifact_kind",
@@ -60,7 +60,7 @@ def test_readiness_report_includes_inference_capability_matrix() -> None:
 
     assert {"quantization", "pruning", "operator", "export", "runtime_features"} <= set(matrix)
     assert any(
-        capability["backend"] == "onnxruntime_qdq"
+        capability["engine"] == "onnxruntime_qdq"
         and capability["requires_calibration"] is True
         for capability in matrix["quantization"]
     )
@@ -87,7 +87,7 @@ def test_stage_report_attaches_workflow_stage_to_manifest() -> None:
     assert stage_report["stage_name"] == "prune_l1"
     assert stage_report["stage_kind"] == "prune"
     assert stage_report["status"] == "accepted"
-    assert "backend" in stage_report
+    assert "engine" in stage_report
     assert "target_module" in stage_report
     assert "p50_ms" in stage_report["benchmark"]
     assert "max_abs" in stage_report["numeric_diff"]
@@ -104,14 +104,14 @@ def test_reporting_schema_payload_reserves_runtime_and_llm_fields() -> None:
     assert "tokens_per_s" in schemas["benchmark"]["llm_workload"]
 
 
-def test_stage_report_extracts_backend_target_benchmark_and_diff() -> None:
+def test_stage_report_extracts_engine_target_benchmark_and_diff() -> None:
     report = build_stage_report(
         stage_name="quant_encoder",
         stage_kind="quant",
         accepted=True,
         message="ok",
         metrics={
-            "backend": "torchao",
+            "engine": "torchao",
             "components": [
                 {
                     "target_path": "encoder.layers.0",
@@ -130,7 +130,7 @@ def test_stage_report_extracts_backend_target_benchmark_and_diff() -> None:
         artifacts={"quant_model": "artifacts/quant.pt"},
     ).to_dict()
 
-    assert report["backend"] == "torchao"
+    assert report["engine"] == "torchao"
     assert report["target_module"] == "encoder.layers.0"
     assert report["benchmark"]["p50_ms"] == 2.0
     assert report["numeric_diff"]["allclose"] is True

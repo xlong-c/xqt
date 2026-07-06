@@ -9,7 +9,7 @@ from xqt.operator_opt.backends.cute_dsl import (
     build_cute_dsl_artifact_metadata,
     list_cute_dsl_kernel_specs,
 )
-from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.operator_opt.executor import (
     build_operator_optimization_plan,
     execute_operator_optimization_plan,
@@ -36,11 +36,11 @@ def _cute_dsl_operator_config() -> dict[str, object]:
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "cute_dsl",
+            "default_engine": "cute_dsl",
             "targets": [
                 {
                     "name": "model",
-                    "backend": "cute_dsl",
+                    "engine": "cute_dsl",
                     "patterns": ["gemm_epilogue"],
                     "cute_dsl": {
                         "target_arch": "sm_90",
@@ -73,7 +73,7 @@ def test_cute_dsl_registry_reports_gemm_patterns() -> None:
 def test_cute_dsl_artifact_metadata_is_stable() -> None:
     metadata = build_cute_dsl_artifact_metadata("gemm_epilogue")
 
-    assert metadata["backend"] == "cute_dsl"
+    assert metadata["engine"] == "cute_dsl"
     assert metadata["pattern"] == "gemm_epilogue"
     assert metadata["compile_status"] == "metadata_only"
     assert metadata["exportable"] is False
@@ -81,7 +81,7 @@ def test_cute_dsl_artifact_metadata_is_stable() -> None:
 
 def test_cute_dsl_capability_reports_missing_runtime() -> None:
     with patch("xqt.operator_opt.capability._package_available", return_value=False):
-        capability = describe_operator_backend_capability("cute_dsl")
+        capability = describe_operator_engine_capability("cute_dsl")
 
     assert capability.status == "planned"
     assert capability.available is False
@@ -126,7 +126,7 @@ def test_cute_dsl_operator_executor_returns_reference_guarded_report() -> None:
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "cute_dsl"
+    assert report.engine == "cute_dsl"
     assert report.applied is False
     assert report.metadata["execution_state"] == "fallback"
     assert report.metadata["execution_mode"] == "reference_fallback"

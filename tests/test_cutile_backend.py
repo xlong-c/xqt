@@ -11,7 +11,7 @@ from xqt.operator_opt.backends.cutile import (
     run_cutile_kernel,
 )
 from xqt.operator_opt.backends.tilelang import list_tilelang_kernel_specs
-from xqt.operator_opt.capability import describe_operator_backend_capability
+from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.operator_opt.executor import (
     build_operator_optimization_plan,
     execute_operator_optimization_plan,
@@ -38,11 +38,11 @@ def _cutile_operator_config() -> dict[str, object]:
         },
         "operator_optimization": {
             "enabled": True,
-            "default_backend": "cutile",
+            "default_engine": "cutile",
             "targets": [
                 {
                     "name": "model",
-                    "backend": "cutile",
+                    "engine": "cutile",
                     "patterns": ["linear", "norm", "dequant_gemm_epilogue"],
                     "cutile": {
                         "target_arch": "sm_89",
@@ -81,7 +81,7 @@ def test_cutile_registry_covers_tilelang_operator_patterns() -> None:
 def test_cutile_artifact_metadata_is_stable() -> None:
     metadata = build_cutile_artifact_metadata("dequant_gemm_epilogue")
 
-    assert metadata["backend"] == "cutile"
+    assert metadata["engine"] == "cutile"
     assert metadata["pattern"] == "dequant_gemm_epilogue"
     assert metadata["compile_status"] == "metadata_only"
     assert metadata["exportable"] is False
@@ -90,7 +90,7 @@ def test_cutile_artifact_metadata_is_stable() -> None:
 
 def test_cutile_capability_uses_cuda_tile_runtime_probe() -> None:
     with patch("xqt.operator_opt.backends.cutile.cutile_available", return_value=True):
-        capability = describe_operator_backend_capability("cutile")
+        capability = describe_operator_engine_capability("cutile")
 
     assert capability.status == "planned"
     assert capability.available is True
@@ -137,7 +137,7 @@ def test_cutile_operator_executor_reports_selected_artifacts() -> None:
 
     assert len(execution.reports) == 1
     report = execution.reports[0]
-    assert report.backend == "cutile"
+    assert report.engine == "cutile"
     assert report.applied is False
     assert report.metadata["execution_state"] == "fallback"
     assert report.metadata["execution_mode"] == "reference_fallback"

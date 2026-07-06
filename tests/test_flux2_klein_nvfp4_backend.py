@@ -15,13 +15,15 @@ from torch import nn
 from xqt.core.errors import XQTBackendError
 from xqt.model import (
     FLUX2_KLEIN_4B_REPO_ID,
+    benchmark_flux2_klein_nvfp4_transformer_paired,
     benchmark_flux2_klein_nvfp4_transformer_forward,
+    capture_flux2_klein_nvfp4_transformer_cuda_graph,
     compile_flux2_klein_nvfp4_transformer,
-    collect_flux2_klein_nvfp4_backend_targets,
+    collect_flux2_klein_nvfp4_engine_targets,
     flux2_klein_nvfp4_single_file_url,
     load_flux2_klein_nvfp4_transformer,
-    materialize_flux2_klein_nvfp4_backend,
-    normalize_flux2_klein_nvfp4_backend,
+    materialize_flux2_klein_nvfp4_engine,
+    normalize_flux2_klein_nvfp4_engine,
     optimize_flux2_klein_nvfp4_transformer,
     run_flux2_klein_nvfp4_inference,
     warmup_flux2_klein_nvfp4_transformer,
@@ -96,22 +98,22 @@ class _TinyFlux2Pipeline:
         }
 
 
-def test_flux2_klein_nvfp4_backend_aliases_and_url() -> None:
-    assert normalize_flux2_klein_nvfp4_backend("cutedsl") == "cute_dsl"
-    assert normalize_flux2_klein_nvfp4_backend("cute-dsl") == "cute_dsl"
-    assert normalize_flux2_klein_nvfp4_backend("cutile") == "cutile"
-    assert normalize_flux2_klein_nvfp4_backend("tilelang") == "tilelang"
+def test_flux2_klein_nvfp4_engine_aliases_and_url() -> None:
+    assert normalize_flux2_klein_nvfp4_engine("cutedsl") == "cute_dsl"
+    assert normalize_flux2_klein_nvfp4_engine("cute-dsl") == "cute_dsl"
+    assert normalize_flux2_klein_nvfp4_engine("cutile") == "cutile"
+    assert normalize_flux2_klein_nvfp4_engine("tilelang") == "tilelang"
     assert flux2_klein_nvfp4_single_file_url().endswith(
         "/black-forest-labs/FLUX.2-klein-4b-nvfp4/resolve/main/flux-2-klein-4b-nvfp4.safetensors"
     )
 
 
-def test_collect_flux2_klein_nvfp4_backend_targets_for_three_backends() -> None:
+def test_collect_flux2_klein_nvfp4_engine_targets_for_three_engines() -> None:
     model = _TinyFlux2Transformer()
 
-    targets = collect_flux2_klein_nvfp4_backend_targets(
+    targets = collect_flux2_klein_nvfp4_engine_targets(
         model,
-        backends=("cutedsl", "cutile", "tilelang"),
+        engines=("cutedsl", "cutile", "tilelang"),
         target_arch="sm_89",
     )
 
@@ -119,10 +121,22 @@ def test_collect_flux2_klein_nvfp4_backend_targets_for_three_backends() -> None:
     assert targets["cute_dsl"][0][0].patterns == ["gemm_epilogue"]
     assert targets["cutile"][0][0].patterns == ["nvfp4_packed_dequant_gemm_epilogue"]
     assert targets["tilelang"][0][0].patterns == ["dequant_gemm_epilogue"]
-    for backend, (_, summaries) in targets.items():
-        assert summaries[0].backend == backend
+    for engine, (_, summaries) in targets.items():
+        assert summaries[0].engine == engine
         assert summaries[0].name == "proj"
         assert summaries[0].group_size == 4
+
+
+def test_collect_flux2_klein_nvfp4_engine_targets_accepts_engines() -> None:
+    model = _TinyFlux2Transformer()
+
+    targets = collect_flux2_klein_nvfp4_engine_targets(
+        model,
+        engines=("cutedsl", "tilelang"),
+        target_arch="sm_89",
+    )
+
+    assert set(targets) == {"cute_dsl", "tilelang"}
 
 
 def test_load_flux2_klein_nvfp4_transformer_passes_diffusers_config(
@@ -245,9 +259,9 @@ def test_load_flux2_klein_nvfp4_transformer_maps_modelopt_qkv(
         dtype=torch.float16,
         local_files_only=True,
     )
-    targets = collect_flux2_klein_nvfp4_backend_targets(
+    targets = collect_flux2_klein_nvfp4_engine_targets(
         model,
-        backends=("cutile",),
+        engines=("cutile",),
         target_arch="sm_89",
     )
 
@@ -269,19 +283,19 @@ def test_load_flux2_klein_nvfp4_transformer_maps_modelopt_qkv(
     )
 
 
-def test_materialize_flux2_klein_nvfp4_backend_runs_three_backends(
+def test_materialize_flux2_klein_nvfp4_engine_runs_three_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("xqt.operator_opt.executor.cutile_available", lambda: False)
     x = torch.randn(3, 8, dtype=torch.float32)
 
-    for backend in ("cutedsl", "cutile", "tilelang"):
+    for engine in ("cutedsl", "cutile", "tilelang"):
         model = _TinyFlux2Transformer().eval()
         expected = model(x)
 
-        result = materialize_flux2_klein_nvfp4_backend(
+        result = materialize_flux2_klein_nvfp4_engine(
             model,
-            backend=backend,
+            engine=engine,
             target_arch="sm_89",
             max_targets=1,
             inplace=False,
@@ -290,13 +304,14 @@ def test_materialize_flux2_klein_nvfp4_backend_runs_three_backends(
 
         torch.testing.assert_close(actual, expected)
         assert result.target_count == 1
+        assert result.engine == result.engine
         metadata = result.model.proj.execution_metadata()
         assert metadata["operator_family"] == "linear"
         assert metadata["execution_mode"] == "reference_fallback"
-        if result.backend == "cute_dsl":
+        if result.engine == "cute_dsl":
             assert metadata["kernel_pattern"] == "gemm_epilogue"
             assert metadata["consumes_packed_weight"] is False
-        elif result.backend == "cutile":
+        elif result.engine == "cutile":
             assert metadata["kernel_pattern"] == "dense_linear_epilogue"
             assert metadata["consumes_packed_weight"] is False
             assert metadata["weight_representation"] == "dense_dequantized_weight_cache"
@@ -307,6 +322,23 @@ def test_materialize_flux2_klein_nvfp4_backend_runs_three_backends(
             }
 
 
+def test_materialize_flux2_klein_nvfp4_engine_accepts_engine_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("xqt.operator_opt.executor.cutile_available", lambda: False)
+    model = _TinyFlux2Transformer().eval()
+
+    result = materialize_flux2_klein_nvfp4_engine(
+        model,
+        engine="cutedsl",
+        target_arch="sm_89",
+        max_targets=1,
+        inplace=False,
+    )
+
+    assert result.engine == "cute_dsl"
+
+
 def test_cutile_uses_dense_cache_when_packed_runtime_is_reference_guarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -315,9 +347,9 @@ def test_cutile_uses_dense_cache_when_packed_runtime_is_reference_guarded(
     x = torch.randn(3, 8, dtype=torch.float32)
     expected = model(x)
 
-    result = materialize_flux2_klein_nvfp4_backend(
+    result = materialize_flux2_klein_nvfp4_engine(
         model,
-        backend="cutile",
+        engine="cutile",
         target_arch="sm_89",
         max_targets=1,
         inplace=False,
@@ -351,9 +383,9 @@ def test_cutile_uses_packed_nvfp4_when_runtime_kernel_is_available(
     x = torch.randn(3, 8, dtype=torch.float32)
     expected = model(x)
 
-    result = materialize_flux2_klein_nvfp4_backend(
+    result = materialize_flux2_klein_nvfp4_engine(
         model,
-        backend="cutile",
+        engine="cutile",
         target_arch="sm_89",
         max_targets=1,
         inplace=False,
@@ -392,9 +424,9 @@ def test_cutile_dense_path_flattens_rank3_inputs(
     x = torch.randn(2, 3, 8, dtype=torch.float32)
     expected = model(x)
 
-    result = materialize_flux2_klein_nvfp4_backend(
+    result = materialize_flux2_klein_nvfp4_engine(
         model,
-        backend="cutile",
+        engine="cutile",
         target_arch="sm_89",
         max_targets=1,
         inplace=False,
@@ -406,14 +438,14 @@ def test_cutile_dense_path_flattens_rank3_inputs(
     assert tuple(actual.shape) == (2, 3, 4)
 
 
-def test_materialize_flux2_klein_nvfp4_backend_replaces_pipeline_transformer() -> None:
+def test_materialize_flux2_klein_nvfp4_engine_replaces_pipeline_transformer() -> None:
     pipeline = _TinyFlux2Pipeline()
     x = torch.randn(2, 8, dtype=torch.float32)
     expected = pipeline.transformer(x)
 
-    result = materialize_flux2_klein_nvfp4_backend(
+    result = materialize_flux2_klein_nvfp4_engine(
         pipeline,
-        backend="cutile",
+        engine="cutile",
         target_arch="sm_89",
         max_targets=1,
         inplace=False,
@@ -434,7 +466,7 @@ def test_run_flux2_klein_nvfp4_inference_materializes_pipeline_inplace() -> None
     output = run_flux2_klein_nvfp4_inference(
         pipeline,
         prompt="test prompt",
-        backend="cutedsl",
+        engine="cutedsl",
         target_arch="sm_89",
         max_targets=1,
         input_tensor=x,
@@ -449,7 +481,7 @@ def test_run_flux2_klein_nvfp4_inference_materializes_pipeline_inplace() -> None
     torch.testing.assert_close(output["output"], expected)
 
 
-def test_compile_flux2_klein_nvfp4_transformer_delegates_to_compile_backend(
+def test_compile_flux2_klein_nvfp4_transformer_delegates_to_compile_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -460,7 +492,7 @@ def test_compile_flux2_klein_nvfp4_transformer_delegates_to_compile_backend(
         plan: object,
     ) -> tuple[nn.Module, float]:
         captured["module"] = module
-        captured["plan_backend"] = getattr(plan, "backend")
+        captured["plan_engine"] = getattr(plan, "engine")
         captured["plan_mode"] = getattr(plan, "mode")
         captured["plan_options"] = dict(getattr(plan, "options"))
         captured["plan_fullgraph"] = getattr(plan, "fullgraph")
@@ -474,7 +506,7 @@ def test_compile_flux2_klein_nvfp4_transformer_delegates_to_compile_backend(
 
     result = compile_flux2_klein_nvfp4_transformer(
         model,
-        backend="inductor",
+        compile_engine="inductor",
         mode="reduce-overhead",
         fullgraph=False,
         dynamic=False,
@@ -482,14 +514,14 @@ def test_compile_flux2_klein_nvfp4_transformer_delegates_to_compile_backend(
 
     assert result.model is model
     assert result.compile_time_ms == 12.5
-    assert result.compile_backend == "inductor"
+    assert result.compile_engine == "inductor"
     assert result.compile_mode == "reduce-overhead"
     assert captured == {
         "module": model,
-        "plan_backend": "torch_compile",
+        "plan_engine": "torch_compile",
         "plan_mode": "reduce-overhead",
         "plan_options": {
-            "backend": "inductor",
+            "engine": "inductor",
         },
         "plan_fullgraph": False,
         "plan_dynamic": False,
@@ -514,7 +546,7 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_then_compiles(
     def fake_materialize(
         module: nn.Module,
         *,
-        backend: str,
+        engine: str,
         target_arch: str | None,
         max_targets: int | None,
         include_names: Sequence[str] | None,
@@ -523,11 +555,11 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_then_compiles(
         min_speedup: float,
     ) -> object:
         del target_arch, max_targets, include_names, exclude_names, min_speedup
-        captured["materialize_backend"] = backend
+        captured["materialize_engine"] = engine
         captured["materialize_inplace"] = inplace
         return types.SimpleNamespace(
             model=module,
-            backend="tilelang",
+            engine="tilelang",
             target_count=3,
         )
 
@@ -538,9 +570,9 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_then_compiles(
         captured["compile_kwargs"] = dict(kwargs)
         return types.SimpleNamespace(
             model=module,
-            backend=kwargs["backend_name"],
+            engine=kwargs["engine_name"],
             materialized_target_count=kwargs["materialized_target_count"],
-            compile_backend=kwargs["backend"],
+            compile_engine=kwargs["compile_engine"],
             compile_mode=kwargs["mode"],
             compile_time_ms=7.5,
             warmup_iterations=0,
@@ -548,7 +580,7 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_then_compiles(
         )
 
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_backend",
+        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_engine",
         fake_materialize,
     )
     monkeypatch.setattr(
@@ -558,24 +590,24 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_then_compiles(
 
     result = optimize_flux2_klein_nvfp4_transformer(
         model,
-        backend="tilelang",
-        compile_backend="inductor",
+        engine="tilelang",
+        compile_engine="inductor",
         compile_mode=None,
         inplace=True,
     )
 
     assert result.model is model
-    assert result.backend == "tilelang"
+    assert result.engine == "tilelang"
     assert result.materialized_target_count == 3
-    assert result.compile_backend == "inductor"
+    assert result.compile_engine == "inductor"
     assert result.compile_mode is None
     assert result.compile_time_ms == 7.5
-    assert captured["materialize_backend"] == "tilelang"
+    assert captured["materialize_engine"] == "tilelang"
     assert captured["materialize_inplace"] is True
     assert captured["compile_kwargs"] == {
-        "backend_name": "tilelang",
+        "engine_name": "tilelang",
         "materialized_target_count": 3,
-        "backend": "inductor",
+        "compile_engine": "inductor",
         "mode": None,
         "fullgraph": False,
         "dynamic": False,
@@ -590,6 +622,171 @@ def test_optimize_flux2_klein_nvfp4_transformer_requires_inputs_for_warmup() -> 
             compile_mode=None,
             warmup_iterations=1,
         )
+
+
+def test_optimize_flux2_klein_nvfp4_transformer_requires_inputs_for_cuda_graph() -> None:
+    with pytest.raises(XQTBackendError, match="cuda_graph optimization requires"):
+        optimize_flux2_klein_nvfp4_transformer(
+            nn.Linear(4, 4),
+            optimization_kind="cuda_graph",
+            warmup_iterations=1,
+        )
+
+
+def test_optimize_flux2_klein_nvfp4_transformer_skips_tilelang_materialization_for_sm89_cuda_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = nn.Linear(4, 4)
+    captured: dict[str, object] = {}
+    hidden_states = torch.randn(1, 2, 4)
+    encoder_hidden_states = torch.randn(1, 3, 8)
+    timestep = torch.tensor([0.5])
+    img_ids = torch.zeros(2, 4)
+    txt_ids = torch.zeros(3, 4)
+
+    def fake_materialize(**_: object) -> object:
+        raise AssertionError("tilelang materialization should be skipped for sm_89 cuda_graph")
+
+    def fake_capture(
+        module: nn.Module,
+        **kwargs: object,
+    ) -> object:
+        captured["module"] = module
+        captured["capture_kwargs"] = dict(kwargs)
+        return types.SimpleNamespace(
+            model=module,
+            engine=kwargs["engine_name"],
+            materialized_target_count=kwargs["materialized_target_count"],
+            graph_state={},
+            input_signature=(),
+            warmup_iterations=kwargs["warmup_iterations"],
+            capture_time_ms=1.25,
+        )
+
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_engine",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein_nvfp4.capture_flux2_klein_nvfp4_transformer_cuda_graph",
+        fake_capture,
+    )
+
+    result = optimize_flux2_klein_nvfp4_transformer(
+        model,
+        engine="tilelang",
+        optimization_kind="cuda_graph",
+        target_arch="sm_89",
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        warmup_iterations=2,
+        inplace=True,
+    )
+
+    assert result.model is model
+    assert result.engine == "tilelang"
+    assert result.materialized_target_count == 0
+    assert captured["module"] is model
+    assert captured["capture_kwargs"]["engine_name"] == "tilelang"
+    assert captured["capture_kwargs"]["materialized_target_count"] == 0
+    assert captured["capture_kwargs"]["hidden_states"] is hidden_states
+    assert captured["capture_kwargs"]["encoder_hidden_states"] is encoder_hidden_states
+    assert captured["capture_kwargs"]["timestep"] is timestep
+    assert captured["capture_kwargs"]["img_ids"] is img_ids
+    assert captured["capture_kwargs"]["txt_ids"] is txt_ids
+    assert captured["capture_kwargs"]["warmup_iterations"] == 2
+
+
+def test_optimize_flux2_klein_nvfp4_transformer_materializes_tilelang_for_non_sm89_cuda_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = nn.Linear(4, 4)
+    captured: dict[str, object] = {}
+
+    def fake_materialize(
+        module: nn.Module,
+        *,
+        engine: str,
+        target_arch: str | None,
+        max_targets: int | None,
+        include_names: Sequence[str] | None,
+        exclude_names: Sequence[str] | None,
+        inplace: bool,
+        min_speedup: float,
+    ) -> object:
+        del max_targets, include_names, exclude_names, min_speedup
+        captured["materialize_engine"] = engine
+        captured["materialize_target_arch"] = target_arch
+        captured["materialize_inplace"] = inplace
+        return types.SimpleNamespace(
+            model=module,
+            engine=engine,
+            target_count=5,
+        )
+
+    def fake_capture(
+        module: nn.Module,
+        **kwargs: object,
+    ) -> object:
+        captured["capture_module"] = module
+        captured["capture_kwargs"] = dict(kwargs)
+        return types.SimpleNamespace(
+            model=module,
+            engine=kwargs["engine_name"],
+            materialized_target_count=kwargs["materialized_target_count"],
+            graph_state={},
+            input_signature=(),
+            warmup_iterations=kwargs["warmup_iterations"],
+            capture_time_ms=2.0,
+        )
+
+    hidden_states = torch.randn(1, 2, 4)
+    encoder_hidden_states = torch.randn(1, 3, 8)
+    timestep = torch.tensor([0.5])
+    img_ids = torch.zeros(2, 4)
+    txt_ids = torch.zeros(3, 4)
+
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_engine",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein_nvfp4.capture_flux2_klein_nvfp4_transformer_cuda_graph",
+        fake_capture,
+    )
+
+    result = optimize_flux2_klein_nvfp4_transformer(
+        model,
+        engine="tilelang",
+        optimization_kind="cuda_graph",
+        target_arch="sm_90",
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        warmup_iterations=3,
+        inplace=True,
+    )
+
+    assert result.model is model
+    assert result.engine == "tilelang"
+    assert result.materialized_target_count == 5
+    assert captured["materialize_engine"] == "tilelang"
+    assert captured["materialize_target_arch"] == "sm_90"
+    assert captured["materialize_inplace"] is True
+    assert captured["capture_module"] is model
+    assert captured["capture_kwargs"]["engine_name"] == "tilelang"
+    assert captured["capture_kwargs"]["materialized_target_count"] == 5
+    assert captured["capture_kwargs"]["hidden_states"] is hidden_states
+    assert captured["capture_kwargs"]["encoder_hidden_states"] is encoder_hidden_states
+    assert captured["capture_kwargs"]["timestep"] is timestep
+    assert captured["capture_kwargs"]["img_ids"] is img_ids
+    assert captured["capture_kwargs"]["txt_ids"] is txt_ids
+    assert captured["capture_kwargs"]["warmup_iterations"] == 3
 
 
 def test_warmup_flux2_klein_nvfp4_transformer_runs_requested_iterations() -> None:
@@ -696,3 +893,205 @@ def test_benchmark_flux2_klein_nvfp4_transformer_forward_uses_explicit_warmup() 
     assert report["warmup"] == 3
     assert report["iterations"] == 5
     assert model.calls == 8
+
+
+def test_benchmark_flux2_klein_nvfp4_transformer_paired_reports_close_outputs() -> None:
+    class _CountingTransformer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            timestep: torch.Tensor,
+            img_ids: torch.Tensor,
+            txt_ids: torch.Tensor,
+            guidance: torch.Tensor | None = None,
+            joint_attention_kwargs: dict[str, object] | None = None,
+            return_dict: bool = False,
+        ) -> tuple[torch.Tensor]:
+            del encoder_hidden_states, timestep, img_ids, txt_ids, joint_attention_kwargs, return_dict
+            self.calls += 1
+            bias = 0.0 if guidance is None else guidance.reshape(-1, 1, 1)
+            return (hidden_states + 1.0 + bias.to(hidden_states.dtype),)
+
+    reference = _CountingTransformer()
+    candidate = _CountingTransformer()
+    hidden_states = torch.randn(1, 2, 4)
+    encoder_hidden_states = torch.randn(1, 3, 8)
+    timestep = torch.tensor([0.5])
+    img_ids = torch.zeros(2, 4)
+    txt_ids = torch.zeros(3, 4)
+    guidance = torch.tensor([0.25], dtype=torch.float32)
+
+    result = benchmark_flux2_klein_nvfp4_transformer_paired(
+        reference_transformer=reference,
+        candidate_transformer=candidate,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        warmup=2,
+        iterations=3,
+        sync_cuda=False,
+    )
+
+    assert result.allclose_vs_eager is True
+    assert result.max_abs_vs_eager == 0.0
+    assert result.reference_report["warmup"] == 2
+    assert result.reference_report["iterations"] == 3
+    assert result.candidate_report["warmup"] == 2
+    assert result.candidate_report["iterations"] == 3
+    assert len(result.paired_speedup_ratios) == 3
+    assert reference.calls == 6
+    assert candidate.calls == 6
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for FLUX.2 CUDA Graph helper test",
+)
+def test_capture_flux2_klein_nvfp4_transformer_cuda_graph_replays_on_second_call() -> None:
+    class _CudaTransformer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            timestep: torch.Tensor,
+            img_ids: torch.Tensor,
+            txt_ids: torch.Tensor,
+            guidance: torch.Tensor | None = None,
+            joint_attention_kwargs: dict[str, object] | None = None,
+            return_dict: bool = False,
+        ) -> tuple[torch.Tensor]:
+            del joint_attention_kwargs, return_dict
+            self.calls += 1
+            total = hidden_states
+            total = total + encoder_hidden_states.mean(dim=1, keepdim=True)[..., : hidden_states.shape[-1]]
+            total = total + timestep.reshape(-1, 1, 1).to(hidden_states.dtype)
+            total = total + img_ids.mean().to(hidden_states.dtype)
+            total = total + txt_ids.mean().to(hidden_states.dtype)
+            if guidance is not None:
+                total = total + guidance.reshape(-1, 1, 1).to(hidden_states.dtype)
+            return (total,)
+
+    model = _CudaTransformer().eval().to(device="cuda", dtype=torch.float16)
+    hidden_states = torch.randn(1, 2, 4, device="cuda", dtype=torch.float16)
+    encoder_hidden_states = torch.randn(1, 3, 8, device="cuda", dtype=torch.float16)
+    timestep = torch.tensor([0.5], device="cuda", dtype=torch.float16)
+    img_ids = torch.zeros(2, 4, device="cuda", dtype=torch.float16)
+    txt_ids = torch.zeros(3, 4, device="cuda", dtype=torch.float16)
+    guidance = torch.tensor([0.125], device="cuda", dtype=torch.float16)
+    capture_result = capture_flux2_klein_nvfp4_transformer_cuda_graph(
+        model,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        warmup_iterations=2,
+    )
+    wrapped = capture_result.model
+
+    first = wrapped(
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        return_dict=False,
+    )[0].clone()
+    second_hidden_states = hidden_states + 1
+    second = wrapped(
+        hidden_states=second_hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        return_dict=False,
+    )[0]
+    expected_first = model(
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        return_dict=False,
+    )[0]
+    expected_second = model(
+        hidden_states=second_hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        return_dict=False,
+    )[0]
+
+    torch.testing.assert_close(first.float(), expected_first.float(), atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(second.float(), expected_second.float(), atol=1e-2, rtol=1e-2)
+    assert capture_result.warmup_iterations == 2
+    assert capture_result.capture_time_ms >= 0.0
+    assert model.calls >= 4
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for FLUX.2 CUDA Graph helper test",
+)
+def test_capture_flux2_klein_nvfp4_transformer_cuda_graph_rejects_shape_change() -> None:
+    class _CudaTransformer(nn.Module):
+        def forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            timestep: torch.Tensor,
+            img_ids: torch.Tensor,
+            txt_ids: torch.Tensor,
+            guidance: torch.Tensor | None = None,
+            joint_attention_kwargs: dict[str, object] | None = None,
+            return_dict: bool = False,
+        ) -> tuple[torch.Tensor]:
+            del encoder_hidden_states, timestep, img_ids, txt_ids, guidance, joint_attention_kwargs, return_dict
+            return (hidden_states + 1.0,)
+
+    model = _CudaTransformer().eval().to(device="cuda", dtype=torch.float16)
+    hidden_states = torch.randn(1, 2, 4, device="cuda", dtype=torch.float16)
+    encoder_hidden_states = torch.randn(1, 3, 8, device="cuda", dtype=torch.float16)
+    timestep = torch.tensor([0.5], device="cuda", dtype=torch.float16)
+    img_ids = torch.zeros(2, 4, device="cuda", dtype=torch.float16)
+    txt_ids = torch.zeros(3, 4, device="cuda", dtype=torch.float16)
+    capture_result = capture_flux2_klein_nvfp4_transformer_cuda_graph(
+        model,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        warmup_iterations=1,
+    )
+
+    with pytest.raises(XQTBackendError, match="matching shape/stride/dtype/device"):
+        capture_result.model(
+            hidden_states=torch.randn(1, 3, 4, device="cuda", dtype=torch.float16),
+            encoder_hidden_states=encoder_hidden_states,
+            timestep=timestep,
+            img_ids=img_ids,
+            txt_ids=txt_ids,
+            return_dict=False,
+        )
