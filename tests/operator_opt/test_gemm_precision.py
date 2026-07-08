@@ -10,6 +10,9 @@ from xqt.operator_opt.backends.gemm_precision import (
     gemm_with_precision,
     list_available_precisions,
 )
+from xqt.operator_opt.kernels.tilelang.gemm import (
+    nvfp4_packed_dequant_gemm_epilogue_reference,
+)
 from xqt.operator_opt.kernels.triton.gemm import (
     gemm_bf16_triton,
     gemm_fp16_triton,
@@ -130,9 +133,12 @@ class TestMXFPPacking:
         unpacked = unpacked.reshape(tensor.shape)
 
         # MXFP4 has 3 mantissa bits, quantization step ~1/7 ≈ 14%
-        # Allow 25% margin for safety
+        # Validate against the per-block quantization step instead of global
+        # allclose. Values near zero can exceed a fixed relative tolerance even
+        # when packing and unpacking are correct.
         assert unpacked.shape == tensor.shape
-        assert torch.allclose(unpacked, tensor, rtol=0.25, atol=0.25)
+        block_error = (unpacked.flatten() - tensor.flatten()).abs().reshape(-1, 32)
+        assert torch.all(block_error <= (scales.reshape(-1, 1) * 0.5 + 1e-6))
 
 
 class TestUnifiedGEMMInterface:
@@ -279,6 +285,37 @@ class TestUnifiedGEMMInterface:
                 transpose_b=True,
             )
 
+    def test_tilelang_nvfp4_reference_path(self) -> None:
+        a = torch.randn(64, 64, dtype=torch.float32)
+        packed = torch.randint(0, 256, (64, 32), dtype=torch.uint8)
+        scale = torch.ones(64, 4, 1, dtype=torch.float32) * 0.125
+        bias = torch.randn(64, dtype=torch.float32)
+        global_scale = torch.tensor([2.0], dtype=torch.float32)
+
+        output = gemm_with_precision(
+            a,
+            packed,
+            bias,
+            precision="nvfp4",
+            engine="tilelang",
+            transpose_b=True,
+            b_scale=scale,
+            group_size=16,
+            input_features=64,
+            weight_global_scale=global_scale,
+        )
+
+        expected = nvfp4_packed_dequant_gemm_epilogue_reference(
+            a,
+            packed,
+            scale,
+            bias,
+            input_features=64,
+            group_size=16,
+            weight_global_scale=global_scale,
+        )
+        assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3)
+
 def test_gemm_fp16_triton_forwards_accum_and_output_dtype_to_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -389,6 +426,13 @@ class TestCapabilityReporting:
         assert cap["precision"] == "fp16"
         # CPU should have torch fallback
         assert cap["engine"] in {"torch", "none"}
+
+    def test_nvfp4_capability_cpu(self):
+        device = torch.device("cpu")
+        cap = describe_gemm_precision_capability("nvfp4", device)
+        assert cap["precision"] == "nvfp4"
+        assert cap["available"] is True
+        assert cap["engine"] == "tilelang"
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_fp8_capability(self):

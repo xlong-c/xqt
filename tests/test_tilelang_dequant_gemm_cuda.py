@@ -21,7 +21,7 @@ from xqt.operator_opt.kernels.tilelang.gemm import (
     fp4_packed_dequant_gemm_epilogue_reference,
     fp4_packed_dequant_gemm_epilogue_tilelang,
 )
-from xqt.quant.quantizers.reference_fp4 import ReferenceFP4Linear
+from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
 
 
 requires_cuda = pytest.mark.skipif(
@@ -175,7 +175,7 @@ def test_tilelang_packed_fp4_validation_cuda_runtime() -> None:
 def test_tilelang_packed_fp4_dequant_gemm_cuda_matches_reference() -> None:
     torch.manual_seed(1)
     linear = torch.nn.Linear(32, 64)
-    fp4_linear = ReferenceFP4Linear.from_linear(linear, group_size=16).to("cuda")
+    fp4_linear = FP4WeightOnlyLinear.from_linear(linear, group_size=16).to("cuda")
     x = torch.randn(64, 32, device="cuda", dtype=torch.float16)
     packed_weight = fp4_linear.packed_weight
     scale = fp4_linear.weight_scale.to(dtype=torch.float16)

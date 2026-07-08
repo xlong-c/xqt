@@ -89,11 +89,11 @@ def test_fp4_quant_stage_can_feed_tilelang_dequant_gemm_operator_stage() -> None
         in target["metadata"]["kernel_constraints"]["supported_patterns"]
     )
     assert (
-        target["metadata"]["kernel_constraints"]["supports_reference_fp4_linear_bridge"]
+        target["metadata"]["kernel_constraints"]["supports_fp4_weight_only_linear_bridge"]
         is True
     )
     assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
-    assert target["metadata"]["weight_source"] == "reference_fp4_linear_packed_bridge"
+    assert target["metadata"]["weight_source"] == "fp4_weight_only_linear_packed_bridge"
     assert target["metadata"]["weight_representation"] == "packed_signed_int4_plus_group_scale"
     assert target["metadata"]["consumes_packed_weight"] is True
     assert target["metadata"]["unpack_stage"] == "eager_reference_fallback"
@@ -146,7 +146,7 @@ def test_fp4_tilelang_operator_stage_uses_packed_cuda_entry() -> None:
     assert target["metadata"]["execution_mode"] == "cuda_native_fastpath"
     assert target["metadata"]["kernel_kind"] == "native_runtime_fastpath"
     assert target["metadata"]["kernel_pattern"] == "dense_linear_epilogue"
-    assert target["metadata"]["weight_source"] == "reference_fp4_linear_dense_cache_bridge"
+    assert target["metadata"]["weight_source"] == "fp4_weight_only_linear_dense_cache_bridge"
     assert target["metadata"]["consumes_packed_weight"] is False
     assert target["metadata"]["unpack_stage"] == "one_time_eager_dequant_cache"
     assert target["metadata"]["fusion_status"] == "tilelang_dense_half_gemm_epilogue"
@@ -202,7 +202,7 @@ def test_fp4_tilelang_operator_stage_can_force_packed_cuda_entry() -> None:
     assert target["metadata"]["execution_mode"] == "cuda_tilelang_entry"
     assert target["metadata"]["kernel_kind"] == "minimal_cuda_jit"
     assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
-    assert target["metadata"]["weight_source"] == "reference_fp4_linear_packed_bridge"
+    assert target["metadata"]["weight_source"] == "fp4_weight_only_linear_packed_bridge"
     assert target["metadata"]["consumes_packed_weight"] is True
     assert target["metadata"]["unpack_stage"] == "tilelang_fused_gemm_kernel"
     assert target["metadata"]["fusion_status"] == "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue"

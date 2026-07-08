@@ -10,7 +10,7 @@ from torch import nn
 
 import xqt
 from xqt.conversion import ConvertResult, FeedForwardPrecisionPolicy, PrecisionPolicy
-from xqt.quant import ReferenceFP4Linear
+from xqt.quant import FP4WeightOnlyLinear
 
 
 def test_xqt_convert_is_available_via_lazy_top_level_attribute() -> None:
@@ -73,11 +73,11 @@ def test_convert_linear_torch_engine_can_return_result() -> None:
     assert result.report["runtime_config"]["mma"] == "fp16"
 
 
-def test_convert_reference_fp4_linear_tilelang_returns_operator_candidate(
+def test_convert_fp4_weight_only_linear_tilelang_returns_operator_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
-    module = ReferenceFP4Linear.from_linear(nn.Linear(8, 4), group_size=4)
+    module = FP4WeightOnlyLinear.from_linear(nn.Linear(8, 4), group_size=4)
 
     def fake_materialize(
         module_arg: nn.Module,
@@ -201,14 +201,14 @@ def test_convert_layernorm_non_tilelang_engine_rejects() -> None:
     )
 
 
-def test_convert_reference_fp4_linear_torch_preserves_forward() -> None:
+def test_convert_fp4_weight_only_linear_torch_preserves_forward() -> None:
     base = nn.Linear(8, 4)
-    module = ReferenceFP4Linear.from_linear(base, group_size=4)
+    module = FP4WeightOnlyLinear.from_linear(base, group_size=4)
     sample = torch.randn(2, 8)
 
     converted = xqt.convert(module, engine="torch")
 
-    assert isinstance(converted, ReferenceFP4Linear)
+    assert isinstance(converted, FP4WeightOnlyLinear)
     torch.testing.assert_close(converted(sample), module(sample))
 
 

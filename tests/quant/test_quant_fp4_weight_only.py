@@ -8,7 +8,7 @@ import xqt.pipeline.passes as passes_module
 from xqt.pipeline.passes import QuantPass
 from xqt.pipeline.runner import create_context
 from xqt.quant import execute_quantization_plan
-from xqt.quant.quantizers.reference_fp4 import ReferenceFP4Linear
+from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
 from xqt.quant.sensitivity import analyze_layer_sensitivity
 from xqt.quant.plan import build_quantization_plan
 from xqt.quant.backends.torchao import TorchAOQuantizationResult
@@ -31,8 +31,8 @@ def _base_config() -> dict:
     return {
         "config_version": 1,
         "project": {
-            "name": "quant_fp4_reference",
-            "artifact_dir": "artifacts/xqt/tests/quant_fp4_reference",
+            "name": "quant_fp4_weight_only",
+            "artifact_dir": "artifacts/xqt/tests/quant_fp4_weight_only",
         },
         "model": {
             "target": "torch.nn:Linear",
@@ -56,7 +56,7 @@ def _base_config() -> dict:
     }
 
 
-def test_pytorch_fp4_weight_only_executes_reference_linear_rewrite() -> None:
+def test_pytorch_fp4_weight_only_executes_weight_only_linear_rewrite() -> None:
     torch.manual_seed(0)
     config = load_xqt_config(_base_config())
     model = _TinyMLP().eval()
@@ -72,7 +72,7 @@ def test_pytorch_fp4_weight_only_executes_reference_linear_rewrite() -> None:
     assert report.backend == "pytorch"
     assert report.strategy == "fp4_weight_only"
     assert report.metadata["executed"] is True
-    assert report.metadata["execution_state"] == "reference_fp4_weight_only"
+    assert report.metadata["execution_state"] == "fp4_weight_only"
     assert report.metadata["group_size"] == 128
     assert report.metadata["selection_policy"]["selectors"]["include_module_types"] == ["Linear"]
     assert (
@@ -86,8 +86,8 @@ def test_pytorch_fp4_weight_only_executes_reference_linear_rewrite() -> None:
 
     quantized_model = execution.model
     assert isinstance(quantized_model, _TinyMLP)
-    assert isinstance(quantized_model.fc1, ReferenceFP4Linear)
-    assert isinstance(quantized_model.fc2, ReferenceFP4Linear)
+    assert isinstance(quantized_model.fc1, FP4WeightOnlyLinear)
+    assert isinstance(quantized_model.fc2, FP4WeightOnlyLinear)
     assert quantized_model.fc1.group_size == 8
     assert quantized_model.fc1.weight_scale.shape == (8, 1, 1)
 
@@ -109,7 +109,7 @@ def test_pytorch_fp4_weight_only_respects_skip_quantize() -> None:
 
     quantized_model = execution.model
     assert isinstance(quantized_model, _TinyMLP)
-    assert isinstance(quantized_model.fc1, ReferenceFP4Linear)
+    assert isinstance(quantized_model.fc1, FP4WeightOnlyLinear)
     assert isinstance(quantized_model.fc2, torch.nn.Linear)
     assert execution.reports[0].skipped_modules == ["fc2"]
     assert (
@@ -131,7 +131,7 @@ def test_pytorch_fp4_weight_only_reports_high_precision_reason() -> None:
     report = execution.reports[0]
     quantized_model = execution.model
     assert isinstance(quantized_model, _TinyMLP)
-    assert isinstance(quantized_model.fc1, ReferenceFP4Linear)
+    assert isinstance(quantized_model.fc1, FP4WeightOnlyLinear)
     assert isinstance(quantized_model.fc2, torch.nn.Linear)
     assert report.high_precision_modules == ["fc2"]
     assert report.skipped_modules == ["fc2"]
@@ -157,7 +157,7 @@ def test_pytorch_fp4_weight_only_uses_group_size_policy() -> None:
 
     quantized_model = execution.model
     assert isinstance(quantized_model, _TinyMLP)
-    assert isinstance(quantized_model.fc1, ReferenceFP4Linear)
+    assert isinstance(quantized_model.fc1, FP4WeightOnlyLinear)
     assert quantized_model.fc1.group_size == 4
     assert quantized_model.fc1.weight_scale.shape == (8, 2, 1)
     assert execution.reports[0].metadata["group_size"] == 4
@@ -229,7 +229,7 @@ def test_quant_pass_degrades_gracefully_when_layer_analysis_fails(
     assert output.metrics["quant"]["quantized_module_count"] >= 1
 
 
-def test_reference_fp4_report_includes_calibration_summary_when_inputs_provided() -> None:
+def test_fp4_weight_only_report_includes_calibration_summary_when_inputs_provided() -> None:
     config = load_xqt_config(_base_config())
     model = _TinyMLP().eval()
     calibration_inputs = [torch.randn(2, 8), torch.randn(2, 8)]
