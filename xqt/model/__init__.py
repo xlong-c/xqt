@@ -29,12 +29,41 @@ _FLUX2_KLEIN_NVFP4_EXPORTS = {
     "warmup_flux2_klein_nvfp4_transformer",
 }
 
+_WAN21_VAE_EXPORTS = {
+    "WAN21_VAE_OPTIMIZATION_KINDS",
+    "WAN21_VAE_REPO_ID",
+    "WAN21_VAE_RUN_MODES",
+    "WAN21_VAE_SUBFOLDER",
+    "Wan21VAECompileResult",
+    "Wan21VAECudaGraphResult",
+    "Wan21VAEOptimizationSummary",
+    "Wan21VAEPairedBenchmarkResult",
+    "benchmark_wan21_vae_paired",
+    "benchmark_wan21_vae_runner",
+    "build_wan21_vae_runner",
+    "capture_wan21_vae_cuda_graph",
+    "collect_wan21_vae_conv3d_targets",
+    "collect_wan21_vae_rmsnorm_targets",
+    "compile_wan21_vae_runner",
+    "load_wan21_pipeline_with_vae",
+    "load_wan21_vae",
+    "materialize_wan21_vae_conv3d_fastpath",
+    "materialize_wan21_vae_rmsnorm_fastpath",
+    "optimize_wan21_vae",
+    "run_wan21_vae_inference",
+    "warmup_wan21_vae_runner",
+}
+
 
 def __getattr__(name: str) -> object:
     if name in _FLUX2_KLEIN_NVFP4_EXPORTS:
         from . import flux2_klein_nvfp4
 
         return getattr(flux2_klein_nvfp4, name)
+    if name in _WAN21_VAE_EXPORTS:
+        from . import wan21_vae
+
+        return getattr(wan21_vae, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -67,4 +96,26 @@ __all__ = [
     "optimize_flux2_klein_nvfp4_transformer",
     "run_flux2_klein_nvfp4_inference",
     "warmup_flux2_klein_nvfp4_transformer",
+    "WAN21_VAE_OPTIMIZATION_KINDS",
+    "WAN21_VAE_REPO_ID",
+    "WAN21_VAE_RUN_MODES",
+    "WAN21_VAE_SUBFOLDER",
+    "Wan21VAECompileResult",
+    "Wan21VAECudaGraphResult",
+    "Wan21VAEOptimizationSummary",
+    "Wan21VAEPairedBenchmarkResult",
+    "benchmark_wan21_vae_paired",
+    "benchmark_wan21_vae_runner",
+    "build_wan21_vae_runner",
+    "capture_wan21_vae_cuda_graph",
+    "collect_wan21_vae_conv3d_targets",
+    "collect_wan21_vae_rmsnorm_targets",
+    "compile_wan21_vae_runner",
+    "load_wan21_pipeline_with_vae",
+    "load_wan21_vae",
+    "materialize_wan21_vae_conv3d_fastpath",
+    "materialize_wan21_vae_rmsnorm_fastpath",
+    "optimize_wan21_vae",
+    "run_wan21_vae_inference",
+    "warmup_wan21_vae_runner",
 ]
