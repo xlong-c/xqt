@@ -64,7 +64,7 @@ from xqt.quant import (
     recommend_high_precision_modules,
     summarize_quantization_reports,
 )
-from xqt.quant.onnx_qdq import quantize_onnx_qdq_static
+from xqt.quant.backends.onnx_qdq import quantize_onnx_qdq_static
 
 
 def _move_to_device(data: Any, device: torch.device) -> Any:
