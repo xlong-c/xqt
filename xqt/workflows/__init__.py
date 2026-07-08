@@ -1,5 +1,7 @@
 """XQT workflow entrypoints."""
 
+from .stage import SessionStage, StagePayload, StagePersistence
+
 from .optimization import (
     OptimizedModelResult,
     OptimizationConfig,
@@ -12,6 +14,9 @@ from .optimization import (
 )
 
 __all__ = [
+    "SessionStage",
+    "StagePayload",
+    "StagePersistence",
     "OptimizedModelResult",
     "OptimizationConfig",
     "OptimizationStageConfig",
