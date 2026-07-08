@@ -2,7 +2,7 @@
 
 ## 开发阶段
 
-当前处于 v0.x 开发期,可以按现有方案直接重构,不需要围绕旧接口做兼容层.
+当前处于 v0.x 开发期,在目标和范围已对齐后,可以按现有方案直接重构,不需要围绕旧接口做兼容层.
 
 ## 核心契约
 
@@ -22,7 +22,7 @@ XQT 负责模型压缩,图变换,导出适配,误差分析和 benchmark. XQT 不
 - `workflows/`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
 - `analysis/`: tensor output diff,layer analysis 和 report helper.
 - `benchmark/`: latency 和 memory benchmark helper.
-- `quant/`: quantization policy,backend capability matrix,activation calibration,layer sensitivity helper.
+- `quant/`: 量化子系统. 根目录保留 policy/strategy/capability/plan/types 等 schema 和事实源; `execution/` 负责 plan dispatch 与 report 组装; `quantizers/` 放模型侧量化算法实现,如 reference FP4,SVD 以及后续 AWQ/GPTQ; `backends/` 放 torchao/onnxruntime_qdq 等外部 runtime 或导出适配; `calibration/` 放 activation calibration 和 calibration summary; `bridges/` 放 NVFP4/packed weight runtime bridge.
 - `prune/`: unstructured,structured,N:M 和 block sparse pruning helper.
 - `operator_opt/`: `torch.compile`-first operator optimization pass,backend capability matrix and runtime fallback reporting.
 - `export/`: torch.export,TorchScript,ONNX,TensorRT,OpenVINO,ExecuTorch,ncnn,MNN 等导出 adapter.

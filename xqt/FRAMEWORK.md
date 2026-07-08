@@ -13,6 +13,12 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 | `load_optimization_config()` | `OptimizationConfig` 加载器. |
 | `load_xqt_config()` | `XQTConfig` 加载器,内部保留. |
 | `XQTOptimizationSession` | 交互式 stage 编排入口. |
+| `SessionStage` / `StagePayload` | session 内部 stage 图和阶段产物协议. |
+| `QuantizedModelPayload` | quant stage 的 typed payload. |
+| `RuntimePlanPayload` | operator stage 的 runtime plan typed payload. |
+| `ExportBundlePayload` | export / deploy stage 的 export bundle typed payload. |
+| `RuntimeHandlePayload` | executable runtime handle typed payload; 当前只定义协议, 不新增 producer. |
+| `StageComparison` | session 内 stage-to-stage 结构化比较结果. |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪. |
 | `MetricRecord` | 结构化指标记录. |
 | `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 engine,status,runtime,artifact_kind 和硬件/校准/导出要求. |
@@ -58,6 +64,27 @@ YAML workflow 只保留一种配置形态:
 - `calibration_inputs` 由调用方传入,recipe 不声明数据来源.
 - planned / capability-only 后端必须在 preflight 和文档中标注.
 - workflow stage 必须写入 `stage_reports` 和 manifest stage metric,保留 stage name,engine,target module,artifact 和 lineage.
+
+### Session stage 内部协议
+
+`XQTOptimizationSession` 初始化时注册 `baseline` stage, 后续 accepted stage 会通过 transform-side provider 注册为 `SessionStage`. provider 内部实现位于 `xqt/workflows/stage_provider.py`, 当前包括:
+
+- `DefaultStageProvider`.
+- `ModelQuantizerProvider`.
+- `OperatorOptimizerProvider`.
+- `ExportProvider`.
+
+`SessionStage.payload` 描述阶段产物, `model_snapshots` 描述可恢复模型态. `use(name)` / `revert_to(name)` 必须保持模型恢复语义, 不能把 `runtime_plan`, `export_bundle` 或其他非模型 artifact 当成当前模型.
+
+当前 payload kind:
+
+- `torch_module`: 默认模型态.
+- `quantized_model`: quant stage.
+- `runtime_plan`: operator stage.
+- `export_bundle`: export / deploy stage.
+- `runtime_handle`: executable runtime handle 协议; 当前无 producer.
+
+`compare_stages()` / `compare_to_baseline()` 返回 `StageComparison`, 只比较 session 内 stage kind, payload kind, capability, metrics 和 artifacts, 不引入 dataset / dataloader 或 task-level validation.
 
 ## Profiling 约定
 
