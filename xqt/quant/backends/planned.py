@@ -7,11 +7,11 @@ from typing import Any
 
 from torch import nn
 
-from xqt.quant.capability import describe_quant_backend_capability
-from xqt.quant.execution.artifacts import artifact_key
-from xqt.quant.execution.component import prefix_module_names
-from xqt.quant.execution.selection import selection_policy_metadata
-from xqt.quant.types import QuantizationComponentPlan, QuantizationReport
+from ..artifacts import artifact_key
+from ..capability import describe_quant_backend_capability
+from ..component import prefix_module_names
+from ..selection import selection_policy_metadata
+from ..types import QuantizationComponentPlan, QuantizationReport
 
 
 def execute_planned_method_component(

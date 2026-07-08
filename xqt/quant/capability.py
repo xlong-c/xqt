@@ -30,6 +30,7 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     "int4_weight_only": QuantizationNature.PSEUDO,
     # fp4 weight-only: W4A16, packed storage with dequant before fp16 MMA
     "fp4_weight_only": QuantizationNature.PSEUDO,
+    "mxfp_weight_only": QuantizationNature.PSEUDO,
     # dynamic int8: observer-based quantize/dequantize, not native mma
     "dynamic_int8": QuantizationNature.PSEUDO,
     "int8_dynamic_activation_int8_weight": QuantizationNature.PSEUDO,
@@ -229,10 +230,10 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         preferred_devices=("cuda", "cpu"),
         requires_calibration=True,
         notes=(
-            "PyTorch backend can host reference method-driven weight-only quantization paths.",
+            "PyTorch backend can host method-driven weight-only quantization paths.",
         ),
         limitations=(
-            "Current executable coverage is limited to reference fp4_weight_only Linear replacement.",
+            "Current executable coverage is limited to fp4_weight_only / mxfp_weight_only Linear replacement.",
             "Other AWQ/GPTQ method combinations still fall back to planned capability/report only.",
         ),
     ),

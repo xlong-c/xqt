@@ -42,10 +42,15 @@ from .types import (
 from .execution import execute_quantization_plan, summarize_quantization_reports
 from .quantizers import Quantizer, QuantizerOptions, QuantizerResult
 from .quantizers.fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
-from .quantizers.reference_fp4 import (
+from .quantizers.fp4_weight_only import (
     FP4QuantizationResult,
-    ReferenceFP4Linear,
-    quantize_with_reference_fp4,
+    FP4WeightOnlyLinear,
+    quantize_with_fp4_weight_only,
+)
+from .quantizers.mxfp_weight_only import (
+    MXFPQuantizationResult,
+    MXFPWeightOnlyLinear,
+    quantize_with_mxfp_weight_only,
 )
 from .bridges.nvfp4 import (
     NVFP4LinearBridge,
@@ -72,6 +77,7 @@ __all__ = [
     "LayerAnalysisRecord",
     "LayerSensitivityRecord",
     "LowRankBranch",
+    "MXFPQuantizationResult",
     "NVFP4LinearBridge",
     "NVFP4TensorLayout",
     "ONNXQDQQuantizationResult",
@@ -86,7 +92,8 @@ __all__ = [
     "QuantizationNature",
     "QuantizationPolicy",
     "QuantizationReport",
-    "ReferenceFP4Linear",
+    "FP4WeightOnlyLinear",
+    "MXFPWeightOnlyLinear",
     "SVDQuantLinear",
     "SVDQuantResult",
     "TorchAOQuantizationResult",
@@ -105,7 +112,8 @@ __all__ = [
     "list_quant_backend_capabilities",
     "list_quantizable_modules",
     "quantize_onnx_qdq_static",
-    "quantize_with_reference_fp4",
+    "quantize_with_mxfp_weight_only",
+    "quantize_with_fp4_weight_only",
     "quantize_with_svd",
     "quantize_with_torchao",
     "recommend_high_precision_modules",
