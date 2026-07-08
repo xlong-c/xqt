@@ -415,7 +415,7 @@ def _fp4_tilelang_readiness(
     }
     evidence = [
         "pytorch + fp4_weight_only is classified as PSEUDO weight-only quantization",
-        "ReferenceFP4Linear stores packed signed int4 codes plus per-group scale",
+        "FP4WeightOnlyLinear stores packed signed int4 codes plus per-group scale",
         "TileLang registry includes packed FP4 fused unpack/dequant/GEMM/bias/activation entry",
     ]
     gaps = [
@@ -424,7 +424,7 @@ def _fp4_tilelang_readiness(
     ]
     required_actions = [
         "capture TileLang packed FP4 runtime correctness and latency on the target CUDA GPU",
-        "complete full AWQ/GPTQ execution if the production path must use those algorithms rather than the reference fp4_weight_only path",
+        "complete full AWQ/GPTQ execution if the production path must use those algorithms rather than the current fp4_weight_only path",
     ]
     validation: TileLangFP4ValidationResult | None = None
     if run_tilelang_probe:
@@ -584,7 +584,7 @@ def _analysis_readiness() -> XQTReadinessScenario:
     evidence = [
         "analyze stage can emit layer error, activation drift, importance, prune candidates, and layer_statistics",
         "layer statistics include output and weight distribution summaries",
-        "FP4 ReferenceFP4Linear weights are materialized through dequantize_weight for analysis",
+        "FP4 FP4WeightOnlyLinear weights are materialized through dequantize_weight for analysis",
     ]
     gaps = [
         "task-level accuracy, mAP, perplexity, or business metrics remain external to XQT",
