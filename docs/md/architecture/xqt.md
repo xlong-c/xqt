@@ -109,6 +109,34 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 - planned / capability-only 后端必须在 preflight 和文档中标注
 - workflow stage 必须写入 `stage_reports` 和 manifest stage metric
 
+### Session stage 协议
+
+`XQTOptimizationSession` 内部正式维护 `SessionStage` 图, 初始化时会注册 `baseline` 作为第一个 stage. 旧的 `OptimizationStageResult` 仍保留运行结果语义, `SessionStage` 负责表达阶段产物, lineage, parent, persistence 和 capability.
+
+核心约定:
+
+- `SessionStage.payload` 表达当前阶段产物语义.
+- `model_snapshots` 表达 session 可恢复的模型态.
+- `use(name)` / `revert_to(name)` 优先恢复模型 snapshot, 不把 runtime plan 或 export bundle 误当成模型.
+- provider 逻辑收敛在 `xqt/workflows/stage_provider.py`, `optimization.py` 只消费 provider 输出.
+
+当前 payload kind:
+
+- `torch_module`: baseline, prune, benchmark, analyze 等默认模型态 stage.
+- `quantized_model`: quant stage, 对应 `QuantizedModelPayload`.
+- `runtime_plan`: operator stage, 对应 `RuntimePlanPayload`.
+- `export_bundle`: export / deploy stage, 对应 `ExportBundlePayload`.
+- `runtime_handle`: executable runtime handle 协议, 对应 `RuntimeHandlePayload`; 当前只定义协议, 不新增 producer.
+
+当前 transform-side provider:
+
+- `DefaultStageProvider`
+- `ModelQuantizerProvider`
+- `OperatorOptimizerProvider`
+- `ExportProvider`
+
+session 内比较使用 `XQTOptimizationSession.compare_stages()` 或 `compare_to_baseline()`, 返回 `StageComparison`. 它只做 stage / payload / metric / artifact 层面的结构化摘要, 不引入 task-level validation.
+
 ## Profiling 约定
 
 `XQT` 允许理解和记录性能分析工具, 但 profiling 只作为模型侧 `benchmark` / `operator` / `export` / `deploy` 的诊断补充.

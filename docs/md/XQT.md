@@ -8,6 +8,8 @@ XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,�
 
 在本仓库内, XQT 是唯一推理优化主体. Python API 是主入口: `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.*` facade 和 runtime manager 用来表达模型替换, 算子 contract, runtime 状态和 benchmark/report. `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda` 是 XQT 内部 engine, 不是和 TensorRT / ONNX Runtime / OpenVINO 并列的外部 backend.
 
+当前 `XQTOptimizationSession` 内部已经维护正式 `SessionStage` 图, `StagePayload` typed payload, transform-side provider 和 `StageComparison` helper. 详细协议以 [architecture/xqt.md](architecture/xqt.md) 和 [../../xqt/FRAMEWORK.md](../../xqt/FRAMEWORK.md) 为准.
+
 ## 1. 项目定位
 
 本章节保留为兼容锚点. `XQT` 的系统定位和模型侧边界已经迁到:
