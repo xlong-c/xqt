@@ -11,7 +11,7 @@ from .capability import (
     describe_quant_backend_capability,
     list_quant_backend_capabilities,
 )
-from .onnx_qdq import (
+from .backends.onnx_qdq import (
     IterableCalibrationDataReader,
     ONNXQDQQuantizationResult,
     quantize_onnx_qdq_static,
@@ -31,7 +31,7 @@ from .sensitivity import (
     recommend_high_precision_modules,
     suggest_high_precision_modules,
 )
-from .torchao_backend import TorchAOQuantizationResult, quantize_with_torchao
+from .backends.torchao import TorchAOQuantizationResult, quantize_with_torchao
 from .types import (
     QuantizationComponentPlan,
     QuantizationExecutionPlan,
@@ -39,14 +39,15 @@ from .types import (
     QuantizationNature,
     QuantizationReport,
 )
-from .executor import execute_quantization_plan, summarize_quantization_reports
-from .fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
-from .fp4_backend import (
+from .execution import execute_quantization_plan, summarize_quantization_reports
+from .quantizers import Quantizer, QuantizerOptions, QuantizerResult
+from .quantizers.fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
+from .quantizers.reference_fp4 import (
     FP4QuantizationResult,
     ReferenceFP4Linear,
     quantize_with_reference_fp4,
 )
-from .nvfp4_bridge import (
+from .bridges.nvfp4 import (
     NVFP4LinearBridge,
     NVFP4TensorLayout,
     bridge_module_to_nvfp4_linear,
@@ -55,7 +56,7 @@ from .nvfp4_bridge import (
     infer_nvfp4_tensor_layout,
     unpack_nvfp4e2m1,
 )
-from .svd_quant import (
+from .quantizers.svd import (
     LowRankBranch,
     SVDQuantLinear,
     SVDQuantResult,
@@ -74,6 +75,9 @@ __all__ = [
     "NVFP4LinearBridge",
     "NVFP4TensorLayout",
     "ONNXQDQQuantizationResult",
+    "Quantizer",
+    "QuantizerOptions",
+    "QuantizerResult",
     "QuantBackendCapability",
     "QuantizationCandidate",
     "QuantizationComponentPlan",
