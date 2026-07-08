@@ -21,7 +21,7 @@ from xqt.operator_opt.backends.gemm_precision import (
     gemm_with_precision,
 )
 from xqt.quant import (
-    ReferenceFP4Linear,
+    FP4WeightOnlyLinear,
     infer_nvfp4_tensor_layout,
 )
 
@@ -433,7 +433,7 @@ class _ModuleConverter:
 
     def _build_contract(self, module: nn.Module) -> OperatorContract:
         if (
-            isinstance(module, (nn.Linear, ReferenceFP4Linear))
+            isinstance(module, (nn.Linear, FP4WeightOnlyLinear))
             or infer_nvfp4_tensor_layout(module) is not None
         ):
             return self._build_linear_contract(module)
@@ -444,11 +444,11 @@ class _ModuleConverter:
         if isinstance(module, xqt_nn.FeedForward):
             return self._build_feedforward_contract(module)
         raise XQTBackendError(
-            "xqt.convert currently supports Linear, Conv2d, LayerNorm, FeedForward, ReferenceFP4Linear, and bridgeable NVFP4 Linear modules"
+            "xqt.convert currently supports Linear, Conv2d, LayerNorm, FeedForward, FP4WeightOnlyLinear, and bridgeable NVFP4 Linear modules"
         )
 
     def _build_linear_contract(self, module: nn.Module) -> OperatorContract:
-        if isinstance(module, ReferenceFP4Linear):
+        if isinstance(module, FP4WeightOnlyLinear):
             weight_spec = TensorStorageSpec(
                 storage_dtype="fp4_packed",
                 logical_dtype=self.policy.weight,
@@ -462,7 +462,7 @@ class _ModuleConverter:
                 "source_module_type": type(module).__name__,
                 "input_features": int(module.input_features),
                 "output_features": int(module.output_features),
-                "path": "reference_fp4",
+                "path": "fp4_weight_only",
             }
         else:
             nvfp4_layout = infer_nvfp4_tensor_layout(module)

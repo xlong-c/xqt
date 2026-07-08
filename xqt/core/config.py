@@ -10,11 +10,6 @@ from omegaconf.errors import OmegaConfBaseException
 
 from xdl.config.resolver import register_default_resolvers
 
-from xqt.quant.strategy import (
-    SUPPORTED_QUANT_STRATEGIES,
-    normalize_quant_strategy,
-)
-
 from .errors import XQTConfigError
 from .schema import (
     COMPRESSION_AXES,
@@ -25,10 +20,12 @@ from .schema import (
     PRUNE_SCOPES,
     QuantComponentPolicyConfig,
     QuantConfig,
+    SUPPORTED_QUANT_STRATEGIES,
     TASK_TYPES,
     TILELANG_PASS_CONFIG_KEYS,
     XQTConfig,
     XQT_CONFIG_VERSION,
+    normalize_quant_strategy,
 )
 
 _STRUCTURED_IMPORTANCE_TYPES = {"l1", "l2", "bn_gamma", "usage"}
