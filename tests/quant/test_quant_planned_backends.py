@@ -4,7 +4,7 @@ import torch
 
 from xqt.core.config import load_xqt_config
 from xqt.pipeline.runner import create_context
-from xqt.quant.executor import execute_quantization_plan
+from xqt.quant.execution import execute_quantization_plan
 from xqt.quant.plan import build_quantization_plan
 
 

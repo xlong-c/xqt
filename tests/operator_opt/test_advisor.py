@@ -27,6 +27,18 @@ class TestPrecisionAdvisor:
         assert recommendation.fallback_precision == "fp16"
         assert recommendation.validation["tighten_runtime_validation"] is True
 
+    def test_norm_prefers_fp16_for_current_builtin_runtime_path(self) -> None:
+        recommendation = recommend_precision_strategy(
+            operator_family="norm",
+            target_sm="sm_90",
+        )
+
+        assert recommendation.recommended_precision == "fp16"
+        assert recommendation.fallback_precision == "fp16"
+        assert recommendation.engine == "triton"
+        assert "bf16" in recommendation.alternatives
+        assert recommendation.validation["tighten_runtime_validation"] is True
+
     def test_megakernel_avoids_low_precision_as_the_first_step(self) -> None:
         recommendation = recommend_precision_strategy(
             operator_family="megakernel",

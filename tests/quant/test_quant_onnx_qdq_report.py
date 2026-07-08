@@ -9,9 +9,9 @@ import torch
 from xqt.core.config import load_xqt_config
 from xqt.pipeline.runner import create_context
 from xqt.quant import execute_quantization_plan
-from xqt.quant.onnx_qdq import ONNXQDQQuantizationResult
+from xqt.quant.backends.onnx_qdq import ONNXQDQQuantizationResult
 from xqt.quant.plan import build_quantization_plan
-import xqt.quant.executor as executor_module
+import xqt.quant.execution.executor as executor_module
 
 
 def _base_config(tmp_path: Path) -> dict[str, Any]:

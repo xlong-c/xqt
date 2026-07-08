@@ -8,10 +8,10 @@ import xqt.pipeline.passes as passes_module
 from xqt.pipeline.passes import QuantPass
 from xqt.pipeline.runner import create_context
 from xqt.quant import execute_quantization_plan
-from xqt.quant.fp4_backend import ReferenceFP4Linear
+from xqt.quant.quantizers.reference_fp4 import ReferenceFP4Linear
 from xqt.quant.sensitivity import analyze_layer_sensitivity
 from xqt.quant.plan import build_quantization_plan
-from xqt.quant.torchao_backend import TorchAOQuantizationResult
+from xqt.quant.backends.torchao import TorchAOQuantizationResult
 
 
 class _TinyMLP(torch.nn.Module):
@@ -274,7 +274,7 @@ def test_torchao_report_includes_calibration_summary_when_inputs_provided(
     )
 
     monkeypatch.setattr(
-        "xqt.quant.executor.quantize_with_torchao",
+        "xqt.quant.execution.executor.quantize_with_torchao",
         lambda model, **kwargs: TorchAOQuantizationResult(
             model=model,
             strategy="dynamic_int8",

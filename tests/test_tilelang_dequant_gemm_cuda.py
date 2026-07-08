@@ -21,7 +21,7 @@ from xqt.operator_opt.kernels.tilelang.gemm import (
     fp4_packed_dequant_gemm_epilogue_reference,
     fp4_packed_dequant_gemm_epilogue_tilelang,
 )
-from xqt.quant.fp4_backend import ReferenceFP4Linear
+from xqt.quant.quantizers.reference_fp4 import ReferenceFP4Linear
 
 
 requires_cuda = pytest.mark.skipif(
