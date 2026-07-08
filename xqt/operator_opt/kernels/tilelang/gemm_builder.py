@@ -311,134 +311,158 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
         out_idx = [4]
     else:
         out_idx = [3]
-
-    @tilelang.jit(
-        out_idx=out_idx,
-        target=target,
-        pass_configs=pass_configs,
+    shape_suffix = (
+        f"m{m}_n{n}_k{input_features}_g{group_size}_bm{block_m}_"
+        f"bn{block_n}_t{threads}_{target_arch or 'auto'}_{activation or 'none'}"
     )
+
+    def tilelang_fp4_fused_gemm_with_bias_main(
+        a: T.Tensor(a_shape, dtype),
+        packed_weight: T.Tensor(packed_shape, T.uint8),
+        scale: T.Tensor(scale_shape, dtype),
+        bias: T.Tensor(bias_shape, dtype),
+        out: T.Tensor(c_shape, dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(m, block_m),
+            T.ceildiv(n, block_n),
+            threads=threads,
+        ) as (bx, by):
+            a_shared = T.alloc_shared([block_m, input_features], dtype)
+            b_shared = T.alloc_shared([block_n, input_features], dtype)
+            o_shared = T.alloc_shared([block_m, block_n], dtype)
+            acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+
+            T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
+            for row_offset, feature in T.Parallel(block_n, input_features):
+                row = by * block_n + row_offset
+                byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
+                low = T.bitwise_and(byte_u16, 15)
+                high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
+                nibble = T.if_then_else(feature % 2 == 0, low, high)
+                signed = T.if_then_else(
+                    nibble >= 8,
+                    nibble.astype(T.int16) - 16,
+                    nibble.astype(T.int16),
+                )
+                b_shared[row_offset, feature] = (
+                    signed.astype(dtype) * scale[row, feature // group_size, 0]
+                )
+            T.fill(acc_o, 0)
+            T.gemm(
+                a_shared,
+                b_shared,
+                acc_o,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+            )
+            for row_offset, column_offset in T.Parallel(block_m, block_n):
+                value = acc_o[row_offset, column_offset] + bias[
+                    by * block_n + column_offset
+                ].astype(accum_dtype)
+                acc_o[row_offset, column_offset] = _apply_activation(value)
+            T.copy(acc_o, o_shared)
+            T.copy(
+                o_shared,
+                out[
+                    bx * block_m : (bx + 1) * block_m,
+                    by * block_n : (by + 1) * block_n,
+                ],
+            )
+
+    tilelang_fp4_fused_gemm_with_bias_main.__name__ = (
+        f"tilelang_fp4_fused_gemm_with_bias_main_{shape_suffix}"
+    )
+    tilelang_fp4_fused_gemm_with_bias_prim = T.prim_func(
+        tilelang_fp4_fused_gemm_with_bias_main
+    )
+
     def fused_gemm_with_bias():
-        @T.prim_func
-        def main(
-            a: T.Tensor(a_shape, dtype),
-            packed_weight: T.Tensor(packed_shape, T.uint8),
-            scale: T.Tensor(scale_shape, dtype),
-            bias: T.Tensor(bias_shape, dtype),
-            out: T.Tensor(c_shape, dtype),
-        ):
-            with T.Kernel(
-                T.ceildiv(m, block_m),
-                T.ceildiv(n, block_n),
-                threads=threads,
-            ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, input_features], dtype)
-                b_shared = T.alloc_shared([block_n, input_features], dtype)
-                o_shared = T.alloc_shared([block_m, block_n], dtype)
-                acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+        return tilelang_fp4_fused_gemm_with_bias_prim
 
-                T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-                for row_offset, feature in T.Parallel(block_n, input_features):
-                    row = by * block_n + row_offset
-                    byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
-                    low = T.bitwise_and(byte_u16, 15)
-                    high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
-                    nibble = T.if_then_else(feature % 2 == 0, low, high)
-                    signed = T.if_then_else(
-                        nibble >= 8,
-                        nibble.astype(T.int16) - 16,
-                        nibble.astype(T.int16),
-                    )
-                    b_shared[row_offset, feature] = (
-                        signed.astype(dtype) * scale[row, feature // group_size, 0]
-                    )
-                T.fill(acc_o, 0)
-                T.gemm(
-                    a_shared,
-                    b_shared,
-                    acc_o,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
-                for row_offset, column_offset in T.Parallel(block_m, block_n):
-                    value = acc_o[row_offset, column_offset] + bias[
-                        by * block_n + column_offset
-                    ].astype(accum_dtype)
-                    acc_o[row_offset, column_offset] = _apply_activation(value)
-                T.copy(acc_o, o_shared)
-                T.copy(
-                    o_shared,
-                    out[
-                        bx * block_m : (bx + 1) * block_m,
-                        by * block_n : (by + 1) * block_n,
-                    ],
-                )
-
-        return main
-
-    @tilelang.jit(
+    fused_gemm_with_bias.__name__ = (
+        f"tilelang_fp4_fused_gemm_with_bias_builder_{shape_suffix}"
+    )
+    fused_gemm_with_bias_jit = tilelang.jit(
         out_idx=out_idx,
         target=target,
         pass_configs=pass_configs,
+    )(fused_gemm_with_bias)
+
+    def tilelang_fp4_fused_gemm_without_bias_main(
+        a: T.Tensor(a_shape, dtype),
+        packed_weight: T.Tensor(packed_shape, T.uint8),
+        scale: T.Tensor(scale_shape, dtype),
+        out: T.Tensor(c_shape, dtype),
+    ):
+        with T.Kernel(
+            T.ceildiv(m, block_m),
+            T.ceildiv(n, block_n),
+            threads=threads,
+        ) as (bx, by):
+            a_shared = T.alloc_shared([block_m, input_features], dtype)
+            b_shared = T.alloc_shared([block_n, input_features], dtype)
+            o_shared = T.alloc_shared([block_m, block_n], dtype)
+            acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+
+            T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
+            for row_offset, feature in T.Parallel(block_n, input_features):
+                row = by * block_n + row_offset
+                byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
+                low = T.bitwise_and(byte_u16, 15)
+                high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
+                nibble = T.if_then_else(feature % 2 == 0, low, high)
+                signed = T.if_then_else(
+                    nibble >= 8,
+                    nibble.astype(T.int16) - 16,
+                    nibble.astype(T.int16),
+                )
+                b_shared[row_offset, feature] = (
+                    signed.astype(dtype) * scale[row, feature // group_size, 0]
+                )
+            T.fill(acc_o, 0)
+            T.gemm(
+                a_shared,
+                b_shared,
+                acc_o,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+            )
+            for row_offset, column_offset in T.Parallel(block_m, block_n):
+                acc_o[row_offset, column_offset] = _apply_activation(
+                    acc_o[row_offset, column_offset]
+                )
+            T.copy(acc_o, o_shared)
+            T.copy(
+                o_shared,
+                out[
+                    bx * block_m : (bx + 1) * block_m,
+                    by * block_n : (by + 1) * block_n,
+                ],
+            )
+
+    tilelang_fp4_fused_gemm_without_bias_main.__name__ = (
+        f"tilelang_fp4_fused_gemm_without_bias_main_{shape_suffix}"
     )
+    tilelang_fp4_fused_gemm_without_bias_prim = T.prim_func(
+        tilelang_fp4_fused_gemm_without_bias_main
+    )
+
     def fused_gemm_without_bias():
-        @T.prim_func
-        def main(
-            a: T.Tensor(a_shape, dtype),
-            packed_weight: T.Tensor(packed_shape, T.uint8),
-            scale: T.Tensor(scale_shape, dtype),
-            out: T.Tensor(c_shape, dtype),
-        ):
-            with T.Kernel(
-                T.ceildiv(m, block_m),
-                T.ceildiv(n, block_n),
-                threads=threads,
-            ) as (bx, by):
-                a_shared = T.alloc_shared([block_m, input_features], dtype)
-                b_shared = T.alloc_shared([block_n, input_features], dtype)
-                o_shared = T.alloc_shared([block_m, block_n], dtype)
-                acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
+        return tilelang_fp4_fused_gemm_without_bias_prim
 
-                T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-                for row_offset, feature in T.Parallel(block_n, input_features):
-                    row = by * block_n + row_offset
-                    byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
-                    low = T.bitwise_and(byte_u16, 15)
-                    high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
-                    nibble = T.if_then_else(feature % 2 == 0, low, high)
-                    signed = T.if_then_else(
-                        nibble >= 8,
-                        nibble.astype(T.int16) - 16,
-                        nibble.astype(T.int16),
-                    )
-                    b_shared[row_offset, feature] = (
-                        signed.astype(dtype) * scale[row, feature // group_size, 0]
-                    )
-                T.fill(acc_o, 0)
-                T.gemm(
-                    a_shared,
-                    b_shared,
-                    acc_o,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
-                for row_offset, column_offset in T.Parallel(block_m, block_n):
-                    acc_o[row_offset, column_offset] = _apply_activation(
-                        acc_o[row_offset, column_offset]
-                    )
-                T.copy(acc_o, o_shared)
-                T.copy(
-                    o_shared,
-                    out[
-                        bx * block_m : (bx + 1) * block_m,
-                        by * block_n : (by + 1) * block_n,
-                    ],
-                )
-
-        return main
+    fused_gemm_without_bias.__name__ = (
+        f"tilelang_fp4_fused_gemm_without_bias_builder_{shape_suffix}"
+    )
+    fused_gemm_without_bias_jit = tilelang.jit(
+        out_idx=out_idx,
+        target=target,
+        pass_configs=pass_configs,
+    )(fused_gemm_without_bias)
 
     if has_bias:
-        return fused_gemm_with_bias()
-    return fused_gemm_without_bias()
+        return fused_gemm_with_bias_jit()
+    return fused_gemm_without_bias_jit()
 
 
 @lru_cache(maxsize=32)

@@ -245,6 +245,8 @@ def gemm_with_precision(
 def _select_engine(precision: str, device: torch.device) -> str:
     """Auto-select best XQT engine for given precision and device."""
     if not device.type == "cuda":
+        if precision in {"fp4", "nvfp4"}:
+            return "tilelang"
         return "torch"
 
     # Triton first: it currently has the broadest GEMM coverage.
@@ -254,6 +256,9 @@ def _select_engine(precision: str, device: torch.device) -> str:
     # INT4 needs a dequantizing path.
     if precision == "int4":
         return "triton"
+
+    if precision in {"fp4", "nvfp4"}:
+        return "tilelang"
 
     return "torch"
 
@@ -371,6 +376,12 @@ def _gemm_tilelang(
 ) -> torch.Tensor:
     """TileLang engine dispatcher."""
     from ..kernels.tilelang.gemm_builder import build_tilelang_gemm_kernel
+    from ..kernels.tilelang.gemm import (
+        fp4_packed_dequant_gemm_epilogue_reference,
+        fp4_packed_dequant_gemm_epilogue_tilelang,
+        nvfp4_packed_dequant_gemm_epilogue_reference,
+        nvfp4_packed_dequant_gemm_epilogue_tilelang,
+    )
 
     if precision.mma == "fp16":
         M, K = a.shape
@@ -399,6 +410,95 @@ def _gemm_tilelang(
             output = torch.nn.functional.silu(output)
 
         return output
+    elif precision.mma == "fp4":
+        if not transpose_b:
+            raise XQTBackendError("packed fp4 TileLang GEMM requires transpose_b=True")
+        b_scale = kwargs.get("b_scale")
+        if b_scale is None:
+            raise ValueError("fp4 precision requires b_scale")
+        group_size = int(kwargs.get("group_size", 128))
+        input_features = int(kwargs.get("input_features", a.shape[1]))
+        can_run_tilelang = (
+            a.is_cuda
+            and b.is_cuda
+            and isinstance(b_scale, torch.Tensor)
+            and b_scale.is_cuda
+            and a.dtype == torch.float16
+            and b.dtype == torch.uint8
+            and b_scale.dtype == torch.float16
+            and (bias is None or (bias.is_cuda and bias.dtype == torch.float16))
+        )
+        if can_run_tilelang:
+            return fp4_packed_dequant_gemm_epilogue_tilelang(
+                a,
+                b,
+                b_scale,
+                bias,
+                input_features=input_features,
+                group_size=group_size,
+                activation=activation,
+                block_m=int(kwargs.get("block_m", 64)),
+                block_n=int(kwargs.get("block_n", 64)),
+                threads=int(kwargs.get("threads", 128)),
+                num_stages=int(kwargs.get("num_stages", 2)),
+                target_arch=kwargs.get("target_arch"),
+            )
+        return fp4_packed_dequant_gemm_epilogue_reference(
+            a,
+            b,
+            b_scale,
+            bias,
+            input_features=input_features,
+            group_size=group_size,
+            activation=activation,
+        )
+    elif precision.mma == "nvfp4":
+        if not transpose_b:
+            raise XQTBackendError("packed nvfp4 TileLang GEMM requires transpose_b=True")
+        b_scale = kwargs.get("b_scale")
+        if b_scale is None:
+            raise ValueError("nvfp4 precision requires b_scale")
+        group_size = int(kwargs.get("group_size", 16))
+        input_features = int(kwargs.get("input_features", a.shape[1]))
+        weight_global_scale = kwargs.get("weight_global_scale")
+        can_run_tilelang = (
+            a.is_cuda
+            and b.is_cuda
+            and isinstance(b_scale, torch.Tensor)
+            and b_scale.is_cuda
+            and a.dtype == torch.float16
+            and b.dtype == torch.uint8
+            and b_scale.dtype == torch.float16
+            and (weight_global_scale is None or (isinstance(weight_global_scale, torch.Tensor) and weight_global_scale.is_cuda and weight_global_scale.dtype == torch.float16))
+            and (bias is None or (bias.is_cuda and bias.dtype == torch.float16))
+        )
+        if can_run_tilelang:
+            return nvfp4_packed_dequant_gemm_epilogue_tilelang(
+                a,
+                b,
+                b_scale,
+                bias,
+                input_features=input_features,
+                group_size=group_size,
+                weight_global_scale=weight_global_scale,
+                activation=activation,
+                block_m=int(kwargs.get("block_m", 64)),
+                block_n=int(kwargs.get("block_n", 16)),
+                block_k=int(kwargs.get("block_k", 128)),
+                threads=int(kwargs.get("threads", 128)),
+                num_stages=int(kwargs.get("num_stages", 2)),
+                target_arch=kwargs.get("target_arch"),
+            )
+        return nvfp4_packed_dequant_gemm_epilogue_reference(
+            a,
+            b,
+            b_scale,
+            bias,
+            input_features=input_features,
+            group_size=group_size,
+            weight_global_scale=weight_global_scale,
+            activation=activation,
+        )
     else:
         raise XQTBackendError(f"TileLang precision {precision.mma} not implemented yet")
 
@@ -473,6 +573,12 @@ def describe_gemm_precision_capability(
         if precision in {"fp16", "bf16"}:
             capability["available"] = True
             capability["engine"] = "torch"
+        elif precision in {"fp4", "nvfp4"}:
+            capability["available"] = True
+            capability["engine"] = "tilelang"
+            capability["notes"].append(
+                "FP4/NVFP4 can use the TileLang reference path without CUDA native kernels"
+            )
         return capability
 
     # 检查CUDA compute capability

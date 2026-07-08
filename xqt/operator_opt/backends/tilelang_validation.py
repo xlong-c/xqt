@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import torch
 
-from xqt.quant.quantizers.reference_fp4 import ReferenceFP4Linear
+from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
 
 from ..kernels.tilelang import (
     build_tilelang_fp4_fused_dequant_gemm_kernel,
@@ -318,7 +318,7 @@ def validate_tilelang_packed_fp4_fused_gemm(
         with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
             torch.manual_seed(seed)
             linear = torch.nn.Linear(in_features, out_features, bias=has_bias)
-            fp4_linear = ReferenceFP4Linear.from_linear(
+            fp4_linear = FP4WeightOnlyLinear.from_linear(
                 linear,
                 group_size=group_size,
             ).to(device)

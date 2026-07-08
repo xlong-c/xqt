@@ -241,6 +241,15 @@ def _normalize_group_scale_for_tilelang(scale: torch.Tensor) -> torch.Tensor:
     return scale
 
 
+def _resolve_cuda_target_arch(tensor: torch.Tensor, target_arch: str | None) -> str | None:
+    if target_arch is not None:
+        return str(target_arch)
+    if not tensor.is_cuda:
+        return None
+    major, minor = torch.cuda.get_device_capability(tensor.device)
+    return f"sm_{major}{minor}"
+
+
 def fp4_packed_dequant_gemm_epilogue_tilelang(
     x: torch.Tensor,
     packed_weight: torch.Tensor,
@@ -310,7 +319,7 @@ def fp4_packed_dequant_gemm_epilogue_tilelang(
         block_m=int(block_m),
         block_n=int(block_n),
         threads=int(threads),
-        target_arch=target_arch,
+        target_arch=_resolve_cuda_target_arch(x, target_arch),
         has_bias=bias is not None,
         activation=activation,
     )
@@ -479,7 +488,7 @@ TILELANG_DEQUANT_GEMM_KERNEL_METADATA = {
         "threads": 128,
         "num_stages": 2,
         "baseline": "fused TileLang packed FP4 unpack/dequant GEMM + bias/activation epilogue",
-        "usage": "ReferenceFP4Linear path that consumes packed uint8 weight and group-wise scale.",
+        "usage": "FP4WeightOnlyLinear path that consumes packed uint8 weight and group-wise scale.",
         "unpack_stage": "tilelang_fused_gemm_kernel",
         "fusion_status": "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue",
         "epilogue_stage": "tilelang_fused_bias_activation",
