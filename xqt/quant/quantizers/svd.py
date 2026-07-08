@@ -45,7 +45,7 @@ from ..execution.selection import (
     module_selection_reason_metadata,
     selection_policy_metadata,
 )
-from .reference_fp4 import (
+from .fp4_weight_only import (
     _pack_int4,
     _unpack_int4,
 )
