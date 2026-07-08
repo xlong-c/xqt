@@ -16,12 +16,16 @@ from xqt.quant.backends.onnx_qdq import (
 from xqt.quant.backends.planned import execute_planned_method_component
 from xqt.quant.backends.torchao import execute_torchao_component, quantize_with_torchao
 from xqt.quant.capability import _resolve_nature
-from xqt.quant.execution.component import prefix_module_names
-from xqt.quant.execution.selection import selection_policy_metadata
-from xqt.quant.quantizers.reference_fp4 import (
-    execute_reference_fp4_component,
-    quantize_with_reference_fp4,
+from xqt.quant.component import prefix_module_names
+from xqt.quant.quantizers.fp4_weight_only import (
+    execute_fp4_weight_only_component,
+    quantize_with_fp4_weight_only,
 )
+from xqt.quant.quantizers.mxfp_weight_only import (
+    execute_mxfp_weight_only_component,
+    quantize_with_mxfp_weight_only,
+)
+from xqt.quant.selection import selection_policy_metadata
 from xqt.quant.quantizers.svd import execute_svdquant_component, quantize_with_svd
 from xqt.quant.types import (
     QuantizationComponentPlan,
@@ -101,11 +105,23 @@ def execute_quantization_plan(
             component.backend == "pytorch"
             and component.strategy == "fp4_weight_only"
         ):
-            current_model, report = execute_reference_fp4_component(
+            current_model, report = execute_fp4_weight_only_component(
                 context,
                 current_model,
                 component,
-                quantize_fn=quantize_with_reference_fp4,
+                quantize_fn=quantize_with_fp4_weight_only,
+            )
+            reports.append(report)
+            continue
+        if (
+            component.backend == "pytorch"
+            and component.strategy == "mxfp_weight_only"
+        ):
+            current_model, report = execute_mxfp_weight_only_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_mxfp_weight_only,
             )
             reports.append(report)
             continue
@@ -157,7 +173,8 @@ __all__ = [
     "_onnx_qdq_graph_summary",
     "execute_quantization_plan",
     "quantize_onnx_qdq_static",
-    "quantize_with_reference_fp4",
+    "quantize_with_fp4_weight_only",
+    "quantize_with_mxfp_weight_only",
     "quantize_with_svd",
     "quantize_with_torchao",
     "summarize_quantization_reports",
