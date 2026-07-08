@@ -21,6 +21,8 @@ from ..kernels.tilelang.conv import (
     TILELANG_CONV_KERNEL_METADATA,
     conv2d_reference,
     conv2d_tilelang,
+    conv3d_1x1x1_reference,
+    conv3d_1x1x1_tilelang,
 )
 from ..kernels.tilelang.gemm import (
     TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
@@ -133,6 +135,13 @@ TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
         reference=conv2d_reference,
         kernel=conv2d_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["conv"]),
+        cuda_only=False,
+    ),
+    "conv3d_1x1x1": TileLangKernelSpec(
+        pattern="conv3d_1x1x1",
+        reference=conv3d_1x1x1_reference,
+        kernel=conv3d_1x1x1_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["conv3d_1x1x1"]),
         cuda_only=False,
     ),
     "dequant_gemm_epilogue": TileLangKernelSpec(

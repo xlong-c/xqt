@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import torch
 
-from xqt.quant.fp4_backend import ReferenceFP4Linear
+from xqt.quant.quantizers.reference_fp4 import ReferenceFP4Linear
 
 from ..kernels.tilelang import (
     build_tilelang_fp4_fused_dequant_gemm_kernel,

@@ -217,10 +217,11 @@ def recommend_precision_strategy(
         rationale.append("Only move to FP8 after the fused higher-precision path is numerically stable.")
         risks.append("Softmax and accumulation paths are more sensitive to low-precision drift.")
     elif operator_family == "norm":
-        recommended = "bf16" if (sm_value or 0) >= 80 else "fp16"
+        recommended = "fp16"
         fallback = "fp16"
-        alternatives = ["bf16", "fp16"]
-        rationale.append("Norm-family kernels usually prefer BF16 when range matters.")
+        alternatives = ["fp16", "bf16"]
+        rationale.append("Current built-in norm fastpaths in XQT are centered on float16 runtime coverage.")
+        rationale.append("Use BF16 as the next validation target after the FP16 path is stable on the target SM.")
         risks.append("Low-bit norm paths require tighter numeric drift checks than plain GEMM.")
     elif operator_family in {"fusion", "megakernel"}:
         recommended = "bf16" if prioritize_accuracy and (sm_value or 0) >= 80 else "fp16"

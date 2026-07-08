@@ -11,6 +11,8 @@ from .conv import (
     build_tilelang_conv1x1_nchw_kernel,
     conv2d_reference,
     conv2d_tilelang,
+    conv3d_1x1x1_reference,
+    conv3d_1x1x1_tilelang,
 )
 from .gemm import (
     TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
@@ -82,6 +84,8 @@ __all__ = [
     "build_tilelang_nvfp4_fused_dequant_gemm_kernel",
     "conv2d_reference",
     "conv2d_tilelang",
+    "conv3d_1x1x1_reference",
+    "conv3d_1x1x1_tilelang",
     "dense_linear_epilogue_reference",
     "dense_linear_epilogue_tilelang",
     "dequant_gemm_epilogue_reference",

@@ -103,12 +103,18 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     ),
     "triton": OperatorOptimizationEngineCapability(
         engine="triton",
-        status="planned",
+        status="available",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
-        notes=("Reserved for CUDA-only Triton fused kernels.",),
-        limitations=("Built-in executor does not yet ship Triton kernels.",),
+        notes=(
+            "Built-in executor ships limited CUDA-only Triton fused kernels.",
+            "Current built-in execution covers standalone float16/bfloat16 RMSNorm with eager reference fallback metadata.",
+        ),
+        limitations=(
+            "Current built-in execution is limited to the rmsnorm pattern.",
+            "Current CUDA execution assumes normalization over the last hidden dimension and uses model-side wrappers when the source module is channel-first.",
+        ),
     ),
     "tilelang": OperatorOptimizationEngineCapability(
         engine="tilelang",

@@ -13,6 +13,7 @@ from torch import fx, nn
 _PATTERN_TO_BACKEND = {
     "bias_gelu": "triton",
     "swiglu": "triton",
+    "rmsnorm": "triton",
     "rmsnorm_residual": "triton",
     "rope": "triton",
     "attention": "tilelang",
@@ -290,6 +291,72 @@ def _find_rmsnorm_residual_nodes(anchor: fx.Node) -> Optional[list[fx.Node]]:
     return [merged_node, pow_node, mean_node, eps_add, rsqrt_node, rms_mul, anchor]
 
 
+def _find_rmsnorm_nodes(anchor: fx.Node) -> Optional[list[fx.Node]]:
+    if not _matches_any_suffix(anchor, _MUL_SUFFIXES):
+        return None
+    rms_mul = next(
+        (
+            source
+            for source in anchor.all_input_nodes
+            if _matches_any_suffix(source, _MUL_SUFFIXES)
+        ),
+        None,
+    )
+    if rms_mul is None:
+        return None
+    x_node = next(
+        (
+            source
+            for source in rms_mul.all_input_nodes
+            if not _matches_any_suffix(source, _RSQRT_SUFFIXES)
+        ),
+        None,
+    )
+    rsqrt_node = next(
+        (
+            source
+            for source in rms_mul.all_input_nodes
+            if _matches_any_suffix(source, _RSQRT_SUFFIXES)
+        ),
+        None,
+    )
+    if x_node is None or rsqrt_node is None:
+        return None
+    eps_add = next(
+        (
+            source
+            for source in rsqrt_node.all_input_nodes
+            if _matches_any_suffix(source, _ADD_SUFFIXES)
+        ),
+        None,
+    )
+    if eps_add is None:
+        return None
+    mean_node = next(
+        (
+            source
+            for source in eps_add.all_input_nodes
+            if _matches_any_suffix(source, _MEAN_SUFFIXES)
+        ),
+        None,
+    )
+    if mean_node is None:
+        return None
+    pow_node = next(
+        (
+            source
+            for source in mean_node.all_input_nodes
+            if _matches_any_suffix(source, _POW_SUFFIXES)
+        ),
+        None,
+    )
+    if pow_node is None or x_node not in pow_node.all_input_nodes:
+        return None
+    if any(_matches_any_suffix(source, _ADD_SUFFIXES) for source in x_node.all_input_nodes):
+        return None
+    return [x_node, pow_node, mean_node, eps_add, rsqrt_node, rms_mul, anchor]
+
+
 def _find_rope_nodes(anchor: fx.Node) -> Optional[list[fx.Node]]:
     if not _matches_any_suffix(anchor, _FLATTEN_SUFFIXES):
         return None
@@ -442,6 +509,17 @@ def _match_fx_patterns(graph_module: fx.GraphModule) -> list[OperatorPatternCand
                         )
                     )
         if node.op == "call_function" and target_name.endswith("mul"):
+            rmsnorm_nodes = _find_rmsnorm_nodes(node)
+            if rmsnorm_nodes is not None:
+                candidates.append(
+                    _build_candidate(
+                        "rmsnorm",
+                        "fx",
+                        node,
+                        rmsnorm_nodes,
+                        estimated_kernel_count=len(rmsnorm_nodes),
+                    )
+                )
             rmsnorm_nodes = _find_rmsnorm_residual_nodes(node)
             if rmsnorm_nodes is not None:
                 candidates.append(
@@ -626,6 +704,17 @@ def _match_export_patterns(graph_module: fx.GraphModule) -> list[OperatorPattern
                     )
                 )
         if node.op == "call_function" and target_name.endswith("aten.mul.Tensor"):
+            rmsnorm_nodes = _find_rmsnorm_nodes(node)
+            if rmsnorm_nodes is not None:
+                candidates.append(
+                    _build_candidate(
+                        "rmsnorm",
+                        "torch_export",
+                        node,
+                        rmsnorm_nodes,
+                        estimated_kernel_count=len(rmsnorm_nodes),
+                    )
+                )
             rmsnorm_nodes = _find_rmsnorm_residual_nodes(node)
             if rmsnorm_nodes is not None:
                 candidates.append(

@@ -178,6 +178,23 @@ class ToyConvBlock(nn.Module):
         return self.proj(F.silu(self.conv(x)))
 
 
+class ToyConv3dBlock(nn.Module):
+    """Small Conv3d block with a named conv target for operator-family routing tests."""
+
+    def __init__(
+        self,
+        in_channels: int = 8,
+        hidden_channels: int = 64,
+        out_channels: int = 32,
+    ) -> None:
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels, hidden_channels, kernel_size=1)
+        self.proj = nn.Conv3d(hidden_channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(F.silu(self.conv(x)))
+
+
 class ToyLinearBlock(nn.Module):
     """Small Linear block with a named linear target for direct half operator routing tests."""
 
@@ -293,6 +310,20 @@ def build_toy_conv_block(
     )
 
 
+def build_toy_conv3d_block(
+    in_channels: int = 8,
+    hidden_channels: int = 64,
+    out_channels: int = 32,
+) -> ToyConv3dBlock:
+    """Build a small Conv3d block for direct TileLang Conv3d routing tests."""
+
+    return ToyConv3dBlock(
+        in_channels=in_channels,
+        hidden_channels=hidden_channels,
+        out_channels=out_channels,
+    )
+
+
 def build_toy_linear_block(
     input_dim: int = 64,
     hidden_dim: int = 64,
@@ -321,6 +352,7 @@ __all__ = [
     "ToyAttentionBlock",
     "ToyAttentionClassifier",
     "ToyConvBlock",
+    "ToyConv3dBlock",
     "ToyLinearBlock",
     "ToyLLMMLPClassifier",
     "ToyNormBlock",
@@ -328,6 +360,7 @@ __all__ = [
     "ToyTransformerClassifier",
     "build_toy_attention_classifier",
     "build_toy_conv_block",
+    "build_toy_conv3d_block",
     "build_toy_dequant_gemm_block",
     "build_toy_fp4_mlp",
     "build_toy_linear_block",

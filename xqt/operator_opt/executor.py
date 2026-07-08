@@ -20,7 +20,7 @@ from xqt.core.schema import OperatorOptimizationConfig
 from xqt.core.types import XQTContext
 from xqt.analysis.compare import compare_tensors
 from xqt.export.input_utils import first_tensor_output, split_example_input
-from xqt.quant.nvfp4_bridge import (
+from xqt.quant.bridges.nvfp4 import (
     NVFP4LinearBridge,
     bridge_module_to_nvfp4_linear,
     bridge_module_to_nvfp4_linear_shared,
@@ -63,7 +63,11 @@ from .backends.tilelang import (
     list_tilelang_kernel_specs,
     tilelang_validation_thresholds,
 )
-from .backends.triton import list_triton_kernel_specs
+from .backends.triton import (
+    get_triton_kernel_spec,
+    list_triton_kernel_specs,
+    run_triton_kernel,
+)
 from .types import (
     OperatorOptimizationExecutionPlan,
     OperatorOptimizationExecutionResult,
@@ -681,6 +685,13 @@ def _engine_metadata(
         }
     if target.engine == "triton":
         metadata["kernel_registry"] = list_triton_kernel_specs()
+        metadata["execution_mode"] = "not_run"
+        metadata["execution_reason"] = None
+        metadata["latency"] = {
+            "compile_latency_ms": None,
+            "execution_latency_ms": None,
+            "status": "not_executed",
+        }
     if target.engine == "tilelang":
         settings = TileLangCompileSettings(
             target=str(target.tilelang.get("target", "cuda")),
@@ -1344,6 +1355,126 @@ class _TileLangConvWrapper(nn.Module):
         }
 
 
+class _TileLangConv3dWrapper(nn.Module):
+    """Conv3d 1x1x1 operator-family wrapper with TileLang fastpath routing."""
+
+    def __init__(
+        self,
+        conv: nn.Conv3d,
+        *,
+        fallback: str,
+        settings: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.conv = conv
+        self.fallback = fallback
+        self.settings = dict(settings)
+        self.last_execution_mode = "not_run"
+        self.last_execution_reason: str | None = None
+        self.last_operator_family = "conv"
+        self.last_fastpath = "none"
+
+    def _is_supported_fastpath(self) -> bool:
+        return (
+            tuple(int(value) for value in self.conv.kernel_size) == (1, 1, 1)
+            and tuple(int(value) for value in self.conv.stride) == (1, 1, 1)
+            and tuple(int(value) for value in self.conv.padding) == (0, 0, 0)
+            and tuple(int(value) for value in self.conv.dilation) == (1, 1, 1)
+            and int(self.conv.groups) == 1
+        )
+
+    def _run_eager(self, x: torch.Tensor) -> torch.Tensor:
+        return F.conv3d(
+            x,
+            self.conv.weight,
+            self.conv.bias,
+            stride=self.conv.stride,
+            padding=self.conv.padding,
+            dilation=self.conv.dilation,
+            groups=self.conv.groups,
+        )
+
+    def _run_tilelang_or_reference(self, x: torch.Tensor) -> torch.Tensor:
+        try:
+            return run_tilelang_kernel(
+                "conv3d_1x1x1",
+                x,
+                self.conv.weight,
+                self.conv.bias,
+                stride=self.conv.stride,
+                padding=self.conv.padding,
+                dilation=self.conv.dilation,
+                groups=self.conv.groups,
+                block_m=int(self.settings.get("block_m", 64)),
+                block_n=int(self.settings.get("block_n", 64)),
+                block_k=int(self.settings.get("block_k", 64)),
+                threads=int(self.settings.get("threads", 128)),
+                num_stages=int(self.settings.get("num_stages", 2)),
+                target_arch=self.settings.get("target_arch"),
+                fallback=self.fallback,
+            )
+        except Exception as exc:
+            if self.fallback != "eager":
+                raise
+            self.last_execution_mode = "reference_fallback"
+            self.last_execution_reason = f"TileLang conv3d runtime fallback: {exc}"
+            self.last_fastpath = "eager_reference_fallback"
+            return self._run_eager(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self._is_supported_fastpath():
+            self.last_execution_mode = "reference_fallback"
+            self.last_execution_reason = (
+                "TileLang Conv3d fastpath requires kernel_size=stride=dilation=(1,1,1), "
+                "padding=(0,0,0), and groups=1."
+            )
+            self.last_fastpath = "eager_reference_fallback"
+            return self._run_eager(x)
+        self.last_execution_mode = (
+            "cuda_tilelang_entry" if x.is_cuda else "reference_fallback"
+        )
+        self.last_fastpath = (
+            "tilelang_half_conv3d_1x1x1_gemm"
+            if self.last_execution_mode == "cuda_tilelang_entry"
+            else "eager_reference_fallback"
+        )
+        self.last_execution_reason = (
+            None
+            if self.last_execution_mode == "cuda_tilelang_entry"
+            else "TileLang conv3d fastpath requires CUDA tensors; using configured fallback."
+        )
+        if self.last_execution_mode == "cuda_tilelang_entry":
+            return self._run_tilelang_or_reference(x)
+        return self._run_eager(x)
+
+    def execution_metadata(self) -> dict[str, Any]:
+        kernel_kind = (
+            "minimal_cuda_jit"
+            if self.last_execution_mode == "cuda_tilelang_entry"
+            else "reference_fallback"
+        )
+        return {
+            "execution_mode": self.last_execution_mode,
+            "execution_reason": self.last_execution_reason,
+            "kernel_kind": kernel_kind,
+            "operator_family": self.last_operator_family,
+            "kernel_pattern": "conv3d_1x1x1",
+            "selected_fastpath": self.last_fastpath,
+            "kernel_constraints": {
+                "dtype": "float16",
+                "supported_patterns": ["conv3d_1x1x1"],
+                "operator_families": ["conv"],
+                "supports_grouped_conv": False,
+                "requires_kernel_size": [1, 1, 1],
+                "requires_stride": [1, 1, 1],
+                "requires_padding": [0, 0, 0],
+                "requires_dilation": [1, 1, 1],
+            },
+            "fallback": self.fallback,
+            "settings": dict(self.settings),
+        }
+
+
 class _TileLangLinearWrapper(nn.Module):
     """Standalone half Linear wrapper for direct TileLang operator targets."""
 
@@ -1697,6 +1828,162 @@ class _TileLangNormWrapper(nn.Module):
                 "reason": self.last_graph_reason,
                 "cache_size": len(self._graph_cache),
             },
+        }
+
+
+class _TritonRMSNormWrapper(nn.Module):
+    """Standalone half RMSNorm wrapper for Triton operator targets."""
+
+    def __init__(
+        self,
+        norm: nn.Module,
+        *,
+        fallback: str,
+        settings: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.norm = norm
+        self.fallback = fallback
+        self.settings = dict(settings)
+        self.last_execution_mode = "not_run"
+        self.last_execution_reason: str | None = None
+        self.last_operator_family = "norm"
+        self.last_fastpath = "none"
+        self.last_dtype = "unknown"
+        self.last_kernel_pattern = "rmsnorm"
+        self.last_channel_layout = "last_dim"
+
+    def _supports_rmsnorm(self) -> bool:
+        return hasattr(self.norm, "gamma") and hasattr(self.norm, "scale")
+
+    def _rmsnorm_weight(self, x: torch.Tensor) -> torch.Tensor:
+        gamma = getattr(self.norm, "gamma", None)
+        scale = getattr(self.norm, "scale", None)
+        if not isinstance(gamma, torch.Tensor) or scale is None:
+            raise XQTBackendError("Triton RMSNorm wrapper requires gamma and scale")
+        weight = gamma.to(device=x.device, dtype=x.dtype)
+        return weight.reshape(-1).contiguous() * float(scale)
+
+    def _rmsnorm_bias(self, x: torch.Tensor) -> torch.Tensor | None:
+        bias = getattr(self.norm, "bias", None)
+        if isinstance(bias, torch.Tensor):
+            return bias.to(device=x.device, dtype=x.dtype).reshape(-1).contiguous()
+        return None
+
+    def _is_channel_first_norm(self, x: torch.Tensor) -> bool:
+        channel_first = bool(getattr(self.norm, "channel_first", False))
+        return channel_first and x.ndim >= 3
+
+    def _reference(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x)
+
+    def _precision_name(self, x: torch.Tensor) -> str:
+        if x.dtype == torch.float16:
+            return "half"
+        if x.dtype == torch.bfloat16:
+            return "bf16"
+        return str(x.dtype).removeprefix("torch.")
+
+    def _run_triton_or_reference(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self._rmsnorm_weight(x)
+        bias = self._rmsnorm_bias(x)
+        if self._is_channel_first_norm(x):
+            kernel_pattern = "rmsnorm_channel_first"
+            eps = float(self.settings.get("eps", 1e-12))
+            kernel_args: tuple[torch.Tensor, ...] = (x, weight)
+            kernel_kwargs = {
+                "bias": bias,
+                "eps": eps,
+                "block_size": int(self.settings.get("block_size", 1024)),
+                "sites_per_program": int(self.settings.get("sites_per_program", 4)),
+                "num_warps": int(self.settings.get("num_warps", 4)),
+                "num_stages": int(self.settings.get("num_stages", 4)),
+                "fallback": self.fallback,
+            }
+            self.last_channel_layout = "channel_first"
+        else:
+            kernel_pattern = "rmsnorm"
+            eps = float(self.settings.get("eps", 1e-6))
+            kernel_args = (x, weight)
+            kernel_kwargs = {
+                "eps": eps,
+                "block_size": int(self.settings.get("block_size", 1024)),
+                "num_warps": int(self.settings.get("num_warps", 4)),
+                "num_stages": int(self.settings.get("num_stages", 4)),
+                "fallback": self.fallback,
+            }
+            self.last_channel_layout = "last_dim"
+        self.last_kernel_pattern = kernel_pattern
+        try:
+            return run_triton_kernel(kernel_pattern, *kernel_args, **kernel_kwargs)
+        except Exception as exc:
+            if self.fallback != "eager":
+                raise
+            self.last_execution_mode = "reference_fallback"
+            self.last_execution_reason = f"Triton rmsnorm runtime fallback: {exc}"
+            self.last_fastpath = "eager_reference_fallback"
+            return self._reference(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self._supports_rmsnorm():
+            self.last_execution_mode = "reference_fallback"
+            self.last_execution_reason = "module does not expose RMSNorm gamma/scale parameters"
+            self.last_fastpath = "eager_reference_fallback"
+            self.last_dtype = str(x.dtype).removeprefix("torch.")
+            return self._reference(x)
+        self.last_dtype = str(x.dtype).removeprefix("torch.")
+        precision_name = self._precision_name(x)
+        is_channel_first = self._is_channel_first_norm(x)
+        self.last_kernel_pattern = (
+            "rmsnorm_channel_first"
+            if is_channel_first
+            else "rmsnorm"
+        )
+        self.last_channel_layout = "channel_first" if is_channel_first else "last_dim"
+        self.last_execution_mode = "cuda_triton_entry" if x.is_cuda else "reference_fallback"
+        kernel_suffix = (
+            "channel_first_norm"
+            if is_channel_first
+            else "rmsnorm"
+        )
+        self.last_fastpath = (
+            f"triton_{precision_name}_{kernel_suffix}"
+            if self.last_execution_mode == "cuda_triton_entry"
+            else "eager_reference_fallback"
+        )
+        self.last_execution_reason = (
+            None
+            if self.last_execution_mode == "cuda_triton_entry"
+            else "Triton rmsnorm kernel requires CUDA tensors; using configured fallback."
+        )
+        if self.last_execution_mode == "cuda_triton_entry":
+            return self._run_triton_or_reference(x)
+        return self._reference(x)
+
+    def execution_metadata(self) -> dict[str, Any]:
+        kernel_kind = (
+            "minimal_cuda_jit"
+            if self.last_execution_mode == "cuda_triton_entry"
+            else "reference_fallback"
+        )
+        return {
+            "execution_mode": self.last_execution_mode,
+            "execution_reason": self.last_execution_reason,
+            "kernel_kind": kernel_kind,
+            "operator_family": self.last_operator_family,
+            "kernel_pattern": self.last_kernel_pattern,
+            "selected_fastpath": self.last_fastpath,
+            "kernel_constraints": {
+                "dtype": self.last_dtype,
+                "supported_patterns": ["rmsnorm", "rmsnorm_channel_first"],
+                "operator_families": ["norm"],
+                "normalized_last_dim_only": self.last_channel_layout == "last_dim",
+                "supports_channel_first": True,
+                "channel_layout": self.last_channel_layout,
+                "supported_dtypes": ["float16", "bfloat16"],
+            },
+            "fallback": self.fallback,
+            "settings": dict(self.settings),
         }
 
 
@@ -2673,6 +2960,38 @@ def _build_tilelang_candidate_model(
         raise XQTBackendError(
             "TileLang conv target requires nn.Conv2d or a module with a Conv2d child"
         )
+    if patterns == ["conv3d_1x1x1"]:
+        if isinstance(target_model, nn.Conv3d):
+            return _TileLangConv3dWrapper(
+                target_model,
+                fallback=target.fallback,
+                settings=settings,
+            )
+        conv3d = getattr(target_model, "conv", None)
+        if isinstance(conv3d, nn.Conv3d):
+            target_model = copy.deepcopy(target_model)
+            target_model.conv = _TileLangConv3dWrapper(
+                conv3d,
+                fallback=target.fallback,
+                settings=settings,
+            )
+            return target_model
+        for child_name, child in target_model.named_children():
+            if isinstance(child, nn.Conv3d):
+                target_model = copy.deepcopy(target_model)
+                setattr(
+                    target_model,
+                    child_name,
+                    _TileLangConv3dWrapper(
+                        child,
+                        fallback=target.fallback,
+                        settings=settings,
+                    ),
+                )
+                return target_model
+        raise XQTBackendError(
+            "TileLang conv3d_1x1x1 target requires nn.Conv3d or a module with a Conv3d child"
+        )
     if patterns in (["linear"], ["linear_marlin"]):
         if isinstance(target_model, nn.Linear):
             return _TileLangLinearWrapper(
@@ -2889,7 +3208,7 @@ def _build_tilelang_candidate_model(
             "TileLang dequant GEMM target requires a module with qweight/scale tensors or a tilelang_dequant_gemm_args bridge"
         )
     raise XQTBackendError(
-        "built-in TileLang executor currently supports attention, conv, linear, norm, and dequant_gemm_epilogue patterns"
+        "built-in TileLang executor currently supports attention, conv, conv3d_1x1x1, linear, norm, and dequant_gemm_epilogue patterns"
     )
 
 
@@ -2942,6 +3261,54 @@ def _build_reference_guarded_linear_candidate_model(
     )
 
 
+def _supports_triton_rmsnorm_engine(module: nn.Module) -> bool:
+    return hasattr(module, "gamma") and hasattr(module, "scale")
+
+
+def _build_triton_candidate_model(
+    target_model: nn.Module,
+    target: OperatorOptimizationTargetPlan,
+) -> nn.Module:
+    patterns = target.patterns or ["rmsnorm"]
+    settings = dict(target.options)
+    settings["preferred_patterns"] = list(patterns)
+    if patterns == ["rmsnorm"]:
+        if _supports_triton_rmsnorm_engine(target_model):
+            return _TritonRMSNormWrapper(
+                target_model,
+                fallback=target.fallback,
+                settings=settings,
+            )
+        norm = getattr(target_model, "norm", None)
+        if _supports_triton_rmsnorm_engine(norm):
+            target_model = copy.deepcopy(target_model)
+            target_model.norm = _TritonRMSNormWrapper(
+                norm,
+                fallback=target.fallback,
+                settings=settings,
+            )
+            return target_model
+        for child_name, child in target_model.named_children():
+            if _supports_triton_rmsnorm_engine(child):
+                target_model = copy.deepcopy(target_model)
+                setattr(
+                    target_model,
+                    child_name,
+                    _TritonRMSNormWrapper(
+                        child,
+                        fallback=target.fallback,
+                        settings=settings,
+                    ),
+                )
+                return target_model
+        raise XQTBackendError(
+            "Triton rmsnorm target requires a module exposing gamma/scale parameters or a child module with that interface"
+        )
+    raise XQTBackendError(
+        "built-in Triton executor currently supports only rmsnorm pattern"
+    )
+
+
 def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
     attached = getattr(model, "_xqt_tilelang_execution_metadata", None)
     if isinstance(attached, dict):
@@ -2949,6 +3316,8 @@ def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
     if isinstance(model, _TileLangAttentionWrapper):
         return model.execution_metadata()
     if isinstance(model, _TileLangConvWrapper):
+        return model.execution_metadata()
+    if isinstance(model, _TileLangConv3dWrapper):
         return model.execution_metadata()
     if isinstance(model, _TileLangLinearWrapper):
         return model.execution_metadata()
@@ -2961,6 +3330,8 @@ def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
         return attention.execution_metadata()
     conv = getattr(model, "conv", None)
     if isinstance(conv, _TileLangConvWrapper):
+        return conv.execution_metadata()
+    if isinstance(conv, _TileLangConv3dWrapper):
         return conv.execution_metadata()
     linear = getattr(model, "linear", None)
     if isinstance(linear, _TileLangLinearWrapper):
@@ -2977,11 +3348,27 @@ def _tilelang_execution_metadata(model: nn.Module) -> dict[str, Any]:
             (
                 _TileLangAttentionWrapper,
                 _TileLangConvWrapper,
+                _TileLangConv3dWrapper,
                 _TileLangLinearWrapper,
                 _TileLangNormWrapper,
                 _TileLangDequantGemmWrapper,
             ),
         ):
+            return module.execution_metadata()
+    return {
+        "execution_mode": "unknown",
+        "execution_reason": None,
+    }
+
+
+def _triton_execution_metadata(model: nn.Module) -> dict[str, Any]:
+    if isinstance(model, _TritonRMSNormWrapper):
+        return model.execution_metadata()
+    norm = getattr(model, "norm", None)
+    if isinstance(norm, _TritonRMSNormWrapper):
+        return norm.execution_metadata()
+    for module in model.modules():
+        if isinstance(module, _TritonRMSNormWrapper):
             return module.execution_metadata()
     return {
         "execution_mode": "unknown",
@@ -2996,6 +3383,8 @@ def _operator_engine_execution_metadata(
 ) -> dict[str, Any]:
     if engine == "tilelang":
         return _tilelang_execution_metadata(model)
+    if engine == "triton":
+        return _triton_execution_metadata(model)
     if engine in {"cutile", "cute_dsl"}:
         if isinstance(model, _ReferenceGuardedLinearWrapper):
             return model.execution_metadata()
@@ -3099,6 +3488,14 @@ def materialize_operator_candidate_model(
             tilelang_candidate,
         )
         return candidate_root, None
+    if target.engine == "triton":
+        triton_candidate = _build_triton_candidate_model(candidate_target, target)
+        candidate_root = _replace_component_model(
+            candidate_root,
+            target.target_path,
+            triton_candidate,
+        )
+        return candidate_root, None
     if target.engine in {"cutile", "cute_dsl"}:
         engine_candidate = _build_reference_guarded_linear_candidate_model(
             candidate_target,
@@ -3141,6 +3538,14 @@ def materialize_operator_candidate_models(
                 candidate_root,
                 target.target_path,
                 tilelang_candidate,
+            )
+            continue
+        if target.engine == "triton":
+            triton_candidate = _build_triton_candidate_model(candidate_target, target)
+            candidate_root = _replace_component_model(
+                candidate_root,
+                target.target_path,
+                triton_candidate,
             )
             continue
         if target.engine in {"cutile", "cute_dsl"}:
@@ -3318,7 +3723,7 @@ def execute_operator_optimization_plan(
         skip_reason = _quant_runtime_guard(context, target)
         if skip_reason is None and target.engine == "torch_compile" and not capability.available:
             skip_reason = "torch.compile is not available in the current PyTorch build"
-        if skip_reason is None and target.engine in {"triton", "cutlass", "custom_cuda"}:
+        if skip_reason is None and target.engine in {"cutlass", "custom_cuda"}:
             if not torch.cuda.is_available():
                 skip_reason = f"{target.engine} requires CUDA-capable hardware"
             else:
@@ -3348,7 +3753,7 @@ def execute_operator_optimization_plan(
             _call_module_no_grad(target_model, module_inputs)
         )
         baseline_execution_detail: dict[str, Any] = {}
-        if target.engine in {"tilelang", "cutile", "cute_dsl"}:
+        if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
             baseline_execution_detail = _operator_engine_execution_metadata(
                 target_model,
                 engine=target.engine,
@@ -3407,6 +3812,8 @@ def execute_operator_optimization_plan(
                 compiled_model, compile_time_ms = compile_with_torch(target_model, target)
             elif target.engine == "tilelang":
                 compiled_model = _build_tilelang_candidate_model(target_model, target)
+            elif target.engine == "triton":
+                compiled_model = _build_triton_candidate_model(target_model, target)
             elif target.engine in {"cutile", "cute_dsl"}:
                 compiled_model = _build_reference_guarded_linear_candidate_model(
                     target_model,
@@ -3475,11 +3882,20 @@ def execute_operator_optimization_plan(
         elif target.engine == "tilelang" and compiled_model is target_model:
             candidate_root = current_model
             candidate_target = compiled_model
+        elif target.engine == "triton" and compiled_model is target_model:
+            candidate_root = current_model
+            candidate_target = compiled_model
         elif target.engine == "tilelang":
             candidate_root = _replace_component_model(
                 candidate_root,
                 target.target_path,
                 _build_tilelang_candidate_model(candidate_target, target),
+            )
+        elif target.engine == "triton":
+            candidate_root = _replace_component_model(
+                candidate_root,
+                target.target_path,
+                _build_triton_candidate_model(candidate_target, target),
             )
         elif target.engine in {"cutile", "cute_dsl"}:
             candidate_root = _replace_component_model(
@@ -3496,7 +3912,7 @@ def execute_operator_optimization_plan(
             _call_module_no_grad(candidate_target, module_inputs)
         )
         execution_detail: dict[str, Any] = {}
-        if target.engine in {"tilelang", "cutile", "cute_dsl"}:
+        if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
             execution_detail = _operator_engine_execution_metadata(
                 candidate_target,
                 engine=target.engine,
@@ -3604,7 +4020,7 @@ def execute_operator_optimization_plan(
                     else None
                 ),
             }
-        if target.engine in {"tilelang", "cutile", "cute_dsl"}:
+        if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
             execution_detail = _operator_engine_execution_metadata(
                 candidate_target,
                 engine=target.engine,
