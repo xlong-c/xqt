@@ -311,6 +311,11 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
             method="static_qdq_int8",
             strategy="static_qdq_int8",
         ).to_optimization_capability(),
+        describe_quant_backend_capability(
+            "bitsandbytes",
+            method="weight_only_int4",
+            strategy="weight_only_int4",
+        ).to_optimization_capability(),
     ]
     operator = [
         describe_operator_engine_capability("torch_compile").to_optimization_capability(),
@@ -323,6 +328,7 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
             name="structured",
             engine="pytorch_rewrite",
             status="available",
+            maturity="executable",
             runtime="pytorch",
             artifact_kind="pytorch_model",
             available=True,
@@ -367,6 +373,7 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
             name="llm_runtime_metadata",
             engine="adapter_only",
             status="planned",
+            maturity="metadata_only",
             runtime="external_serving",
             artifact_kind="metadata",
             available=False,

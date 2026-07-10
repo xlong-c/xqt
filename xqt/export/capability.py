@@ -20,6 +20,7 @@ class ExportCapability:
     quantization: bool
     sparse_support: str = "unknown"
     status: str = "planned"
+    maturity: str = "planned"
     notes: str = ""
 
     def to_optimization_capability(self) -> OptimizationCapability:
@@ -32,6 +33,7 @@ class ExportCapability:
             name=self.format,
             engine=self.format,
             status=unified_status,
+            maturity=self.maturity,
             runtime="/".join(self.runtimes) if self.runtimes else "unknown",
             artifact_kind=f"{self.format}_artifact",
             requires_exportable_graph=self.format not in {"torchscript"},
@@ -67,6 +69,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         dynamic_shapes=True,
         quantization=False,
         status="implemented",
+        maturity="executable",
         notes="torch.export ExportedProgram save/load adapter is implemented.",
     ),
     ExportCapability(
@@ -78,6 +81,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         quantization=True,
         sparse_support="backend-dependent",
         status="implemented",
+        maturity="executable",
         notes="ONNX export, checker, and ONNX Runtime diff are implemented.",
     ),
     ExportCapability(
@@ -89,6 +93,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         quantization=True,
         sparse_support="2:4 on supported NVIDIA GPUs",
         status="adapter",
+        maturity="reference_guarded",
         notes="trtexec command adapter with dry-run and performance threshold support.",
     ),
     ExportCapability(
@@ -99,6 +104,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         dynamic_shapes=False,
         quantization=False,
         status="implemented",
+        maturity="executable",
         notes="TorchScript trace/script fallback adapter.",
     ),
     ExportCapability(
@@ -110,6 +116,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         quantization=True,
         sparse_support="backend-dependent",
         status="adapter",
+        maturity="reference_guarded",
         notes="Optional dependency adapter.",
     ),
     ExportCapability(
@@ -120,6 +127,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         dynamic_shapes=False,
         quantization=True,
         status="adapter",
+        maturity="reference_guarded",
         notes="Optional ExecuTorch export adapter with dry-run support.",
     ),
     ExportCapability(
@@ -130,6 +138,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         dynamic_shapes=False,
         quantization=True,
         status="adapter",
+        maturity="reference_guarded",
         notes="pnnx and ONNX -> ncnn command adapters with dry-run support.",
     ),
     ExportCapability(
@@ -140,6 +149,7 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         dynamic_shapes=False,
         quantization=True,
         status="adapter",
+        maturity="reference_guarded",
         notes="ONNX -> MNN command adapter with dry-run support.",
     ),
 )

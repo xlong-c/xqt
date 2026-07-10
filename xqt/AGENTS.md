@@ -26,7 +26,7 @@ XQT 负责模型压缩,图变换,导出适配,误差分析和 benchmark. XQT 不
 - `prune/`: unstructured,structured,N:M 和 block sparse pruning helper.
 - `operator_opt/`: `torch.compile`-first operator optimization pass,backend capability matrix and runtime fallback reporting.
 - `export/`: torch.export,TorchScript,ONNX,TensorRT,OpenVINO,ExecuTorch,ncnn,MNN 等导出 adapter.
-- `xdl_adapter.py`: 从 XDL TrainSetup-like 对象或 checkpoint 提取模型上下文,不接管训练.
+- `xdl_adapter.py`: 从 XDL TrainSetup-like 对象或 checkpoint 提取模型上下文,不接管训练,只接受 `OptimizationConfig` 或 workflow 输入,不接旧 recipe schema.
 
 ### Recipes
 
@@ -58,7 +58,7 @@ XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配
 - `xqt-run-workflow`: 运行 stage workflow recipe.
 - `run_workflow.py`: workflow 命令入口模块,通过环境变量指定 stage workflow.
 
-早期 `load_xqt_config`,`run_xqt_recipe`,`preflight_xqt_config` 和 `XQTConfig` pass recipe 链路只作为内部实现保留,不要从 `xqt` 顶层重新导出,也不要新增安装后命令入口.
+早期 `run_xqt_recipe`, `preflight_xqt_config`, `create_manifest(XQTConfig)`, `xqt_config_to_dict()`, `load_xqt_config()` 和 `XQTConfig` 已删除,不要恢复兼容入口. public `create_context()` 只接受 `OptimizationConfig` 或 workflow 输入,不接旧 recipe mapping. 不要从 `xqt` 或 `xqt.core` 聚合入口重新导出旧 schema/loader,也不要新增安装后命令入口.
 
 ## API 边界
 

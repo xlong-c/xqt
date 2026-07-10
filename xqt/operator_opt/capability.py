@@ -24,6 +24,7 @@ class OperatorOptimizationEngineCapability:
 
     engine: str
     status: str
+    maturity: str
     runtime: str
     exportable: bool
     artifact_kind: str = "pytorch_model"
@@ -42,6 +43,7 @@ class OperatorOptimizationEngineCapability:
             name=self.engine,
             engine=self.engine,
             status=self.status,
+            maturity=self.maturity,
             runtime=self.runtime,
             artifact_kind=self.artifact_kind,
             requires_cuda=self.requires_cuda,
@@ -60,6 +62,7 @@ class OperatorOptimizationEngineCapability:
         return {
             "engine": self.engine,
             "status": self.status,
+            "maturity": self.maturity,
             "runtime": self.runtime,
             "exportable": self.exportable,
             "artifact_kind": self.artifact_kind,
@@ -77,6 +80,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "torch_compile": OperatorOptimizationEngineCapability(
         engine="torch_compile",
         status="available",
+        maturity="executable",
         runtime="pytorch",
         exportable=False,
         notes=(
@@ -90,6 +94,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "deployment_engine": OperatorOptimizationEngineCapability(
         engine="deployment_engine",
         status="planned",
+        maturity="metadata_only",
         runtime="deployment_engine",
         exportable=True,
         artifact_kind="deployment_artifact",
@@ -104,21 +109,23 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "triton": OperatorOptimizationEngineCapability(
         engine="triton",
         status="available",
+        maturity="executable",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
         notes=(
             "Built-in executor ships limited CUDA-only Triton fused kernels.",
-            "Current built-in execution covers standalone float16/bfloat16 RMSNorm with eager reference fallback metadata.",
+            "Current built-in execution covers standalone float16/bfloat16 RMSNorm and the xqt.nn.FeedForward Triton runtime composition, both with eager reference fallback metadata.",
         ),
         limitations=(
-            "Current built-in execution is limited to the rmsnorm pattern.",
-            "Current CUDA execution assumes normalization over the last hidden dimension and uses model-side wrappers when the source module is channel-first.",
+            "Current built-in materialization is limited to rmsnorm and xqt.nn.FeedForward patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
+            "Current CUDA execution assumes float16/bfloat16 kernels. RMSNorm supports last-hidden-dimension and model-side channel-first wrappers; FeedForward composes existing GEMM and pointwise kernels rather than claiming a single FFN megakernel.",
         ),
     ),
     "tilelang": OperatorOptimizationEngineCapability(
         engine="tilelang",
         status="available",
+        maturity="executable",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
@@ -135,6 +142,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "cutile": OperatorOptimizationEngineCapability(
         engine="cutile",
         status="planned",
+        maturity="reference_guarded",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
@@ -150,6 +158,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "cutlass": OperatorOptimizationEngineCapability(
         engine="cutlass",
         status="planned",
+        maturity="metadata_only",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
@@ -162,6 +171,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "cute_dsl": OperatorOptimizationEngineCapability(
         engine="cute_dsl",
         status="planned",
+        maturity="reference_guarded",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
@@ -177,6 +187,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
     "custom_cuda": OperatorOptimizationEngineCapability(
         engine="custom_cuda",
         status="planned",
+        maturity="planned",
         runtime="pytorch",
         exportable=False,
         requires_cuda=True,
@@ -231,6 +242,20 @@ def describe_operator_engine_capability(
             notes.append(
                 "tilelang package is not importable; built-in execution is limited to reference fallback."
             )
+        else:
+            try:
+                from .kernels.tilelang._common import (
+                    tilelang_runtime_unavailability_reason,
+                    tilelang_runtime_usable,
+                )
+
+                if not tilelang_runtime_usable():
+                    notes.append(
+                        tilelang_runtime_unavailability_reason()
+                        or "TileLang runtime is unavailable; built-in execution is limited to reference fallback."
+                    )
+            except Exception:
+                pass
         try:
             from .backends.tilelang import list_tilelang_kernel_specs
 

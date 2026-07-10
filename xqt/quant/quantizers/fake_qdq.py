@@ -10,7 +10,9 @@ import torch
 from torch import nn
 
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
+from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
+from xqt.workflows.stage_specs import QuantStageSpec
 
 from ..plan import build_quantization_plan
 from ..policy import QuantizationPolicy, list_quantizable_modules
@@ -460,6 +462,7 @@ def _attach_activation_fake_qdq(
 
 def build_fake_qdq_surrogate(
     context: XQTContext,
+    quant_config: QuantConfig | QuantStageSpec | None = None,
 ) -> Optional[FakeQDQSurrogateResult]:
     """Build a PyTorch fake-QDQ surrogate for analysis-only layer inspection."""
 
@@ -467,11 +470,15 @@ def build_fake_qdq_surrogate(
     if not isinstance(model, nn.Module):
         return None
 
-    quant_config = context.config.compression.quant
-    if not quant_config.enabled or quant_config.backend != "onnxruntime_qdq":
+    resolved_quant = quant_config or context.quant_config
+    if resolved_quant is None:
+        raise ValueError("XQTContext.quant_config is required")
+    enabled = resolved_quant.enabled if isinstance(resolved_quant, QuantConfig) else True
+    backend = resolved_quant.backend
+    if not enabled or backend != "onnxruntime_qdq":
         return None
 
-    plan = build_quantization_plan(quant_config)
+    plan = build_quantization_plan(resolved_quant)
     qdq_components = [
         component
         for component in plan.components

@@ -14,6 +14,7 @@ class PruneRuntimeCapability:
 
     method: str
     runtime: str
+    maturity: str
     supported: bool
     speedup_verified: bool
     pattern_present: bool
@@ -32,6 +33,7 @@ class PruneRuntimeCapability:
             name=self.method,
             engine=self.runtime,
             status=status,
+            maturity=self.maturity,
             runtime=self.runtime,
             artifact_kind=self.artifact_kind,
             available=self.supported,
@@ -51,6 +53,7 @@ class PruneRuntimeCapability:
         return {
             "method": self.method,
             "runtime": self.runtime,
+            "maturity": self.maturity,
             "supported": self.supported,
             "speedup_verified": self.speedup_verified,
             "pattern_present": self.pattern_present,
@@ -91,6 +94,7 @@ def describe_prune_runtime_capability(
             return PruneRuntimeCapability(
                 method=method,
                 runtime="cuda_sparse_candidate",
+                maturity="reference_guarded",
                 supported=True,
                 speedup_verified=False,
                 pattern_present=True,
@@ -107,6 +111,7 @@ def describe_prune_runtime_capability(
         return PruneRuntimeCapability(
             method=method,
             runtime="pytorch_eager",
+            maturity="planned",
             supported=False,
             speedup_verified=False,
             pattern_present=True,
@@ -122,6 +127,7 @@ def describe_prune_runtime_capability(
         return PruneRuntimeCapability(
             method=method,
             runtime="pytorch_eager",
+            maturity="metadata_only",
             supported=False,
             speedup_verified=False,
             pattern_present=True,

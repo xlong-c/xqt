@@ -2,26 +2,38 @@
 
 from __future__ import annotations
 
+import copy
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
+from omegaconf import OmegaConf
 import torch
 from torch import nn
 
 from xqt.core.artifact import ArtifactRecord, MetricRecord
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.registry import register_pass
+from xqt.core.schema import ExportTargetConfig, OutputDiffConfig
 from xqt.core.types import XQTContext
+from xqt.workflows.stage_specs import (
+    DeployStageSpec,
+    ExportStageSpec,
+    stage_spec_to_params,
+)
 from xqt.export import (
     benchmark_tensorrt_engine,
     build_tensorrt_engine,
     compare_openvino_outputs,
     compare_onnxruntime_outputs,
+    create_onnxruntime_session,
+    create_tensorrt_runtime_session,
     export_executorch_program,
     export_mnn_from_onnx,
     export_ncnn_from_onnx,
     export_onnx,
     export_openvino_ir,
+    optimize_onnx,
     export_torch_program,
     export_torchscript,
 )
@@ -88,17 +100,190 @@ def update_structured_prune_export_status(
     }
 
 
+def resolve_onnx_optimization_config(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize ONNX optimization settings from export target params."""
+
+    raw = params.get("onnx_optimization", params.get("optimize", False))
+    if raw is True:
+        return {"enabled": True}
+    if raw is False or raw is None:
+        return {"enabled": False}
+    if not isinstance(raw, Mapping):
+        raise ValueError("onnx_optimization must be a mapping or boolean")
+    normalized = dict(raw)
+    normalized.setdefault("enabled", True)
+    return normalized
+
+
+def _target_summary(
+    target: ExportTargetConfig,
+    artifact: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "format": target.format,
+        "output_path": target.output_path,
+        "precision": target.precision,
+        "opset": target.opset,
+        "dynamic_shapes": dict(target.dynamic_shapes),
+        "profiles": dict(target.profiles),
+        "params": dict(target.params),
+        **dict(artifact),
+    }
+
+
+def _output_diff_runtime_config(spec: OutputDiffConfig | None) -> OutputDiffConfig | None:
+    if spec is None:
+        return None
+    try:
+        merged = OmegaConf.merge(
+            OmegaConf.structured(OutputDiffConfig),
+            OmegaConf.create(asdict(spec) if is_dataclass(spec) else dict(spec)),
+        )
+        return cast(OutputDiffConfig, OmegaConf.to_object(merged))
+    except Exception as exc:
+        raise ValueError(f"failed to load output diff config: {exc}") from exc
+
+
+def _runtime_handle_params(request: Mapping[str, Any]) -> Mapping[str, Any]:
+    params = request.get("params", {})
+    if not isinstance(params, Mapping):
+        raise ValueError("deploy runtime_handle.params must be a mapping")
+    return params
+
+
+def _runtime_handle_plugin_libraries(
+    params: Mapping[str, Any],
+    targets: list[dict[str, object]],
+) -> list[str] | None:
+    plugins = params.get("plugin_libraries")
+    if plugins is None:
+        for target in targets:
+            if target.get("format") != "tensorrt":
+                continue
+            target_params = target.get("params")
+            if isinstance(target_params, Mapping):
+                plugins = target_params.get("plugin_libraries")
+                break
+    if plugins is None:
+        return None
+    if not isinstance(plugins, list) or not all(isinstance(item, str) for item in plugins):
+        raise ValueError("TensorRT runtime_handle plugin_libraries must be a list of paths")
+    return list(plugins)
+
+
+def materialize_deploy_runtime_handle(
+    context: XQTContext,
+    request: Mapping[str, Any],
+    target_summaries: list[dict[str, object]],
+) -> dict[str, object]:
+    """Materialize and describe one verified deploy runtime handle."""
+
+    runtime = str(request.get("runtime") or "onnxruntime")
+    params = _runtime_handle_params(request)
+    handle_kind = str(request.get("handle_kind", "inference_session"))
+    if runtime == "onnxruntime":
+        onnx_path = context.artifacts.get("last_onnx")
+        if onnx_path is None:
+            raise ValueError(
+                "ONNX Runtime handle requires an ONNX export target in the same deploy stage"
+            )
+        providers = params.get("providers")
+        if providers is not None and not isinstance(providers, list):
+            raise ValueError("deploy runtime_handle.params.providers must be a list")
+        session = create_onnxruntime_session(
+            onnx_path,
+            providers=[str(provider) for provider in providers] if providers is not None else None,
+        )
+        return {
+            "runtime": runtime,
+            "handle_kind": handle_kind,
+            "handle": session,
+            "target_count": 1,
+            "targets": [
+                item for item in target_summaries if item.get("format") == "onnx"
+            ],
+            "artifacts": {"onnx": str(onnx_path)},
+            "metadata": {
+                "providers": list(session.get_providers()),
+                "model_path": str(onnx_path),
+                "runtime_validation": {"status": "session_created"},
+            },
+        }
+    if runtime != "tensorrt":
+        raise ValueError(
+            "deploy runtime-handle materialization supports runtime=onnxruntime or runtime=tensorrt"
+        )
+
+    engine_path = context.artifacts.get("last_engine")
+    if engine_path is None:
+        raise ValueError(
+            "TensorRT runtime handle requires a non-dry-run TensorRT export target in the same deploy stage"
+        )
+    tensorrt_targets = [
+        item for item in target_summaries if item.get("format") == "tensorrt"
+    ]
+    if not tensorrt_targets:
+        raise ValueError(
+            "TensorRT runtime handle requires a TensorRT export target in the same deploy stage"
+        )
+    if any(bool(item.get("dry_run")) for item in tensorrt_targets):
+        raise ValueError("TensorRT runtime handle cannot materialize a dry-run engine artifact")
+    device = str(params.get("device") or context.device or "cuda:0")
+    plugin_libraries = _runtime_handle_plugin_libraries(params, tensorrt_targets)
+    session = create_tensorrt_runtime_session(
+        engine_path,
+        device=device,
+        plugin_libraries=plugin_libraries,
+    )
+    return {
+        "runtime": runtime,
+        "handle_kind": handle_kind,
+        "handle": session,
+        "target_count": len(tensorrt_targets),
+        "targets": tensorrt_targets,
+        "artifacts": {"tensorrt_engine": str(engine_path)},
+        "metadata": {
+            "engine_path": str(session.engine_path),
+            "device": session.device,
+            "plugin_libraries": plugin_libraries or [],
+            "engine_inspector": dict(session.engine_inspector),
+            "runtime_validation": {
+                "status": "session_created",
+                "engine_deserialized": True,
+                "execution_context_created": True,
+            },
+        },
+    }
+
+
 @register_pass("export")
 class ExportPass:
     """Export configured artifacts."""
 
     name = "export"
 
-    def run(self, context: XQTContext) -> XQTContext:
-        if not context.config.export.targets:
+    def run(
+        self,
+        context: XQTContext,
+        *,
+        targets: list[ExportTargetConfig] | None = None,
+        output_diff: OutputDiffConfig | None = None,
+        stage_kind: str = "export",
+        runtime_handle_request: Mapping[str, Any] | None = None,
+    ) -> XQTContext:
+        resolved_targets = targets if targets is not None else context.export_targets
+        if resolved_targets is None:
+            raise ValueError("XQTContext.export_targets is required")
+        export_targets = list(resolved_targets)
+        context.export_targets = copy.deepcopy(export_targets)
+        if not export_targets:
             return context
+        resolved_output_diff = output_diff or context.output_diff_config
+        if resolved_output_diff is None:
+            raise ValueError("XQTContext.output_diff_config is required")
+        artifact_dir = Path(context.artifact_dir)
         needs_model = False
-        for target in context.config.export.targets:
+        for target in export_targets:
             if target.format in {"torch_export", "torchscript", "onnx"}:
                 needs_model = True
                 break
@@ -125,17 +310,15 @@ class ExportPass:
                 reference_output = first_tensor_output(call_model(export_model, example_input))
 
         exported: list[dict[str, object]] = []
+        target_summaries: list[dict[str, object]] = []
 
-        for index, target in enumerate(context.config.export.targets):
+        for index, target in enumerate(export_targets):
             if target.format == "torch_export":
                 if export_model is None or example_input is None:
                     raise ValueError("torch_export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.pt2"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.pt2")
                 result = export_torch_program(
                     export_model,
                     example_input,
@@ -144,8 +327,8 @@ class ExportPass:
                     strict=bool(target.params.get("strict", False)),
                     validate=bool(target.params.get("validate", True)),
                     compare_output=bool(target.params.get("runtime_diff", True)),
-                    atol=context.config.validation.output_diff.atol,
-                    rtol=context.config.validation.output_diff.rtol,
+                    atol=resolved_output_diff.atol,
+                    rtol=resolved_output_diff.rtol,
                 )
                 record = ArtifactRecord.from_file(
                     result.path,
@@ -179,6 +362,7 @@ class ExportPass:
                         "export_guard": dict(export_guard),
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "torchscript":
@@ -186,10 +370,7 @@ class ExportPass:
                     raise ValueError("torchscript export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.pt"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.pt")
                 result = export_torchscript(
                     export_model,
                     example_input,
@@ -197,8 +378,8 @@ class ExportPass:
                     method=str(target.params.get("method", "trace")),
                     check_trace=bool(target.params.get("check_trace", True)),
                     compare_output=bool(target.params.get("runtime_diff", True)),
-                    atol=context.config.validation.output_diff.atol,
-                    rtol=context.config.validation.output_diff.rtol,
+                    atol=resolved_output_diff.atol,
+                    rtol=resolved_output_diff.rtol,
                 )
                 record = ArtifactRecord.from_file(
                     result.path,
@@ -231,6 +412,7 @@ class ExportPass:
                         "export_guard": dict(export_guard),
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "onnx":
@@ -238,10 +420,7 @@ class ExportPass:
                     raise ValueError("onnx export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.onnx"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.onnx")
                 result = export_onnx(
                     export_model,
                     example_input,
@@ -255,6 +434,30 @@ class ExportPass:
                     validate=bool(target.params.get("validate", True)),
                     pre_export_fusion=target.params.get("pre_export_fusion"),
                 )
+                optimization = resolve_onnx_optimization_config(target.params)
+                optimized_result = None
+                if bool(optimization.get("enabled", False)):
+                    optimized_result = optimize_onnx(
+                        result.path,
+                        optimization.get("output_path"),
+                        backend=str(optimization.get("backend", "onnxruntime")),
+                        level=str(optimization.get("level", "extended")),
+                        output_suffix=str(
+                            optimization.get("output_suffix", ".optimized")
+                        ),
+                        validate=bool(optimization.get("validate", True)),
+                        providers=list(
+                            optimization.get("providers", ["CPUExecutionProvider"])
+                        ),
+                        native_qdq=optimization.get("native_qdq", True),
+                        metadata={
+                            "source_export_path": str(result.path),
+                        },
+                    )
+                    result.metadata["onnx_optimization"] = optimized_result.to_dict()
+                    result.path = optimized_result.path
+                    result.checksum = optimized_result.checksum
+                    result.checked = optimized_result.checked
                 diff = None
                 if bool(target.params.get("runtime_diff", True)):
                     if reference_output is None or example_input is None:
@@ -264,8 +467,8 @@ class ExportPass:
                         reference_output,
                         example_input,
                         input_names=result.metadata.get("input_names"),
-                        atol=context.config.validation.output_diff.atol,
-                        rtol=context.config.validation.output_diff.rtol,
+                        atol=resolved_output_diff.atol,
+                        rtol=resolved_output_diff.rtol,
                     )
                     result.output_diff = diff
                 result_metadata = getattr(result, "metadata", {})
@@ -282,7 +485,12 @@ class ExportPass:
                     },
                 )
                 context.artifacts[f"export_{index}"] = result.path
-                context.artifacts.setdefault("last_onnx", result.path)
+                context.artifacts["last_onnx"] = result.path
+                if optimized_result is not None:
+                    context.artifacts[f"export_{index}_source_onnx"] = (
+                        optimized_result.source_path
+                    )
+                    context.artifacts["last_onnx_source"] = optimized_result.source_path
                 if context.manifest is not None:
                     context.manifest.add_artifact(record)
                 exported.append(
@@ -293,9 +501,11 @@ class ExportPass:
                         "checksum": result.checksum,
                         "output_diff": diff.to_dict() if diff is not None else None,
                         "pre_export_fusion": result_metadata.get("pre_export_fusion"),
+                        "onnx_optimization": result_metadata.get("onnx_optimization"),
                         "export_guard": dict(export_guard),
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "tensorrt":
@@ -306,10 +516,7 @@ class ExportPass:
                     raise ValueError("TensorRT export requires params.onnx_path or a prior ONNX export")
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.engine"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.engine")
                 result = build_tensorrt_engine(
                     onnx_path,
                     output_path,
@@ -425,6 +632,7 @@ class ExportPass:
                         ),
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "openvino":
@@ -439,10 +647,7 @@ class ExportPass:
                     source = export_model
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.xml"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.xml")
                 result = export_openvino_ir(
                     source,
                     output_path,
@@ -465,8 +670,8 @@ class ExportPass:
                         reference_output,
                         example_input,
                         device=str(target.params.get("device", "CPU")),
-                        atol=context.config.validation.output_diff.atol,
-                        rtol=context.config.validation.output_diff.rtol,
+                        atol=resolved_output_diff.atol,
+                        rtol=resolved_output_diff.rtol,
                     )
                     result.output_diff = diff
                 metadata = {
@@ -512,6 +717,7 @@ class ExportPass:
                         "command": metadata.get("command"),
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "executorch":
@@ -519,10 +725,7 @@ class ExportPass:
                     raise ValueError("executorch export requires a loaded model and example_inputs")
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.pte"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.pte")
                 result = export_executorch_program(
                     export_model,
                     example_input,
@@ -551,6 +754,7 @@ class ExportPass:
                         "checksum": result.checksum,
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "ncnn":
@@ -561,10 +765,7 @@ class ExportPass:
                     raise ValueError("ncnn export requires params.onnx_path or a prior ONNX export")
                 param_path = target.output_path
                 if param_path is None:
-                    param_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.param"
-                    )
+                    param_path = str(artifact_dir / f"model_{index}.param")
                 bin_path = target.params.get("bin_path")
                 if bin_path is None:
                     bin_path = str(Path(param_path).with_suffix(".bin"))
@@ -603,6 +804,7 @@ class ExportPass:
                         "checksums": result.checksums,
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             if target.format == "mnn":
@@ -613,10 +815,7 @@ class ExportPass:
                     raise ValueError("MNN export requires params.onnx_path or a prior ONNX export")
                 output_path = target.output_path
                 if output_path is None:
-                    output_path = str(
-                        Path(context.config.project.artifact_dir)
-                        / f"model_{index}.mnn"
-                    )
+                    output_path = str(artifact_dir / f"model_{index}.mnn")
                 result = export_mnn_from_onnx(
                     onnx_path,
                     output_path,
@@ -652,17 +851,59 @@ class ExportPass:
                         "checksums": result.checksums,
                     }
                 )
+                target_summaries.append(_target_summary(target, exported[-1]))
                 continue
 
             raise ValueError(f"Unsupported export format: {target.format}")
-        context.metrics["export"] = {"artifacts": exported}
+        metrics: dict[str, object] = {
+            "artifacts": exported,
+            "target_count": len(export_targets),
+            "targets": target_summaries,
+            "stage_kind": stage_kind,
+        }
+        if runtime_handle_request is not None:
+            metrics["runtime_handle_request"] = dict(runtime_handle_request)
+            if bool(runtime_handle_request.get("materialize", False)):
+                metrics["runtime_handle"] = materialize_deploy_runtime_handle(
+                    context,
+                    runtime_handle_request,
+                    target_summaries,
+                )
+        context.metrics["export"] = metrics
         update_structured_prune_export_status(context, exported)
         return context
+
+
+def run_export_stage(
+    context: XQTContext,
+    spec: ExportStageSpec | DeployStageSpec,
+    *,
+    stage_kind: str = "export",
+) -> XQTContext:
+    """Run an export or deploy stage from a typed stage spec."""
+
+    output_diff = _output_diff_runtime_config(spec.validate)
+    runtime_handle_request: Mapping[str, Any] | None = None
+    if isinstance(spec, DeployStageSpec) and spec.runtime_handle is not None:
+        runtime_handle_request = stage_spec_to_params(spec.runtime_handle)
+    if output_diff is not None:
+        context.output_diff_config = copy.deepcopy(output_diff)
+    context.export_targets = copy.deepcopy(list(spec.targets))
+    return ExportPass().run(
+        context,
+        targets=list(spec.targets),
+        output_diff=output_diff,
+        stage_kind=stage_kind,
+        runtime_handle_request=runtime_handle_request,
+    )
 
 
 __all__ = [
     "ExportPass",
     "call_model",
     "resolve_export_model",
+    "resolve_onnx_optimization_config",
+    "materialize_deploy_runtime_handle",
+    "run_export_stage",
     "update_structured_prune_export_status",
 ]

@@ -5,7 +5,25 @@ from .fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
 from .fp4_weight_only import (
     FP4QuantizationResult,
     FP4WeightOnlyLinear,
+    quantize_with_awq_fp4,
     quantize_with_fp4_weight_only,
+    quantize_with_gptq_fp4,
+)
+from .awq_gptq_weight_only import (
+    AWQGPTQWeightOnlyLinear,
+    AWQGPTQWeightOnlyQuantizationResult,
+    quantize_with_awq_weight_only,
+    quantize_with_gptq_weight_only,
+)
+from .int8_mma import (
+    Int8MmaLinear,
+    Int8MmaQuantizationResult,
+    quantize_with_int8_mma,
+)
+from .w4_storage_int8_mma import (
+    W4StorageInt8MmaLinear,
+    W4StorageInt8MmaQuantizationResult,
+    quantize_with_w4_storage_int8_mma,
 )
 from .mxfp_weight_only import (
     MXFPQuantizationResult,
@@ -16,7 +34,11 @@ from .svd import LowRankBranch, SVDQuantLinear, SVDQuantResult, quantize_with_sv
 
 __all__ = [
     "FP4QuantizationResult",
+    "AWQGPTQWeightOnlyLinear",
+    "AWQGPTQWeightOnlyQuantizationResult",
     "FakeQDQSurrogateResult",
+    "Int8MmaLinear",
+    "Int8MmaQuantizationResult",
     "LowRankBranch",
     "MXFPQuantizationResult",
     "Quantizer",
@@ -26,8 +48,16 @@ __all__ = [
     "MXFPWeightOnlyLinear",
     "SVDQuantLinear",
     "SVDQuantResult",
+    "W4StorageInt8MmaLinear",
+    "W4StorageInt8MmaQuantizationResult",
     "build_fake_qdq_surrogate",
+    "quantize_with_awq_fp4",
+    "quantize_with_awq_weight_only",
+    "quantize_with_int8_mma",
     "quantize_with_mxfp_weight_only",
     "quantize_with_fp4_weight_only",
+    "quantize_with_gptq_fp4",
+    "quantize_with_gptq_weight_only",
     "quantize_with_svd",
+    "quantize_with_w4_storage_int8_mma",
 ]

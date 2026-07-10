@@ -5,6 +5,7 @@ from .capability import (
     describe_prune_runtime_capability,
     prune_runtime_capability_from_report,
 )
+from .graph import DependencyGroup, PruningDependencyGraph
 from .masks import (
     PruningEntry,
     PruningReport,
@@ -37,26 +38,32 @@ from .schedule import (
     run_prune_schedule,
     run_structured_prune_schedule,
 )
-from .structured import (
-    apply_block_sparse_pruning,
-    apply_nm_structured_sparsity,
+from .report import (
     BlockSparseLayerReport,
     BlockSparsePruningReport,
-    find_structured_pruning_targets,
     NMStructuredLayerReport,
     NMStructuredPruningReport,
     PruningTarget,
-    SUPPORTED_GRANULARITIES,
-    SUPPORTED_IMPORTANCE_METRICS,
-    SUPPORTED_SCOPES,
     StructuredPruningAction,
     StructuredPruningPlan,
     StructuredPruningReport,
-    StructuredPruningToyCNN,
+)
+from .api import (
     apply_structured_pruning,
     apply_structured_pruning_plan,
+    find_structured_pruning_targets,
     plan_structured_pruning,
 )
+from .discovery import (
+    SUPPORTED_GRANULARITIES,
+    SUPPORTED_IMPORTANCE_METRICS,
+    SUPPORTED_SCOPES,
+)
+from .sparsity import (
+    apply_block_sparse_pruning,
+    apply_nm_structured_sparsity,
+)
+from .toy_models import StructuredPruningToyCNN
 
 __all__ = [
     "PruneScheduleReport",
@@ -67,6 +74,7 @@ __all__ = [
     "StructuredPruneScheduleReport",
     "StructuredPruneScheduleStepReport",
     "DEFAULT_PRUNABLE_TYPES",
+    "DependencyGroup",
     "describe_prune_runtime_capability",
     "apply_block_sparse_pruning",
     "apply_global_l1_unstructured_pruning",
@@ -79,6 +87,7 @@ __all__ = [
     "NMStructuredPruningReport",
     "PruneCandidateRecord",
     "PruneRuntimeCapability",
+    "PruningDependencyGraph",
     "PruningTarget",
     "prune_batchnorm_channels",
     "prune_conv2d_in_channels",

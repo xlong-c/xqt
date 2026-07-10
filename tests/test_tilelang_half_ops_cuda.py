@@ -17,6 +17,7 @@ from xqt.operator_opt.kernels.tilelang.norm import (
     layer_norm_reference,
     layer_norm_tilelang,
 )
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(
@@ -25,8 +26,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang half-op CUDA test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang half-op CUDA test",
 )
 
 

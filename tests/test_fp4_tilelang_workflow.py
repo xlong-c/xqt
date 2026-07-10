@@ -5,6 +5,7 @@ import importlib.util
 import pytest
 import torch
 
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 from xqt.workflows import XQTOptimizationSession
 
 
@@ -14,8 +15,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for FP4 TileLang CUDA workflow test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for FP4 TileLang CUDA workflow test",
 )
 
 
@@ -99,6 +100,59 @@ def test_fp4_quant_stage_can_feed_tilelang_dequant_gemm_operator_stage() -> None
     assert target["metadata"]["unpack_stage"] == "eager_reference_fallback"
     assert target["metadata"]["settings"]["target_arch"] == "sm_80"
     assert "requires CUDA tensors" in str(target["metadata"]["execution_reason"])
+
+
+def test_tilelang_awq_int4_operator_stage_reports_weight_only_metadata() -> None:
+    torch.manual_seed(1)
+    model = _TinyMLP().eval()
+    example_inputs = torch.randn(64, 64, dtype=torch.float32)
+    session = XQTOptimizationSession(
+        project={
+            "name": "int4_awq_tilelang_workflow",
+            "artifact_dir": "artifacts/xqt/tests/int4_awq_tilelang_workflow",
+        },
+        model=model,
+        example_inputs=example_inputs,
+        calibration_inputs=[example_inputs],
+    )
+
+    quant_stage = session.quant(
+        name="int4_awq_quant",
+        backend="tilelang",
+        method="awq",
+        strategy="weight_only_int4",
+        policy={
+            "dtype": "int4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc1"],
+            "bits": 4,
+            "group_size": 64,
+        },
+    )
+    operator_stage = session.operator(
+        name="tilelang_int4_fc1",
+        from_stage="int4_awq_quant",
+        targets=[
+            {
+                "name": "fc1_tilelang",
+                "target": "fc1",
+                "engine": "tilelang",
+                "patterns": ["dequant_gemm_epilogue"],
+                "min_speedup": 1.01,
+                "tilelang": {
+                    "target_arch": "sm_80",
+                },
+            }
+        ],
+    )
+
+    assert quant_stage.accepted is True
+    assert quant_stage.metrics["algorithm_executable"] is True
+    target = operator_stage.metrics["targets"][0]
+    assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
+    assert target["metadata"]["weight_source"] == "awq_weight_only_int4_linear_packed_bridge"
+    assert target["metadata"]["weight_representation"] == "packed_signed_int4_plus_group_scale"
+    assert target["metadata"]["consumes_packed_weight"] is True
 
 
 @requires_cuda

@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import torch
 
-from xqt.core.config import load_xqt_config
 from xqt.operator_opt.backends.cutile import (
     build_cutile_artifact_metadata,
     list_cutile_kernel_specs,
@@ -12,12 +11,10 @@ from xqt.operator_opt.backends.cutile import (
 )
 from xqt.operator_opt.backends.tilelang import list_tilelang_kernel_specs
 from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.operator_opt.executor import (
-    build_operator_optimization_plan,
-    execute_operator_optimization_plan,
-)
-from xqt.pipeline.preflight import preflight_xqt_config
-from xqt.pipeline.runner import create_context
+from xqt.operator_opt.execute import execute_operator_optimization_plan
+from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.pipeline.preflight import preflight_optimization_config
+from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 def _cutile_operator_config() -> dict[str, object]:
@@ -62,11 +59,30 @@ def _cutile_operator_config() -> dict[str, object]:
     }
 
 
+def _cutile_operator_workflow_config() -> dict[str, object]:
+    legacy_config = _cutile_operator_config()
+    operator_params = dict(legacy_config["operator_optimization"])
+    operator_params.pop("enabled")
+    return {
+        "project": legacy_config["project"],
+        "model": legacy_config["model"],
+        "benchmark": legacy_config["benchmark"],
+        "stages": [
+            {
+                "name": "cutile_operator",
+                "kind": "operator",
+                "params": operator_params,
+            }
+        ],
+    }
+
+
 def test_cutile_registry_covers_tilelang_operator_patterns() -> None:
     cutile_specs = list_cutile_kernel_specs()
     tilelang_specs = list_tilelang_kernel_specs()
 
-    assert (set(tilelang_specs) - {"linear_marlin"}).issubset(cutile_specs)
+    tilelang_only = {"conv3d_1x1x1", "int8_mma", "linear_marlin"}
+    assert (set(tilelang_specs) - tilelang_only).issubset(cutile_specs)
     assert "bias_silu" in cutile_specs
     assert (
         cutile_specs["linear"]["metadata"]["production_status"] == "reference_guarded"
@@ -93,6 +109,7 @@ def test_cutile_capability_uses_cuda_tile_runtime_probe() -> None:
         capability = describe_operator_engine_capability("cutile")
 
     assert capability.status == "planned"
+    assert capability.maturity == "reference_guarded"
     assert capability.available is True
     assert capability.requires_cuda is True
     assert any("linear, norm" in note for note in capability.notes)
@@ -103,13 +120,13 @@ def test_preflight_records_cutile_config_and_missing_dependency() -> None:
         patch("xqt.operator_opt.backends.cutile.cutile_available", return_value=False),
         patch("xqt.pipeline.preflight._cutile_available", return_value=False),
     ):
-        report = preflight_xqt_config(_cutile_operator_config())
+        report = preflight_optimization_config(_cutile_operator_workflow_config())
 
     checks = {check.name: check for check in report.checks}
     dependency_check = checks["dependency.cuda.tile"]
-    capability_check = checks["operator_optimization.targets.0.capability"]
-    runtime_check = checks["operator_optimization.targets.0.cutile.runtime"]
-    config_check = checks["operator_optimization.targets.0.cutile.config"]
+    capability_check = checks["stages.0.cutile_operator.targets.0.capability"]
+    runtime_check = checks["stages.0.cutile_operator.targets.0.cutile.runtime"]
+    config_check = checks["stages.0.cutile_operator.targets.0.cutile.config"]
 
     assert dependency_check.passed is False
     assert dependency_check.metadata["legacy_package"] == "cutile"
@@ -122,16 +139,16 @@ def test_preflight_records_cutile_config_and_missing_dependency() -> None:
 
 
 def test_cutile_operator_executor_reports_selected_artifacts() -> None:
-    config = load_xqt_config(_cutile_operator_config())
-    context = create_context(
-        config,
+    config_dict = _cutile_operator_config()
+    context = operator_runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(2, 16),
     )
     from xqt.pipeline.passes import LoadModelPass
 
     LoadModelPass().run(context)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 
 from xqt.quant import (
+    FP4WeightOnlyLinear,
+    MXFPWeightOnlyLinear,
     NVFP4LinearBridge,
     bridge_module_to_nvfp4_linear,
     bridge_module_to_nvfp4_linear_shared,
@@ -145,6 +147,21 @@ def test_infer_nvfp4_tensor_layout_from_modelopt_scale2() -> None:
     assert layout.group_size == 2
     assert layout.input_features == 4
     assert layout.output_features == 1
+
+
+def test_infer_nvfp4_tensor_layout_rejects_xqt_weight_only_modules() -> None:
+    source = torch.nn.Linear(8, 4, bias=False)
+    fp4 = FP4WeightOnlyLinear.from_linear(source, group_size=4)
+    mxfp4 = MXFPWeightOnlyLinear.from_linear(
+        source,
+        mx_precision=4,
+        block_size=4,
+    )
+
+    assert infer_nvfp4_tensor_layout(fp4) is None
+    assert infer_nvfp4_tensor_layout(mxfp4) is None
+    assert bridge_module_to_nvfp4_linear(fp4) is None
+    assert bridge_module_to_nvfp4_linear(mxfp4) is None
 
 
 def test_bridge_module_to_nvfp4_linear_exposes_tilelang_args() -> None:

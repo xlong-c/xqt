@@ -28,14 +28,15 @@
 
 - `from xqt import XQTOptimizationSession`
 - `xqt.convert(model_or_module, engine=..., policy=...)`
-- `xqt.nn.Linear` / `xqt.nn.Conv2d` / `xqt.nn.LayerNorm` / `xqt.nn.FeedForward`
+- `xqt.nn.FeedForward` / `xqt.nn.RMSNorm`
+- `xqt.nn.Linear` / `xqt.nn.Conv2d` / `xqt.nn.LayerNorm` 是保留 PyTorch module/state_dict 语义并显式记录 runtime intent 的 facade
 
 适用场景:
 
 - 需要逐 stage 试验
 - 需要在 Python 中动态拼装流程
 - 需要更细粒度控制 artifact 和 report
-- 需要以 Python 模块替换表达 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock` 这类推理语义块
+- 需要以 Python 模块替换表达 `FeedForward` 这类已接入推理语义块, 或为后续 `Linear`, `Conv`, `Norm`, `Attention`, `TransformerBlock` semantic facade 做准备
 
 其中 `engine` 指 XQT 内部实现选择和 report 字段, 例如 `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda`, `torch_compile`. 它不是把 TensorRT / ONNX Runtime 这类外部 runtime 和 XQT 并列. 对推理优化来说, 用户入口仍然是 `xqt`.
 
@@ -68,6 +69,8 @@ YAML workflow 只保留一种配置项集合:
 
 不要在 `xqt/recipes` 使用旧顶层 `compression`,`export`,`operator_optimization`,`analysis`,`validation` 或 `config_version`. 公开 recipe 必须能直接由 `load_optimization_config()` 加载.
 
+当前 loader 已把 `stages[*].params` 解析为 typed `StageSpec`, workflow 主链已通过 stage helper 消费 runtime config. workflow context 为 runtime-only, public `create_context()` 只接受 `OptimizationConfig` 或 workflow 输入; 旧 `load_xqt_config()` / `XQTConfig` / `XQTContext.config` 已删除, 新 workflow 不应恢复旧 schema.
+
 ## readiness / report / artifact
 
 当前可用落点:
@@ -86,7 +89,8 @@ YAML workflow 只保留一种配置项集合:
 
 1. 先看 [../XQT.md](../XQT.md)
 2. 再看 [../../../xqt/FRAMEWORK.md](../../../xqt/FRAMEWORK.md)
-3. 最后看相关 `recipes/*.yaml` 和测试
+3. 架构重构先看 [../architecture/xqt-realignment-guide.md](../architecture/xqt-realignment-guide.md)
+4. 最后看相关 `recipes/*.yaml` 和测试
 
 ## 继续阅读
 

@@ -1,14 +1,17 @@
-import pytest
+import importlib
 
-from xqt.core.config import load_xqt_config
+import pytest
+from omegaconf import OmegaConf
+
 from xqt.core.errors import XQTConfigError
+from xqt.core.schema import QuantConfig
 from xqt.quant.capability import describe_quant_backend_capability
 from xqt.quant.plan import build_quantization_plan
+from xqt.workflows import load_optimization_config
 
 
 def _base_config() -> dict:
     return {
-        "config_version": 1,
         "project": {
             "name": "quant_method_schema",
             "artifact_dir": "artifacts/xqt/tests/quant_method_schema",
@@ -37,10 +40,35 @@ def _base_config() -> dict:
     }
 
 
-def test_quant_method_is_distinct_from_backend() -> None:
-    config = load_xqt_config(_base_config())
+def _quant_config(config: dict) -> QuantConfig:
+    merged = OmegaConf.merge(
+        OmegaConf.structured(QuantConfig),
+        config["compression"]["quant"],
+    )
+    return OmegaConf.to_object(merged)  # type: ignore[return-value]
 
-    plan = build_quantization_plan(config.compression.quant)
+
+def _workflow_config(config: dict) -> dict:
+    quant_params = dict(config["compression"]["quant"])
+    quant_params.pop("enabled", None)
+    return {
+        "project": config["project"],
+        "model": config["model"],
+        "compression_axes": ["precision"],
+        "stages": [
+            {
+                "name": "quant_model",
+                "kind": "quant",
+                "params": quant_params,
+            }
+        ],
+    }
+
+
+def test_quant_method_is_distinct_from_backend() -> None:
+    quant_config = _quant_config(_base_config())
+
+    plan = build_quantization_plan(quant_config)
 
     assert len(plan.components) == 1
     component = plan.components[0]
@@ -53,9 +81,9 @@ def test_quant_method_is_distinct_from_backend() -> None:
 def test_legacy_strategy_alias_is_canonicalized_in_plan() -> None:
     config_dict = _base_config()
     config_dict["compression"]["quant"]["strategy"] = "int4_weight_only"
-    config = load_xqt_config(config_dict)
+    quant_config = _quant_config(config_dict)
 
-    plan = build_quantization_plan(config.compression.quant)
+    plan = build_quantization_plan(quant_config)
 
     assert plan.components[0].strategy == "weight_only_int4"
 
@@ -64,8 +92,8 @@ def test_quant_config_requires_explicit_backend_when_enabled() -> None:
     config = _base_config()
     config["compression"]["quant"].pop("backend")
 
-    with pytest.raises(XQTConfigError, match="compression.quant.backend"):
-        load_xqt_config(config)
+    with pytest.raises(XQTConfigError, match="quant.params.backend"):
+        load_optimization_config(_workflow_config(config))
 
 
 def test_quant_config_requires_explicit_method_strategy_or_policy() -> None:
@@ -76,8 +104,8 @@ def test_quant_config_requires_explicit_method_strategy_or_policy() -> None:
     quant.pop("strategy")
     quant.pop("policy")
 
-    with pytest.raises(XQTConfigError, match="method, strategy, or policy"):
-        load_xqt_config(config)
+    with pytest.raises(XQTConfigError, match="method, strategy, policy"):
+        load_optimization_config(_workflow_config(config))
 
 
 def test_component_policy_records_selection_policy_metadata() -> None:
@@ -99,8 +127,8 @@ def test_component_policy_records_selection_policy_metadata() -> None:
         }
     ]
 
-    loaded = load_xqt_config(config)
-    plan = build_quantization_plan(loaded.compression.quant)
+    quant_config = _quant_config(config)
+    plan = build_quantization_plan(quant_config)
     selection_policy = plan.components[0].policy["selection_policy"]
 
     assert selection_policy["target_path"] == "encoder"
@@ -117,8 +145,8 @@ def test_awq_is_not_accepted_as_quant_backend() -> None:
     config["compression"]["quant"]["backend"] = "awq"
     config["compression"]["quant"].pop("method")
 
-    with pytest.raises(XQTConfigError, match="compression.quant.backend"):
-        load_xqt_config(config)
+    with pytest.raises(XQTConfigError, match="Unsupported quantization backend"):
+        load_optimization_config(_workflow_config(config))
 
 
 def test_component_method_overrides_global_method() -> None:
@@ -133,8 +161,8 @@ def test_component_method_overrides_global_method() -> None:
         }
     ]
 
-    loaded = load_xqt_config(config)
-    plan = build_quantization_plan(loaded.compression.quant)
+    quant_config = _quant_config(config)
+    plan = build_quantization_plan(quant_config)
 
     assert len(plan.components) == 1
     assert plan.components[0].backend == "pytorch"
@@ -144,3 +172,55 @@ def test_component_method_overrides_global_method() -> None:
 def test_capability_rejects_method_backend_mismatch() -> None:
     with pytest.raises(ValueError, match="not supported by backend"):
         describe_quant_backend_capability("onnxruntime_qdq", method="awq")
+
+
+def test_tilelang_awq_fp4_capability_reports_cpu_rewrite_and_pseudo_quant() -> None:
+    capability = describe_quant_backend_capability(
+        "tilelang",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={"dtype": "fp4"},
+    )
+
+    assert capability.status == "available"
+    assert capability.maturity == "reference_guarded"
+    assert capability.methods == ("awq", "gptq")
+    assert capability.requires_calibration is True
+    assert capability.requires_cuda is False
+    assert capability.preferred_devices == ("cuda", "cpu")
+    assert capability.nature.value == "pseudo"
+    assert any("Weight-only module rewrite can run on CPU" in note for note in capability.notes)
+
+
+def test_tilelang_gptq_int8_capability_is_executable() -> None:
+    capability = describe_quant_backend_capability(
+        "tilelang",
+        method="gptq",
+        strategy="weight_only_int8",
+        policy={"dtype": "int8", "bits": 8},
+    )
+
+    assert capability.status == "available"
+    assert capability.maturity == "executable"
+
+
+def test_awq_and_gptq_modules_are_explicit_reexports() -> None:
+    awq_module = importlib.import_module("xqt.quant.quantizers.awq")
+    gptq_module = importlib.import_module("xqt.quant.quantizers.gptq")
+
+    assert awq_module.quantize_with_awq_weight_only.__module__ == (
+        "xqt.quant.quantizers.awq_gptq_weight_only"
+    )
+    assert awq_module.quantize_with_awq_fp4.__module__ == "xqt.quant.quantizers.fp4_weight_only"
+    assert gptq_module.quantize_with_gptq_weight_only.__module__ == (
+        "xqt.quant.quantizers.awq_gptq_weight_only"
+    )
+    assert gptq_module.quantize_with_gptq_fp4.__module__ == "xqt.quant.quantizers.fp4_weight_only"
+
+
+def test_removed_placeholder_quantizer_modules_are_not_importable() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("xqt.quant.quantizers.rtn")
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("xqt.quant.quantizers.smoothquant")

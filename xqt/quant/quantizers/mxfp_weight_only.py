@@ -408,9 +408,21 @@ def execute_mxfp_weight_only_component(
         calibration_samples=calibration_samples,
         calibration_summary=calibration_summary,
         nature=QuantizationNature.PSEUDO,
+        algorithm_executable=component.method not in {"awq", "gptq"},
+        method_semantics=(
+            "awq_gptq_label_only_groupwise_weight_only_storage_quantization"
+            if component.method in {"awq", "gptq"}
+            else "groupwise_mxfp_weight_only_storage_quantization"
+        ),
         compute_speedup_expected=None,
         metadata={
             **dict(result.metadata),
+            "algorithm_executable": component.method not in {"awq", "gptq"},
+            "method_semantics": (
+                "awq_gptq_label_only_groupwise_weight_only_storage_quantization"
+                if component.method in {"awq", "gptq"}
+                else "groupwise_mxfp_weight_only_storage_quantization"
+            ),
             "analysis_only": component.analysis_only,
             "policy": effective_policy,
             "selection_policy": selection_policy_metadata(component),

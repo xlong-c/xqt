@@ -94,6 +94,8 @@ class QuantizationReport:
     calibration_samples: Optional[int] = None
     calibration_summary: Optional[dict[str, Any]] = None
     nature: QuantizationNature = QuantizationNature.UNKNOWN
+    algorithm_executable: Optional[bool] = None
+    method_semantics: Optional[str] = None
     compute_speedup_expected: Optional[float] = None
     fusion_applied: list[str] = field(default_factory=list)
     dequant_nodes_eliminated: int = 0
@@ -115,6 +117,8 @@ class QuantizationReport:
             "calibration_samples": self.calibration_samples,
             "calibration_summary": self.calibration_summary,
             "nature": self.nature.value,
+            "algorithm_executable": self.algorithm_executable,
+            "method_semantics": self.method_semantics,
             "compute_speedup_expected": self.compute_speedup_expected,
             "fusion_applied": list(self.fusion_applied),
             "dequant_nodes_eliminated": self.dequant_nodes_eliminated,

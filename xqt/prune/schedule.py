@@ -12,7 +12,8 @@ from .masks import (
     remove_pruning_reparameterization,
     summarize_pruning,
 )
-from .structured import StructuredPruningReport, apply_structured_pruning
+from .report import StructuredPruningReport
+from .api import apply_structured_pruning
 
 
 @dataclass

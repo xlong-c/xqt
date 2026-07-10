@@ -5,19 +5,17 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.core.config import load_xqt_config
-from xqt.operator_opt.executor import (
-    build_operator_optimization_plan,
-    execute_operator_optimization_plan,
-    materialize_operator_candidate_model,
-)
+from xqt.operator_opt.execute import execute_operator_optimization_plan
+from xqt.operator_opt.materialize import materialize_operator_candidate_model
+from xqt.operator_opt.plan import build_operator_optimization_plan
 from xqt.operator_opt.kernels.tilelang.conv import (
     conv3d_1x1x1_reference,
     conv3d_1x1x1_tilelang,
 )
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 from xqt.operator_opt.types import OperatorOptimizationTargetPlan
 from xqt.pipeline.passes import LoadModelPass
-from xqt.pipeline.runner import create_context
+from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(
@@ -26,8 +24,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang conv3d operator CUDA test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang conv3d operator CUDA test",
 )
 
 
@@ -106,14 +104,14 @@ def test_tilelang_half_conv3d_cuda_kernel_matches_reference() -> None:
 
 
 def test_tilelang_conv3d_operator_stage_uses_reference_fallback_on_cpu() -> None:
-    config = load_xqt_config(_tilelang_conv3d_operator_config("cpu"))
-    context = create_context(
-        config,
+    config_dict = _tilelang_conv3d_operator_config("cpu")
+    context = operator_runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(1, 8, 2, 8, 8, dtype=torch.float32),
     )
     LoadModelPass().run(context)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -149,15 +147,15 @@ def test_materialize_tilelang_conv3d_candidate_replaces_named_conv() -> None:
 @requires_cuda
 @requires_tilelang
 def test_tilelang_conv3d_operator_stage_uses_cuda_kernel_entry() -> None:
-    config = load_xqt_config(_tilelang_conv3d_operator_config("cuda"))
-    context = create_context(
-        config,
+    config_dict = _tilelang_conv3d_operator_config("cuda")
+    context = operator_runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(1, 8, 2, 8, 8, device="cuda", dtype=torch.float16),
     )
     LoadModelPass().run(context)
     context.model = context.require_model().to(device="cuda", dtype=torch.float16)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()

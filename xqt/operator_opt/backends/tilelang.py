@@ -33,6 +33,11 @@ from ..kernels.tilelang.gemm import (
     nvfp4_packed_dequant_gemm_epilogue_reference,
     nvfp4_packed_dequant_gemm_epilogue_tilelang,
 )
+from ..kernels.tilelang.int8_mma import (
+    TILELANG_INT8_MMA_KERNEL_METADATA,
+    int8_mma_reference,
+    int8_mma_tilelang,
+)
 from ..kernels.tilelang.linear import (
     TILELANG_LINEAR_KERNEL_METADATA,
     dense_linear_epilogue_reference,
@@ -117,6 +122,7 @@ TILELANG_KERNEL_METADATA: dict[str, dict[str, Any]] = {
     },
     **TILELANG_CONV_KERNEL_METADATA,
     **TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
+    **TILELANG_INT8_MMA_KERNEL_METADATA,
     **TILELANG_LINEAR_KERNEL_METADATA,
     **TILELANG_MARLIN_LINEAR_KERNEL_METADATA,
     **TILELANG_NORM_KERNEL_METADATA,
@@ -155,6 +161,12 @@ TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
         reference=dense_linear_epilogue_reference,
         kernel=dense_linear_epilogue_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["dense_linear_epilogue"]),
+    ),
+    "int8_mma": TileLangKernelSpec(
+        pattern="int8_mma",
+        reference=int8_mma_reference,
+        kernel=int8_mma_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["int8_mma"]),
     ),
     "linear": TileLangKernelSpec(
         pattern="linear",
@@ -273,6 +285,17 @@ def run_tilelang_kernel(
             }
             return spec.reference(*args, **filtered_kwargs)
         raise XQTBackendError(f"TileLang pattern '{pattern}' requires CUDA tensors")
+    if any(arg.is_cuda for arg in tensor_args):
+        from xqt.operator_opt.kernels.tilelang._common import (
+            tilelang_runtime_unavailability_reason,
+            tilelang_runtime_usable,
+        )
+
+        if not tilelang_runtime_usable():
+            raise XQTBackendError(
+                tilelang_runtime_unavailability_reason()
+                or "TileLang runtime is unavailable for XQT kernels"
+            )
     return spec.kernel(*args, **kwargs)
 
 

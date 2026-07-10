@@ -278,6 +278,15 @@ class NVFP4LinearBridge(nn.Module):
 def infer_nvfp4_tensor_layout(module: nn.Module) -> NVFP4TensorLayout | None:
     """Infer a packed NVFP4 tensor contract from a module by attribute names."""
 
+    if callable(getattr(module, "tilelang_packed_dequant_gemm_args", None)):
+        return None
+    if callable(getattr(module, "tilelang_dequant_gemm_args", None)):
+        return None
+    if hasattr(module, "mx_precision") and callable(
+        getattr(module, "tilelang_dense_linear_args", None)
+    ):
+        return None
+
     packed_weight_name = None
     for candidate in ("qweight", "weight_packed", "packed_weight", "weight"):
         value = getattr(module, candidate, None)
@@ -332,6 +341,8 @@ def infer_nvfp4_tensor_layout(module: nn.Module) -> NVFP4TensorLayout | None:
             weight_global_scale_name = candidate
             invert_weight_global_scale = candidate == "weight_scale_2"
             break
+    if weight_global_scale_name is None:
+        return None
 
     bias_name = "bias" if isinstance(getattr(module, "bias", None), torch.Tensor) else None
 

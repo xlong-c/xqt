@@ -7,23 +7,34 @@ import importlib.util
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 
-from xqt.core.config import ConfigInput, load_xqt_config
+from xqt.core.config import ConfigInput
 from xqt.core.imports import resolve_target
 from xqt.core.schema import (
     QuantComponentPolicyConfig,
     QuantConfig,
+    PruneConfig,
     TASK_TYPES,
-    XQTConfig,
 )
 from xqt.operator_opt.capability import describe_operator_engine_capability
 from xqt.operator_opt.cuda_extension import describe_custom_cuda_extension_capability
 from xqt.prune import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
 from xqt.export.tensorrt import validate_tensorrt_plugin_libraries
+from xqt.workflows.optimization import OptimizationConfig, OptimizationStageConfig, load_optimization_config
+from xqt.workflows.stage_specs import (
+    AnalyzeStageSpec,
+    BenchmarkStageSpec,
+    DeployStageSpec,
+    ExportStageSpec,
+    OperatorStageSpec,
+    PruneStageSpec,
+    QuantStageSpec,
+    ensure_stage_spec,
+)
 
 
 @dataclass
@@ -289,8 +300,10 @@ def _check_quant_component_policy(
     report: PreflightReport,
     quant_config: QuantConfig,
     component: QuantComponentPolicyConfig,
+    *,
+    prefix: str | None = None,
 ) -> None:
-    prefix = f"compression.quant.component_policies.{component.name}"
+    prefix = prefix or f"compression.quant.component_policies.{component.name}"
     backend = component.backend or quant_config.backend
     if component.target is not None:
         report.add(
@@ -335,7 +348,10 @@ def _check_quant_component_policy(
 
 
 def _check_quant_runtime_mix(
-    report: PreflightReport, quant_config: QuantConfig
+    report: PreflightReport,
+    quant_config: QuantConfig,
+    *,
+    name: str = "compression.quant.runtime_mix",
 ) -> None:
     backends: list[str] = []
     if quant_config.component_policies:
@@ -349,14 +365,14 @@ def _check_quant_runtime_mix(
     unique_backends = sorted(set(backends))
     if len(unique_backends) <= 1:
         report.add(
-            "compression.quant.runtime_mix",
+            name,
             True,
             "single quantization runtime configured",
             backends=unique_backends,
         )
         return
     report.add(
-        "compression.quant.runtime_mix",
+        name,
         True,
         "multiple quantization runtimes configured",
         level="warning",
@@ -364,28 +380,80 @@ def _check_quant_runtime_mix(
     )
 
 
-def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> None:
-    operator_config = loaded.operator_optimization
-    if not operator_config.enabled:
+def _check_quant_config(
+    report: PreflightReport,
+    quant_config: QuantConfig,
+    *,
+    prefix: str,
+    cuda_name: str,
+) -> None:
+    if not quant_config.enabled:
         return
-    if not operator_config.targets:
+    _check_quant_runtime_mix(report, quant_config, name=f"{prefix}.runtime_mix")
+    _check_quant_backend_capability(
+        report,
+        f"{prefix}.capability",
+        quant_config.backend,
+        method=quant_config.method,
+        strategy=quant_config.strategy,
+        policy=quant_config.policy,
+    )
+    if quant_config.backend == "torchao":
+        _check_dependency(report, "torchao")
+        if describe_quant_backend_capability(
+            quant_config.backend,
+            method=quant_config.method,
+            strategy=quant_config.strategy,
+            policy=quant_config.policy,
+        ).requires_cuda:
+            _check_cuda(report, cuda_name)
+    if quant_config.backend == "onnxruntime_qdq":
+        _check_dependency(report, "onnxruntime")
+        _check_external_calibration_inputs(
+            report,
+            name=f"{prefix}.calibration_inputs",
+        )
+    if quant_config.component_policies:
         report.add(
-            "operator_optimization.targets",
+            f"{prefix}.component_policies",
+            True,
+            "component-level quantization policies configured",
+            count=len(quant_config.component_policies),
+        )
+        for component in quant_config.component_policies:
+            _check_quant_component_policy(
+                report,
+                quant_config,
+                component,
+                prefix=f"{prefix}.component_policies.{component.name}",
+            )
+
+
+def _check_operator_targets(
+    report: PreflightReport,
+    operator_targets: list[Any],
+    *,
+    default_engine: str,
+    prefix: str = "operator_optimization",
+) -> None:
+    if not operator_targets:
+        report.add(
+            f"{prefix}.targets",
             False,
             "operator optimization is enabled but no targets are configured",
             level="error",
         )
         return
     report.add(
-        "operator_optimization.targets",
+        f"{prefix}.targets",
         True,
         "operator optimization targets configured",
-        count=len(operator_config.targets),
-        default_engine=operator_config.default_engine,
+        count=len(operator_targets),
+        default_engine=default_engine,
     )
     torch_compile_available = hasattr(torch, "compile")
     report.add(
-        "operator_optimization.torch_compile",
+        f"{prefix}.torch_compile",
         torch_compile_available,
         "torch.compile available"
         if torch_compile_available
@@ -393,8 +461,8 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         torch_version=torch.__version__,
     )
     target_engines = {
-        target.engine or operator_config.default_engine
-        for target in operator_config.targets
+        getattr(target, "engine", None) or default_engine
+        for target in operator_targets
     }
     if target_engines & {
         "triton",
@@ -404,7 +472,7 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         "cute_dsl",
         "custom_cuda",
     }:
-        _check_cuda(report, "operator_optimization.hardware.cuda")
+        _check_cuda(report, f"{prefix}.hardware.cuda")
     for package_engine in ("triton", "tilelang", "cutlass"):
         if package_engine in target_engines:
             _check_dependency(report, package_engine)
@@ -419,133 +487,150 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         )
     if "cute_dsl" in target_engines:
         _check_dependency(report, "cutlass.cute")
-    for index, target in enumerate(operator_config.targets):
-        prefix = f"operator_optimization.targets.{index}"
-        target_engine = target.engine or operator_config.default_engine
+    for index, target in enumerate(operator_targets):
+        target_prefix = f"{prefix}.targets.{index}"
+        target_engine = getattr(target, "engine", None) or default_engine
         capability = describe_operator_engine_capability(
             target_engine,
             torch_compile_available=torch_compile_available,
         )
+        fallback_policy = str(getattr(target, "fallback_policy", "prefer_fallback"))
+        fallback_policy_ok = fallback_policy in {"strict", "prefer_fallback"}
         report.add(
-            f"{prefix}.capability",
+            f"{target_prefix}.capability",
             capability.available or capability.status == "planned",
             "operator optimization engine capability described",
             level="info"
             if capability.available or capability.status == "available"
             else "warning",
-            target_name=target.name,
-            module_path=target.target,
+            target_name=getattr(target, "name", None),
+            module_path=getattr(target, "target", None),
             **capability.to_dict(),
+        )
+        report.add(
+            f"{target_prefix}.fallback_policy",
+            fallback_policy_ok,
+            "operator fallback policy recorded"
+            if fallback_policy_ok
+            else "operator fallback_policy must be 'strict' or 'prefer_fallback'",
+            level="info" if fallback_policy_ok else "error",
+            target_name=getattr(target, "name", None),
+            module_path=getattr(target, "target", None),
+            fallback_policy=fallback_policy,
         )
         if target_engine == "tilelang" and not _package_available("tilelang"):
             report.add(
-                f"{prefix}.tilelang.runtime",
+                f"{target_prefix}.tilelang.runtime",
                 True,
                 "tilelang package is not importable; built-in executor will be limited to reference fallback",
                 level="warning",
-                target_name=target.name,
-                module_path=target.target,
+                target_name=getattr(target, "name", None),
+                module_path=getattr(target, "target", None),
             )
         if target_engine == "cutile" and not capability.available:
             report.add(
-                f"{prefix}.cutile.runtime",
+                f"{target_prefix}.cutile.runtime",
                 False,
                 "cutile engine is configured but cuda.tile is not importable",
                 level="warning",
-                target_name=target.name,
-                module_path=target.target,
+                target_name=getattr(target, "name", None),
+                module_path=getattr(target, "target", None),
             )
         if target_engine == "cutlass" and not capability.available:
             report.add(
-                f"{prefix}.cutlass.runtime",
+                f"{target_prefix}.cutlass.runtime",
                 False,
                 "cutlass engine is configured but cutlass is not importable",
                 level="warning",
-                target_name=target.name,
-                module_path=target.target,
+                target_name=getattr(target, "name", None),
+                module_path=getattr(target, "target", None),
             )
         if target_engine == "cute_dsl" and not capability.available:
             report.add(
-                f"{prefix}.cute_dsl.runtime",
+                f"{target_prefix}.cute_dsl.runtime",
                 False,
                 "cute_dsl engine is configured but cutlass.cute is not importable",
                 level="warning",
-                target_name=target.name,
-                module_path=target.target,
+                target_name=getattr(target, "name", None),
+                module_path=getattr(target, "target", None),
             )
         if target_engine == "tilelang":
+            tilelang_config = getattr(target, "tilelang")
             tilelang_metadata = {
-                "target_name": target.name,
-                "module_path": target.target,
-                "target": target.tilelang.target,
-                "target_arch": target.tilelang.target_arch,
-                "cache_dir": target.tilelang.cache_dir,
-                "threads": target.tilelang.threads,
-                "num_stages": target.tilelang.num_stages,
-                "pass_configs": dict(target.tilelang.pass_configs),
+                "target_name": getattr(target, "name", None),
+                "module_path": getattr(target, "target", None),
+                "target": tilelang_config.target,
+                "target_arch": tilelang_config.target_arch,
+                "cache_dir": tilelang_config.cache_dir,
+                "threads": tilelang_config.threads,
+                "num_stages": tilelang_config.num_stages,
+                "pass_configs": dict(tilelang_config.pass_configs),
             }
             tilelang_metadata.update(_module_metadata("tilelang"))
             report.add(
-                f"{prefix}.tilelang.config",
+                f"{target_prefix}.tilelang.config",
                 True,
                 "tilelang compile configuration recorded",
                 **tilelang_metadata,
             )
         if target_engine == "cutile":
+            cutile_config = getattr(target, "cutile")
             cutile_metadata = {
-                "target_name": target.name,
-                "module_path": target.target,
-                "target": target.cutile.target,
-                "target_arch": target.cutile.target_arch,
-                "cache_dir": target.cutile.cache_dir,
-                "threads": target.cutile.threads,
-                "pass_configs": dict(target.cutile.pass_configs),
+                "target_name": getattr(target, "name", None),
+                "module_path": getattr(target, "target", None),
+                "target": cutile_config.target,
+                "target_arch": cutile_config.target_arch,
+                "cache_dir": cutile_config.cache_dir,
+                "threads": cutile_config.threads,
+                "pass_configs": dict(cutile_config.pass_configs),
             }
             cutile_metadata.update(_cutile_metadata())
             report.add(
-                f"{prefix}.cutile.config",
+                f"{target_prefix}.cutile.config",
                 True,
                 "cutile compile configuration recorded",
                 **cutile_metadata,
             )
         if target_engine == "cutlass":
+            cutlass_config = getattr(target, "cutlass")
             cutlass_metadata = {
-                "target_name": target.name,
-                "module_path": target.target,
-                "target_arch": target.cutlass.target_arch,
-                "cache_dir": target.cutlass.cache_dir,
-                "tile_shape": list(target.cutlass.tile_shape),
+                "target_name": getattr(target, "name", None),
+                "module_path": getattr(target, "target", None),
+                "target_arch": cutlass_config.target_arch,
+                "cache_dir": cutlass_config.cache_dir,
+                "tile_shape": list(cutlass_config.tile_shape),
                 "cluster_shape": (
-                    list(target.cutlass.cluster_shape)
-                    if target.cutlass.cluster_shape is not None
+                    list(cutlass_config.cluster_shape)
+                    if cutlass_config.cluster_shape is not None
                     else None
                 ),
-                "pass_configs": dict(target.cutlass.pass_configs),
+                "pass_configs": dict(cutlass_config.pass_configs),
             }
             cutlass_metadata.update(_module_metadata("cutlass"))
             report.add(
-                f"{prefix}.cutlass.config",
+                f"{target_prefix}.cutlass.config",
                 True,
                 "cutlass compile configuration recorded",
                 **cutlass_metadata,
             )
         if target_engine == "cute_dsl":
+            cute_dsl_config = getattr(target, "cute_dsl")
             cute_dsl_metadata = {
-                "target_name": target.name,
-                "module_path": target.target,
-                "target_arch": target.cute_dsl.target_arch,
-                "cache_dir": target.cute_dsl.cache_dir,
-                "tile_shape": list(target.cute_dsl.tile_shape),
+                "target_name": getattr(target, "name", None),
+                "module_path": getattr(target, "target", None),
+                "target_arch": cute_dsl_config.target_arch,
+                "cache_dir": cute_dsl_config.cache_dir,
+                "tile_shape": list(cute_dsl_config.tile_shape),
                 "cluster_shape": (
-                    list(target.cute_dsl.cluster_shape)
-                    if target.cute_dsl.cluster_shape is not None
+                    list(cute_dsl_config.cluster_shape)
+                    if cute_dsl_config.cluster_shape is not None
                     else None
                 ),
-                "pass_configs": dict(target.cute_dsl.pass_configs),
+                "pass_configs": dict(cute_dsl_config.pass_configs),
             }
             cute_dsl_metadata.update(_module_metadata("cutlass.cute"))
             report.add(
-                f"{prefix}.cute_dsl.config",
+                f"{target_prefix}.cute_dsl.config",
                 True,
                 "cute_dsl compile configuration recorded",
                 **cute_dsl_metadata,
@@ -553,29 +638,91 @@ def _check_operator_optimization(report: PreflightReport, loaded: XQTConfig) -> 
         if target_engine == "custom_cuda":
             extension = describe_custom_cuda_extension_capability()
             report.add(
-                f"{prefix}.custom_cuda.extension",
+                f"{target_prefix}.custom_cuda.extension",
                 extension.available,
                 "custom CUDA extension capability described",
                 level="info" if extension.available else "warning",
-                target_name=target.name,
-                module_path=target.target,
+                target_name=getattr(target, "name", None),
+                module_path=getattr(target, "target", None),
                 **extension.to_dict(),
             )
 
 
-def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) -> None:
-    prune = loaded.compression.prune
-    if not prune.enabled or loaded.task.type != "detection":
+def _check_prune_config(
+    report: PreflightReport,
+    prune: PruneConfig,
+    *,
+    device: str | None,
+    task_type: str,
+    prefix: str,
+) -> None:
+    if not prune.enabled:
         return
+    if prune.method == "nm_structured":
+        pattern_raw = prune.selection.get("pattern") or prune.params.get("pattern")
+        if isinstance(pattern_raw, (list, tuple)) and len(pattern_raw) == 2:
+            pattern = (int(pattern_raw[0]), int(pattern_raw[1]))
+            capability = describe_prune_runtime_capability(
+                method="nm_structured",
+                device=device,
+                pattern=pattern,
+            ).to_dict()
+            report.add(
+                f"{prefix}.nm_backend",
+                bool(capability["supported"]),
+                str(capability["reason"]),
+                pattern=list(pattern),
+                runtime=capability["runtime"],
+                speedup_verified=capability["speedup_verified"],
+                pattern_present=capability["pattern_present"],
+                level="info" if capability["supported"] else "warning",
+            )
+        else:
+            report.add(
+                f"{prefix}.nm_backend",
+                False,
+                "N:M structured pruning requires selection.pattern=[N, M]",
+                level="error",
+            )
+    if prune.method == "block_sparse":
+        block_shape_raw = prune.selection.get("block_shape") or prune.params.get(
+            "block_shape"
+        )
+        if isinstance(block_shape_raw, (list, tuple)) and len(block_shape_raw) == 2:
+            block_shape = (int(block_shape_raw[0]), int(block_shape_raw[1]))
+            capability = describe_prune_runtime_capability(
+                method="block_sparse",
+                device=device,
+                block_shape=block_shape,
+            ).to_dict()
+            report.add(
+                f"{prefix}.block_sparse_backend",
+                bool(capability["supported"]),
+                str(capability["reason"]),
+                block_shape=list(block_shape),
+                runtime=capability["runtime"],
+                speedup_verified=capability["speedup_verified"],
+                pattern_present=capability["pattern_present"],
+                level="info" if capability["supported"] else "warning",
+            )
+        else:
+            report.add(
+                f"{prefix}.block_sparse_backend",
+                False,
+                "block_sparse pruning requires selection.block_shape=[rows, cols]",
+                level="error",
+            )
     metadata = {
         "method": prune.method,
         "target_sparsity": prune.target_sparsity,
         "granularity": prune.granularity,
         "scope": prune.scope,
     }
+    if task_type != "detection":
+        return
     if prune.method == "global_l1_unstructured":
         report.add(
-            "compression.prune.detection_safety",
+            f"{prefix}.detection_safety",
             True,
             "unstructured detection pruning records sparsity only; speedup is not claimed",
             **metadata,
@@ -583,14 +730,14 @@ def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) ->
         return
     if prune.method != "structured":
         report.add(
-            "compression.prune.detection_safety",
+            f"{prefix}.detection_safety",
             True,
             "detection pruning method does not rewrite detection head topology",
             **metadata,
         )
         return
     report.add(
-        "compression.prune.detection_safety",
+        f"{prefix}.detection_safety",
         True,
         (
             "structured detection pruning is guarded; residual/CSP/C2f/SPPF/detect head "
@@ -602,16 +749,151 @@ def _check_detection_prune_safety(report: PreflightReport, loaded: XQTConfig) ->
     )
 
 
-def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
-    """Run lightweight dependency and target checks for a recipe."""
+def _check_export_targets(
+    report: PreflightReport,
+    targets: list[Any],
+    *,
+    prefix: str = "export.targets",
+) -> None:
+    for index, target in enumerate(targets):
+        target_format = getattr(target, "format", None)
+        target_params = dict(getattr(target, "params", {}) or {})
+        target_prefix = f"{prefix}.{index}.{target_format}"
+        if target_format in {"torch_export", "torchscript"}:
+            report.add(target_prefix, True, "built-in PyTorch export target")
+        elif target_format == "onnx":
+            _check_dependency(report, "onnx")
+            if bool(target_params.get("runtime_diff", True)):
+                _check_dependency(report, "onnxruntime")
+            onnx_optimization = target_params.get(
+                "onnx_optimization",
+                target_params.get("optimize", False),
+            )
+            if onnx_optimization is True or (
+                isinstance(onnx_optimization, Mapping)
+                and bool(onnx_optimization.get("enabled", True))
+            ):
+                backend = (
+                    str(onnx_optimization.get("backend", "onnxruntime"))
+                    if isinstance(onnx_optimization, Mapping)
+                    else "onnxruntime"
+                )
+                if backend == "onnxruntime":
+                    _check_dependency(report, "onnxruntime")
+                else:
+                    report.add(
+                        f"{target_prefix}.onnx_optimization",
+                        False,
+                        f"unsupported ONNX optimization backend: {backend}",
+                        level="error",
+                    )
+        elif target_format == "tensorrt":
+            _check_optional_executable(
+                report,
+                str(target_params.get("trtexec_path", "trtexec")),
+                f"{target_prefix}.trtexec",
+                dry_run=bool(target_params.get("dry_run", False)),
+            )
+            plugin_libraries = target_params.get("plugin_libraries")
+            if plugin_libraries is not None:
+                if not isinstance(plugin_libraries, list):
+                    report.add(
+                        f"{target_prefix}.plugin_libraries",
+                        False,
+                        "TensorRT plugin_libraries must be a list of shared library paths",
+                        level="error",
+                    )
+                else:
+                    for plugin_index, plugin_path in enumerate(plugin_libraries):
+                        path = Path(str(plugin_path))
+                        plugin_validation = validate_tensorrt_plugin_libraries(
+                            [path],
+                            validate_loadability=bool(
+                                target_params.get(
+                                    "validate_plugin_libraries_loadable",
+                                    False,
+                                )
+                            ),
+                        )
+                        plugin_check = plugin_validation.plugin_libraries[0]
+                        report.add(
+                            f"{target_prefix}.plugin_libraries.{plugin_index}",
+                            plugin_check.exists,
+                            "TensorRT plugin library found"
+                            if plugin_check.exists
+                            else "TensorRT plugin library missing",
+                            level="info" if plugin_check.exists else "warning",
+                            path=plugin_check.path,
+                            validation=plugin_check.to_dict(),
+                        )
+                        if bool(target_params.get("validate_plugin_libraries_loadable", False)):
+                            if plugin_check.loadable is True:
+                                report.add(
+                                    f"{target_prefix}.plugin_libraries.{plugin_index}.loadable",
+                                    True,
+                                    "TensorRT plugin library loaded with ctypes RTLD_GLOBAL",
+                                    level="info",
+                                    path=plugin_check.path,
+                                    loaded_plugin_libraries=plugin_check.loaded_plugin_libraries,
+                                    validation=plugin_check.to_dict(),
+                                )
+                            else:
+                                report.add(
+                                    f"{target_prefix}.plugin_libraries.{plugin_index}.loadable",
+                                    False,
+                                    f"TensorRT plugin library failed to load: {plugin_check.error}",
+                                    level="error",
+                                    path=plugin_check.path,
+                                    validation=plugin_check.to_dict(),
+                                )
+        elif target_format == "openvino":
+            _check_optional_dependency(
+                report,
+                "openvino",
+                "dependency.openvino",
+                dry_run=bool(target_params.get("dry_run", False)),
+            )
+        elif target_format == "executorch":
+            _check_dependency(report, "executorch")
+        elif target_format == "ncnn":
+            if target_params.get("converter", "onnx2ncnn") == "pnnx":
+                _check_executable(
+                    report,
+                    str(target_params.get("pnnx_path", "pnnx")),
+                    f"{target_prefix}.pnnx",
+                )
+            else:
+                _check_executable(
+                    report,
+                    str(target_params.get("onnx2ncnn_path", "onnx2ncnn")),
+                    f"{target_prefix}.onnx2ncnn",
+                )
+        elif target_format == "mnn":
+            _check_executable(
+                report,
+                str(target_params.get("converter_path", "MNNConvert")),
+                f"{target_prefix}.MNNConvert",
+            )
+        else:
+            report.add(target_prefix, False, "unsupported export target")
 
-    loaded = config if isinstance(config, XQTConfig) else load_xqt_config(config)
+
+def preflight_optimization_config(
+    config: ConfigInput | OptimizationConfig,
+) -> PreflightReport:
+    """Run lightweight dependency and target checks for a stage workflow."""
+
+    loaded = (
+        config
+        if isinstance(config, OptimizationConfig)
+        else load_optimization_config(config)
+    )
     report = PreflightReport()
     report.add(
         "project.artifact_dir",
         True,
         "artifact directory configured",
-        path=loaded.project.artifact_dir,
+        path=str(loaded.project.get("artifact_dir", "")),
     )
     report.add(
         "task.type",
@@ -633,208 +915,63 @@ def preflight_xqt_config(config: ConfigInput | XQTConfig) -> PreflightReport:
             },
         )
     _check_target(report, "model.target", loaded.model.target)
-    _check_model_device(report, loaded.model.device)
+    _check_model_device(report, loaded.device or loaded.model.device)
 
-    quant = loaded.compression.quant
-    if quant.enabled:
-        _check_quant_runtime_mix(report, quant)
-        _check_quant_backend_capability(
-            report,
-            "compression.quant.capability",
-            quant.backend,
-            method=quant.method,
-            strategy=quant.strategy,
-            policy=quant.policy,
+    for index, stage in enumerate(loaded.stages):
+        spec = ensure_stage_spec(stage)
+        prefix = f"stages.{index}.{stage.name}"
+        report.add(
+            f"{prefix}.kind",
+            True,
+            "stage kind configured",
+            kind=stage.kind,
         )
-        if quant.backend == "torchao":
-            _check_dependency(report, "torchao")
-            if describe_quant_backend_capability(
-                quant.backend,
-                method=quant.method,
-                strategy=quant.strategy,
-                policy=quant.policy,
-            ).requires_cuda:
-                _check_cuda(report, "hardware.cuda")
-        if quant.backend == "onnxruntime_qdq":
-            _check_dependency(report, "onnxruntime")
-            _check_external_calibration_inputs(
+        if isinstance(spec, QuantStageSpec):
+            _check_quant_config(
                 report,
-                name="compression.quant.calibration_inputs",
+                QuantConfig(enabled=True, **spec.__dict__),
+                prefix=prefix,
+                cuda_name="hardware.cuda",
             )
-        if quant.component_policies:
+        elif isinstance(spec, PruneStageSpec):
+            _check_prune_config(
+                report,
+                PruneConfig(enabled=True, **spec.__dict__),
+                device=loaded.device or loaded.model.device,
+                task_type=loaded.task.type,
+                prefix=prefix,
+            )
+        elif isinstance(spec, OperatorStageSpec):
+            _check_operator_targets(
+                report,
+                spec.targets,
+                default_engine=spec.default_engine,
+                prefix=prefix,
+            )
+        elif isinstance(spec, (ExportStageSpec, DeployStageSpec)):
+            _check_export_targets(report, list(spec.targets), prefix=f"{prefix}.targets")
+        elif isinstance(spec, AnalyzeStageSpec):
             report.add(
-                "compression.quant.component_policies",
+                f"{prefix}.analysis.metrics",
+                bool(spec.metrics),
+                "analysis metrics configured" if spec.metrics else "analysis metrics missing",
+                level="info" if spec.metrics else "error",
+                metrics=list(spec.metrics),
+            )
+        elif isinstance(spec, BenchmarkStageSpec):
+            report.add(
+                f"{prefix}.benchmark",
                 True,
-                "component-level quantization policies configured",
-                count=len(quant.component_policies),
+                "benchmark override recorded",
+                warmup=spec.warmup,
+                iterations=spec.iterations,
+                measure_memory=spec.measure_memory,
             )
-            for component in quant.component_policies:
-                _check_quant_component_policy(report, quant, component)
-    _check_operator_optimization(report, loaded)
-
-    prune = loaded.compression.prune
-    if prune.enabled and prune.method == "nm_structured":
-        pattern_raw = prune.selection.get("pattern") or prune.params.get("pattern")
-        if isinstance(pattern_raw, (list, tuple)) and len(pattern_raw) == 2:
-            pattern = (int(pattern_raw[0]), int(pattern_raw[1]))
-            capability = describe_prune_runtime_capability(
-                method="nm_structured",
-                device=loaded.model.device,
-                pattern=pattern,
-            ).to_dict()
-            report.add(
-                "compression.prune.nm_backend",
-                bool(capability["supported"]),
-                str(capability["reason"]),
-                pattern=list(pattern),
-                runtime=capability["runtime"],
-                speedup_verified=capability["speedup_verified"],
-                pattern_present=capability["pattern_present"],
-                level="info" if capability["supported"] else "warning",
-            )
-        else:
-            report.add(
-                "compression.prune.nm_backend",
-                False,
-                "N:M structured pruning requires selection.pattern=[N, M]",
-                level="error",
-            )
-    if prune.enabled and prune.method == "block_sparse":
-        block_shape_raw = prune.selection.get("block_shape") or prune.params.get(
-            "block_shape"
-        )
-        if isinstance(block_shape_raw, (list, tuple)) and len(block_shape_raw) == 2:
-            block_shape = (int(block_shape_raw[0]), int(block_shape_raw[1]))
-            capability = describe_prune_runtime_capability(
-                method="block_sparse",
-                device=loaded.model.device,
-                block_shape=block_shape,
-            ).to_dict()
-            report.add(
-                "compression.prune.block_sparse_backend",
-                bool(capability["supported"]),
-                str(capability["reason"]),
-                block_shape=list(block_shape),
-                runtime=capability["runtime"],
-                speedup_verified=capability["speedup_verified"],
-                pattern_present=capability["pattern_present"],
-                level="info" if capability["supported"] else "warning",
-            )
-        else:
-            report.add(
-                "compression.prune.block_sparse_backend",
-                False,
-                "block_sparse pruning requires selection.block_shape=[rows, cols]",
-                level="error",
-            )
-    _check_detection_prune_safety(report, loaded)
-
-    for index, target in enumerate(loaded.export.targets):
-        prefix = f"export.targets.{index}.{target.format}"
-        if target.format in {"torch_export", "torchscript"}:
-            report.add(prefix, True, "built-in PyTorch export target")
-        elif target.format == "onnx":
-            _check_dependency(report, "onnx")
-            if bool(target.params.get("runtime_diff", True)):
-                _check_dependency(report, "onnxruntime")
-        elif target.format == "tensorrt":
-            _check_optional_executable(
-                report,
-                str(target.params.get("trtexec_path", "trtexec")),
-                f"{prefix}.trtexec",
-                dry_run=bool(target.params.get("dry_run", False)),
-            )
-            plugin_libraries = target.params.get("plugin_libraries")
-            if plugin_libraries is not None:
-                if not isinstance(plugin_libraries, list):
-                    report.add(
-                        f"{prefix}.plugin_libraries",
-                        False,
-                        "TensorRT plugin_libraries must be a list of shared library paths",
-                        level="error",
-                    )
-                else:
-                    for plugin_index, plugin_path in enumerate(plugin_libraries):
-                        path = Path(str(plugin_path))
-                        plugin_validation = validate_tensorrt_plugin_libraries(
-                            [path],
-                            validate_loadability=bool(
-                                target.params.get(
-                                    "validate_plugin_libraries_loadable",
-                                    False,
-                                )
-                            ),
-                        )
-                        plugin_check = plugin_validation.plugin_libraries[0]
-                        report.add(
-                            f"{prefix}.plugin_libraries.{plugin_index}",
-                            plugin_check.exists,
-                            "TensorRT plugin library found"
-                            if plugin_check.exists
-                            else "TensorRT plugin library missing",
-                            level="info" if plugin_check.exists else "warning",
-                            path=plugin_check.path,
-                            validation=plugin_check.to_dict(),
-                        )
-                        if bool(
-                            target.params.get(
-                                "validate_plugin_libraries_loadable", False
-                            )
-                        ):
-                            if plugin_check.loadable is True:
-                                report.add(
-                                    f"{prefix}.plugin_libraries.{plugin_index}.loadable",
-                                    True,
-                                    "TensorRT plugin library loaded with ctypes RTLD_GLOBAL",
-                                    level="info",
-                                    path=plugin_check.path,
-                                    loaded_plugin_libraries=plugin_check.loaded_plugin_libraries,
-                                    validation=plugin_check.to_dict(),
-                                )
-                            else:
-                                report.add(
-                                    f"{prefix}.plugin_libraries.{plugin_index}.loadable",
-                                    False,
-                                    f"TensorRT plugin library failed to load: {plugin_check.error}",
-                                    level="error",
-                                    path=plugin_check.path,
-                                    validation=plugin_check.to_dict(),
-                                )
-        elif target.format == "openvino":
-            _check_optional_dependency(
-                report,
-                "openvino",
-                "dependency.openvino",
-                dry_run=bool(target.params.get("dry_run", False)),
-            )
-        elif target.format == "executorch":
-            _check_dependency(report, "executorch")
-        elif target.format == "ncnn":
-            if target.params.get("converter", "onnx2ncnn") == "pnnx":
-                _check_executable(
-                    report,
-                    str(target.params.get("pnnx_path", "pnnx")),
-                    f"{prefix}.pnnx",
-                )
-            else:
-                _check_executable(
-                    report,
-                    str(target.params.get("onnx2ncnn_path", "onnx2ncnn")),
-                    f"{prefix}.onnx2ncnn",
-                )
-        elif target.format == "mnn":
-            _check_executable(
-                report,
-                str(target.params.get("converter_path", "MNNConvert")),
-                f"{prefix}.MNNConvert",
-            )
-        else:
-            report.add(prefix, False, "unsupported export target")
     return report
 
 
 __all__ = [
     "PreflightCheck",
     "PreflightReport",
-    "preflight_xqt_config",
+    "preflight_optimization_config",
 ]

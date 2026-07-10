@@ -35,6 +35,8 @@ XQT 是仓库内唯一推理优化主体. Python API 是主入口; `triton`, `ti
 - 半可用: TensorRT engine / plugin preflight,TileLang 的受限 kernel target (attention / conv / half linear / half norm / dequant GEMM),FP4 packed weight 到 TileLang operator stage 的桥接.
 - 偏实验: 更完整的 AWQ / GPTQ packed megakernel,以及更广泛的 engine capability 闭环.
 
+架构重构状态: 最初诊断报告的 1-8 节不是已完成清单. 当前已完成配置单轨化 Phase A/B/C: workflow 主链已推进到 typed `StageSpec` / stage helper 消费 runtime config; workflow context 为 runtime-only, public `create_context()` 只接受 `OptimizationConfig` 或 workflow 输入; 旧 `load_xqt_config()` / `XQTConfig` / `XQTContext.config` 已删除. 长期指导见 [architecture/xqt-realignment-guide.md](architecture/xqt-realignment-guide.md).
+
 ## 性能分析工具
 
 - XQT 记录 profiler 上下文和产物,不接管厂商 profiler 的安装,权限,驱动版本或 GUI 工作流.

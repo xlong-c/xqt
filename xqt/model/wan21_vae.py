@@ -16,11 +16,11 @@ from xqt.core.errors import XQTBackendError
 from xqt.operator_opt import OperatorOptimizationTargetPlan
 from xqt.operator_opt import materialize_operator_candidate_models
 from xqt.operator_opt.compile_backend import compile_with_torch
-from xqt.operator_opt.executor import (
-    _benchmark_paired_callables,
-    _capture_cuda_graph_with_static_state,
-    _cuda_graph_tensor_signature,
-    _replay_cuda_graph_tensor_callable,
+from xqt.operator_opt._benchmark import _benchmark_paired_callables
+from xqt.operator_opt.runtime import (
+    capture_cuda_graph_with_static_state,
+    cuda_graph_tensor_signature,
+    replay_cuda_graph_tensor_callable,
 )
 
 
@@ -464,7 +464,7 @@ def materialize_wan21_vae_rmsnorm_fastpath(
 
 
 def _tensor_callable_signature(runtime_args: tuple[torch.Tensor, ...]) -> tuple[tuple[Any, ...], ...]:
-    return tuple(_cuda_graph_tensor_signature(tensor) for tensor in runtime_args)
+    return tuple(cuda_graph_tensor_signature(tensor) for tensor in runtime_args)
 
 
 class _Wan21VAERunnerModule(nn.Module):
@@ -504,7 +504,7 @@ class _Wan21VAECudaGraphModule(nn.Module):
                 "Wan 2.1 VAE CUDA Graph replay requires matching shape/stride/dtype/device inputs"
             )
         with torch.no_grad():
-            return _replay_cuda_graph_tensor_callable(self._graph_state, runtime_args)
+            return replay_cuda_graph_tensor_callable(self._graph_state, runtime_args)
 
 
 def load_wan21_vae(
@@ -710,7 +710,7 @@ def capture_wan21_vae_cuda_graph(
             raise XQTBackendError("Wan 2.1 VAE CUDA Graph capture expects exactly one tensor input")
         return runner(dynamic_runtime_args[0])
 
-    graph_state = _capture_cuda_graph_with_static_state(
+    graph_state = capture_cuda_graph_with_static_state(
         runtime_args,
         body=_capture_body,
         warmup=warmup_iterations,

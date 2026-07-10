@@ -6,20 +6,17 @@ import pytest
 import torch
 from torch import nn
 
-from xqt.core.config import load_xqt_config
-from xqt.operator_opt.executor import (
-    _TritonRMSNormWrapper,
-    build_operator_optimization_plan,
-    execute_operator_optimization_plan,
-    materialize_operator_candidate_model,
-)
+from xqt.operator_opt.execute import execute_operator_optimization_plan
+from xqt.operator_opt.materialize import materialize_operator_candidate_model
+from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.operator_opt.triton_wrappers import _TritonRMSNormWrapper
 from xqt.operator_opt.kernels.triton.pointwise import (
     fused_channel_first_l2norm_reference,
     fused_rmsnorm_reference,
     fused_rmsnorm_triton,
 )
 from xqt.operator_opt.types import OperatorOptimizationTargetPlan
-from xqt.pipeline.runner import create_context
+from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(
@@ -151,13 +148,13 @@ def test_channel_first_l2norm_reference_matches_fake_vae_module() -> None:
 
 
 def test_triton_rmsnorm_operator_stage_uses_reference_fallback_on_cpu() -> None:
-    config = load_xqt_config(_triton_rmsnorm_operator_config("cpu"))
-    context = create_context(
-        config,
+    config_dict = _triton_rmsnorm_operator_config("cpu")
+    context = operator_runtime_context(
+        config_dict,
         model=_FakeWanRMSNormBlock().eval(),
         example_inputs=torch.randn(8, 64, dtype=torch.float32),
     )
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -194,13 +191,13 @@ def test_materialize_triton_rmsnorm_candidate_replaces_named_norm() -> None:
 
 
 def test_triton_rmsnorm_operator_stage_reports_bfloat16_reference_metadata_on_cpu() -> None:
-    config = load_xqt_config(_triton_rmsnorm_operator_config("cpu"))
-    context = create_context(
-        config,
+    config_dict = _triton_rmsnorm_operator_config("cpu")
+    context = operator_runtime_context(
+        config_dict,
         model=_FakeWanRMSNormBlock().eval().to(dtype=torch.bfloat16),
         example_inputs=torch.randn(8, 64, dtype=torch.bfloat16),
     )
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -304,13 +301,13 @@ def test_triton_channel_first_half_cuda_kernel_matches_reference() -> None:
 @requires_cuda
 @requires_triton
 def test_triton_rmsnorm_operator_stage_uses_cuda_kernel_entry() -> None:
-    config = load_xqt_config(_triton_rmsnorm_operator_config("cuda"))
-    context = create_context(
-        config,
+    config_dict = _triton_rmsnorm_operator_config("cuda")
+    context = operator_runtime_context(
+        config_dict,
         model=_FakeWanRMSNormBlock().eval().to(device="cuda", dtype=torch.float16),
         example_inputs=torch.randn(8, 64, device="cuda", dtype=torch.float16),
     )
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -326,13 +323,13 @@ def test_triton_rmsnorm_operator_stage_uses_cuda_kernel_entry() -> None:
 @requires_cuda
 @requires_triton
 def test_triton_rmsnorm_operator_stage_uses_bfloat16_cuda_kernel_entry() -> None:
-    config = load_xqt_config(_triton_rmsnorm_operator_config("cuda"))
-    context = create_context(
-        config,
+    config_dict = _triton_rmsnorm_operator_config("cuda")
+    context = operator_runtime_context(
+        config_dict,
         model=_FakeWanRMSNormBlock().eval().to(device="cuda", dtype=torch.bfloat16),
         example_inputs=torch.randn(8, 64, device="cuda", dtype=torch.bfloat16),
     )
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()

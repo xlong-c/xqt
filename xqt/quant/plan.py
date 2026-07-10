@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
-from xqt.core.schema import QuantComponentPolicyConfig, QuantConfig
+from omegaconf import OmegaConf
 
+from xqt.core.schema import QuantComponentPolicyConfig, QuantConfig
+from xqt.workflows.stage_specs import QuantStageSpec
+
+from .capability import describe_quant_backend_capability
 from .strategy import CANONICAL_QUANT_STRATEGIES, normalize_quant_strategy
 from .types import QuantizationComponentPlan, QuantizationExecutionPlan
 
@@ -19,6 +23,16 @@ def _ordered_unique(values: Iterable[str]) -> list[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def _component_policy_config(value: Any) -> QuantComponentPolicyConfig:
+    if isinstance(value, QuantComponentPolicyConfig):
+        return value
+    merged = OmegaConf.merge(
+        OmegaConf.structured(QuantComponentPolicyConfig),
+        OmegaConf.create(dict(value)),
+    )
+    return OmegaConf.to_object(merged)  # type: ignore[return-value]
 
 
 def _policy_selector_summary(
@@ -115,18 +129,72 @@ def _merge_component_plan(
     )
 
 
+def _validate_quant_config_for_plan(quant_config: QuantConfig) -> None:
+    if not quant_config.backend:
+        raise ValueError("quant.backend is required when quantization is enabled")
+    has_selector = (
+        quant_config.method is not None
+        or quant_config.strategy is not None
+        or bool(quant_config.policy)
+        or bool(quant_config.component_policies)
+    )
+    if not has_selector:
+        raise ValueError(
+            "quant must specify method, strategy, policy, or component_policies "
+            "when enabled=true"
+        )
+    if quant_config.component_policies:
+        quant_config.component_policies = [
+            _component_policy_config(component)
+            for component in quant_config.component_policies
+        ]
+        for component_config in quant_config.component_policies:
+            if not component_config.enabled:
+                continue
+            component_policy = dict(quant_config.policy)
+            component_policy.update(component_config.policy)
+            describe_quant_backend_capability(
+                component_config.backend or quant_config.backend,
+                method=component_config.method or quant_config.method,
+                strategy=component_config.strategy or quant_config.strategy,
+                policy=component_policy,
+            )
+        return
+    describe_quant_backend_capability(
+        quant_config.backend,
+        method=quant_config.method,
+        strategy=quant_config.strategy,
+        policy=quant_config.policy,
+    )
+
+
 def build_quantization_plan(
-    quant_config: QuantConfig,
+    quant_config: QuantConfig | QuantStageSpec,
     *,
     artifact_prefix: str = "quant",
 ) -> QuantizationExecutionPlan:
     """Build a normalized quantization execution plan from config."""
+
+    if isinstance(quant_config, QuantStageSpec):
+        quant_config = QuantConfig(
+            enabled=True,
+            backend=quant_config.backend,
+            method=quant_config.method,
+            strategy=quant_config.strategy,
+            policy=dict(quant_config.policy),
+            keep_high_precision=list(quant_config.keep_high_precision),
+            skip_quantize=list(quant_config.skip_quantize),
+            force_quantize=list(quant_config.force_quantize),
+            analysis_only_modules=list(quant_config.analysis_only_modules),
+            component_policies=list(quant_config.component_policies),
+        )
 
     if not quant_config.enabled:
         return QuantizationExecutionPlan(
             components=[],
             artifact_prefix=artifact_prefix,
         )
+    _validate_quant_config_for_plan(quant_config)
 
     components: list[QuantizationComponentPlan] = []
     if quant_config.component_policies:

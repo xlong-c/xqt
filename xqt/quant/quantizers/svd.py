@@ -507,6 +507,7 @@ def execute_svdquant_component(
         high_precision_modules=high_precision_modules,
     )
     nature = _resolve_nature(component.strategy, component.policy)
+    method_semantics = "svdquant_reference_low_rank_plus_quantized_residual"
     report = QuantizationReport(
         component_name=component.name,
         backend=result.backend,
@@ -518,10 +519,14 @@ def execute_svdquant_component(
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
         nature=nature,
+        algorithm_executable=True,
+        method_semantics=method_semantics,
         compute_speedup_expected=None,
         metadata={
             **dict(result.metadata),
             "analysis_only": component.analysis_only,
+            "algorithm_executable": True,
+            "method_semantics": method_semantics,
             "policy": effective_policy,
             "selection_policy": selection_policy_metadata(component),
             "module_selection_reasons": module_selection_reasons,

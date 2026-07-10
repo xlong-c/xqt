@@ -13,7 +13,7 @@ import torch
 from diffusers.models.autoencoders.autoencoder_kl_wan import WanRMS_norm
 
 from xqt.benchmark.latency import benchmark_callable
-from xqt.operator_opt.executor import _TritonRMSNormWrapper
+from xqt.operator_opt.triton_wrappers import _TritonRMSNormWrapper
 from xqt.operator_opt.kernels.triton.pointwise import fused_rmsnorm_triton
 
 

@@ -21,6 +21,19 @@ from xqt.quant.quantizers.fp4_weight_only import (
     execute_fp4_weight_only_component,
     quantize_with_fp4_weight_only,
 )
+from xqt.quant.quantizers.awq_gptq_weight_only import (
+    execute_awq_gptq_weight_only_component,
+    quantize_with_awq_weight_only,
+    quantize_with_gptq_weight_only,
+)
+from xqt.quant.quantizers.int8_mma import (
+    execute_int8_mma_component,
+    quantize_with_int8_mma,
+)
+from xqt.quant.quantizers.w4_storage_int8_mma import (
+    execute_w4_storage_int8_mma_component,
+    quantize_with_w4_storage_int8_mma,
+)
 from xqt.quant.quantizers.mxfp_weight_only import (
     execute_mxfp_weight_only_component,
     quantize_with_mxfp_weight_only,
@@ -48,6 +61,7 @@ def _component_requires_model(component: QuantizationComponentPlan) -> bool:
 
 
 def _analysis_only_report(component: QuantizationComponentPlan) -> QuantizationReport:
+    method_semantics = "analysis_only_no_executable_algorithm"
     return QuantizationReport(
         component_name=component.name,
         backend=component.backend,
@@ -63,9 +77,13 @@ def _analysis_only_report(component: QuantizationComponentPlan) -> QuantizationR
             component.target_path,
         ),
         nature=_resolve_nature(component.strategy, component.policy),
+        algorithm_executable=False,
+        method_semantics=method_semantics,
         metadata={
             "analysis_only": True,
             "executed": False,
+            "algorithm_executable": False,
+            "method_semantics": method_semantics,
             "selection_policy": selection_policy_metadata(component),
         },
     )
@@ -102,7 +120,7 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if (
-            component.backend == "pytorch"
+            component.backend in {"pytorch", "tilelang"}
             and component.strategy == "fp4_weight_only"
         ):
             current_model, report = execute_fp4_weight_only_component(
@@ -110,6 +128,18 @@ def execute_quantization_plan(
                 current_model,
                 component,
                 quantize_fn=quantize_with_fp4_weight_only,
+            )
+            reports.append(report)
+            continue
+        if (
+            component.backend in {"pytorch", "tilelang"}
+            and component.method in {"awq", "gptq"}
+            and component.strategy in {"weight_only_int4", "weight_only_int8"}
+        ):
+            current_model, report = execute_awq_gptq_weight_only_component(
+                context,
+                current_model,
+                component,
             )
             reports.append(report)
             continue
@@ -122,6 +152,30 @@ def execute_quantization_plan(
                 current_model,
                 component,
                 quantize_fn=quantize_with_mxfp_weight_only,
+            )
+            reports.append(report)
+            continue
+        if (
+            component.backend == "pytorch"
+            and component.strategy in {"dynamic_int8_mma", "tilelang_int8_mma", "int8_mma"}
+        ):
+            current_model, report = execute_int8_mma_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_int8_mma,
+            )
+            reports.append(report)
+            continue
+        if (
+            component.backend in {"pytorch", "tilelang"}
+            and component.strategy == "w4_storage_int8_mma"
+        ):
+            current_model, report = execute_w4_storage_int8_mma_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_w4_storage_int8_mma,
             )
             reports.append(report)
             continue
@@ -172,10 +226,14 @@ def execute_quantization_plan(
 __all__ = [
     "_onnx_qdq_graph_summary",
     "execute_quantization_plan",
+    "quantize_with_awq_weight_only",
     "quantize_onnx_qdq_static",
     "quantize_with_fp4_weight_only",
+    "quantize_with_gptq_weight_only",
+    "quantize_with_int8_mma",
     "quantize_with_mxfp_weight_only",
     "quantize_with_svd",
     "quantize_with_torchao",
+    "quantize_with_w4_storage_int8_mma",
     "summarize_quantization_reports",
 ]

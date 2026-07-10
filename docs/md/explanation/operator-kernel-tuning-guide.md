@@ -52,6 +52,20 @@
 
 没有 benchmark 和 profiler 证据时, 不要直接讨论 "最优 tile". 没有正确性校验时, 不要讨论 "性能提升".
 
+## 离线权重预排板 (Weight Prepack)
+
+手写 Tensor Core GEMM 时, **不要**在每个 K-tile 上把 row-major 权重 gather 成 fragment.
+
+正确分层:
+
+1. **数学布局**: 训练 / 量化 / 调试用的 `[K,N]` 或 `[out,in]`.
+2. **存储 pack** (可选): W4 / NVFP4 等压缩码 (省 HBM).
+3. **算力 prepack** (offline): 按 `sm_*` + MMA atom 写成 kernel 友好序 (连续 K, swizzle, ldmatrix 序).
+4. **Runtime kernel**: 只做 G2S + MMA + epilogue.
+
+XQT 注册表见 `xqt/operator_opt/kernels/prepack/`, 说明见 [mma-weight-prepack.md](mma-weight-prepack.md).
+当前已实现 `int8:sm_89:b_nk`; int4 / fp4 / fp8 / 其它 arch 为 placeholder.
+
 ## 一眼判断瓶颈
 
 | 现象 | 常见瓶颈 | 优先检查 |
@@ -146,6 +160,57 @@ GEMM, Linear, Conv 和 Attention 的高性能路径基本绕不开 Tensor Core:
 - Volta / Turing / Ampere 上常见 `mma.sync` / `wmma`.
 - Hopper 上常见 `wgmma` 和 warpgroup 级协作.
 - Blackwell 上会出现新的 Tensor Core 指令族和更复杂的 tensor memory 组织.
+
+### NVIDIA 代际与 MMA 主类型速查
+
+下面这张表的口径是 "架构上最值得关心的主力 MMA 指令族 + 实际部署时常用的数据类型". 它不是把所有 PTX 子变体都平铺出来, 而是为了让 XQT 在选 kernel 路线和精度路线时先做一轮快速筛选.
+
+| 代际 | 典型架构 | MMA 主类型 | 主要支持数据类型 |
+| --- | --- | --- | --- |
+| Volta | `sm_70` | `wmma.mma` | `FP16` |
+| Turing | `sm_75` | `wmma.mma`, `mma.sync` | `FP16`, `INT8`, `INT4`, `B1` |
+| Ampere | `sm_80`, `sm_86` | `wmma.mma`, `mma.sync` | `FP16`, `BF16`, `TF32`, `FP64 Tensor`, `INT8`, `INT4`, `B1` |
+| Ada | `sm_89` | `mma.sync` | `FP16`, `BF16`, `TF32`, `FP8`(`E4M3` / `E5M2`), `INT8` |
+| Hopper | `sm_90a` | `mma.sync`, `wgmma.mma_async` | `FP16`, `BF16`, `TF32`, `FP8`, `INT8`, `B1`, `FP64 Tensor` |
+| Blackwell | `sm_100*` | `tcgen05.mma`, `mma.sync` | `FP16`, `BF16`, `TF32`, `INT8`, `FP8` / `FP6` / `FP4` microscaling 家族 |
+
+补充说明:
+
+- `Ada` 代的工程重点不是 "PTX 新增一个完全替代 `mma.sync` 的新指令族", 而是在现有 Tensor Core 路线上把 `FP8` 正式带入可落地推理范围.
+- `Hopper` 开始, `wgmma.mma_async` 才成为需要认真考虑的新主力路径. 如果 kernel 仍然完全按 Ampere 的 warp 级 `mma.sync` 思路设计, 往往吃不到 `sm_90a` 的上限.
+- `Blackwell` 需要把 `tcgen05.mma` 和 microscaling 当成一套新路线看待. `FP4` / `NVFP4` 不应只理解成 "更低 bit 的 packed storage", 而是伴随 block-scale / micro-scale 的硬件执行路径.
+- `Blackwell` 表里保留 `BF16`, 因为产品和软件栈仍然广泛支持 `BF16`, 只是新平台讨论重点会更多落在 `FP8` / `FP6` / `FP4`.
+- 这里的 `FP64 Tensor` 是指 Tensor Core 路径上的双精度矩阵乘加能力, 主要对 HPC 有意义, 不是常规推理主线.
+
+### AMD 代际与 MMA 主类型速查
+
+AMD 的口径需要和 NVIDIA 分开看. 对 Instinct / CDNA, 主力是 `MFMA`; 对 Radeon / RDNA, 面向 AI 加速的 warp / wave 级矩阵 API 通常以 `WMMA` / `rocWMMA` 的工程入口出现. 另外, ROCm 文档里的 "支持某个 HIP 数据类型" 不等于所有代际都已经有同等级的原生矩阵核心吞吐, 文档里要把这两层区分开.
+
+| 代际 | 典型架构 | MMA 主类型 | 主要支持数据类型 |
+| --- | --- | --- | --- |
+| CDNA1 | `gfx908` | `MFMA` | `FP16`, `BF16`, `INT8` |
+| CDNA2 | `gfx90a` | `MFMA` | `FP16`, `BF16`, `INT8`, `FP64 Matrix` |
+| CDNA3 | `gfx94*` | `MFMA` | `FP16`, `BF16`, `FP8`(`E4M3` / `E5M2`, FNUZ), `INT8`, `FP64 Matrix` |
+| CDNA4 | `gfx950` | `MFMA` | `FP16`, `BF16`, `FP8`, `FP6`, `FP4`, `INT8`, `FP64 Matrix` |
+| RDNA3 | `gfx110*` | `WMMA` / AI Matrix | `FP16`, `INT8` |
+| RDNA4 | `gfx120*` | `WMMA` / AI Matrix | `FP16`, `BF16`, `FP8`, `INT8` |
+
+补充说明:
+
+- `CDNA` 线是数据中心 / Instinct 主线, XQT 如果面向训练后部署或大模型推理做 AMD 适配, 优先看 `MFMA` 和 ROCm 的 `precision support` 表.
+- `CDNA3` 的 `FP8` 是 AMD 当前真正进入主流 AI 推理讨论的分界点.
+- `CDNA4` 才把 `FP4` / `FP6` 正式带进硬件精度家族, 这和 NVIDIA Blackwell 的低 bit 方向大体同代, 但格式和软件栈不是同一套.
+- `RDNA3` 上更适合把低精度重点放在 `FP16` / `INT8`; `RDNA4` 才开始把 `FP8` 带入 Radeon 侧的现实部署讨论.
+- ROCm 文档中的 HIP 类型支持表和 rocWMMA 支持表并不完全等价. 例如某些类型在类型系统里可表示, 不等于当前 XQT 路径已经有成熟的 fused dequant GEMM 或 attention kernel.
+
+### XQT 选型口径
+
+把上面两张表落到 `XQT` 里, 更实用的结论是:
+
+- `Volta` / `Turing` / `Ampere` / `CDNA1` / `CDNA2`: 优先 `FP16` / `BF16` / `INT8`, 不要假设 `FP8` / `FP4` 有真实可用路径.
+- `Ada` / `Hopper` / `CDNA3` / `RDNA4`: `FP8` 进入认真评估区间, 但 `INT8` 仍然通常有更好的兼容性和算子覆盖.
+- `Blackwell` / `CDNA4`: 才适合把 `FP4` / `NVFP4` / `microscaling` 作为性能上限路线讨论; 没有目标机器实测时, 不应把这条路线写成默认收益.
+- 对通用部署, 精度选择不要机械写成单一总排序. 更稳的经验是: `INT8` 负责兼容性, `FP8` 负责新平台高端推理均衡, `FP4` 负责最新平台冲峰值, `FP16` / `BF16` 负责保底和回退.
 
 MMA 优化关注:
 

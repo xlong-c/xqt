@@ -8,7 +8,7 @@ from xqt.operator_opt import (
     materialize_operator_candidate_model,
     materialize_operator_candidate_models,
 )
-from xqt.operator_opt.executor import _effective_min_speedup, _native_runtime_near_equal
+from xqt.operator_opt._benchmark import _effective_min_speedup, _native_runtime_near_equal
 from xqt.quant import bridge_module_to_nvfp4_linear
 
 

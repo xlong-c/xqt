@@ -36,6 +36,7 @@ def test_optimization_capability_projection_uses_shared_fields() -> None:
             "name",
             "engine",
             "status",
+            "maturity",
             "runtime",
             "artifact_kind",
             "requires_cuda",
@@ -47,6 +48,10 @@ def test_optimization_capability_projection_uses_shared_fields() -> None:
     assert quant["requires_calibration"] is True
     assert quant["requires_exportable_graph"] is True
     assert operator["status"] == "planned"
+    assert quant["maturity"] == "executable"
+    assert operator["maturity"] == "reference_guarded"
+    assert prune["maturity"] == "reference_guarded"
+    assert export["maturity"] == "executable"
     assert operator["status"] not in {"optimized", "applied"}
     assert prune["metadata"]["pattern"] == [2, 4]
     assert export["status"] == "available"
@@ -62,17 +67,40 @@ def test_readiness_report_includes_inference_capability_matrix() -> None:
     assert any(
         capability["engine"] == "onnxruntime_qdq"
         and capability["requires_calibration"] is True
+        and capability["maturity"] == "executable"
         for capability in matrix["quantization"]
     )
     assert any(
         capability["name"] == "structured"
         and capability["metadata"]["speedup_verified"] is False
+        and capability["maturity"] == "executable"
         for capability in matrix["pruning"]
     )
-    assert any(capability["name"] == "openvino" for capability in matrix["export"])
+    assert any(
+        capability["name"] == "openvino"
+        and capability["maturity"] == "reference_guarded"
+        for capability in matrix["export"]
+    )
+    assert any(
+        capability["engine"] == "cute_dsl"
+        and capability["maturity"] == "reference_guarded"
+        for capability in matrix["operator"]
+    )
     assert "ttft_ms" in schemas["benchmark"]["llm_workload"]
     assert "failed_tensor_count" in schemas["numeric_diff"]["numeric_diff"]
     assert "Capability matrix" in report.to_markdown()
+
+
+def test_capability_matrix_exposes_all_shared_maturity_levels() -> None:
+    report = assess_xqt_readiness()
+    matrix = report.to_dict()["capability_matrix"]
+    maturities = {
+        capability["maturity"]
+        for capabilities in matrix.values()
+        for capability in capabilities
+    }
+
+    assert {"executable", "reference_guarded", "metadata_only", "planned"} <= maturities
 
 
 def test_stage_report_attaches_workflow_stage_to_manifest() -> None:
@@ -91,6 +119,16 @@ def test_stage_report_attaches_workflow_stage_to_manifest() -> None:
     assert "target_module" in stage_report
     assert "p50_ms" in stage_report["benchmark"]
     assert "max_abs" in stage_report["numeric_diff"]
+    assert set(stage_report["execution"]) == {
+        "backend",
+        "engine",
+        "device",
+        "shape",
+        "warmup",
+        "iterations",
+        "fallback",
+        "artifact_kinds",
+    }
     assert "prune:prune_l1" in payload["passes"]
     assert "stage.prune_l1.status" in metric_names
     assert "stage.prune_l1.accepted" in metric_names
@@ -135,3 +173,13 @@ def test_stage_report_extracts_engine_target_benchmark_and_diff() -> None:
     assert report["benchmark"]["p50_ms"] == 2.0
     assert report["numeric_diff"]["allclose"] is True
     assert report["numeric_diff"]["max_abs"] == 0.01
+    assert report["execution"] == {
+        "backend": "torchao",
+        "engine": "torchao",
+        "device": None,
+        "shape": None,
+        "warmup": None,
+        "iterations": None,
+        "fallback": None,
+        "artifact_kinds": ["quant_model"],
+    }

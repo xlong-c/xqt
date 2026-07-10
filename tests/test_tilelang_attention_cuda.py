@@ -9,6 +9,7 @@ from xqt.operator_opt.kernels.tilelang.attention import (
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
 )
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(
@@ -17,8 +18,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang attention CUDA test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang attention CUDA test",
 )
 
 

@@ -1,0 +1,99 @@
+project:
+  name: weight_only_tilelang_onnx_tensorrt_golden
+  artifact_dir: artifacts/xqt/smoke/weight_only_tilelang_onnx_tensorrt_golden
+model:
+  target: xqt.operator_opt.toy_models.build_toy_fp4_mlp
+  params:
+    hidden_dim: 64
+  device: cuda:0
+benchmark:
+  warmup: 10
+  iterations: 50
+compression_axes:
+  - precision
+hardware:
+  device: cuda:0
+  backends:
+    - pytorch
+    - tilelang
+    - onnxruntime
+    - tensorrt
+stages:
+  - name: fp4_weight_only
+    kind: quant
+    params:
+      backend: pytorch
+      method: awq
+      strategy: fp4_weight_only
+      policy:
+        dtype: fp4
+        scheme: weight_only
+        include_module_names:
+          - fc1
+        group_size: 64
+  - name: tilelang_dequant_gemm
+    kind: operator
+    params:
+      default_engine: tilelang
+      targets:
+        - name: fc1_tilelang_dequant
+          target: fc1
+          engine: tilelang
+          patterns:
+            - dequant_gemm_epilogue
+          fallback: eager
+          fallback_policy: strict
+          min_speedup: 1.01
+          tilelang:
+            target_arch: sm_89
+  - name: benchmark_optimized_model
+    kind: benchmark
+    params:
+      warmup: 10
+      iterations: 50
+      sync_cuda: true
+  - name: analyze_optimized_model
+    kind: analyze
+    save_model: false
+    params:
+      compare_to: baseline
+      module_names:
+        - fc1
+        - fc2
+      metrics:
+        - max_abs
+        - mean_abs
+        - cosine_similarity
+      include_weight_diff: true
+      include_statistics: true
+      sample_budget: 256
+  - name: export_onnx
+    kind: export
+    save_model: false
+    params:
+      targets:
+        - format: onnx
+          output_path: artifacts/xqt/smoke/weight_only_tilelang_onnx_tensorrt_golden/model.onnx
+          params:
+            dynamo: true
+            runtime_diff: false
+  - name: deploy_tensorrt
+    kind: deploy
+    save_model: false
+    params:
+      targets:
+        - format: tensorrt
+          output_path: artifacts/xqt/smoke/weight_only_tilelang_onnx_tensorrt_golden/model.engine
+          precision: fp16
+          profiles:
+            input:
+              min: [1, 64]
+              opt: [64, 64]
+              max: [256, 64]
+          params:
+            backend: python_api
+            dry_run: true
+      runtime_handle:
+        runtime: tensorrt
+        handle_kind: runtime_session
+        materialize: false

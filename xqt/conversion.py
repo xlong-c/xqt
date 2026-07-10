@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Literal
 
 import torch
@@ -11,10 +11,17 @@ from torch.nn import functional as F
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
+from xqt.contracts import (
+    FeedForwardPrecisionPolicy,
+    FusionIntent,
+    OperatorContract,
+    PrecisionPolicy,
+    TensorStorageSpec,
+)
 from xqt import nn as xqt_nn
 from xqt.operator_opt import (
     OperatorOptimizationTargetPlan,
-    materialize_operator_candidate_model,
+    materialize_module,
 )
 from xqt.operator_opt.backends.gemm_precision import (
     MatmulPrecisionSpec,
@@ -26,7 +33,6 @@ from xqt.quant import (
 )
 
 
-OperatorKind = Literal["linear", "conv2d", "layernorm", "feedforward"]
 EngineKind = Literal["torch", "triton", "tilelang", "cutile", "cute_dsl"]
 
 
@@ -38,80 +44,6 @@ def _resolve_engine_alias(
     if engine is None:
         raise XQTBackendError(f"{context} requires engine=...")
     return str(engine).strip().lower()
-
-
-@dataclass(frozen=True)
-class PrecisionPolicy:
-    """User-facing compute precision intent for module conversion."""
-
-    activation: str = "fp16"
-    weight: str = "fp16"
-    bias: str = "fp16"
-    mma: str = "fp16"
-    accum: str = "fp32"
-    output: str = "fp16"
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "activation": self.activation,
-            "weight": self.weight,
-            "bias": self.bias,
-            "mma": self.mma,
-            "accum": self.accum,
-            "output": self.output,
-        }
-
-    @classmethod
-    def from_matmul(
-        cls,
-        *,
-        A: str | None = None,
-        B: str | None = None,
-        C: str | None = None,
-        O: str | None = None,
-        activation: str | None = None,
-        weight: str | None = None,
-        bias: str | None = None,
-        mma: str = "fp16",
-        accum: str = "fp32",
-        output: str | None = None,
-    ) -> "PrecisionPolicy":
-        """Build a policy from ``A x B + C = O`` matrix role names."""
-
-        return _precision_policy_from_matmul_spec(
-            MatmulPrecisionSpec.from_roles(
-                A=A,
-                B=B,
-                C=C,
-                O=O,
-                activation=activation,
-                weight=weight,
-                bias=bias,
-                mma=mma,
-                accum=accum,
-                output=output,
-            )
-        )
-
-
-@dataclass(frozen=True)
-class FeedForwardPrecisionPolicy:
-    """Structured per-projection precision intent for FeedForward conversion."""
-
-    default: PrecisionPolicy = field(default_factory=PrecisionPolicy)
-    proj_in: PrecisionPolicy | None = None
-    proj_gate: PrecisionPolicy | None = None
-    proj_out: PrecisionPolicy | None = None
-
-    def projection_policies(self) -> dict[str, PrecisionPolicy]:
-        projection_policies: dict[str, PrecisionPolicy] = {}
-        if self.proj_in is not None:
-            projection_policies["proj_in"] = self.proj_in
-        if self.proj_gate is not None:
-            projection_policies["proj_gate"] = self.proj_gate
-        if self.proj_out is not None:
-            projection_policies["proj_out"] = self.proj_out
-        return projection_policies
 
 
 def _runtime_precision_dict(
@@ -230,54 +162,6 @@ def _projection_policy_dict(
         "O": "output",
     }
     return {key_aliases.get(key, key): str(value) for key, value in role_kwargs.items()}
-
-
-@dataclass(frozen=True)
-class TensorStorageSpec:
-    """Internal storage description for one tensor role."""
-
-    storage_dtype: str
-    logical_dtype: str
-    layout: str
-    packed: bool = False
-    group_size: int | None = None
-    scale_dtype: str | None = None
-    scale_layout: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "storage_dtype": self.storage_dtype,
-            "logical_dtype": self.logical_dtype,
-            "layout": self.layout,
-            "packed": self.packed,
-            "group_size": self.group_size,
-            "scale_dtype": self.scale_dtype,
-            "scale_layout": self.scale_layout,
-        }
-
-
-@dataclass(frozen=True)
-class OperatorContract:
-    """Internal lowering contract for one converted module."""
-
-    operator_kind: OperatorKind
-    policy: PrecisionPolicy
-    input_spec: TensorStorageSpec
-    weight_spec: TensorStorageSpec
-    output_dtype: str
-    epilogue: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "operator_kind": self.operator_kind,
-            "policy": self.policy.to_dict(),
-            "input_spec": self.input_spec.to_dict(),
-            "weight_spec": self.weight_spec.to_dict(),
-            "output_dtype": self.output_dtype,
-            "epilogue": list(self.epilogue),
-            "metadata": dict(self.metadata),
-        }
 
 
 @dataclass(frozen=True)
@@ -568,6 +452,7 @@ class _ModuleConverter:
         epilogue = ("dropout",) if module.dropout_p > 0.0 else ()
         if module.final_dropout_enabled:
             epilogue = (*epilogue, "final_dropout")
+        runtime_fusion = module.runtime_config()["fusion"]
         return OperatorContract(
             operator_kind="feedforward",
             policy=self.policy,
@@ -583,6 +468,10 @@ class _ModuleConverter:
             ),
             output_dtype=self.policy.output,
             epilogue=epilogue,
+            fusion=FusionIntent(
+                patterns=tuple(runtime_fusion["realized_patterns"]),
+                epilogue=epilogue,
+            ),
             metadata={
                 "source_module_type": type(module).__name__,
                 "dim": int(module.dim),
@@ -592,7 +481,7 @@ class _ModuleConverter:
                 "norm": norm_kind,
                 "has_gate": has_gate,
                 "engine": module.engine,
-                "fusion": module.runtime_config()["fusion"],
+                "fusion": runtime_fusion,
             },
         )
 
@@ -641,7 +530,11 @@ class _ModuleConverter:
                 },
             )
         target_plan = self._lower_linear_contract_to_target_plan(contract)
-        converted_module, _ = materialize_operator_candidate_model(module, target_plan)
+        converted_module, _ = materialize_module(
+            module,
+            contract=contract,
+            target=target_plan,
+        )
         report = {
             "engine": self.engine,
             "converted": True,
@@ -690,7 +583,11 @@ class _ModuleConverter:
                 "target_arch": self.target_arch,
             },
         )
-        converted_module, _ = materialize_operator_candidate_model(module, target_plan)
+        converted_module, _ = materialize_module(
+            module,
+            contract=contract,
+            target=target_plan,
+        )
         return ConvertResult(
             model=converted_module,
             engine=self.engine,
@@ -738,7 +635,11 @@ class _ModuleConverter:
                 "target_arch": self.target_arch,
             },
         )
-        converted_module, _ = materialize_operator_candidate_model(module, target_plan)
+        converted_module, _ = materialize_module(
+            module,
+            contract=contract,
+            target=target_plan,
+        )
         return ConvertResult(
             model=converted_module,
             engine=self.engine,
@@ -762,34 +663,68 @@ class _ModuleConverter:
             raise XQTBackendError(
                 f"xqt.convert FeedForward currently supports only engine='torch' or engine='triton', got {self.engine}"
             )
-        module.configure_runtime(
+        if self.engine == "torch":
+            module.configure_runtime(
+                engine=self.engine,
+                activation_dtype=self.policy.activation,
+                weight_dtype=self.policy.weight,
+                bias_dtype=self.policy.bias,
+                mma_dtype=self.policy.mma,
+                accum_dtype=self.policy.accum,
+                output_dtype=self.policy.output,
+                projection_policies=self._feedforward_projection_policies(),
+            )
+            return ConvertResult(
+                model=module,
+                engine=self.engine,
+                target=self.target,
+                contract=contract,
+                converted=False,
+                report={
+                    "engine": self.engine,
+                    "converted": False,
+                    "reason": "torch engine keeps the original FeedForward implementation",
+                    "runtime_config": module.runtime_config(),
+                    "fusion": module.runtime_config()["fusion"],
+                    "contract": contract.to_dict(),
+                },
+            )
+        target_plan = OperatorOptimizationTargetPlan(
+            name=f"{type(module).__name__}_{self.engine}",
             engine=self.engine,
-            activation_dtype=self.policy.activation,
-            weight_dtype=self.policy.weight,
-            bias_dtype=self.policy.bias,
-            mma_dtype=self.policy.mma,
-            accum_dtype=self.policy.accum,
-            output_dtype=self.policy.output,
-            projection_policies=self._feedforward_projection_policies(),
+            target_path=None,
+            patterns=["feedforward"],
+            fallback=self.fallback,
+            min_speedup=0.0,
+            validate={"atol": 1e-2, "rtol": 1e-2},
+            options={
+                "activation_dtype": self.policy.activation,
+                "weight_dtype": self.policy.weight,
+                "bias_dtype": self.policy.bias,
+                "mma_dtype": self.policy.mma,
+                "accum_dtype": self.policy.accum,
+                "output_dtype": self.policy.output,
+                "projection_policies": self._feedforward_projection_policies(),
+            },
         )
-        converted = self.engine != "torch"
-        reason = (
-            "torch engine keeps the original FeedForward implementation"
-            if not converted
-            else "feedforward runtime configured from xqt.convert precision policy"
+        converted_module, _ = materialize_module(
+            module,
+            contract=contract,
+            target=target_plan,
         )
         return ConvertResult(
-            model=module,
+            model=converted_module,
             engine=self.engine,
             target=self.target,
             contract=contract,
-            converted=converted,
+            converted=True,
             report={
                 "engine": self.engine,
-                "converted": converted,
-                "reason": reason,
-                "runtime_config": module.runtime_config(),
-                "fusion": module.runtime_config()["fusion"],
+                "converted": True,
+                "reason": "Triton FeedForward candidate materialized from shared module contract",
+                "runtime_config": converted_module.runtime_config(),
+                "fusion": converted_module.runtime_config()["fusion"],
+                "target_plan": target_plan.to_dict(),
                 "contract": contract.to_dict(),
             },
         )

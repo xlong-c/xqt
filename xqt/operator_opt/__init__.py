@@ -46,13 +46,14 @@ from .backends.cute_dsl import (
     list_cute_dsl_kernel_specs,
     run_cute_dsl_kernel,
 )
-from .executor import (
-    build_operator_optimization_plan,
-    execute_operator_optimization_plan,
+from .execute import execute_operator_optimization_plan
+from .materialize import (
+    materialize_module,
     materialize_operator_candidate_model,
     materialize_operator_candidate_models,
-    summarize_operator_optimization_reports,
 )
+from .plan import build_operator_optimization_plan
+from .reporting import summarize_operator_optimization_reports
 from .patterns import (
     OperatorPatternCandidate,
     scan_export_candidates,
@@ -129,6 +130,7 @@ __all__ = [
     "list_triton_kernel_specs",
     "materialize_operator_candidate_model",
     "materialize_operator_candidate_models",
+    "materialize_module",
     "recommend_precision_strategy",
     "run_tilelang_kernel",
     "run_triton_kernel",

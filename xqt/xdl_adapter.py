@@ -9,19 +9,24 @@ import torch
 from torch import nn
 
 from xqt.core.config import ConfigInput
-from xqt.core.schema import XQTConfig
 from xqt.core.types import XQTContext
 from xqt.pipeline.runner import create_context
+from xqt.workflows import OptimizationConfig
+from xqt.workflows.config_compat import ensure_optimization_workflow_config
 
 
 def xdl_setup_to_xqt_context(
     setup: Any,
-    config: ConfigInput | XQTConfig,
+    config: ConfigInput | OptimizationConfig,
 ) -> XQTContext:
     """Create an XQT context from the model in a TrainSetup-like object."""
 
-    context = create_context(
+    workflow_config = ensure_optimization_workflow_config(
         config,
+        caller="xdl_setup_to_xqt_context()",
+    )
+    context = create_context(
+        workflow_config,
         model=getattr(setup, "model", None),
         metrics={
             "xdl_setup": {
@@ -66,7 +71,7 @@ def load_checkpoint_into_model(
 def xdl_checkpoint_to_xqt_context(
     model: nn.Module,
     checkpoint_path: str | Path,
-    config: ConfigInput | XQTConfig,
+    config: ConfigInput | OptimizationConfig,
     *,
     map_location: str | torch.device = "cpu",
     state_key: Optional[str] = None,
@@ -74,6 +79,10 @@ def xdl_checkpoint_to_xqt_context(
 ) -> XQTContext:
     """Load a checkpoint and create an XQT context."""
 
+    workflow_config = ensure_optimization_workflow_config(
+        config,
+        caller="xdl_checkpoint_to_xqt_context()",
+    )
     load_checkpoint_into_model(
         model,
         checkpoint_path,
@@ -84,7 +93,7 @@ def xdl_checkpoint_to_xqt_context(
     # Keep the checkpoint path in the manifest so downstream export and
     # reporting can trace the run back to its training artifact.
     context = create_context(
-        config,
+        workflow_config,
         model=model,
     )
     if context.manifest is not None:

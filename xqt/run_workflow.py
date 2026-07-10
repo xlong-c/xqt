@@ -18,7 +18,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     del argv
     config_path = Path(os.environ.get(CONFIG_ENV, str(DEFAULT_CONFIG))).expanduser()
     result = optimize_model(config_path)
-    print(f"project: {result.context.config.project.name}")
+    print(f"project: {result.context.project_name}")
     print(f"stages: {','.join(stage.name for stage in result.stages)}")
     if result.best_stage is not None:
         print(f"best_stage: {result.best_stage}")

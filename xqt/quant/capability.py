@@ -34,6 +34,11 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     # dynamic int8: observer-based quantize/dequantize, not native mma
     "dynamic_int8": QuantizationNature.PSEUDO,
     "int8_dynamic_activation_int8_weight": QuantizationNature.PSEUDO,
+    # dynamic W8A8 INT8 MMA: activation and weight both feed native int8 tensor cores
+    "dynamic_int8_mma": QuantizationNature.TRUE,
+    "int8_mma": QuantizationNature.TRUE,
+    "tilelang_int8_mma": QuantizationNature.TRUE,
+    "w4_storage_int8_mma": QuantizationNature.TRUE,
     # onnxruntime QDQ INT8: runs QDQ ops on CPU integer backend → TRUE if backend hardware supports native int8 mma
     "static_qdq_int8": QuantizationNature.PSEUDO,
     "static_int8": QuantizationNature.PSEUDO,
@@ -81,6 +86,7 @@ class QuantBackendCapability:
 
     backend: str
     status: str
+    maturity: str
     runtime: str
     artifact_kind: str
     methods: tuple[str, ...]
@@ -104,6 +110,7 @@ class QuantBackendCapability:
             name=self.backend,
             engine=self.backend,
             status=self.status,
+            maturity=self.maturity,
             runtime=self.runtime,
             artifact_kind=self.artifact_kind,
             requires_cuda=self.requires_cuda,
@@ -128,6 +135,7 @@ class QuantBackendCapability:
         return {
             "backend": self.backend,
             "status": self.status,
+            "maturity": self.maturity,
             "runtime": self.runtime,
             "artifact_kind": self.artifact_kind,
             "methods": list(self.methods),
@@ -163,6 +171,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
     "torchao": QuantBackendCapability(
         backend="torchao",
         status="available",
+        maturity="executable",
         runtime="pytorch",
         artifact_kind="pytorch_model",
         methods=(
@@ -194,6 +203,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
     "onnxruntime_qdq": QuantBackendCapability(
         backend="onnxruntime_qdq",
         status="available",
+        maturity="executable",
         runtime="onnxruntime",
         artifact_kind="onnx_qdq",
         methods=("static_qdq_int8",),
@@ -221,6 +231,30 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
     "pytorch": QuantBackendCapability(
         backend="pytorch",
         status="available",
+        maturity="reference_guarded",
+        runtime="pytorch",
+        artifact_kind="pytorch_model",
+        methods=("awq", "dynamic_int8_mma", "gptq", "tilelang_int8_mma", "w4_storage_int8_mma"),
+        model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
+        primary_module_types=("Linear",),
+        default_high_precision=_DEFAULT_HIGH_PRECISION,
+        preferred_devices=("cuda", "cpu"),
+        requires_calibration=True,
+        notes=(
+            "PyTorch backend can host method-driven weight-only quantization paths.",
+            "dynamic_int8_mma uses W8A8 int8 inputs with int32 MMA accumulation.",
+            "w4_storage_int8_mma keeps packed W4 weights and retargets compute to INT8 MMA.",
+        ),
+        limitations=(
+            "Executable AWQ/GPTQ coverage currently targets FP4, INT4, and INT8 weight-only Linear replacement.",
+            "Methods need representative calibration inputs to report algorithm-level execution.",
+            "w4_storage_int8_mma is compute retarget, not bit-exact native FP4 MMA.",
+        ),
+    ),
+    "tilelang": QuantBackendCapability(
+        backend="tilelang",
+        status="available",
+        maturity="reference_guarded",
         runtime="pytorch",
         artifact_kind="pytorch_model",
         methods=("awq", "gptq"),
@@ -229,32 +263,21 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         default_high_precision=_DEFAULT_HIGH_PRECISION,
         preferred_devices=("cuda", "cpu"),
         requires_calibration=True,
+        requires_cuda=False,
         notes=(
-            "PyTorch backend can host method-driven weight-only quantization paths.",
+            "TileLang quant backend emits XQT FP4, INT4, and INT8 weight-only Linear modules with TileLang bridge protocols.",
+            "Weight-only module rewrite can run on CPU; TileLang runtime kernels still require CUDA-capable hardware.",
+            "Operator execution can consume the packed FP4 bridge through TileLang dequant GEMM targets.",
         ),
         limitations=(
-            "Current executable coverage is limited to fp4_weight_only / mxfp_weight_only Linear replacement.",
-            "Other AWQ/GPTQ method combinations still fall back to planned capability/report only.",
+            "Current backend still stores low-bit weights and dequantizes before half GEMM when TileLang packed low-bit kernels are unavailable.",
+            "Methods need representative calibration inputs to report algorithm-level execution.",
         ),
-    ),
-    "tilelang": QuantBackendCapability(
-        backend="tilelang",
-        status="planned",
-        runtime="pytorch",
-        artifact_kind="pytorch_model",
-        methods=("awq",),
-        model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
-        primary_module_types=("Linear",),
-        default_high_precision=_DEFAULT_HIGH_PRECISION,
-        preferred_devices=("cuda",),
-        requires_calibration=True,
-        requires_cuda=True,
-        notes=("Planned TileLang runtime for packed weight-only kernels.",),
-        limitations=("TileLang AWQ kernels are not wired into XQT execution yet.",),
     ),
     "bitsandbytes": QuantBackendCapability(
         backend="bitsandbytes",
         status="planned",
+        maturity="planned",
         runtime="transformers",
         artifact_kind="hf_runtime_model",
         methods=("weight_only_int4", "weight_only_int8"),
@@ -268,6 +291,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
     "svdquant": QuantBackendCapability(
         backend="svdquant",
         status="available",
+        maturity="reference_guarded",
         runtime="pytorch",
         artifact_kind="pytorch_model",
         methods=("svd_fp4", "svd_int4"),
@@ -338,10 +362,23 @@ def describe_quant_backend_capability(
     requires_cuda = base.requires_cuda or _strategy_requires_cuda(strategy, policy)
     resolved_nature = _resolve_nature(strategy, policy)
     notes = list(base.notes)
+    maturity = base.maturity
     if backend == "torchao" and requires_cuda:
         notes.append("Configured strategy requires CUDA-capable hardware.")
     if selected_method is not None:
         notes.append(f"Configured quantization method: {selected_method}.")
+    if backend == "pytorch" and selected_method in {"awq", "gptq"}:
+        normalized_strategy = normalize_quant_strategy(strategy, policy)
+        if normalized_strategy in {"weight_only_int4", "weight_only_int8", "dynamic_int8_mma", "int8_mma", "tilelang_int8_mma", "w4_storage_int8_mma"}:
+            maturity = "executable"
+    if backend == "pytorch":
+        normalized_strategy = normalize_quant_strategy(strategy, policy)
+        if normalized_strategy in {"dynamic_int8_mma", "int8_mma", "tilelang_int8_mma", "w4_storage_int8_mma"}:
+            maturity = "executable"
+    if backend == "tilelang" and selected_method in {"awq", "gptq"}:
+        normalized_strategy = normalize_quant_strategy(strategy, policy)
+        if normalized_strategy in {"weight_only_int4", "weight_only_int8"}:
+            maturity = "executable"
     if resolved_nature == QuantizationNature.PSEUDO:
         notes.append(
             "PSEUDO quantization: storage compression only. "
@@ -355,6 +392,7 @@ def describe_quant_backend_capability(
         )
     return replace(
         base,
+        maturity=maturity,
         requires_cuda=requires_cuda,
         nature=resolved_nature,
         notes=tuple(notes),

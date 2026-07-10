@@ -7,32 +7,48 @@ import json
 from dataclasses import asdict, dataclass, field, is_dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any, Mapping, Optional, cast
+from typing import Any, Mapping, Optional, TypeVar, cast
 
 from omegaconf import OmegaConf
 from torch import nn
 
 from xdl.config.resolver import register_default_resolvers
-from xqt.core.config import ConfigInput, load_xqt_config
+from xqt.core.config import ConfigInput
+from xqt.core.errors import XQTConfigError
 from xqt.core.reporting import add_stage_report_to_manifest, build_stage_report
 from xqt.core.schema import (
+    AnalysisConfig,
     BenchmarkConfig,
     ModelConfig,
+    OperatorOptimizationConfig,
+    OutputDiffConfig,
     PruneConfig,
+    QuantConfig,
     TaskConfig,
 )
 from xqt.core.types import XQTContext
 from xqt.pipeline.passes import (
-    AnalyzePass,
-    BenchmarkPass,
-    ExportPass,
     LoadModelPass,
-    OperatorOptimizationPass,
-    PrunePass,
-    QuantPass,
+    run_analyze_stage,
+    run_benchmark_stage,
+    run_export_stage,
+    run_operator_stage,
+    run_prune_stage,
+    run_quant_stage,
 )
 from xqt.pipeline.runner import create_context
 from xqt.readiness import XQTReadinessReport, assess_xqt_readiness
+from .stage_specs import (
+    AnalyzeStageSpec,
+    BenchmarkStageSpec,
+    DeployStageSpec,
+    ExportStageSpec,
+    OperatorStageSpec,
+    PruneStageSpec,
+    QuantStageSpec,
+    StageSpec,
+    ensure_stage_spec,
+)
 from .stage import (
     SessionStage,
     StageComparison,
@@ -57,6 +73,26 @@ STAGE_KINDS = {
     "deploy",
     "analyze",
 }
+
+_REMOVED_WORKFLOW_TOP_LEVEL_KEYS = {
+    "analysis",
+    "compression",
+    "config_version",
+    "export",
+    "operator_optimization",
+    "validation",
+}
+
+_REMOVED_KEY_MIGRATIONS = {
+    "compression": "split into stages[*].params for quant / prune stages",
+    "operator_optimization": "move under stages[*].params for operator stages",
+    "export": "move under stages[*].params.targets for export / deploy stages",
+    "analysis": "move under stages[*].params for analyze stages",
+    "validation": "move output_diff thresholds under stages[*].params.validate",
+    "config_version": "drop it; OptimizationConfig has no public version field",
+}
+
+_StageSpecT = TypeVar("_StageSpecT", bound=StageSpec)
 
 
 @dataclass
@@ -161,16 +197,62 @@ def load_optimization_config(config: ConfigInput | OptimizationConfig) -> Optimi
     """Load a stage workflow config using OmegaConf structured defaults."""
 
     if is_dataclass(config) and isinstance(config, OptimizationConfig):
+        _attach_stage_specs(config)
         return config
 
     register_default_resolvers()
     raw = OmegaConf.load(config) if isinstance(config, (str, Path)) else OmegaConf.create(config)
     try:
+        _validate_raw_optimization_config(raw)
         merged = OmegaConf.merge(OmegaConf.structured(OptimizationConfig), raw)
         OmegaConf.resolve(merged)
-        return cast(OptimizationConfig, OmegaConf.to_object(merged))
+        loaded = cast(OptimizationConfig, OmegaConf.to_object(merged))
+        _attach_stage_specs(loaded)
+        return loaded
     except Exception as exc:
-        raise ValueError(f"failed to load XQT optimization config: {exc}") from exc
+        if isinstance(exc, XQTConfigError):
+            raise
+        raise XQTConfigError(f"failed to load XQT optimization config: {exc}") from exc
+
+
+def _validate_raw_optimization_config(raw_config: Any) -> None:
+    raw = OmegaConf.to_container(raw_config, resolve=False, enum_to_str=True)
+    if not isinstance(raw, Mapping):
+        return
+    removed = sorted(set(raw) & _REMOVED_WORKFLOW_TOP_LEVEL_KEYS)
+    if removed:
+        migration = ", ".join(
+            f"{key} -> {_REMOVED_KEY_MIGRATIONS[key]}"
+            for key in removed
+        )
+        raise XQTConfigError(
+            "OptimizationConfig does not accept removed recipe top-level keys: "
+            f"{removed}. Migration: {migration}."
+        )
+
+
+def _attach_stage_specs(config: OptimizationConfig) -> None:
+    seen: set[str] = set()
+    for index, stage in enumerate(config.stages):
+        if not stage.name:
+            raise XQTConfigError(f"stages.{index}.name is required")
+        if stage.name in seen:
+            raise XQTConfigError(f"stage names must be unique: {stage.name}")
+        seen.add(stage.name)
+        if stage.kind not in STAGE_KINDS:
+            allowed = ", ".join(sorted(STAGE_KINDS))
+            raise XQTConfigError(f"unsupported stage kind {stage.kind}. Allowed: {allowed}")
+        ensure_stage_spec(stage, rebuild=True)
+
+
+def _typed_stage_spec(stage: OptimizationStageConfig, spec_type: type[_StageSpecT]) -> _StageSpecT:
+    spec = ensure_stage_spec(stage)
+    if not isinstance(spec, spec_type):
+        raise XQTConfigError(
+            f"stage {stage.name!r} expected {spec_type.__name__}, "
+            f"got {type(spec).__name__}"
+        )
+    return spec
 
 
 def _project(config: OptimizationConfig, *, stage_name: str | None = None) -> dict[str, Any]:
@@ -190,21 +272,6 @@ def _model_config(config: OptimizationConfig) -> dict[str, Any]:
 
 def _task_config(config: OptimizationConfig) -> dict[str, Any]:
     return asdict(config.task) if is_dataclass(config.task) else dict(config.task)
-
-
-def _base_xqt_config(
-    config: OptimizationConfig,
-    *,
-    stage_name: str | None = None,
-) -> Any:
-    return load_xqt_config(
-        {
-            "project": _project(config, stage_name=stage_name),
-            "model": _model_config(config),
-            "task": _task_config(config),
-            "benchmark": asdict(config.benchmark) if is_dataclass(config.benchmark) else dict(config.benchmark),
-        }
-    )
 
 
 def _snapshot_model(model: Any) -> Any:
@@ -290,7 +357,7 @@ def _create_optimization_state(
     calibration_inputs: Any = None,
 ) -> _OptimizationRunState:
     context = create_context(
-        _base_xqt_config(config),
+        config,
         model=model,
         example_inputs=example_inputs,
         calibration_inputs=calibration_inputs,
@@ -331,9 +398,23 @@ def _stage_context(
     *,
     context: XQTContext,
 ) -> XQTContext:
-    stage_config = _base_xqt_config(config, stage_name=stage.name)
-    context.config = stage_config
-    context.device = stage_config.model.device
+    project = _project(config, stage_name=stage.name)
+    model_config = _model_config(config)
+    task_config = _task_config(config)
+    context.device = str(model_config.get("device", ""))
+    context.artifact_dir = str(project.get("artifact_dir", ""))
+    context.project_name = str(project.get("name", ""))
+    context.task_type = str(task_config.get("type", "classification"))
+    context.compression_axes = list(config.compression_axes)
+    context.model_target = model_config.get("target")
+    context.model_params = copy.deepcopy(model_config.get("params", {}))
+    context.quant_config = QuantConfig()
+    context.prune_config = PruneConfig()
+    context.analysis_config = AnalysisConfig()
+    context.benchmark_config = copy.deepcopy(config.benchmark)
+    context.operator_config = OperatorOptimizationConfig()
+    context.output_diff_config = OutputDiffConfig()
+    context.export_targets = []
     return context
 
 
@@ -394,14 +475,6 @@ def _accept_stage(
     return accepted, "ok" if accepted else "rejected by acceptance thresholds"
 
 
-def _benchmark_config(params: Mapping[str, Any]) -> BenchmarkConfig:
-    try:
-        merged = OmegaConf.merge(OmegaConf.structured(BenchmarkConfig), dict(params))
-        return cast(BenchmarkConfig, OmegaConf.to_object(merged))
-    except Exception as exc:
-        raise ValueError(f"failed to load benchmark stage params: {exc}") from exc
-
-
 def _new_artifacts(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -440,6 +513,7 @@ def _record_stage_report(
     result: OptimizationStageResult,
 ) -> None:
     capability = _extract_optimization_capability(result.metrics)
+    benchmark_config = state.context.benchmark_config
     report = build_stage_report(
         stage_name=result.name,
         stage_kind=result.kind,
@@ -458,6 +532,10 @@ def _record_stage_report(
             "save_model": stage.save_model,
             "revert_on_reject": stage.revert_on_reject,
         },
+        device=state.context.device or None,
+        shape=state.context.example_inputs,
+        warmup=benchmark_config.warmup if benchmark_config is not None else None,
+        iterations=benchmark_config.iterations if benchmark_config is not None else None,
     )
     stage_reports = state.context.metrics.setdefault("stage_reports", {})
     if isinstance(stage_reports, dict):
@@ -475,10 +553,7 @@ def _run_prune(
     context: XQTContext,
 ) -> None:
     _stage_context(config, stage, context=context)
-    params = dict(stage.params)
-    params.pop("enabled", None)
-    context.config.compression.prune = PruneConfig(enabled=True, **params)
-    PrunePass().run(context)
+    run_prune_stage(context, _typed_stage_spec(stage, PruneStageSpec))
 
 
 def _run_quant(
@@ -487,12 +562,7 @@ def _run_quant(
     context: XQTContext,
 ) -> None:
     _stage_context(config, stage, context=context)
-    params = dict(stage.params)
-    params.pop("enabled", None)
-    context.config.compression.quant = load_xqt_config(
-        {"compression": {"quant": {"enabled": True, **params}}}
-    ).compression.quant
-    QuantPass().run(context)
+    run_quant_stage(context, _typed_stage_spec(stage, QuantStageSpec))
 
 
 def _run_operator(
@@ -501,15 +571,11 @@ def _run_operator(
     context: XQTContext,
 ) -> None:
     _stage_context(config, stage, context=context)
-    params = dict(stage.params)
-    params.pop("enabled", None)
-    benchmark_params = params.pop("benchmark", None)
-    if isinstance(benchmark_params, Mapping):
-        context.config.benchmark = _benchmark_config(benchmark_params)
-    context.config.operator_optimization = load_xqt_config(
-        {"operator_optimization": {"enabled": True, **params}}
-    ).operator_optimization
-    OperatorOptimizationPass().run(context)
+    run_operator_stage(
+        context,
+        _typed_stage_spec(stage, OperatorStageSpec),
+        base_benchmark_config=config.benchmark,
+    )
 
 
 def _run_export(
@@ -518,11 +584,11 @@ def _run_export(
     context: XQTContext,
 ) -> None:
     _stage_context(config, stage, context=context)
-    params = dict(stage.params)
-    params.pop("enabled", None)
-    targets = params.pop("targets", [])
-    context.config.export = load_xqt_config({"export": {"targets": targets}}).export
-    ExportPass().run(context)
+    if stage.kind == "deploy":
+        spec = _typed_stage_spec(stage, DeployStageSpec)
+    else:
+        spec = _typed_stage_spec(stage, ExportStageSpec)
+    run_export_stage(context, spec, stage_kind=stage.kind)
 
 
 def _run_analyze(
@@ -531,12 +597,7 @@ def _run_analyze(
     context: XQTContext,
 ) -> None:
     _stage_context(config, stage, context=context)
-    params = dict(stage.params)
-    params.pop("enabled", None)
-    context.config.analysis = load_xqt_config(
-        {"analysis": {"enabled": True, **params}}
-    ).analysis
-    AnalyzePass().run(context)
+    run_analyze_stage(context, _typed_stage_spec(stage, AnalyzeStageSpec))
 
 
 def _run_benchmark(
@@ -545,8 +606,11 @@ def _run_benchmark(
     context: XQTContext,
 ) -> None:
     _stage_context(config, stage, context=context)
-    context.config.benchmark = _benchmark_config(stage.params)
-    BenchmarkPass().run(context)
+    run_benchmark_stage(
+        context,
+        _typed_stage_spec(stage, BenchmarkStageSpec),
+        base_benchmark_config=config.benchmark,
+    )
 
 
 def _run_optimization_stage(
@@ -662,7 +726,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _write_workflow_outputs(result: OptimizedModelResult) -> None:
-    artifact_dir = Path(result.context.config.project.artifact_dir)
+    artifact_dir = Path(result.context.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "stages": [_json_safe(asdict(stage)) for stage in result.stages],
@@ -896,6 +960,7 @@ class XQTOptimizationSession:
 
     def run_stage(self, stage: OptimizationStageConfig) -> OptimizationStageResult:
         self._validate_stage(stage)
+        ensure_stage_spec(stage, rebuild=True)
         self._state.config.stages.append(stage)
         result = _run_optimization_stage(self._state, stage)
         if result is None:
@@ -1034,6 +1099,47 @@ class XQTOptimizationSession:
         return self._run(
             name=name,
             kind="export",
+            from_stage=from_stage,
+            compare_to=compare_to,
+            save_model=save_model,
+            params=params,
+            accept=accept,
+        )
+
+    def deploy(
+        self,
+        *,
+        name: str,
+        format: str | None = None,
+        output_path: str | Path | None = None,
+        targets: list[Mapping[str, Any]] | None = None,
+        target_params: Mapping[str, Any] | None = None,
+        runtime_handle: Mapping[str, Any] | None = None,
+        opset: int | None = None,
+        from_stage: str | None = None,
+        compare_to: str | None = None,
+        accept: Mapping[str, Any] | StageAcceptanceConfig | None = None,
+        save_model: bool = False,
+        **params: Any,
+    ) -> OptimizationStageResult:
+        if targets is None:
+            if format is None or output_path is None:
+                raise ValueError("deploy requires targets or format + output_path")
+            target: dict[str, Any] = {
+                "format": format,
+                "output_path": str(output_path),
+            }
+            if opset is not None:
+                target["opset"] = opset
+            if target_params is not None:
+                target["params"] = dict(target_params)
+            targets = [target]
+        params["targets"] = [dict(target) for target in targets]
+        if runtime_handle is not None:
+            params["runtime_handle"] = dict(runtime_handle)
+        return self._run(
+            name=name,
+            kind="deploy",
             from_stage=from_stage,
             compare_to=compare_to,
             save_model=save_model,

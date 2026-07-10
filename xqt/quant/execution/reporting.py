@@ -93,6 +93,9 @@ def summarize_quantization_reports(reports: list[QuantizationReport]) -> dict[st
             "high_precision_modules": list(first.high_precision_modules),
             "calibration_samples": first.calibration_samples,
             "calibration_summary": first.calibration_summary,
+            "nature": first.nature.value,
+            "algorithm_executable": first.algorithm_executable,
+            "method_semantics": first.method_semantics,
             "metadata": dict(first.metadata),
         }
     )

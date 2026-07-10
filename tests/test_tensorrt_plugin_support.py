@@ -11,7 +11,7 @@ from xqt.export import (
     build_trtexec_command,
     validate_tensorrt_plugin_libraries,
 )
-from xqt.pipeline.preflight import preflight_xqt_config
+from xqt.pipeline.preflight import preflight_optimization_config
 
 
 def test_build_trtexec_command_includes_plugin_libraries() -> None:
@@ -88,7 +88,6 @@ def test_preflight_reports_tensorrt_plugin_library_presence(tmp_path: Path) -> N
     plugin_path = tmp_path / "libcustom_plugin.so"
     plugin_path.write_bytes(b"")
     config = {
-        "config_version": 1,
         "project": {
             "name": "trt_plugin_preflight",
             "artifact_dir": str(tmp_path / "artifacts"),
@@ -96,31 +95,37 @@ def test_preflight_reports_tensorrt_plugin_library_presence(tmp_path: Path) -> N
         "model": {
             "target": "torch.nn:Identity",
         },
-        "export": {
-            "targets": [
-                {
-                    "format": "tensorrt",
-                    "output_path": str(tmp_path / "model.engine"),
-                    "params": {
-                        "dry_run": True,
-                        "plugin_libraries": [str(plugin_path)],
-                    },
-                }
-            ]
-        },
+        "stages": [
+            {
+                "name": "export_tensorrt",
+                "kind": "export",
+                "params": {
+                    "targets": [
+                        {
+                            "format": "tensorrt",
+                            "output_path": str(tmp_path / "model.engine"),
+                            "params": {
+                                "dry_run": True,
+                                "plugin_libraries": [str(plugin_path)],
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
     }
 
-    report = preflight_xqt_config(config)
+    report = preflight_optimization_config(config)
     checks = {check.name: check for check in report.checks}
 
-    assert f"export.targets.0.tensorrt.plugin_libraries.0" in checks
-    assert checks["export.targets.0.tensorrt.plugin_libraries.0"].passed is True
+    check_name = "stages.0.export_tensorrt.targets.0.tensorrt.plugin_libraries.0"
+    assert check_name in checks
+    assert checks[check_name].passed is True
 
 
 def test_preflight_can_validate_tensorrt_plugin_library_loadability(tmp_path: Path) -> None:
     plugin_path = _build_dummy_shared_library(tmp_path)
     config = {
-        "config_version": 1,
         "project": {
             "name": "trt_plugin_preflight_loadable",
             "artifact_dir": str(tmp_path / "artifacts"),
@@ -128,24 +133,32 @@ def test_preflight_can_validate_tensorrt_plugin_library_loadability(tmp_path: Pa
         "model": {
             "target": "torch.nn:Identity",
         },
-        "export": {
-            "targets": [
-                {
-                    "format": "tensorrt",
-                    "output_path": str(tmp_path / "model.engine"),
-                    "params": {
-                        "dry_run": True,
-                        "plugin_libraries": [str(plugin_path)],
-                        "validate_plugin_libraries_loadable": True,
-                    },
-                }
-            ]
-        },
+        "stages": [
+            {
+                "name": "export_tensorrt",
+                "kind": "export",
+                "params": {
+                    "targets": [
+                        {
+                            "format": "tensorrt",
+                            "output_path": str(tmp_path / "model.engine"),
+                            "params": {
+                                "dry_run": True,
+                                "plugin_libraries": [str(plugin_path)],
+                                "validate_plugin_libraries_loadable": True,
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
     }
 
-    report = preflight_xqt_config(config)
+    report = preflight_optimization_config(config)
     checks = {check.name: check for check in report.checks}
-    loadable = checks["export.targets.0.tensorrt.plugin_libraries.0.loadable"]
+    loadable = checks[
+        "stages.0.export_tensorrt.targets.0.tensorrt.plugin_libraries.0.loadable"
+    ]
 
     assert loadable.passed is True
     assert loadable.metadata["loaded_plugin_libraries"] == [str(plugin_path)]

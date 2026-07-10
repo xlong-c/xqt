@@ -201,6 +201,8 @@ def execute_torchao_component(
     )
     nature = _resolve_nature(component.strategy, component.policy)
     compute_speedup = 1.0 if nature == QuantizationNature.TRUE else None
+    algorithm_executable = True
+    method_semantics = "torchao_executable_quantization"
     report = QuantizationReport(
         component_name=component.name,
         backend=result.backend,
@@ -214,10 +216,14 @@ def execute_torchao_component(
         calibration_samples=calibration_samples,
         calibration_summary=calibration_summary,
         nature=nature,
+        algorithm_executable=algorithm_executable,
+        method_semantics=method_semantics,
         compute_speedup_expected=compute_speedup,
         metadata={
             **dict(result.metadata),
             "analysis_only": component.analysis_only,
+            "algorithm_executable": algorithm_executable,
+            "method_semantics": method_semantics,
             "policy": effective_policy,
             "selection_policy": selection_policy_metadata(component),
             "module_selection_reasons": module_selection_reasons,

@@ -6,6 +6,9 @@ from pathlib import Path
 import pytest
 import torch
 
+from xqt.contracts import RuntimeHandlePayload as ContractRuntimeHandlePayload
+from xqt.contracts import RuntimePlanPayload as ContractRuntimePlanPayload
+from xqt.contracts import QuantizedModelPayload as ContractQuantizedModelPayload
 from xqt.workflows import XQTOptimizationSession
 from xqt.workflows.stage import (
     ExportBundlePayload,
@@ -19,6 +22,7 @@ from xqt.workflows.stage import (
     stage_kind_for_transform,
     transform_family_for_kind,
 )
+from xqt.workflows.stage_specs import DeployStageSpec
 
 
 class _TinyLinear(torch.nn.Module):
@@ -122,6 +126,38 @@ def test_quant_and_operator_create_stage_lineage(tmp_path: Path) -> None:
     assert isinstance(session.model, _TinyLinear)
 
 
+def test_quantized_model_payload_is_contract_reexport() -> None:
+    assert QuantizedModelPayload is ContractQuantizedModelPayload
+    payload = ContractQuantizedModelPayload(
+        stage_name="fp4_quant",
+        source_model_stage="baseline",
+        model=torch.nn.Linear(2, 2),
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        calibration_summary={"samples": 4},
+        components=[{"target": "weight"}],
+        artifacts={"checkpoint": "quantized.pt"},
+    )
+
+    assert payload.to_dict() == {
+        "artifact_kind": "quantized_model",
+        "stage_name": "fp4_quant",
+        "source_model_stage": "baseline",
+        "model_type": "torch.nn.modules.linear.Linear",
+        "backend": "pytorch",
+        "method": "awq",
+        "strategy": "fp4_weight_only",
+        "quantized_module_count": 0,
+        "quantized_modules": [],
+        "calibration_samples": None,
+        "calibration_summary": {"samples": 4},
+        "components": [{"target": "weight"}],
+        "artifacts": {"checkpoint": "quantized.pt"},
+        "capability": None,
+    }
+
+
 def test_quant_stage_without_explicit_from_stage_uses_baseline_as_parent(tmp_path: Path) -> None:
     session = XQTOptimizationSession(
         project={
@@ -148,6 +184,95 @@ def test_quant_stage_without_explicit_from_stage_uses_baseline_as_parent(tmp_pat
     baseline = session.session_stages[0]
     quantized = session.session_stages[1]
     assert quantized.parent_stage_ids == [baseline.stage_id]
+
+
+def test_session_quant_routes_through_run_quant_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_quant_stage_dispatch",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_quant_stage(context, spec) -> object:
+        captured["backend"] = spec.backend
+        captured["strategy"] = spec.strategy
+        context.metrics["quant"] = {
+            "quantized_module_count": 1,
+            "backend": spec.backend,
+            "strategy": spec.strategy,
+        }
+        return context
+
+    monkeypatch.setattr("xqt.workflows.optimization.run_quant_stage", _fake_run_quant_stage)
+
+    result = session.quant(
+        name="fp4_quant",
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={
+            "dtype": "fp4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc"],
+            "group_size": 16,
+        },
+    )
+
+    assert result.accepted is True
+    assert captured == {
+        "backend": "pytorch",
+        "strategy": "fp4_weight_only",
+    }
+    assert session.session_stages[-1].name == "fp4_quant"
+
+
+def test_session_prune_routes_through_run_prune_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_prune_stage_dispatch",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_prune_stage(context, spec) -> object:
+        captured["method"] = spec.method
+        captured["target_sparsity"] = spec.target_sparsity
+        context.metrics["prune"] = {
+            "sparsity": spec.target_sparsity,
+            "method": spec.method,
+            "target_sparsity": spec.target_sparsity,
+        }
+        return context
+
+    monkeypatch.setattr("xqt.workflows.optimization.run_prune_stage", _fake_run_prune_stage)
+
+    result = session.prune(
+        name="l1_prune",
+        method="global_l1_unstructured",
+        target_sparsity=0.4,
+    )
+
+    assert result.accepted is True
+    assert captured == {
+        "method": "global_l1_unstructured",
+        "target_sparsity": 0.4,
+    }
+    assert session.session_stages[-1].name == "l1_prune"
 
 
 def test_workflow_result_writes_session_stages(tmp_path: Path) -> None:
@@ -313,6 +438,68 @@ def test_export_stage_uses_export_bundle_payload_kind(
     assert exported.created_by.transform_family == "export"
 
 
+def test_deploy_stage_accepts_runtime_handle_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_deploy",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_export(config, stage, context) -> None:
+        assert isinstance(stage.spec, DeployStageSpec)
+        assert stage.spec.runtime_handle is not None
+        captured["runtime"] = stage.spec.runtime_handle.runtime
+        captured["handle_kind"] = stage.spec.runtime_handle.handle_kind
+        captured["materialize"] = stage.spec.runtime_handle.materialize
+        output = tmp_path / "model.engine"
+        output.write_bytes(b"fake-engine")
+        context.artifacts["deploy_engine"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": "tensorrt", "output_path": str(output)}],
+            "stage_kind": "deploy",
+            "runtime_handle_request": {
+                "runtime": "tensorrt",
+                "handle_kind": "engine",
+                "materialize": False,
+            },
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    deploy_stage = session.deploy(
+        name="build_engine",
+        format="tensorrt",
+        output_path=tmp_path / "model.engine",
+        runtime_handle={
+            "runtime": "tensorrt",
+            "handle_kind": "engine",
+            "materialize": False,
+        },
+    )
+
+    assert deploy_stage.accepted is True
+    assert captured == {
+        "runtime": "tensorrt",
+        "handle_kind": "engine",
+        "materialize": False,
+    }
+    exported = session.session_stages[-1]
+    assert exported.name == "build_engine"
+    assert exported.stage_kind == "exported"
+    assert exported.payload.payload_kind == "export_bundle"
+    assert exported.created_by.transform == "deploy"
+    assert exported.created_by.transform_family == "export"
+
+
 def test_stage_created_by_tracks_transform_metadata(tmp_path: Path) -> None:
     session = XQTOptimizationSession(
         project={
@@ -436,6 +623,8 @@ def test_stage_payload_dispatch_uses_specialized_and_default_builders(
 
 
 def test_runtime_handle_payload_serializes_as_plain_mapping() -> None:
+    assert RuntimeHandlePayload is ContractRuntimeHandlePayload
+    assert RuntimePlanPayload is ContractRuntimePlanPayload
     payload = RuntimeHandlePayload(
         stage_name="runtime_session",
         source_model_stage="onnx_export",

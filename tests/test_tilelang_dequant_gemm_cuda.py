@@ -15,6 +15,7 @@ from xqt.operator_opt.backends.tilelang_validation import (
 from xqt.operator_opt.kernels.tilelang import (
     build_tilelang_fp4_fused_dequant_gemm_kernel,
 )
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 from xqt.operator_opt.kernels.tilelang.gemm import (
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
@@ -30,8 +31,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang dequant GEMM CUDA test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang dequant GEMM CUDA test",
 )
 
 requires_nvcc = pytest.mark.skipif(

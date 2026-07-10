@@ -5,13 +5,11 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.core.config import load_xqt_config
-from xqt.operator_opt.executor import (
-    _TileLangAttentionWrapper,
-    build_operator_optimization_plan,
-    execute_operator_optimization_plan,
-)
-from xqt.pipeline.runner import create_context
+from xqt.operator_opt.execute import execute_operator_optimization_plan
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.operator_opt.tilelang_wrappers import _TileLangAttentionWrapper
+from xqt.operator_opt.plan import build_operator_optimization_plan
+from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(
@@ -20,8 +18,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang operator CUDA test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang operator CUDA test",
 )
 
 
@@ -72,9 +70,9 @@ def _tilelang_cuda_operator_config(
 @requires_cuda
 @requires_tilelang
 def test_tilelang_operator_executor_uses_cuda_kernel_entry() -> None:
-    config = load_xqt_config(_tilelang_cuda_operator_config(attention_fastpath="tilelang"))
-    context = create_context(
-        config,
+    config_dict = _tilelang_cuda_operator_config(attention_fastpath="tilelang")
+    context = operator_runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(1, 64, 32, device="cuda", dtype=torch.float16),
     )
@@ -82,7 +80,7 @@ def test_tilelang_operator_executor_uses_cuda_kernel_entry() -> None:
 
     LoadModelPass().run(context)
     context.model = context.require_model().to(device="cuda", dtype=torch.float16)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
 
@@ -101,14 +99,12 @@ def test_tilelang_operator_executor_uses_cuda_kernel_entry() -> None:
 @requires_cuda
 @requires_tilelang
 def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> None:
-    config = load_xqt_config(
-        _tilelang_cuda_operator_config(
-            attention_fastpath="auto",
-            min_speedup=1.000001,
-        )
+    config_dict = _tilelang_cuda_operator_config(
+        attention_fastpath="auto",
+        min_speedup=1.000001,
     )
-    context = create_context(
-        config,
+    context = operator_runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(1, 64, 32, device="cuda", dtype=torch.float16),
     )
@@ -116,7 +112,7 @@ def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> N
 
     LoadModelPass().run(context)
     context.model = context.require_model().to(device="cuda", dtype=torch.float16)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
 
@@ -135,14 +131,12 @@ def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> N
 @requires_cuda
 @requires_tilelang
 def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath() -> None:
-    config = load_xqt_config(
-        _tilelang_cuda_operator_config(
-            attention_fastpath="graph",
-            min_speedup=1.000001,
-        )
+    config_dict = _tilelang_cuda_operator_config(
+        attention_fastpath="graph",
+        min_speedup=1.000001,
     )
-    context = create_context(
-        config,
+    context = operator_runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(1, 64, 32, device="cuda", dtype=torch.float16),
     )
@@ -150,7 +144,7 @@ def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath() -> None
 
     LoadModelPass().run(context)
     context.model = context.require_model().to(device="cuda", dtype=torch.float16)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
 

@@ -19,6 +19,13 @@ CAPABILITY_STATUSES = (
     "not_verified",
 )
 
+CAPABILITY_MATURITIES = (
+    "executable",
+    "reference_guarded",
+    "metadata_only",
+    "planned",
+)
+
 
 def _tuple_of_str(value: Sequence[str] | None) -> tuple[str, ...]:
     return tuple(str(item) for item in value or ())
@@ -100,6 +107,66 @@ def _find_first_bool(value: Any, key: str) -> bool | None:
     return None
 
 
+def _find_first_value(value: Any, key: str) -> Any:
+    if isinstance(value, Mapping):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _find_first_value(item, key)
+            if found is not None:
+                return found
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _find_first_value(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _shape_signature(value: Any) -> Any:
+    if value is None:
+        return None
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            return [int(dimension) for dimension in shape]
+        except (TypeError, ValueError):
+            return str(shape)
+    if isinstance(value, Mapping):
+        return {str(key): _shape_signature(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_shape_signature(item) for item in value]
+    return None
+
+
+def _collect_text_values(value: Any, key: str) -> list[str]:
+    if isinstance(value, Mapping):
+        values: list[str] = []
+        raw = value.get(key)
+        if isinstance(raw, str):
+            values.append(raw)
+        for item in value.values():
+            values.extend(_collect_text_values(item, key))
+        return values
+    if isinstance(value, (list, tuple)):
+        values = []
+        for item in value:
+            values.extend(_collect_text_values(item, key))
+        return values
+    return []
+
+
+def _artifact_kinds(metrics: Mapping[str, Any], artifacts: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("artifact_kind", "format"):
+        for value in _collect_text_values(metrics, key):
+            if value not in values:
+                values.append(value)
+    if values:
+        return values
+    return [str(key) for key in artifacts]
+
+
 @dataclass(frozen=True)
 class OptimizationCapability:
     """Unified capability description for quant, prune, operator, and export paths."""
@@ -108,6 +175,7 @@ class OptimizationCapability:
     name: str
     engine: str
     status: str
+    maturity: str
     runtime: str
     artifact_kind: str
     requires_cuda: bool = False
@@ -131,6 +199,7 @@ class OptimizationCapability:
             "name": self.name,
             "engine": self.engine,
             "status": self.status,
+            "maturity": self.maturity,
             "runtime": self.runtime,
             "artifact_kind": self.artifact_kind,
             "requires_cuda": self.requires_cuda,
@@ -159,6 +228,7 @@ class OptimizationCapability:
         """Create a unified capability from a capability dictionary."""
 
         raw_status = str(payload.get("status", "not_verified"))
+        raw_maturity = str(payload.get("maturity", "planned"))
         runtime = str(payload.get("runtime", "unknown"))
         artifact_kind = str(payload.get("artifact_kind", "unknown"))
         return cls(
@@ -166,6 +236,7 @@ class OptimizationCapability:
             name=name,
             engine=str(engine or payload.get("engine") or name),
             status=normalize_capability_status(raw_status),
+            maturity=normalize_capability_maturity(raw_maturity),
             runtime=runtime,
             artifact_kind=artifact_kind,
             requires_cuda=bool(payload.get("requires_cuda", False)),
@@ -194,6 +265,7 @@ class OptimizationCapability:
                 not in {
                     "engine",
                     "status",
+                    "maturity",
                     "runtime",
                     "artifact_kind",
                     "requires_cuda",
@@ -322,6 +394,7 @@ class StageReport:
     capability: dict[str, Any] | None = None
     benchmark: dict[str, Any] = field(default_factory=dict)
     numeric_diff: dict[str, Any] = field(default_factory=dict)
+    execution: dict[str, Any] = field(default_factory=dict)
     lineage: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -341,6 +414,7 @@ class StageReport:
             "capability": _json_safe(self.capability),
             "benchmark": _json_safe(self.benchmark),
             "numeric_diff": _json_safe(self.numeric_diff),
+            "execution": _json_safe(self.execution),
             "lineage": _json_safe(self.lineage),
             "metadata": _json_safe(self.metadata),
         }
@@ -359,6 +433,29 @@ def normalize_capability_status(status: str) -> str:
     if text in {"missing", "failed", "error"}:
         return "unavailable"
     return "not_verified"
+
+
+def normalize_capability_maturity(maturity: str) -> str:
+    """Normalize capability maturity names to the shared maturity vocabulary."""
+
+    text = str(maturity).lower()
+    aliases = {
+        "available": "executable",
+        "implemented": "executable",
+        "adapter": "executable",
+        "runtime_kernel": "executable",
+        "production": "executable",
+        "reference": "reference_guarded",
+        "reference_only": "reference_guarded",
+        "reference-guarded": "reference_guarded",
+        "design_extracted_reference_guarded": "reference_guarded",
+        "metadata": "metadata_only",
+        "capability_only": "metadata_only",
+    }
+    normalized = aliases.get(text, text)
+    if normalized in CAPABILITY_MATURITIES:
+        return normalized
+    return "planned"
 
 
 def default_benchmark_metric_schema() -> BenchmarkMetricSchema:
@@ -420,6 +517,51 @@ def normalize_numeric_diff_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]
     return normalized
 
 
+def normalize_stage_execution(
+    metrics: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+    *,
+    engine: str | None = None,
+    device: str | None = None,
+    shape: Any = None,
+    warmup: int | None = None,
+    iterations: int | None = None,
+) -> dict[str, Any]:
+    """Project every workflow stage onto a fixed runtime-reporting envelope."""
+
+    metric_shape = (
+        _find_first_value(metrics, "shape_signature")
+        or _find_first_value(metrics, "input_shapes")
+    )
+    fallback = (
+        _find_first_text(metrics, "fallback_reason")
+        or _find_first_text(metrics, "skip_reason")
+        or _find_first_text(metrics, "fallback")
+    )
+    return {
+        "backend": _find_first_text(metrics, "backend")
+        or _find_first_text(metrics, "runtime")
+        or engine
+        or _find_first_text(metrics, "engine")
+        or _find_first_text(metrics, "engines"),
+        "engine": engine
+        or _find_first_text(metrics, "engine")
+        or _find_first_text(metrics, "engines"),
+        "device": device or _find_first_text(metrics, "device"),
+        "shape": _json_safe(metric_shape)
+        if metric_shape is not None
+        else _shape_signature(shape),
+        "warmup": warmup if warmup is not None else _find_first_numeric(metrics, "warmup"),
+        "iterations": (
+            iterations
+            if iterations is not None
+            else _find_first_numeric(metrics, "iterations")
+        ),
+        "fallback": fallback,
+        "artifact_kinds": _artifact_kinds(metrics, artifacts),
+    }
+
+
 def build_stage_report(
     *,
     stage_name: str,
@@ -433,6 +575,10 @@ def build_stage_report(
     capability: Mapping[str, Any] | None = None,
     lineage: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    device: str | None = None,
+    shape: Any = None,
+    warmup: int | None = None,
+    iterations: int | None = None,
 ) -> StageReport:
     """Build a canonical stage report from workflow result data."""
 
@@ -456,6 +602,15 @@ def build_stage_report(
         capability=_json_safe(dict(capability)) if capability is not None else None,
         benchmark=normalize_benchmark_metrics(metrics),
         numeric_diff=normalize_numeric_diff_metrics(metrics),
+        execution=normalize_stage_execution(
+            metrics,
+            artifacts,
+            engine=engine,
+            device=device,
+            shape=shape,
+            warmup=warmup,
+            iterations=iterations,
+        ),
         lineage=_json_safe(dict(lineage or {})),
         metadata=_json_safe(dict(metadata or {})),
     )
@@ -502,6 +657,7 @@ def add_stage_report_to_manifest(
 
 
 __all__ = [
+    "CAPABILITY_MATURITIES",
     "CAPABILITY_STATUSES",
     "BenchmarkMetricSchema",
     "NumericDiffSchema",
@@ -514,7 +670,9 @@ __all__ = [
     "default_numeric_diff_schema",
     "default_runtime_feature_schema",
     "normalize_benchmark_metrics",
+    "normalize_capability_maturity",
     "normalize_capability_status",
     "normalize_numeric_diff_metrics",
+    "normalize_stage_execution",
     "reporting_schema_payload",
 ]

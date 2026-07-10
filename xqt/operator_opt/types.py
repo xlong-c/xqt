@@ -21,6 +21,7 @@ class OperatorOptimizationTargetPlan:
     options: dict[str, Any] = field(default_factory=dict)
     patterns: list[str] = field(default_factory=list)
     fallback: str = "eager"
+    fallback_policy: str = "prefer_fallback"
     min_speedup: float = 1.01
     validate: dict[str, float] = field(default_factory=dict)
     tilelang: dict[str, Any] = field(default_factory=dict)
@@ -39,6 +40,7 @@ class OperatorOptimizationTargetPlan:
             "options": dict(self.options),
             "patterns": list(self.patterns),
             "fallback": self.fallback,
+            "fallback_policy": self.fallback_policy,
             "min_speedup": self.min_speedup,
             "validate": dict(self.validate),
             "tilelang": dict(self.tilelang),
@@ -76,6 +78,7 @@ class OperatorOptimizationReport:
     runtime: str
     applied: bool
     fallback: str
+    fallback_policy: str
     skip_reason: Optional[str] = None
     compile_time_ms: Optional[float] = None
     latency_before: Optional[dict[str, Any]] = None
@@ -97,6 +100,7 @@ class OperatorOptimizationReport:
             "runtime": self.runtime,
             "applied": self.applied,
             "fallback": self.fallback,
+            "fallback_policy": self.fallback_policy,
             "skip_reason": self.skip_reason,
             "compile_time_ms": self.compile_time_ms,
             "latency_before": dict(self.latency_before or {}),

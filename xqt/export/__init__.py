@@ -20,9 +20,16 @@ from .mobile import (
 from .onnx_exporter import (
     ONNXExportResult,
     compare_onnxruntime_outputs,
+    create_onnxruntime_session,
     convert_onnx_to_fp16,
     export_onnx,
     validate_onnx,
+)
+from .onnx_optimizer import (
+    ONNXNativeQDQOptimizationResult,
+    ONNXOptimizationResult,
+    optimize_onnx,
+    optimize_qdq_native,
 )
 from .openvino import OpenVINOExportResult, compare_openvino_outputs, export_openvino_ir
 from .tensorrt import (
@@ -61,6 +68,8 @@ __all__ = [
     "ExecuTorchExportResult",
     "ExportCapability",
     "ONNXExportResult",
+    "ONNXNativeQDQOptimizationResult",
+    "ONNXOptimizationResult",
     "OpenVINOExportResult",
     "PreExportFusionResult",
     "TensorRTBuildResult",
@@ -87,6 +96,7 @@ __all__ = [
     "apply_pre_export_fusion",
     "compare_openvino_outputs",
     "compare_onnxruntime_outputs",
+    "create_onnxruntime_session",
     "convert_onnx_to_fp16",
     "deployment_capability_matrix",
     "evaluate_tensorrt_performance_thresholds",
@@ -99,6 +109,8 @@ __all__ = [
     "export_torch_program",
     "export_torchscript",
     "inspect_tensorrt_engine",
+    "optimize_onnx",
+    "optimize_qdq_native",
     "parse_trtexec_performance",
     "summarize_tensorrt_engine_inspector",
     "validate_tensorrt_plugin_libraries",

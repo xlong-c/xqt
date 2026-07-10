@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
+from typing import Any
+
 import torch
 
-from xqt.core.config import load_xqt_config
-from xqt.pipeline.runner import create_context
+from xqt.core.schema import QuantConfig
+from xqt.core.types import XQTContext
 from xqt.quant import execute_quantization_plan
 from xqt.quant.plan import build_quantization_plan
 from xqt.quant.quantizers.mxfp_weight_only import MXFPWeightOnlyLinear
@@ -20,6 +23,27 @@ class _TinyMLP(torch.nn.Module):
         hidden = self.fc1(inputs)
         hidden = self.norm(hidden)
         return self.fc2(hidden)
+
+
+def _runtime_context(
+    quant_config: QuantConfig,
+    *,
+    model: Any = None,
+    calibration_inputs: Any = None,
+) -> XQTContext:
+    return XQTContext(
+        model=model,
+        reference_model=copy.deepcopy(model) if model is not None else None,
+        calibration_inputs=calibration_inputs,
+        device="cpu",
+        artifact_dir="artifacts/xqt/tests/quant_mxfp_weight_only",
+        project_name="quant_mxfp_weight_only",
+        quant_config=quant_config,
+    )
+
+
+def _quant_config(config_dict: dict[str, Any]) -> QuantConfig:
+    return QuantConfig(**config_dict["compression"]["quant"])
 
 
 def _base_config() -> dict:
@@ -55,12 +79,12 @@ def _base_config() -> dict:
 
 def test_pytorch_mxfp_weight_only_executes_weight_only_linear_rewrite() -> None:
     torch.manual_seed(0)
-    config = load_xqt_config(_base_config())
+    quant_config = _quant_config(_base_config())
     model = _TinyMLP().eval()
     sample = torch.randn(2, 8)
     baseline = model(sample)
-    context = create_context(config, model=model)
-    plan = build_quantization_plan(config.compression.quant)
+    context = _runtime_context(quant_config, model=model)
+    plan = build_quantization_plan(quant_config)
 
     execution = execute_quantization_plan(context, plan)
 
@@ -92,10 +116,10 @@ def test_pytorch_mxfp_weight_only_executes_weight_only_linear_rewrite() -> None:
 def test_pytorch_mxfp_weight_only_supports_mxfp4_storage() -> None:
     config_dict = _base_config()
     config_dict["compression"]["quant"]["policy"]["precision"] = 4
-    config = load_xqt_config(config_dict)
+    quant_config = _quant_config(config_dict)
     model = _TinyMLP().eval()
-    context = create_context(config, model=model)
-    plan = build_quantization_plan(config.compression.quant)
+    context = _runtime_context(quant_config, model=model)
+    plan = build_quantization_plan(quant_config)
 
     execution = execute_quantization_plan(context, plan)
 
@@ -108,16 +132,22 @@ def test_pytorch_mxfp_weight_only_supports_mxfp4_storage() -> None:
 
 
 def test_mxfp_weight_only_report_includes_calibration_summary_when_inputs_provided() -> None:
-    config = load_xqt_config(_base_config())
+    quant_config = _quant_config(_base_config())
     model = _TinyMLP().eval()
     calibration_inputs = [torch.randn(2, 8), torch.randn(2, 8)]
-    context = create_context(config, model=model, calibration_inputs=calibration_inputs)
-    plan = build_quantization_plan(config.compression.quant)
+    context = _runtime_context(
+        quant_config,
+        model=model,
+        calibration_inputs=calibration_inputs,
+    )
+    plan = build_quantization_plan(quant_config)
 
     execution = execute_quantization_plan(context, plan)
 
     report = execution.reports[0]
     assert report.calibration_samples == 2
     assert report.calibration_summary is not None
+    assert report.algorithm_executable is False
+    assert report.method_semantics == "awq_gptq_label_only_groupwise_weight_only_storage_quantization"
     assert report.calibration_summary["sample_count"] == 2
     assert report.calibration_summary["batch_count"] == 2

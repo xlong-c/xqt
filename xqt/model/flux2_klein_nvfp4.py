@@ -21,11 +21,11 @@ from xqt.operator_opt import (
     materialize_operator_candidate_models,
 )
 from xqt.operator_opt.compile_backend import compile_with_torch
-from xqt.operator_opt.executor import (
-    _benchmark_paired_callables,
-    _capture_cuda_graph_with_static_state,
-    _cuda_graph_tensor_signature,
-    _replay_cuda_graph_tensor_callable,
+from xqt.operator_opt._benchmark import _benchmark_paired_callables
+from xqt.operator_opt.runtime import (
+    capture_cuda_graph_with_static_state,
+    cuda_graph_tensor_signature,
+    replay_cuda_graph_tensor_callable,
 )
 from xqt.quant import bridge_module_to_nvfp4_linear_shared, infer_nvfp4_tensor_layout
 
@@ -451,7 +451,7 @@ def _forward_flux2_klein_nvfp4_transformer_once(
 def _flux2_cuda_graph_signature(
     runtime_args: tuple[torch.Tensor, ...],
 ) -> tuple[tuple[Any, ...], ...]:
-    return tuple(_cuda_graph_tensor_signature(tensor) for tensor in runtime_args)
+    return tuple(cuda_graph_tensor_signature(tensor) for tensor in runtime_args)
 
 
 class _Flux2KleinNVFP4CudaGraphModule(nn.Module):
@@ -507,7 +507,7 @@ class _Flux2KleinNVFP4CudaGraphModule(nn.Module):
                 "FLUX.2 CUDA Graph replay requires matching shape/stride/dtype/device inputs"
             )
         with torch.no_grad():
-            output = _replay_cuda_graph_tensor_callable(self._graph_state, runtime_args)
+            output = replay_cuda_graph_tensor_callable(self._graph_state, runtime_args)
         return (output,)
 
 
@@ -779,7 +779,7 @@ def capture_flux2_klein_nvfp4_transformer_cuda_graph(
             joint_attention_kwargs=joint_attention_kwargs,
         )
 
-    graph_state = _capture_cuda_graph_with_static_state(
+    graph_state = capture_cuda_graph_with_static_state(
         runtime_args,
         body=_capture_body,
         warmup=warmup_iterations,

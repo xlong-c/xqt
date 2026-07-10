@@ -5,12 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
-from xqt.quant.capability import describe_quant_backend_capability
-
-from .stage import (
+from xqt.contracts import (
     ExportBundlePayload,
     QuantizedModelPayload,
+    RuntimeHandlePayload,
     RuntimePlanPayload,
+)
+from xqt.quant.capability import describe_quant_backend_capability
+
+from .stage_specs import stage_params
+from .stage import (
     TransformLineage,
     stage_kind_for_transform,
     transform_family_for_kind,
@@ -50,12 +54,13 @@ class StageProvider(Protocol):
 def build_stage_lineage(stage: Any) -> TransformLineage:
     """Build structured lineage for a workflow stage config."""
 
+    params = stage_params(stage)
     return TransformLineage(
         kind=stage.kind,
         transform=stage.kind,
         transform_family=transform_family_for_kind(stage.kind),
         transform_name=stage.kind,
-        params=dict(stage.params),
+        params=params,
         from_stage=stage.from_stage,
         compare_to=stage.compare_to,
     )
@@ -82,12 +87,13 @@ def _first_mapping_list(metrics: Mapping[str, Any], key: str) -> list[dict[str, 
 
 
 def _quant_capability(stage: Any, metrics: Mapping[str, Any]) -> dict[str, Any] | None:
-    backend = str(metrics.get("backend") or stage.params.get("backend") or "")
+    params = stage_params(stage)
+    backend = str(metrics.get("backend") or params.get("backend") or "")
     if not backend:
         return None
-    policy = stage.params.get("policy")
-    method = metrics.get("method") or stage.params.get("method")
-    strategy = metrics.get("strategy") or stage.params.get("strategy")
+    policy = params.get("policy")
+    method = metrics.get("method") or params.get("method")
+    strategy = metrics.get("strategy") or params.get("strategy")
     try:
         return describe_quant_backend_capability(
             backend,
@@ -116,6 +122,7 @@ class ModelQuantizerProvider:
 
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
         metrics = context.metrics
+        params = stage_params(context.stage)
         components = _first_mapping_list(metrics, "components")
         quantized_modules = metrics.get("quantized_modules", [])
         if not isinstance(quantized_modules, list):
@@ -124,9 +131,9 @@ class ModelQuantizerProvider:
             stage_name=context.stage.name,
             source_model_stage=context.source_stage_name,
             model=context.state.context.model,
-            backend=str(metrics.get("backend") or context.stage.params.get("backend") or "unknown"),
-            method=str(metrics.get("method") or context.stage.params.get("method") or "unknown"),
-            strategy=str(metrics.get("strategy") or context.stage.params.get("strategy") or "unknown"),
+            backend=str(metrics.get("backend") or params.get("backend") or "unknown"),
+            method=str(metrics.get("method") or params.get("method") or "unknown"),
+            strategy=str(metrics.get("strategy") or params.get("strategy") or "unknown"),
             quantized_module_count=int(metrics.get("quantized_module_count") or 0),
             quantized_modules=[str(item) for item in quantized_modules],
             calibration_samples=metrics.get("calibration_samples")
@@ -182,6 +189,30 @@ class ExportProvider:
 
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
         targets = _first_mapping_list(context.metrics, "targets")
+        runtime_handle = context.metrics.get("runtime_handle")
+        if isinstance(runtime_handle, Mapping):
+            payload_value = RuntimeHandlePayload(
+                stage_name=context.stage.name,
+                source_model_stage=context.source_stage_name,
+                runtime=str(runtime_handle["runtime"]),
+                handle_kind=str(runtime_handle["handle_kind"]),
+                target_count=int(runtime_handle.get("target_count", 0)),
+                targets=_first_mapping_list(runtime_handle, "targets"),
+                handle=runtime_handle.get("handle"),
+                artifacts={
+                    str(key): str(value)
+                    for key, value in dict(runtime_handle.get("artifacts", {})).items()
+                },
+                metadata=dict(runtime_handle.get("metadata", {})),
+            )
+            payload_metadata = _base_payload_metadata(context)
+            payload_metadata["runtime_handle"] = payload_value.to_dict()
+            return StageProviderOutput(
+                session_stage_kind="exported",
+                lineage=build_stage_lineage(context.stage),
+                payload_value=payload_value,
+                payload_metadata=payload_metadata,
+            )
         first_format = "unknown"
         if targets:
             first_format = str(targets[0].get("format", "unknown"))

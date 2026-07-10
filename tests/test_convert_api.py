@@ -10,6 +10,7 @@ from torch import nn
 
 import xqt
 from xqt.conversion import ConvertResult, FeedForwardPrecisionPolicy, PrecisionPolicy
+from xqt.contracts import FusionIntent, ModuleContract
 from xqt.quant import FP4WeightOnlyLinear
 
 
@@ -18,11 +19,36 @@ def test_xqt_convert_is_available_via_lazy_top_level_attribute() -> None:
 
 
 def test_xqt_nn_exposes_operator_facades() -> None:
-    assert xqt.nn.Linear is nn.Linear
-    assert xqt.nn.Conv2d is nn.Conv2d
-    assert xqt.nn.LayerNorm is nn.LayerNorm
+    assert xqt.nn.Linear is not nn.Linear
+    assert xqt.nn.Conv2d is not nn.Conv2d
+    assert xqt.nn.LayerNorm is not nn.LayerNorm
+    assert issubclass(xqt.nn.Linear, nn.Linear)
+    assert issubclass(xqt.nn.Conv2d, nn.Conv2d)
+    assert issubclass(xqt.nn.LayerNorm, nn.LayerNorm)
     assert xqt.nn.FeedForward.__name__ == "FeedForward"
     assert xqt.nn.RMSNorm.__name__ == "RMSNorm"
+
+
+def test_xqt_semantic_facades_preserve_torch_forward_and_runtime_intent() -> None:
+    linear = xqt.nn.Linear(4, 3)
+    conv = xqt.nn.Conv2d(3, 4, kernel_size=3, padding=1)
+    norm = xqt.nn.LayerNorm(4)
+
+    linear.configure_runtime(engine="triton", output_dtype="bf16")
+    conv.configure_runtime(engine="tilelang", activation_dtype="fp16")
+    norm.configure_runtime(engine="tilelang", accum_dtype="fp32")
+
+    linear_input = torch.randn(2, 4)
+    torch.testing.assert_close(
+        linear(linear_input),
+        nn.Linear.forward(linear, linear_input),
+    )
+    assert conv(torch.randn(2, 3, 5, 5)).shape == (2, 4, 5, 5)
+    assert norm(torch.randn(2, 4)).shape == (2, 4)
+    assert linear.runtime_config()["engine"] == "triton"
+    assert linear.runtime_config()["output"] == "bf16"
+    assert conv.runtime_config()["engine"] == "tilelang"
+    assert norm.runtime_config()["accum"] == "fp32"
 
 
 def test_xqt_top_level_import_remains_lightweight_with_lazy_convert() -> None:
@@ -30,7 +56,7 @@ def test_xqt_top_level_import_remains_lightweight_with_lazy_convert() -> None:
         "import xqt; "
         "assert 'convert' not in xqt.__all__; "
         "assert callable(xqt.convert); "
-        "assert xqt.nn.Linear.__name__ == 'Linear'"
+        "assert issubclass(xqt.nn.Linear, __import__('torch').nn.Linear)"
     )
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -81,14 +107,17 @@ def test_convert_fp4_weight_only_linear_tilelang_returns_operator_candidate(
 
     def fake_materialize(
         module_arg: nn.Module,
+        *,
+        contract: ModuleContract,
         target: object,
     ) -> tuple[nn.Module, float | None]:
         captured["module"] = module_arg
+        captured["contract"] = contract
         captured["target"] = target
         return module_arg, None
 
     monkeypatch.setattr(
-        "xqt.conversion.materialize_operator_candidate_model",
+        "xqt.conversion.materialize_module",
         fake_materialize,
     )
 
@@ -104,6 +133,7 @@ def test_convert_fp4_weight_only_linear_tilelang_returns_operator_candidate(
     assert result.converted is True
     assert result.contract.operator_kind == "linear"
     assert result.contract.weight_spec.storage_dtype == "fp4_packed"
+    assert captured["contract"] is result.contract
     target = captured["target"]
     assert getattr(target, "engine") == "tilelang"
     assert getattr(target, "patterns") == ["fp4_packed_dequant_gemm_epilogue"]
@@ -170,14 +200,17 @@ def test_convert_conv2d_tilelang_delegates_to_materializer(
 
     def fake_materialize(
         module_arg: nn.Module,
+        *,
+        contract: ModuleContract,
         target: object,
     ) -> tuple[nn.Module, float | None]:
         captured["module"] = module_arg
+        captured["contract"] = contract
         captured["target"] = target
         return module_arg, None
 
     monkeypatch.setattr(
-        "xqt.conversion.materialize_operator_candidate_model",
+        "xqt.conversion.materialize_module",
         fake_materialize,
     )
 
@@ -185,7 +218,19 @@ def test_convert_conv2d_tilelang_delegates_to_materializer(
 
     assert isinstance(result, ConvertResult)
     assert result.contract.operator_kind == "conv2d"
+    assert captured["contract"] is result.contract
     assert getattr(captured["target"], "patterns") == ["conv"]
+
+
+def test_convert_tilelang_materializer_records_shared_module_contract() -> None:
+    result = xqt.convert(
+        nn.Conv2d(3, 8, kernel_size=3, padding=1),
+        engine="tilelang",
+        return_result=True,
+    )
+
+    assert isinstance(result, ConvertResult)
+    assert getattr(result.model, "_xqt_module_contract") == result.contract.to_dict()
 
 
 def test_convert_layernorm_non_tilelang_engine_rejects() -> None:
@@ -244,6 +289,8 @@ def test_convert_feedforward_torch_returns_runtime_configured_result() -> None:
         result.report["runtime_config"]["projections"]["proj_out"]["output"] == "fp16"
     )
     assert result.report["fusion"]["realized_patterns"] == ["swiglu"]
+    assert isinstance(result.contract, ModuleContract)
+    assert result.contract.fusion == FusionIntent(patterns=("swiglu",))
 
 
 def test_convert_feedforward_triton_updates_runtime_engine() -> None:
@@ -265,10 +312,14 @@ def test_convert_feedforward_triton_updates_runtime_engine() -> None:
     assert isinstance(result, ConvertResult)
     assert result.contract.operator_kind == "feedforward"
     assert result.converted is True
+    assert result.model is not module
+    assert module.runtime_config()["engine"] == "torch"
     assert result.model.runtime_config()["engine"] == "triton"
     assert result.model.runtime_config()["output"] == "bf16"
     assert result.model.runtime_config()["projections"]["proj_in"]["output"] == "fp16"
     assert result.model.runtime_config()["projections"]["proj_out"]["output"] == "bf16"
+    assert result.report["target_plan"]["patterns"] == ["feedforward"]
+    assert getattr(result.model, "_xqt_module_contract") == result.contract.to_dict()
 
 
 def test_convert_feedforward_projection_policies_override_selected_matmuls() -> None:
@@ -702,3 +753,39 @@ def test_xqt_feedforward_rejects_low_bit_mma_without_runtime_kernel() -> None:
 
     with pytest.raises(ValueError, match="mma precision nvfp4"):
         module(torch.randn(2, 8))
+
+
+def test_xqt_feedforward_records_triton_linear_fallback_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = xqt.nn.FeedForward(
+        8,
+        inner_dim=12,
+        activation="gelu",
+        dropout=0.0,
+        final_dropout=False,
+        engine="triton",
+    )
+    module.configure_runtime(
+        activation_dtype="fp16",
+        weight_dtype="fp16",
+        mma_dtype="fp16",
+        accum_dtype="fp32",
+        output_dtype="fp16",
+    )
+
+    def _raise_triton(*args: object, **kwargs: object) -> torch.Tensor:
+        del args, kwargs
+        raise RuntimeError("synthetic Triton failure")
+
+    monkeypatch.setattr("xqt.nn.gemm_fp16_triton", _raise_triton)
+    output = module(torch.randn(2, 8))
+
+    runtime = module.runtime_config()
+    assert output.shape == (2, 8)
+    assert runtime["fallback_count"] >= 1
+    assert runtime["fallback"] == {
+        "engine": "triton",
+        "stage": "linear_epilogue",
+        "reason": "synthetic Triton failure",
+    }

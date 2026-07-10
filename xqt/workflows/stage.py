@@ -7,6 +7,14 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from xqt.contracts.runtime import (
+    ExportBundlePayload,
+    RuntimeArtifactPayload,
+    RuntimeHandlePayload,
+    RuntimePlanPayload,
+)
+from xqt.contracts.quantized import QuantizedModelPayload
+
 
 StageKind = Literal[
     "baseline",
@@ -86,190 +94,6 @@ _PAYLOAD_CAPABILITIES_BY_KIND: dict[PayloadKind, dict[str, bool]] = {
         "can_restore_model": False,
     },
 }
-
-
-@dataclass(kw_only=True)
-class QuantizedModelPayload:
-    """Type-safe payload describing a quantized model-side stage."""
-
-    stage_name: str
-    source_model_stage: str
-    model: Any
-    backend: str
-    method: str
-    strategy: str
-    quantized_module_count: int = 0
-    quantized_modules: list[str] = field(default_factory=list)
-    calibration_samples: int | None = None
-    calibration_summary: dict[str, Any] | None = None
-    components: list[dict[str, Any]] = field(default_factory=list)
-    artifacts: dict[str, str] = field(default_factory=dict)
-    capability: dict[str, Any] | None = None
-    artifact_kind: str = field(default="quantized_model", init=False)
-
-    def to_dict(self) -> dict[str, Any]:
-        model_type: str | None
-        if self.model is None:
-            model_type = None
-        else:
-            model_type = f"{type(self.model).__module__}.{type(self.model).__qualname__}"
-        return {
-            "artifact_kind": self.artifact_kind,
-            "stage_name": self.stage_name,
-            "source_model_stage": self.source_model_stage,
-            "model_type": model_type,
-            "backend": self.backend,
-            "method": self.method,
-            "strategy": self.strategy,
-            "quantized_module_count": self.quantized_module_count,
-            "quantized_modules": list(self.quantized_modules),
-            "calibration_samples": self.calibration_samples,
-            "calibration_summary": _json_safe_stage_value(self.calibration_summary),
-            "components": _json_safe_stage_value(self.components),
-            "artifacts": dict(self.artifacts),
-            "capability": _json_safe_stage_value(self.capability),
-        }
-
-
-@dataclass(kw_only=True)
-class RuntimeArtifactPayload:
-    """Shared runtime-side payload contract for non-model stage artifacts."""
-
-    artifact_kind: str
-    stage_name: str
-    source_model_stage: str
-    artifacts: dict[str, str] = field(default_factory=dict)
-
-    def base_dict(self) -> dict[str, Any]:
-        return {
-            "artifact_kind": self.artifact_kind,
-            "stage_name": self.stage_name,
-            "source_model_stage": self.source_model_stage,
-            "artifacts": dict(self.artifacts),
-        }
-
-
-@dataclass(kw_only=True)
-class RuntimePlanPayload(RuntimeArtifactPayload):
-    """Type-safe payload describing an operator-optimized runtime plan."""
-
-    engine: str
-    target_count: int
-    targets: list[dict[str, Any]] = field(default_factory=list)
-
-    def __init__(
-        self,
-        *,
-        stage_name: str,
-        source_model_stage: str,
-        engine: str,
-        target_count: int,
-        targets: list[dict[str, Any]] | None = None,
-        artifacts: dict[str, str] | None = None,
-    ) -> None:
-        super().__init__(
-            artifact_kind="runtime_plan",
-            stage_name=stage_name,
-            source_model_stage=source_model_stage,
-            artifacts=dict(artifacts or {}),
-        )
-        self.engine = engine
-        self.target_count = target_count
-        self.targets = [dict(target) for target in (targets or [])]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            **self.base_dict(),
-            "engine": self.engine,
-            "target_count": self.target_count,
-            "targets": [dict(target) for target in self.targets],
-        }
-
-
-@dataclass(kw_only=True)
-class RuntimeHandlePayload(RuntimeArtifactPayload):
-    """Type-safe payload describing a materialized executable runtime handle."""
-
-    runtime: str
-    handle_kind: str
-    target_count: int = 0
-    targets: list[dict[str, Any]] = field(default_factory=list)
-    handle: Any = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __init__(
-        self,
-        *,
-        stage_name: str,
-        source_model_stage: str,
-        runtime: str,
-        handle_kind: str,
-        target_count: int = 0,
-        targets: list[dict[str, Any]] | None = None,
-        handle: Any = None,
-        artifacts: dict[str, str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(
-            artifact_kind="runtime_handle",
-            stage_name=stage_name,
-            source_model_stage=source_model_stage,
-            artifacts=dict(artifacts or {}),
-        )
-        self.runtime = runtime
-        self.handle_kind = handle_kind
-        self.target_count = target_count
-        self.targets = [dict(target) for target in (targets or [])]
-        self.handle = handle
-        self.metadata = dict(metadata or {})
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            **self.base_dict(),
-            "runtime": self.runtime,
-            "handle_kind": self.handle_kind,
-            "target_count": self.target_count,
-            "targets": [dict(target) for target in self.targets],
-            "handle_materialized": self.handle is not None,
-            "metadata": _json_safe_stage_value(self.metadata),
-        }
-
-
-@dataclass(kw_only=True)
-class ExportBundlePayload(RuntimeArtifactPayload):
-    """Type-safe payload describing exported model bundle outputs."""
-
-    format: str
-    target_count: int
-    targets: list[dict[str, Any]] = field(default_factory=list)
-
-    def __init__(
-        self,
-        *,
-        stage_name: str,
-        source_model_stage: str,
-        format: str,
-        target_count: int,
-        targets: list[dict[str, Any]] | None = None,
-        artifacts: dict[str, str] | None = None,
-    ) -> None:
-        super().__init__(
-            artifact_kind="export_bundle",
-            stage_name=stage_name,
-            source_model_stage=source_model_stage,
-            artifacts=dict(artifacts or {}),
-        )
-        self.format = format
-        self.target_count = target_count
-        self.targets = [dict(target) for target in (targets or [])]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            **self.base_dict(),
-            "format": self.format,
-            "target_count": self.target_count,
-            "targets": [dict(target) for target in self.targets],
-        }
 
 
 def stage_kind_for_transform(transform_kind: str) -> StageKind:

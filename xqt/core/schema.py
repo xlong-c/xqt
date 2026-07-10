@@ -5,8 +5,6 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from xdl.metric.detection_utils import DetectionPostprocessConfig
 
-XQT_CONFIG_VERSION = 1
-
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
 TASK_TYPES = ("classification", "detection")
 PRUNE_GRANULARITIES = (
@@ -53,6 +51,8 @@ CUTE_DSL_PASS_CONFIG_KEYS = (
 )
 CANONICAL_QUANT_STRATEGIES = (
     "dynamic_int8",
+    "dynamic_int8_mma",
+    "tilelang_int8_mma",
     "weight_only_int8",
     "weight_only_int4",
     "static_qdq_int8",
@@ -61,6 +61,7 @@ CANONICAL_QUANT_STRATEGIES = (
     "mxfp_weight_only",
     "svd_fp4",
     "svd_int4",
+    "w4_storage_int8_mma",
 )
 OPTIONAL_QUANT_STRATEGIES = (
     "fp8_weight_only",
@@ -70,6 +71,10 @@ QUANT_STRATEGY_ALIASES = {
     "int8_dynamic_activation_int8_weight": "dynamic_int8",
     "int8_dynamic": "dynamic_int8",
     "int8": "dynamic_int8",
+    "int8_mma": "dynamic_int8_mma",
+    "dynamic_int8_mma": "dynamic_int8_mma",
+    "int8_dynamic_mma": "dynamic_int8_mma",
+    "tilelang_int8_mma": "tilelang_int8_mma",
     "int8_weight_only": "weight_only_int8",
     "weight_only_int8": "weight_only_int8",
     "int4_weight_only": "weight_only_int4",
@@ -91,6 +96,10 @@ QUANT_STRATEGY_ALIASES = {
     "svd_fp4": "svd_fp4",
     "svd_int4": "svd_int4",
     "svdquant": "svd_fp4",
+    "w4_storage_int8_mma": "w4_storage_int8_mma",
+    "w4_int8_mma": "w4_storage_int8_mma",
+    "retarget_w4_to_w8a8": "w4_storage_int8_mma",
+    "fp4_to_int8_mma": "w4_storage_int8_mma",
 }
 
 
@@ -119,6 +128,24 @@ def normalize_quant_strategy(
             raw = "weight_only_int4"
         elif dtype == "int8" and scheme in {"weight_only", "weight-only"}:
             raw = "weight_only_int8"
+        elif dtype == "int8" and scheme in {"dynamic_mma", "mma", "w8a8_mma"}:
+            engine = str(policy.get("engine") or "").lower()
+            raw = "tilelang_int8_mma" if engine == "tilelang" else "dynamic_int8_mma"
+        elif dtype == "int8" and scheme in {
+            "w4_storage_int8_mma",
+            "w4_int8_mma",
+            "retarget_w4_to_w8a8",
+            "fp4_to_int8_mma",
+        }:
+            raw = "w4_storage_int8_mma"
+        elif dtype in {"fp4", "int4"} and scheme in {
+            "w4_storage_int8_mma",
+            "w4_int8_mma",
+            "retarget_w4_to_w8a8",
+            "fp4_to_int8_mma",
+            "int8_mma",
+        }:
+            raw = "w4_storage_int8_mma"
         elif dtype == "int8" and scheme in {"", "dynamic"}:
             raw = "dynamic_int8"
         elif dtype in {"fp8", "float8"} and scheme in {"", "dynamic"}:
@@ -154,14 +181,6 @@ def require_supported_quant_strategy(
         allowed = ", ".join(SUPPORTED_QUANT_STRATEGIES)
         raise ValueError(f"{location} must be one of: {allowed}")
     return normalized
-
-
-@dataclass
-class ProjectConfig:
-    """Project-level artifact settings."""
-
-    name: str = "xqt_experiment"
-    artifact_dir: str = "artifacts/xqt/default"
 
 
 @dataclass
@@ -313,6 +332,7 @@ class OperatorOptimizationTargetConfig:
     options: Dict[str, Any] = field(default_factory=dict)
     patterns: List[str] = field(default_factory=list)
     fallback: str = "eager"
+    fallback_policy: str = "prefer_fallback"
     min_speedup: float = 1.01
     validate: OperatorOptimizationValidationConfig = field(
         default_factory=OperatorOptimizationValidationConfig
@@ -334,15 +354,6 @@ class OperatorOptimizationConfig:
 
 
 @dataclass
-class CompressionConfig:
-    """Enabled compression passes and compression axes."""
-
-    axes: List[str] = field(default_factory=list)
-    quant: QuantConfig = field(default_factory=QuantConfig)
-    prune: PruneConfig = field(default_factory=PruneConfig)
-
-
-@dataclass
 class ExportTargetConfig:
     """Single export target settings."""
 
@@ -356,25 +367,11 @@ class ExportTargetConfig:
 
 
 @dataclass
-class ExportConfig:
-    """Export target collection."""
-
-    targets: List[ExportTargetConfig] = field(default_factory=list)
-
-
-@dataclass
 class OutputDiffConfig:
     """Output comparison thresholds."""
 
     atol: float = 1e-5
     rtol: float = 1e-5
-
-
-@dataclass
-class ValidationConfig:
-    """Model output numeric validation thresholds."""
-
-    output_diff: OutputDiffConfig = field(default_factory=OutputDiffConfig)
 
 
 @dataclass
@@ -435,25 +432,6 @@ class AnalysisConfig:
     histogram_bins: int = 32
     export: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
 
-
-@dataclass
-class XQTConfig:
-    """XQT recipe schema v1."""
-
-    config_version: int = XQT_CONFIG_VERSION
-    project: ProjectConfig = field(default_factory=ProjectConfig)
-    model: ModelConfig = field(default_factory=ModelConfig)
-    task: TaskConfig = field(default_factory=TaskConfig)
-    compression: CompressionConfig = field(default_factory=CompressionConfig)
-    operator_optimization: OperatorOptimizationConfig = field(
-        default_factory=OperatorOptimizationConfig
-    )
-    export: ExportConfig = field(default_factory=ExportConfig)
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
-    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
-    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
-
-
 __all__ = [
     "COMPRESSION_AXES",
     "CUTILE_PASS_CONFIG_KEYS",
@@ -464,31 +442,25 @@ __all__ = [
     "PRUNE_SCOPES",
     "TASK_TYPES",
     "TILELANG_PASS_CONFIG_KEYS",
-    "XQT_CONFIG_VERSION",
     "AnalysisConfig",
     "AnalysisExportConfig",
     "AnalysisRecommendationConfig",
     "AnalysisStructuredConfig",
     "BenchmarkConfig",
     "ComponentConfig",
-    "CompressionConfig",
     "CuTileKernelConfig",
     "CutlassKernelConfig",
     "CuteDSLKernelConfig",
     "DetectionPostprocessConfig",
-    "ExportConfig",
     "ExportTargetConfig",
     "ModelConfig",
     "OperatorOptimizationConfig",
     "OperatorOptimizationTargetConfig",
     "OperatorOptimizationValidationConfig",
     "OutputDiffConfig",
-    "ProjectConfig",
     "PruneConfig",
     "QuantComponentPolicyConfig",
     "QuantConfig",
     "TaskConfig",
     "TileLangKernelConfig",
-    "ValidationConfig",
-    "XQTConfig",
 ]

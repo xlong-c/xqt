@@ -1,108 +1,59 @@
-"""Minimal YAML runner for XQT recipes."""
+"""Context builders for XQT optimization workflows."""
 
 from __future__ import annotations
 
 import copy
-from dataclasses import is_dataclass
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from xqt.core.artifact import ArtifactManifest, file_sha256
-from xqt.core.config import ConfigInput, load_xqt_config, xqt_config_to_dict
-from xqt.core.registry import PASS_REGISTRY, XQTRegistry
-from xqt.core.schema import XQTConfig
+from xqt.core.config import ConfigInput
+from xqt.core.schema import (
+    AnalysisConfig,
+    OperatorOptimizationConfig,
+    OutputDiffConfig,
+    PruneConfig,
+    QuantConfig,
+    TaskConfig,
+)
 from xqt.core.types import XQTContext
+from xqt.workflows.config_compat import ensure_optimization_workflow_config
 
-from .pass_manager import SequentialPipeline
-
-
-DEFAULT_COMPRESSION_PASS_ORDER = (
-    "prune",
-    "quant",
-    "operator_optimization",
-)
-
-DEFAULT_PASS_ORDER = (
-    "load_model",
-    *DEFAULT_COMPRESSION_PASS_ORDER,
-    "write_reports",
-)
+if TYPE_CHECKING:
+    from xqt.workflows.optimization import OptimizationConfig
 
 
-def _ensure_builtin_passes_registered() -> None:
-    """Import built-in passes for their registration side effects."""
-
-    import xqt.pipeline.passes  # noqa: F401
-
-
-def _ensure_config(config: ConfigInput | XQTConfig) -> XQTConfig:
-    """Accept either a loaded config object or a config source."""
-
-    if is_dataclass(config) and isinstance(config, XQTConfig):
-        return config
-    return load_xqt_config(config)
-
-
-def enabled_pass_names(config: XQTConfig) -> list[str]:
-    """Return enabled compression pass names in the default execution order."""
-
-    compression = config.compression
-    enabled = {
-        "prune": compression.prune.enabled,
-        "quant": compression.quant.enabled,
-        "operator_optimization": config.operator_optimization.enabled,
-    }
-    return [name for name in DEFAULT_COMPRESSION_PASS_ORDER if enabled[name]]
-
-
-def default_pass_names(config: XQTConfig) -> list[str]:
-    """Return the default runnable pass list for a recipe."""
-
-    compression_passes = set(enabled_pass_names(config))
-    names: list[str] = []
-    for name in DEFAULT_PASS_ORDER:
-        if name in DEFAULT_COMPRESSION_PASS_ORDER and name not in compression_passes:
-            continue
-        names.append(name)
-    return names
-
-
-def create_manifest(config: XQTConfig) -> ArtifactManifest:
-    """Create a manifest initialized from the recipe config."""
-
-    source_checksum: Optional[str] = None
-    if config.model.checkpoint:
-        checkpoint_path = Path(config.model.checkpoint).expanduser()
-        if checkpoint_path.is_file():
-            source_checksum = file_sha256(checkpoint_path)
-
-    return ArtifactManifest(
-        project_name=config.project.name,
-        source_checkpoint=config.model.checkpoint,
-        source_checksum=source_checksum,
-        compression_axes=list(config.compression.axes),
-        task={
-            "type": config.task.type,
-            "class_names": list(config.task.class_names),
-            "detection_postprocess": {
-                "format": config.task.detection_postprocess.format,
-                "box_format": config.task.detection_postprocess.box_format,
-                "score_threshold": config.task.detection_postprocess.score_threshold,
-                "iou_threshold": config.task.detection_postprocess.iou_threshold,
-                "max_detections": config.task.detection_postprocess.max_detections,
-                "score_activation": config.task.detection_postprocess.score_activation,
-                "has_objectness": config.task.detection_postprocess.has_objectness,
-                "class_agnostic_nms": config.task.detection_postprocess.class_agnostic_nms,
-                "rescale_to_original": config.task.detection_postprocess.rescale_to_original,
-            },
-            "params": dict(config.task.params),
+def _task_to_manifest_dict(task: TaskConfig) -> dict[str, Any]:
+    return {
+        "type": task.type,
+        "class_names": list(task.class_names),
+        "detection_postprocess": {
+            "format": task.detection_postprocess.format,
+            "box_format": task.detection_postprocess.box_format,
+            "score_threshold": task.detection_postprocess.score_threshold,
+            "iou_threshold": task.detection_postprocess.iou_threshold,
+            "max_detections": task.detection_postprocess.max_detections,
+            "score_activation": task.detection_postprocess.score_activation,
+            "has_objectness": task.detection_postprocess.has_objectness,
+            "class_agnostic_nms": task.detection_postprocess.class_agnostic_nms,
+            "rescale_to_original": task.detection_postprocess.rescale_to_original,
         },
-        config_snapshot=xqt_config_to_dict(config),
-    )
+        "params": dict(task.params),
+    }
 
 
-def create_context(
-    config: ConfigInput | XQTConfig,
+def _checkpoint_checksum(checkpoint: str | None) -> Optional[str]:
+    if not checkpoint:
+        return None
+    checkpoint_path = Path(checkpoint).expanduser()
+    if not checkpoint_path.is_file():
+        return None
+    return file_sha256(checkpoint_path)
+
+
+def _create_context_from_optimization_config(
+    config: ConfigInput | OptimizationConfig,
     *,
     model: Any = None,
     example_inputs: Any = None,
@@ -111,43 +62,52 @@ def create_context(
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
 ) -> XQTContext:
-    """Build an XQTContext from a config path, mapping, or dataclass."""
+    loaded = ensure_optimization_workflow_config(
+        config,
+        caller="create_context()",
+    )
+    project = dict(loaded.project)
+    project_name = str(project.get("name", "xqt_optimization"))
+    artifact_dir = str(project.get("artifact_dir", "artifacts/xqt/optimization"))
+    device = loaded.device or loaded.model.device
+    compression_axes = list(loaded.compression_axes)
+    config_snapshot = asdict(loaded) if is_dataclass(loaded) else dict(loaded)
 
-    loaded_config = _ensure_config(config)
     return XQTContext(
-        config=loaded_config,
         model=model,
         reference_model=copy.deepcopy(model) if model is not None else None,
         example_inputs=example_inputs,
         calibration_inputs=calibration_inputs,
         artifacts=dict(artifacts or {}),
         metrics=dict(metrics or {}),
-        device=loaded_config.model.device,
-        manifest=manifest or create_manifest(loaded_config),
+        device=device,
+        artifact_dir=artifact_dir,
+        project_name=project_name,
+        task_type=loaded.task.type,
+        compression_axes=compression_axes,
+        model_target=loaded.model.target,
+        model_params=copy.deepcopy(loaded.model.params),
+        quant_config=QuantConfig(),
+        prune_config=PruneConfig(),
+        analysis_config=AnalysisConfig(),
+        benchmark_config=copy.deepcopy(loaded.benchmark),
+        operator_config=OperatorOptimizationConfig(),
+        output_diff_config=OutputDiffConfig(),
+        export_targets=[],
+        manifest=manifest
+        or ArtifactManifest(
+            project_name=project_name,
+            source_checkpoint=loaded.model.checkpoint,
+            source_checksum=_checkpoint_checksum(loaded.model.checkpoint),
+            compression_axes=compression_axes,
+            task=_task_to_manifest_dict(loaded.task),
+            config_snapshot=config_snapshot,
+        ),
     )
 
 
-def build_pipeline_from_config(
-    config: XQTConfig,
-    *,
-    pass_names: Optional[Sequence[str]] = None,
-    pass_registry: XQTRegistry = PASS_REGISTRY,
-    pass_params: Optional[Mapping[str, Mapping[str, Any]]] = None,
-) -> SequentialPipeline:
-    """Build a sequential pipeline from enabled pass names."""
-
-    _ensure_builtin_passes_registered()
-    names = list(pass_names) if pass_names is not None else default_pass_names(config)
-    params_by_name = dict(pass_params or {})
-    passes = [
-        pass_registry.build(name, **dict(params_by_name.get(name, {})))
-        for name in names
-    ]
-    return SequentialPipeline.from_iterable(passes)
-
-
-def run_xqt_recipe(
-    config: ConfigInput | XQTConfig,
+def create_context(
+    config: ConfigInput | OptimizationConfig,
     *,
     model: Any = None,
     example_inputs: Any = None,
@@ -155,15 +115,10 @@ def run_xqt_recipe(
     artifacts: Optional[Mapping[str, Any]] = None,
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
-    pass_names: Optional[Sequence[str]] = None,
-    pass_registry: XQTRegistry = PASS_REGISTRY,
-    pass_params: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    write_manifest: bool = True,
-    manifest_name: str = "manifest.json",
 ) -> XQTContext:
-    """Load an XQT recipe, run enabled passes, and optionally write manifest JSON."""
+    """Build an XQTContext from a stage workflow."""
 
-    context = create_context(
+    return _create_context_from_optimization_config(
         config,
         model=model,
         example_inputs=example_inputs,
@@ -172,29 +127,8 @@ def run_xqt_recipe(
         metrics=metrics,
         manifest=manifest,
     )
-    pipeline = build_pipeline_from_config(
-        context.config,
-        pass_names=pass_names,
-        pass_registry=pass_registry,
-        pass_params=pass_params,
-    )
-    output = pipeline.run(context)
-
-    if write_manifest and output.manifest is not None:
-        manifest_path = Path(output.config.project.artifact_dir) / manifest_name
-        output.manifest.write_json(manifest_path)
-        output.artifacts["manifest"] = manifest_path
-
-    return output
 
 
 __all__ = [
-    "DEFAULT_COMPRESSION_PASS_ORDER",
-    "DEFAULT_PASS_ORDER",
-    "build_pipeline_from_config",
     "create_context",
-    "create_manifest",
-    "default_pass_names",
-    "enabled_pass_names",
-    "run_xqt_recipe",
 ]

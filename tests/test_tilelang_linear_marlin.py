@@ -14,6 +14,7 @@ from xqt.operator_opt.kernels.tilelang.linear_marlin import (
     quantize_int4_weight,
     quantize_int8_weight,
 )
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(
@@ -22,8 +23,8 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang Marlin Linear tests",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang Marlin Linear tests",
 )
 
 

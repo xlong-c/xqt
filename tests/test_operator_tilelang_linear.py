@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
+from typing import Any
 
+from omegaconf import OmegaConf
 import pytest
 import torch
 from torch import nn
 
-from xqt.core.config import load_xqt_config
+from xqt.core.schema import BenchmarkConfig, OperatorOptimizationConfig
+from xqt.core.types import XQTContext
 from xqt.operator_opt import OperatorOptimizationTargetPlan
-from xqt.operator_opt.executor import (
-    _build_tilelang_candidate_model,
-    build_operator_optimization_plan,
-    execute_operator_optimization_plan,
-)
+from xqt.operator_opt.execute import execute_operator_optimization_plan
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.operator_opt.tilelang_wrappers import build_tilelang_candidate_model
+from xqt.operator_opt.plan import build_operator_optimization_plan
 from xqt.pipeline.passes import LoadModelPass
-from xqt.pipeline.runner import create_context
 
 
 requires_cuda = pytest.mark.skipif(
@@ -23,9 +25,40 @@ requires_cuda = pytest.mark.skipif(
 )
 
 requires_tilelang = pytest.mark.skipif(
-    importlib.util.find_spec("tilelang") is None,
-    reason="tilelang package is required for TileLang linear operator CUDA test",
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for TileLang linear operator CUDA test",
 )
+
+
+def _operator_config(config_dict: dict[str, Any]) -> OperatorOptimizationConfig:
+    merged = OmegaConf.merge(
+        OmegaConf.structured(OperatorOptimizationConfig),
+        config_dict["operator_optimization"],
+    )
+    return OmegaConf.to_object(merged)  # type: ignore[return-value]
+
+
+def _runtime_context(
+    config_dict: dict[str, Any],
+    *,
+    model: Any = None,
+    example_inputs: Any = None,
+) -> XQTContext:
+    model_config = config_dict["model"]
+    project = config_dict["project"]
+    return XQTContext(
+        model=model,
+        reference_model=copy.deepcopy(model) if model is not None else None,
+        example_inputs=example_inputs,
+        device=str(model_config["device"]),
+        artifact_dir=str(project["artifact_dir"]),
+        project_name=str(project["name"]),
+        task_type="classification",
+        model_target=str(model_config["target"]),
+        model_params=dict(model_config["params"]),
+        operator_config=_operator_config(config_dict),
+        benchmark_config=BenchmarkConfig(**config_dict["benchmark"]),
+    )
 
 
 def _tilelang_linear_operator_config(
@@ -76,14 +109,14 @@ def _tilelang_linear_operator_config(
 
 
 def test_tilelang_linear_operator_stage_uses_reference_fallback_on_cpu() -> None:
-    config = load_xqt_config(_tilelang_linear_operator_config("cpu"))
-    context = create_context(
-        config,
+    config_dict = _tilelang_linear_operator_config("cpu")
+    context = _runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(64, 64, dtype=torch.float32),
     )
     LoadModelPass().run(context)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(_operator_config(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -91,20 +124,19 @@ def test_tilelang_linear_operator_stage_uses_reference_fallback_on_cpu() -> None
     assert target["metadata"]["kernel_kind"] == "reference_fallback"
     assert target["metadata"]["operator_family"] == "linear"
     assert target["metadata"]["selected_fastpath"] == "eager_reference_fallback"
+    assert target["metadata"]["candidate_materialization"] == "target_only_benchmark_no_root_deepcopy"
     assert target["metadata"]["settings"]["preferred_patterns"] == ["linear"]
 
 
 def test_tilelang_linear_marlin_operator_pattern_uses_reference_fallback_on_cpu() -> None:
-    config = load_xqt_config(
-        _tilelang_linear_operator_config("cpu", patterns=["linear_marlin"])
-    )
-    context = create_context(
-        config,
+    config_dict = _tilelang_linear_operator_config("cpu", patterns=["linear_marlin"])
+    context = _runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(64, 64, dtype=torch.float32),
     )
     LoadModelPass().run(context)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(_operator_config(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -117,20 +149,18 @@ def test_tilelang_linear_marlin_operator_pattern_uses_reference_fallback_on_cpu(
 @requires_cuda
 @requires_tilelang
 def test_tilelang_linear_operator_stage_uses_cuda_kernel_entry() -> None:
-    config = load_xqt_config(
-        _tilelang_linear_operator_config(
-            "cuda",
-            linear_runtime="tilelang",
-        )
+    config_dict = _tilelang_linear_operator_config(
+        "cuda",
+        linear_runtime="tilelang",
     )
-    context = create_context(
-        config,
+    context = _runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(64, 64, device="cuda", dtype=torch.float16),
     )
     LoadModelPass().run(context)
     context.model = context.require_model().to(device="cuda", dtype=torch.float16)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(_operator_config(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -145,21 +175,19 @@ def test_tilelang_linear_operator_stage_uses_cuda_kernel_entry() -> None:
 @requires_cuda
 @requires_tilelang
 def test_tilelang_linear_operator_stage_uses_native_cuda_fastpath_on_ada() -> None:
-    config = load_xqt_config(
-        _tilelang_linear_operator_config(
-            "cuda",
-            linear_runtime="auto",
-            min_speedup=1.000001,
-        )
+    config_dict = _tilelang_linear_operator_config(
+        "cuda",
+        linear_runtime="auto",
+        min_speedup=1.000001,
     )
-    context = create_context(
-        config,
+    context = _runtime_context(
+        config_dict,
         model=None,
         example_inputs=torch.randn(64, 64, device="cuda", dtype=torch.float16),
     )
     LoadModelPass().run(context)
     context.model = context.require_model().to(device="cuda", dtype=torch.float16)
-    plan = build_operator_optimization_plan(config.operator_optimization)
+    plan = build_operator_optimization_plan(_operator_config(config_dict))
     execution = execute_operator_optimization_plan(context, plan)
 
     target = execution.reports[0].to_dict()
@@ -214,10 +242,10 @@ def test_tilelang_dequant_materialization_prefers_fp16_for_float32_only_buffers(
     )
 
     monkeypatch.setattr(
-        "xqt.operator_opt.executor._module_has_cuda_state",
+        "xqt.operator_opt.tilelang_wrappers._module_has_cuda_state",
         lambda module: True,
     )
-    candidate = _build_tilelang_candidate_model(_FakeNVFP4Linear(), target)
+    candidate = build_tilelang_candidate_model(_FakeNVFP4Linear(), target)
 
     assert type(candidate).__name__ == "_TileLangEagerDenseLinearModule"
     assert candidate.linear.weight.dtype == torch.float16

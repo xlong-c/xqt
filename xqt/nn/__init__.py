@@ -17,10 +17,6 @@ from xqt.operator_opt.kernels.triton.gemm import (
 )
 
 
-Linear = nn.Linear
-Conv2d = nn.Conv2d
-LayerNorm = nn.LayerNorm
-
 NormKind = Literal["layernorm", "rmsnorm"]
 ActivationKind = Literal[
     "gelu",
@@ -130,6 +126,74 @@ def _default_runtime_precision() -> dict[str, str]:
         "accum": "auto",
         "output": "auto",
     }
+
+
+class _SemanticModuleMixin:
+    """Runtime intent shared by XQT semantic module facades."""
+
+    def _init_runtime_intent(self, *, engine: str | None) -> None:
+        resolved = _resolve_engine_alias(
+            engine=engine,
+            context=type(self).__name__,
+        )
+        if resolved not in {"torch", "triton", "tilelang", "cutile", "cute_dsl"}:
+            raise ValueError(f"unsupported engine: {resolved}")
+        self.engine = resolved
+        self.runtime_precision = _default_runtime_precision()
+        self.runtime_fallback: dict[str, Any] | None = None
+        self.runtime_fallback_count = 0
+
+    def configure_runtime(
+        self,
+        *,
+        engine: str | None = None,
+        activation_dtype: str | None = None,
+        weight_dtype: str | None = None,
+        bias_dtype: str | None = None,
+        mma_dtype: str | None = None,
+        accum_dtype: str | None = None,
+        output_dtype: str | None = None,
+    ) -> None:
+        if engine is not None:
+            self._init_runtime_intent(engine=engine)
+        updates = {
+            "activation": activation_dtype,
+            "weight": weight_dtype,
+            "bias": bias_dtype,
+            "mma": mma_dtype,
+            "accum": accum_dtype,
+            "output": output_dtype,
+        }
+        for name, value in updates.items():
+            if value is not None:
+                self.runtime_precision[name] = _canonical_precision_name(value)
+
+    def runtime_config(self) -> dict[str, str]:
+        return {"engine": self.engine, **dict(self.runtime_precision)}
+
+
+class Linear(nn.Linear, _SemanticModuleMixin):
+    """XQT semantic Linear facade with explicit runtime intent."""
+
+    def __init__(self, *args: Any, engine: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_runtime_intent(engine=engine)
+
+
+class Conv2d(nn.Conv2d, _SemanticModuleMixin):
+    """XQT semantic Conv2d facade with explicit runtime intent."""
+
+    def __init__(self, *args: Any, engine: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_runtime_intent(engine=engine)
+
+
+class LayerNorm(nn.LayerNorm, _SemanticModuleMixin):
+    """XQT semantic LayerNorm facade with explicit runtime intent."""
+
+    def __init__(self, *args: Any, engine: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_runtime_intent(engine=engine)
 
 
 def _canonical_precision_key(name: str) -> str:
@@ -250,11 +314,13 @@ class FeedForward(nn.Module):
             else FeedForwardFusionConfig(enabled=bool(fusion))
         )
         self.runtime_precision = _default_runtime_precision()
+        self.runtime_fallback: dict[str, Any] | None = None
+        self.runtime_fallback_count = 0
 
         if norm is None:
             self.norm: nn.Module | None = None
         elif norm == "layernorm":
-            self.norm = nn.LayerNorm(self.dim, eps=eps)
+            self.norm = LayerNorm(self.dim, eps=eps, engine=self.engine)
         elif norm == "rmsnorm":
             self.norm = RMSNorm(self.dim, eps=eps)
         else:
@@ -266,15 +332,25 @@ class FeedForward(nn.Module):
             "geglu-approximate",
             "linear-silu",
         }:
-            self.proj_in = nn.Linear(self.dim, self.inner_dim, bias=bias)
+            self.proj_in = Linear(self.dim, self.inner_dim, bias=bias, engine=self.engine)
             self.proj_gate = None
         elif activation in {"geglu", "swiglu"}:
-            self.proj_in = nn.Linear(self.dim, self.inner_dim, bias=bias)
-            self.proj_gate = nn.Linear(self.dim, self.inner_dim, bias=bias)
+            self.proj_in = Linear(self.dim, self.inner_dim, bias=bias, engine=self.engine)
+            self.proj_gate = Linear(
+                self.dim,
+                self.inner_dim,
+                bias=bias,
+                engine=self.engine,
+            )
         else:
             raise ValueError(f"unsupported activation: {activation}")
 
-        self.proj_out = nn.Linear(self.inner_dim, self.dim_out, bias=bias)
+        self.proj_out = Linear(
+            self.inner_dim,
+            self.dim_out,
+            bias=bias,
+            engine=self.engine,
+        )
         self.dropout = nn.Dropout(self.dropout_p)
         self.final_dropout = (
             nn.Dropout(self.dropout_p) if self.final_dropout_enabled else None
@@ -325,6 +401,24 @@ class FeedForward(nn.Module):
                 if isinstance(fusion, FeedForwardFusionConfig)
                 else FeedForwardFusionConfig(enabled=bool(fusion))
             )
+        for name in self._projection_names():
+            projection = getattr(self, name)
+            if isinstance(projection, Linear):
+                policy = self._effective_projection_precision(name)
+                projection.configure_runtime(
+                    engine=self.engine,
+                    activation_dtype=policy["activation"],
+                    weight_dtype=policy["weight"],
+                    bias_dtype=policy["bias"],
+                    mma_dtype=policy["mma"],
+                    accum_dtype=policy["accum"],
+                    output_dtype=policy["output"],
+                )
+        if isinstance(self.norm, LayerNorm):
+            self.norm.configure_runtime(engine=self.engine, **{
+                f"{name}_dtype": value
+                for name, value in self.runtime_precision.items()
+            })
 
     def runtime_config(self) -> dict[str, Any]:
         return {
@@ -340,6 +434,23 @@ class FeedForward(nn.Module):
                 name: self._effective_projection_precision(name)
                 for name in self._projection_names()
             },
+            "fallback": (
+                None if self.runtime_fallback is None else dict(self.runtime_fallback)
+            ),
+            "fallback_count": self.runtime_fallback_count,
+        }
+
+    def _record_runtime_fallback(
+        self,
+        *,
+        stage: str,
+        reason: Exception,
+    ) -> None:
+        self.runtime_fallback_count += 1
+        self.runtime_fallback = {
+            "engine": self.engine,
+            "stage": stage,
+            "reason": str(reason),
         }
 
     def _apply_norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -496,8 +607,11 @@ class FeedForward(nn.Module):
                         f"unsupported Triton compute dtype for FFN: {compute_name}"
                     )
                 return out.reshape(*x.shape[:-1], int(out.shape[-1]))
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_runtime_fallback(
+                    stage="linear_epilogue",
+                    reason=exc,
+                )
         out = gemm_reference(
             flat_compute,
             weight,
@@ -518,8 +632,11 @@ class FeedForward(nn.Module):
         if self.engine == "triton":
             try:
                 return run_triton_kernel(pattern, gate, up)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_runtime_fallback(
+                    stage=f"{pattern}_gate",
+                    reason=exc,
+                )
         if pattern == "swiglu":
             return F.silu(gate) * up
         if pattern == "geglu":

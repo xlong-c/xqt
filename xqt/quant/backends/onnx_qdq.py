@@ -249,7 +249,7 @@ def execute_onnx_qdq_component(
     calibration_iterator = iter(calibration_inputs)
     batch = next(calibration_iterator)
     calibration_data = chain([batch], calibration_iterator)
-    artifact_dir = Path(context.config.project.artifact_dir)
+    artifact_dir = Path(context.artifact_dir)
     onnx_key = artifact_key("last_onnx", component.name)
     default_last_onnx = context.artifacts.get(onnx_key)
     if component.name == "model" and default_last_onnx is None:
@@ -326,6 +326,8 @@ def execute_onnx_qdq_component(
     )
     if export_metadata.get("pre_export_fusion") is not None:
         metadata["pre_export_fusion"] = dict(export_metadata["pre_export_fusion"])
+    nature = _resolve_nature(component.strategy, component.policy)
+    method_semantics = "onnxruntime_static_qdq_graph_quantization"
     report = QuantizationReport(
         component_name=component.name,
         backend="onnxruntime_qdq",
@@ -345,12 +347,16 @@ def execute_onnx_qdq_component(
         artifacts={"onnx": str(result.path)},
         calibration_samples=result.calibration_samples,
         calibration_summary=metadata.get("calibration_summary"),
-        nature=_resolve_nature(component.strategy, component.policy),
+        nature=nature,
+        algorithm_executable=True,
+        method_semantics=method_semantics,
         metadata={
             **metadata,
             "path": str(result.path),
             "checksum": result.checksum,
             "analysis_only": component.analysis_only,
+            "algorithm_executable": True,
+            "method_semantics": method_semantics,
             "selection_policy": selection_policy_metadata(component),
         },
     )

@@ -39,8 +39,8 @@ PyTorch model / checkpoint / exported artifact
 - 覆盖 PTQ / QDQ, 权重量化, 剪枝, 算子优化, 导出前适配和部署格式转换.
 - 能导出 ONNX, TensorRT, OpenVINO, torch.export, TorchScript, ExecuTorch, ncnn, MNN 等产物.
 - 记录配置, 源 checkpoint, 指标, 产物校验和执行阶段, 保证结果可复现.
-- 以 Python API 为主入口表达模型变换, 例如 `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.Linear`, `xqt.nn.Conv2d`, `xqt.nn.LayerNorm`, `xqt.nn.FeedForward` 和后续 `Attention` / `TransformerBlock` facade.
-- 以语义块替换作为推理优化入口: Python 层替换 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock`; engine 层再决定落成一个 kernel, 一组 kernel 或 megakernel.
+- 以 Python API 为主入口表达模型变换, 例如 `XQTOptimizationSession`, `xqt.convert(...)`, 当前真实的 `xqt.nn.Linear` / `Conv2d` / `LayerNorm` / `FeedForward` / `RMSNorm` facade, 以及后续计划中的 `Attention`, `TransformerBlock` semantic facade.
+- 以语义块替换作为推理优化目标: Python 层逐步表达 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock`; engine 层再决定落成一个 kernel, 一组 kernel 或 megakernel. `Linear` / `Conv2d` / `LayerNorm` 是保留 PyTorch module/state_dict 语义并记录 runtime intent 的 facade; `FeedForward` / `RMSNorm` 还承载专用 runtime 路径. 这不表示 `Attention` / `TransformerBlock` 或完整 megakernel 已实现.
 
 非目标:
 
@@ -50,9 +50,17 @@ PyTorch model / checkpoint / exported artifact
 - 不做 task-level validation 或 accuracy / mAP 评测闭环.
 - 不重新实现 TensorRT, OpenVINO, ONNX Runtime, ExecuTorch, ncnn, MNN 等后端.
 
-## Engine 术语
+## Backend / Engine 术语
 
-XQT 文档和代码中统一使用 `engine` 表达 XQT 自己的实现选择和 report 字段:
+XQT 文档和代码必须区分 `backend` 和 `engine`.
+
+`backend` 表示外部 quant/export/runtime 选择:
+
+- `quant.params.backend`, 如 `torchao`, `pytorch`, `onnxruntime_qdq`
+- `hardware.backends`
+- TensorRT / ONNX Runtime / OpenVINO / ExecuTorch / ncnn / MNN 等导出或部署 runtime
+
+`engine` 表示 XQT 自己的 kernel/lowering 实现选择和 report 字段:
 
 - `xqt.convert(..., engine=...)`
 - `operator_optimization.default_engine`
@@ -67,7 +75,8 @@ XQT 文档和代码中统一使用 `engine` 表达 XQT 自己的实现选择和 
 ```text
 Public API:
   xqt.convert(model, engine=..., policy=...)
-  xqt.nn.Linear / Conv2d / LayerNorm / FeedForward / Attention / TransformerBlock
+  xqt.nn.Linear / Conv2d / LayerNorm / FeedForward / RMSNorm
+  future: Attention / TransformerBlock
 
 XQT contract:
   precision, layout, packing, fusion, runtime state, target architecture
@@ -78,6 +87,8 @@ XQT engine:
 
 `engine="auto"` 这类策略未来应由 XQT capability 和 benchmark/report 决定. 文档不能把 metadata-only engine 写成已验证 executable path.
 
+TileLang CUDA kernel entry 会先检查 runtime compatibility. 已知 packed-tensor ABI 不兼容时, entry 显式报错; operator wrapper 仅在 `fallback_policy` 允许时记录 eager fallback. 因此 package 可导入或静态 capability 为 `executable` 不等于本机完成 kernel correctness 或性能验收.
+
 ## 配置方式
 
 `XQT` 只提供两种配置方式:
@@ -87,13 +98,18 @@ XQT engine:
 
 原则上不要新增 CLI 参数解析, JSON shaped workflow 或其他配置路径.
 
-YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compression_axes`, `hardware`, `benchmark`, `stages`, `device`. 其中 `stages` 是唯一的优化和导出路径描述; 旧式顶层 `compression`, `export`, `operator_optimization`, `analysis`, `validation` 和 `config_version` 只属于内部 `XQTConfig` 形态,不能出现在 `xqt/recipes`.
+YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compression_axes`, `hardware`, `benchmark`, `stages`, `device`. 其中 `stages` 是唯一的优化和导出路径描述; 旧式顶层 `compression`, `export`, `operator_optimization`, `analysis`, `validation` 和 `config_version` 属于已删除的旧 recipe 形态,不能出现在 `xqt/recipes`.
+
+当前 loader 已把 `stages[*].params` 解析为 typed `StageSpec`; workflow 主链也已通过 `run_quant_stage(...)`, `run_prune_stage(...)`, `run_operator_stage(...)`, `run_export_stage(...)`, `run_analyze_stage(...)`, `run_benchmark_stage(...)` 等入口直接消费 typed spec. public `create_context(...)` 已收窄为只接受 `OptimizationConfig`, workflow 映射和带 `stages` 的 workflow 路径, 并直接构造 runtime-only context; `preflight_optimization_config(...)` 是 workflow preflight 入口; `xdl_setup_to_xqt_context(...)` / `xdl_checkpoint_to_xqt_context(...)` 也已收窄为只接受 `OptimizationConfig` 或 workflow 输入.
+
+同时 `XQTContext` 已 workflow 去配置化: `device`, `artifact_dir`, `project_name`, `task_type`, `compression_axes`, `model_target`, `model_params`, `quant_config`, `prune_config`, `analysis_config`, `benchmark_config`, `operator_config`, `output_diff_config`, `export_targets` 已独立成 runtime 字段; `LoadModelPass`, `run_quant_stage(...)`, `run_prune_stage(...)`, `AnalyzePass`, `BenchmarkPass`, `OperatorOptimizationPass`, `ExportPass`, `fake_qdq` 和 workflow CLI 输出已直接走这些字段, 不再用旧 `context.config` 兜底当前 stage runtime 配置. 旧 `QuantPass` / `PrunePass`, `run_xqt_recipe(...)`, `build_pipeline_from_config(...)`, pass order helper, `preflight_xqt_config(...)`, `create_manifest(XQTConfig)`, `xqt_config_to_dict()`, `load_xqt_config()` 和 `XQTConfig` 已删除. 配置单轨化主路径已经完成, 后续重点转向拆大文件, contract 层和能力面收敛.
 
 ## 关键抽象
 
 | 概念 | 说明 |
 | --- | --- |
 | `OptimizationConfig` | 对外 stage workflow schema |
+| `StageSpec` | loader 后的 typed stage 参数 |
 | `XQTOptimizationSession` | 交互式 stage 编排入口 |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪 |
 | `MetricRecord` | 结构化指标记录 |
@@ -123,10 +139,10 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 当前 payload kind:
 
 - `torch_module`: baseline, prune, benchmark, analyze 等默认模型态 stage.
-- `quantized_model`: quant stage, 对应 `QuantizedModelPayload`.
+- `quantized_model`: quant stage, 对应 `xqt.contracts.QuantizedModelPayload`; `xqt.workflows.stage` 仅重导出该 artifact contract.
 - `runtime_plan`: operator stage, 对应 `RuntimePlanPayload`.
 - `export_bundle`: export / deploy stage, 对应 `ExportBundlePayload`.
-- `runtime_handle`: executable runtime handle 协议, 对应 `RuntimeHandlePayload`; 当前只定义协议, 不新增 producer.
+- `runtime_handle`: executable runtime handle, 对应 `RuntimeHandlePayload`. deploy stage 可创建 ONNX Runtime `InferenceSession`, 或反序列化同 stage 的非 dry-run TensorRT engine 并创建 execution context. runtime session creation 不替代数值或性能验收.
 
 当前 transform-side provider:
 
@@ -158,4 +174,6 @@ session 内比较使用 `XQTOptimizationSession.compare_stages()` 或 `compare_t
 
 - [../explanation/xqt-concepts.md](../explanation/xqt-concepts.md)
 - [../usage/xqt-workflows.md](../usage/xqt-workflows.md)
+- [xqt-config-unification-todo.md](xqt-config-unification-todo.md)
+- [xqt-realignment-guide.md](xqt-realignment-guide.md)
 - [../XQT.md](../XQT.md)
