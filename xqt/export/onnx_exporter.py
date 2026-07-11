@@ -19,6 +19,7 @@ from xqt.export.input_utils import (
     default_input_names,
     split_example_input,
 )
+from xqt.export.lowering import apply_pre_export_lowering
 
 
 @dataclass
@@ -33,6 +34,40 @@ class ONNXExportResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _legacy_dynamic_axes(
+    dynamic_shapes: Mapping[str, Any] | None,
+) -> dict[str, dict[int, str]] | None:
+    """Translate the shared dynamic-shape mapping for the legacy ONNX exporter."""
+
+    if not dynamic_shapes:
+        return None
+    dynamic_axes: dict[str, dict[int, str]] = {}
+    for input_name, dimensions in dynamic_shapes.items():
+        if not isinstance(dimensions, Mapping):
+            raise XQTBackendError(
+                "legacy ONNX dynamic_shapes entries must map axis indices to names"
+            )
+        axes: dict[int, str] = {}
+        for axis, name in dimensions.items():
+            try:
+                normalized_axis = int(axis)
+            except (TypeError, ValueError) as exc:
+                raise XQTBackendError(
+                    f"legacy ONNX dynamic shape axis for {input_name!r} must be an integer"
+                ) from exc
+            if normalized_axis < 0:
+                raise XQTBackendError(
+                    f"legacy ONNX dynamic shape axis for {input_name!r} must be non-negative"
+                )
+            axes[normalized_axis] = str(name)
+        if not axes:
+            raise XQTBackendError(
+                f"legacy ONNX dynamic shape entry for {input_name!r} cannot be empty"
+            )
+        dynamic_axes[str(input_name)] = axes
+    return dynamic_axes
+
+
 def export_onnx(
     model: nn.Module,
     example_input: Any,
@@ -45,6 +80,7 @@ def export_onnx(
     dynamo: bool = True,
     validate: bool = True,
     pre_export_fusion: Optional[Mapping[str, Any]] = None,
+    pre_export_lowering: Optional[Mapping[str, Any]] = None,
 ) -> ONNXExportResult:
     """Export a PyTorch module to ONNX using the modern dynamo exporter by default."""
 
@@ -54,7 +90,11 @@ def export_onnx(
     example_spec = split_example_input(example_input)
     resolved_input_names = list(input_names or default_input_names(example_input))
     fusion_result = apply_pre_export_fusion(model, pre_export_fusion)
-    export_model = fusion_result.model
+    lowering_result = apply_pre_export_lowering(
+        fusion_result.model,
+        pre_export_lowering,
+    )
+    export_model = lowering_result.model
     export_model.eval()
 
     kwargs: dict[str, Any] = {
@@ -65,7 +105,10 @@ def export_onnx(
     if opset is not None:
         kwargs["opset_version"] = opset
     if dynamic_shapes:
-        kwargs["dynamic_shapes"] = dict(dynamic_shapes)
+        if dynamo:
+            kwargs["dynamic_shapes"] = dict(dynamic_shapes)
+        else:
+            kwargs["dynamic_axes"] = _legacy_dynamic_axes(dynamic_shapes)
     if example_spec.kwargs:
         kwargs["kwargs"] = dict(example_spec.kwargs)
 
@@ -87,9 +130,11 @@ def export_onnx(
         checked=checked,
         metadata={
             "dynamo": dynamo,
+            "dynamic_shapes": dict(dynamic_shapes or {}),
             "input_names": resolved_input_names,
             "output_names": list(output_names or ["output"]),
             "pre_export_fusion": dict(fusion_result.metadata),
+            "pre_export_lowering": dict(lowering_result.metadata),
         },
     )
 

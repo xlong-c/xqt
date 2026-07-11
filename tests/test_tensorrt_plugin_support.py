@@ -27,7 +27,9 @@ def test_build_trtexec_command_includes_plugin_libraries() -> None:
     assert "--setPluginsToSerialize=plugins/libcustom_b.so" in command
 
 
-def test_validate_tensorrt_plugin_libraries_reports_missing_file(tmp_path: Path) -> None:
+def test_validate_tensorrt_plugin_libraries_reports_missing_file(
+    tmp_path: Path,
+) -> None:
     missing = tmp_path / "missing_plugin.so"
 
     result = validate_tensorrt_plugin_libraries([missing])
@@ -58,7 +60,9 @@ def _build_dummy_shared_library(tmp_path: Path) -> Path:
     return library
 
 
-def test_validate_tensorrt_plugin_libraries_loads_real_shared_object(tmp_path: Path) -> None:
+def test_validate_tensorrt_plugin_libraries_loads_real_shared_object(
+    tmp_path: Path,
+) -> None:
     plugin_path = _build_dummy_shared_library(tmp_path)
 
     result = validate_tensorrt_plugin_libraries(
@@ -72,7 +76,9 @@ def test_validate_tensorrt_plugin_libraries_loads_real_shared_object(tmp_path: P
     assert result.plugin_libraries[0].loadable is True
 
 
-def test_validate_tensorrt_plugin_libraries_can_only_check_presence(tmp_path: Path) -> None:
+def test_validate_tensorrt_plugin_libraries_can_only_check_presence(
+    tmp_path: Path,
+) -> None:
     plugin_path = tmp_path / "libcustom_plugin.so"
     plugin_path.write_bytes(b"")
 
@@ -104,7 +110,7 @@ def test_preflight_reports_tensorrt_plugin_library_presence(tmp_path: Path) -> N
                         {
                             "format": "tensorrt",
                             "output_path": str(tmp_path / "model.engine"),
-                            "params": {
+                            "tensorrt": {
                                 "dry_run": True,
                                 "plugin_libraries": [str(plugin_path)],
                             },
@@ -123,7 +129,9 @@ def test_preflight_reports_tensorrt_plugin_library_presence(tmp_path: Path) -> N
     assert checks[check_name].passed is True
 
 
-def test_preflight_can_validate_tensorrt_plugin_library_loadability(tmp_path: Path) -> None:
+def test_preflight_can_validate_tensorrt_plugin_library_loadability(
+    tmp_path: Path,
+) -> None:
     plugin_path = _build_dummy_shared_library(tmp_path)
     config = {
         "project": {
@@ -142,7 +150,7 @@ def test_preflight_can_validate_tensorrt_plugin_library_loadability(tmp_path: Pa
                         {
                             "format": "tensorrt",
                             "output_path": str(tmp_path / "model.engine"),
-                            "params": {
+                            "tensorrt": {
                                 "dry_run": True,
                                 "plugin_libraries": [str(plugin_path)],
                                 "validate_plugin_libraries_loadable": True,

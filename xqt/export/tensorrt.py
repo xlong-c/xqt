@@ -443,6 +443,14 @@ class TensorRTRuntimeSession:
     context: Any
     engine_inspector: dict[str, Any]
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "engine_path": str(self.engine_path),
+            "device": self.device,
+            "handle_materialized": self.engine is not None and self.context is not None,
+            "engine_inspector": dict(self.engine_inspector),
+        }
+
 
 @dataclass
 class TensorRTEngineInspectorSummary:

@@ -6,6 +6,7 @@ from .capability import (
     deployment_capability_matrix,
 )
 from .fusion import PreExportFusionResult, apply_pre_export_fusion
+from .lowering import PreExportLoweringResult, apply_pre_export_lowering
 from .mobile import (
     CommandExportResult,
     ExecuTorchExportResult,
@@ -72,6 +73,7 @@ __all__ = [
     "ONNXOptimizationResult",
     "OpenVINOExportResult",
     "PreExportFusionResult",
+    "PreExportLoweringResult",
     "TensorRTBuildResult",
     "TensorRTEngineInspectorSummary",
     "TensorRTPerformanceCheck",
@@ -94,6 +96,7 @@ __all__ = [
     "execute_tensorrt_engine",
     "execute_tensorrt_session",
     "apply_pre_export_fusion",
+    "apply_pre_export_lowering",
     "compare_openvino_outputs",
     "compare_onnxruntime_outputs",
     "create_onnxruntime_session",

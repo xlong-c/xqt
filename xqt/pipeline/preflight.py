@@ -24,10 +24,15 @@ from xqt.operator_opt.cuda_extension import describe_custom_cuda_extension_capab
 from xqt.prune import describe_prune_runtime_capability
 from xqt.quant.capability import describe_quant_backend_capability
 from xqt.export.tensorrt import validate_tensorrt_plugin_libraries
-from xqt.workflows.optimization import OptimizationConfig, OptimizationStageConfig, load_optimization_config
+from xqt.workflows.optimization import (
+    OptimizationConfig,
+    OptimizationStageConfig,
+    load_optimization_config,
+)
 from xqt.workflows.stage_specs import (
     AnalyzeStageSpec,
     BenchmarkStageSpec,
+    DeployRuntimeHandleSpec,
     DeployStageSpec,
     ExportStageSpec,
     OperatorStageSpec,
@@ -461,8 +466,7 @@ def _check_operator_targets(
         torch_version=torch.__version__,
     )
     target_engines = {
-        getattr(target, "engine", None) or default_engine
-        for target in operator_targets
+        getattr(target, "engine", None) or default_engine for target in operator_targets
     }
     if target_engines & {
         "triton",
@@ -763,21 +767,20 @@ def _check_export_targets(
             report.add(target_prefix, True, "built-in PyTorch export target")
         elif target_format == "onnx":
             _check_dependency(report, "onnx")
-            if bool(target_params.get("runtime_diff", True)):
-                _check_dependency(report, "onnxruntime")
-            onnx_optimization = target_params.get(
-                "onnx_optimization",
-                target_params.get("optimize", False),
-            )
-            if onnx_optimization is True or (
-                isinstance(onnx_optimization, Mapping)
-                and bool(onnx_optimization.get("enabled", True))
-            ):
-                backend = (
-                    str(onnx_optimization.get("backend", "onnxruntime"))
-                    if isinstance(onnx_optimization, Mapping)
-                    else "onnxruntime"
+            onnx_config = getattr(target, "onnx", None)
+            if onnx_config is None:
+                report.add(
+                    f"{target_prefix}.onnx",
+                    False,
+                    "ONNX export target requires typed onnx configuration",
+                    level="error",
                 )
+                continue
+            if onnx_config.runtime_diff:
+                _check_dependency(report, "onnxruntime")
+            optimization = onnx_config.optimization
+            if optimization.enabled:
+                backend = optimization.backend
                 if backend == "onnxruntime":
                     _check_dependency(report, "onnxruntime")
                 else:
@@ -788,94 +791,135 @@ def _check_export_targets(
                         level="error",
                     )
         elif target_format == "tensorrt":
+            tensorrt = target.tensorrt
             _check_optional_executable(
                 report,
-                str(target_params.get("trtexec_path", "trtexec")),
+                tensorrt.trtexec_path,
                 f"{target_prefix}.trtexec",
-                dry_run=bool(target_params.get("dry_run", False)),
+                dry_run=tensorrt.dry_run,
             )
-            plugin_libraries = target_params.get("plugin_libraries")
-            if plugin_libraries is not None:
-                if not isinstance(plugin_libraries, list):
-                    report.add(
-                        f"{target_prefix}.plugin_libraries",
-                        False,
-                        "TensorRT plugin_libraries must be a list of shared library paths",
-                        level="error",
-                    )
-                else:
-                    for plugin_index, plugin_path in enumerate(plugin_libraries):
-                        path = Path(str(plugin_path))
-                        plugin_validation = validate_tensorrt_plugin_libraries(
-                            [path],
-                            validate_loadability=bool(
-                                target_params.get(
-                                    "validate_plugin_libraries_loadable",
-                                    False,
-                                )
-                            ),
-                        )
-                        plugin_check = plugin_validation.plugin_libraries[0]
+            for plugin_index, plugin_path in enumerate(tensorrt.plugin_libraries):
+                path = Path(plugin_path)
+                plugin_validation = validate_tensorrt_plugin_libraries(
+                    [path],
+                    validate_loadability=tensorrt.validate_plugin_libraries_loadable,
+                )
+                plugin_check = plugin_validation.plugin_libraries[0]
+                report.add(
+                    f"{target_prefix}.plugin_libraries.{plugin_index}",
+                    plugin_check.exists,
+                    "TensorRT plugin library found"
+                    if plugin_check.exists
+                    else "TensorRT plugin library missing",
+                    level="info" if plugin_check.exists else "warning",
+                    path=plugin_check.path,
+                    validation=plugin_check.to_dict(),
+                )
+                if tensorrt.validate_plugin_libraries_loadable:
+                    if plugin_check.loadable is True:
                         report.add(
-                            f"{target_prefix}.plugin_libraries.{plugin_index}",
-                            plugin_check.exists,
-                            "TensorRT plugin library found"
-                            if plugin_check.exists
-                            else "TensorRT plugin library missing",
-                            level="info" if plugin_check.exists else "warning",
+                            f"{target_prefix}.plugin_libraries.{plugin_index}.loadable",
+                            True,
+                            "TensorRT plugin library loaded with ctypes RTLD_GLOBAL",
+                            level="info",
+                            path=plugin_check.path,
+                            loaded_plugin_libraries=plugin_check.loaded_plugin_libraries,
+                            validation=plugin_check.to_dict(),
+                        )
+                    else:
+                        report.add(
+                            f"{target_prefix}.plugin_libraries.{plugin_index}.loadable",
+                            False,
+                            f"TensorRT plugin library failed to load: {plugin_check.error}",
+                            level="error",
                             path=plugin_check.path,
                             validation=plugin_check.to_dict(),
                         )
-                        if bool(target_params.get("validate_plugin_libraries_loadable", False)):
-                            if plugin_check.loadable is True:
-                                report.add(
-                                    f"{target_prefix}.plugin_libraries.{plugin_index}.loadable",
-                                    True,
-                                    "TensorRT plugin library loaded with ctypes RTLD_GLOBAL",
-                                    level="info",
-                                    path=plugin_check.path,
-                                    loaded_plugin_libraries=plugin_check.loaded_plugin_libraries,
-                                    validation=plugin_check.to_dict(),
-                                )
-                            else:
-                                report.add(
-                                    f"{target_prefix}.plugin_libraries.{plugin_index}.loadable",
-                                    False,
-                                    f"TensorRT plugin library failed to load: {plugin_check.error}",
-                                    level="error",
-                                    path=plugin_check.path,
-                                    validation=plugin_check.to_dict(),
-                                )
         elif target_format == "openvino":
+            openvino = target.openvino
             _check_optional_dependency(
                 report,
                 "openvino",
                 "dependency.openvino",
-                dry_run=bool(target_params.get("dry_run", False)),
+                dry_run=openvino.dry_run,
             )
         elif target_format == "executorch":
-            _check_dependency(report, "executorch")
+            _check_optional_dependency(
+                report,
+                "executorch",
+                "dependency.executorch",
+                dry_run=target.executorch.dry_run,
+            )
         elif target_format == "ncnn":
-            if target_params.get("converter", "onnx2ncnn") == "pnnx":
-                _check_executable(
+            ncnn = target.ncnn
+            if ncnn.converter == "pnnx":
+                _check_optional_executable(
                     report,
-                    str(target_params.get("pnnx_path", "pnnx")),
+                    ncnn.pnnx_path,
                     f"{target_prefix}.pnnx",
+                    dry_run=ncnn.dry_run,
                 )
             else:
-                _check_executable(
+                _check_optional_executable(
                     report,
-                    str(target_params.get("onnx2ncnn_path", "onnx2ncnn")),
+                    ncnn.onnx2ncnn_path,
                     f"{target_prefix}.onnx2ncnn",
+                    dry_run=ncnn.dry_run,
                 )
         elif target_format == "mnn":
-            _check_executable(
+            mnn = target.mnn
+            _check_optional_executable(
                 report,
-                str(target_params.get("converter_path", "MNNConvert")),
+                mnn.converter_path,
                 f"{target_prefix}.MNNConvert",
+                dry_run=mnn.dry_run,
             )
         else:
             report.add(target_prefix, False, "unsupported export target")
+
+
+def _check_deploy_runtime_handle(
+    report: PreflightReport,
+    handle: DeployRuntimeHandleSpec | None,
+    *,
+    prefix: str,
+) -> None:
+    if handle is None or not handle.materialize:
+        return
+    runtime = handle.runtime
+    supported = runtime in {"onnxruntime", "tensorrt"}
+    report.add(
+        f"{prefix}.runtime_handle.runtime",
+        supported,
+        "runtime handle is configured"
+        if supported
+        else "unsupported materialized runtime handle",
+        level="info" if supported else "error",
+        runtime=runtime,
+        handle_kind=handle.handle_kind,
+    )
+    if runtime == "onnxruntime":
+        _check_dependency(report, "onnxruntime")
+        return
+    if runtime != "tensorrt":
+        return
+    _check_dependency(report, "tensorrt")
+    for index, plugin_path in enumerate(handle.tensorrt.plugin_libraries):
+        validation = validate_tensorrt_plugin_libraries(
+            [plugin_path],
+            validate_loadability=True,
+        )
+        check = validation.plugin_libraries[0]
+        report.add(
+            f"{prefix}.runtime_handle.tensorrt.plugin_libraries.{index}",
+            check.loadable is True,
+            "TensorRT runtime plugin library loaded"
+            if check.loadable is True
+            else f"TensorRT runtime plugin library failed to load: {check.error}",
+            level="info" if check.loadable is True else "error",
+            path=check.path,
+            validation=check.to_dict(),
+        )
 
 
 def preflight_optimization_config(
@@ -949,12 +993,18 @@ def preflight_optimization_config(
                 prefix=prefix,
             )
         elif isinstance(spec, (ExportStageSpec, DeployStageSpec)):
-            _check_export_targets(report, list(spec.targets), prefix=f"{prefix}.targets")
+            _check_export_targets(
+                report, list(spec.targets), prefix=f"{prefix}.targets"
+            )
+            if isinstance(spec, DeployStageSpec):
+                _check_deploy_runtime_handle(report, spec.runtime_handle, prefix=prefix)
         elif isinstance(spec, AnalyzeStageSpec):
             report.add(
                 f"{prefix}.analysis.metrics",
                 bool(spec.metrics),
-                "analysis metrics configured" if spec.metrics else "analysis metrics missing",
+                "analysis metrics configured"
+                if spec.metrics
+                else "analysis metrics missing",
                 level="info" if spec.metrics else "error",
                 metrics=list(spec.metrics),
             )
