@@ -53,6 +53,7 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
     engine: str
     target_count: int
     targets: list[dict[str, Any]] = field(default_factory=list)
+    module_contract: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -63,6 +64,7 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
         target_count: int,
         targets: list[dict[str, Any]] | None = None,
         artifacts: dict[str, str] | None = None,
+        module_contract: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             artifact_kind="runtime_plan",
@@ -73,14 +75,58 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
         self.engine = engine
         self.target_count = target_count
         self.targets = [dict(target) for target in (targets or [])]
+        self.module_contract = (
+            dict(module_contract) if module_contract is not None else None
+        )
+
+    @classmethod
+    def from_stage_metrics(
+        cls,
+        *,
+        stage_name: str,
+        source_model_stage: str,
+        metrics: Mapping[str, Any],
+        artifacts: Mapping[str, str] | None = None,
+        module_contract: Mapping[str, Any] | None = None,
+    ) -> "RuntimePlanPayload":
+        targets = metrics.get("targets", [])
+        if not isinstance(targets, list):
+            targets = []
+        target_dicts = [dict(item) for item in targets if isinstance(item, Mapping)]
+        engines = [
+            str(target.get("engine"))
+            for target in target_dicts
+            if target.get("engine")
+        ]
+        resolved_contract = (
+            dict(module_contract)
+            if module_contract is not None
+            else (
+                dict(raw)
+                if isinstance((raw := metrics.get("module_contract")), Mapping)
+                else None
+            )
+        )
+        return cls(
+            stage_name=stage_name,
+            source_model_stage=source_model_stage,
+            engine=engines[0] if engines else "unknown",
+            target_count=len(target_dicts),
+            targets=target_dicts,
+            artifacts={str(key): str(value) for key, value in dict(artifacts or {}).items()},
+            module_contract=resolved_contract,
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             **self.base_dict(),
             "engine": self.engine,
             "target_count": self.target_count,
             "targets": [dict(target) for target in self.targets],
         }
+        if self.module_contract is not None:
+            payload["module_contract"] = _json_safe_contract_value(self.module_contract)
+        return payload
 
 
 @dataclass(kw_only=True)
@@ -120,6 +166,32 @@ class RuntimeHandlePayload(RuntimeArtifactPayload):
         self.handle = handle
         self.metadata = dict(metadata or {})
 
+    @classmethod
+    def from_stage_metrics(
+        cls,
+        *,
+        stage_name: str,
+        source_model_stage: str,
+        runtime_handle: Mapping[str, Any],
+    ) -> "RuntimeHandlePayload":
+        targets = runtime_handle.get("targets", [])
+        if not isinstance(targets, list):
+            targets = []
+        return cls(
+            stage_name=stage_name,
+            source_model_stage=source_model_stage,
+            runtime=str(runtime_handle["runtime"]),
+            handle_kind=str(runtime_handle["handle_kind"]),
+            target_count=int(runtime_handle.get("target_count", 0)),
+            targets=[dict(item) for item in targets if isinstance(item, Mapping)],
+            handle=runtime_handle.get("handle"),
+            artifacts={
+                str(key): str(value)
+                for key, value in dict(runtime_handle.get("artifacts", {})).items()
+            },
+            metadata=dict(runtime_handle.get("metadata", {})),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             **self.base_dict(),
@@ -139,6 +211,7 @@ class ExportBundlePayload(RuntimeArtifactPayload):
     format: str
     target_count: int
     targets: list[dict[str, Any]] = field(default_factory=list)
+    module_contract: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -149,6 +222,7 @@ class ExportBundlePayload(RuntimeArtifactPayload):
         target_count: int,
         targets: list[dict[str, Any]] | None = None,
         artifacts: dict[str, str] | None = None,
+        module_contract: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             artifact_kind="export_bundle",
@@ -159,14 +233,56 @@ class ExportBundlePayload(RuntimeArtifactPayload):
         self.format = format
         self.target_count = target_count
         self.targets = [dict(target) for target in (targets or [])]
+        self.module_contract = (
+            dict(module_contract) if module_contract is not None else None
+        )
+
+    @classmethod
+    def from_stage_metrics(
+        cls,
+        *,
+        stage_name: str,
+        source_model_stage: str,
+        metrics: Mapping[str, Any],
+        artifacts: Mapping[str, str] | None = None,
+        module_contract: Mapping[str, Any] | None = None,
+    ) -> "ExportBundlePayload":
+        targets = metrics.get("targets", [])
+        if not isinstance(targets, list):
+            targets = []
+        target_dicts = [dict(item) for item in targets if isinstance(item, Mapping)]
+        first_format = "unknown"
+        if target_dicts:
+            first_format = str(target_dicts[0].get("format", "unknown"))
+        resolved_contract = (
+            dict(module_contract)
+            if module_contract is not None
+            else (
+                dict(raw)
+                if isinstance((raw := metrics.get("module_contract")), Mapping)
+                else None
+            )
+        )
+        return cls(
+            stage_name=stage_name,
+            source_model_stage=source_model_stage,
+            format=first_format,
+            target_count=len(target_dicts),
+            targets=target_dicts,
+            artifacts={str(key): str(value) for key, value in dict(artifacts or {}).items()},
+            module_contract=resolved_contract,
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             **self.base_dict(),
             "format": self.format,
             "target_count": self.target_count,
             "targets": [dict(target) for target in self.targets],
         }
+        if self.module_contract is not None:
+            payload["module_contract"] = _json_safe_contract_value(self.module_contract)
+        return payload
 
 
 __all__ = [

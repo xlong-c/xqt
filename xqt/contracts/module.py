@@ -3,12 +3,92 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
-from xqt.operator_opt.backends.gemm_precision import MatmulPrecisionSpec
+from xqt.core.errors import XQTBackendError
 
 
-OperatorKind = Literal["linear", "conv2d", "layernorm", "feedforward"]
+OperatorKind = Literal[
+    "linear",
+    "conv2d",
+    "layernorm",
+    "feedforward",
+    "attention",
+    "transformer_block",
+]
+
+_PRECISION_ALIASES = {
+    "float16": "fp16",
+    "half": "fp16",
+    "bfloat16": "bf16",
+    "float32": "fp32",
+    "float": "fp32",
+    "fp4e2m1": "fp4",
+    "nv_fp4": "nvfp4",
+    "nv-fp4": "nvfp4",
+}
+_SUPPORTED_PRECISION_NAMES = {
+    "fp16",
+    "bf16",
+    "fp32",
+    "int8",
+    "fp8",
+    "int4",
+    "fp4",
+    "nvfp4",
+    "mxfp8",
+    "mxfp6",
+    "mxfp4",
+}
+_PRECISION_ROLE_ALIASES = {
+    "a": "activation",
+    "lhs": "activation",
+    "input": "activation",
+    "activation": "activation",
+    "activation_dtype": "activation",
+    "b": "weight",
+    "rhs": "weight",
+    "weight": "weight",
+    "weight_dtype": "weight",
+    "c": "bias",
+    "bias": "bias",
+    "bias_dtype": "bias",
+    "addend": "bias",
+    "addend_dtype": "bias",
+    "mma": "mma",
+    "mma_dtype": "mma",
+    "acc": "accum",
+    "accum": "accum",
+    "accum_dtype": "accum",
+    "accumulator": "accum",
+    "accumulator_dtype": "accum",
+    "o": "output",
+    "out": "output",
+    "output": "output",
+    "output_dtype": "output",
+}
+
+
+def _canonical_precision_name(name: str) -> str:
+    normalized = str(name).strip().lower()
+    canonical = _PRECISION_ALIASES.get(normalized, normalized)
+    if canonical not in _SUPPORTED_PRECISION_NAMES:
+        choices = ", ".join(sorted(_SUPPORTED_PRECISION_NAMES))
+        raise XQTBackendError(
+            f"Unsupported precision name: {name}. Allowed: {choices}"
+        )
+    return canonical
+
+
+def _canonical_precision_role(name: str) -> str:
+    normalized = str(name).strip().lower()
+    try:
+        return _PRECISION_ROLE_ALIASES[normalized]
+    except KeyError as exc:
+        choices = ", ".join(sorted(_PRECISION_ROLE_ALIASES))
+        raise XQTBackendError(
+            f"Unsupported precision field: {name}. Allowed: {choices}"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -49,7 +129,7 @@ class PrecisionPolicy:
     ) -> "PrecisionPolicy":
         """Build a policy from ``A x B + C = O`` matrix role names."""
 
-        resolved = MatmulPrecisionSpec.from_roles(
+        return cls.from_roles(
             A=A,
             B=B,
             C=C,
@@ -61,14 +141,77 @@ class PrecisionPolicy:
             accum=accum,
             output=output,
         )
-        return cls(
-            activation=resolved.activation,
-            weight=resolved.weight,
-            bias=resolved.bias,
-            mma=resolved.mma,
-            accum=resolved.accum,
-            output=resolved.output,
+
+    @classmethod
+    def from_roles(
+        cls,
+        *,
+        A: str | None = None,
+        B: str | None = None,
+        C: str | None = None,
+        O: str | None = None,
+        activation: str | None = None,
+        weight: str | None = None,
+        bias: str | None = None,
+        mma: str = "fp16",
+        accum: str = "fp32",
+        output: str | None = None,
+    ) -> "PrecisionPolicy":
+        """Build one shared policy from GEMM role names."""
+
+        return cls.from_mapping(
+            {
+                "A": A
+                if A is not None
+                else activation
+                if activation is not None
+                else "fp16",
+                "B": B if B is not None else weight if weight is not None else "fp16",
+                "C": C if C is not None else bias if bias is not None else "fp16",
+                "mma": mma,
+                "accum": accum,
+                "O": O if O is not None else output if output is not None else "fp16",
+            }
         )
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> "PrecisionPolicy":
+        """Normalize semantic or ``A x B + C = O`` precision fields."""
+
+        payload = cls.normalize_fields(values)
+        activation = payload.get("activation", "fp16")
+        return cls(
+            activation=activation,
+            weight=payload.get("weight", activation),
+            bias=payload.get("bias", payload.get("output", activation)),
+            mma=payload.get("mma", activation),
+            accum=payload.get("accum", "fp32"),
+            output=payload.get("output", activation),
+        )
+
+    @staticmethod
+    def normalize_fields(values: Mapping[str, str]) -> dict[str, str]:
+        """Normalize precision aliases without adding omitted role defaults."""
+
+        return {
+            _canonical_precision_role(str(key)): _canonical_precision_name(str(value))
+            for key, value in values.items()
+        }
+
+    @staticmethod
+    def canonical_name(name: str, *, allow_auto: bool = False) -> str:
+        """Normalize one precision name for a contract or runtime intent."""
+
+        normalized = str(name).strip().lower()
+        if allow_auto and normalized == "auto":
+            return normalized
+        return _canonical_precision_name(normalized)
+
+    @staticmethod
+    def canonical_field(name: str) -> str:
+        """Normalize one semantic or GEMM role field name."""
+
+        return _canonical_precision_role(name)
 
 
 @dataclass(frozen=True)

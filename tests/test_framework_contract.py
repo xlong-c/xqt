@@ -207,7 +207,9 @@ def test_create_context_accepts_optimization_config(tmp_path: Path) -> None:
     assert context.device == "cuda:3"
     assert context.artifact_dir == str(tmp_path / "artifacts")
     assert context.manifest is not None
-    assert context.manifest.config_snapshot["project"]["name"] == "create_context_workflow"
+    assert (
+        context.manifest.config_snapshot["project"]["name"] == "create_context_workflow"
+    )
 
 
 def test_create_context_accepts_workflow_mapping(tmp_path: Path) -> None:
@@ -415,7 +417,9 @@ def test_run_quant_stage_does_not_require_prepopulated_runtime_quant_config(
     )
     context.quant_config = None
 
-    monkeypatch.setattr(passes_module, "build_quantization_plan", lambda resolved_quant: object())
+    monkeypatch.setattr(
+        passes_module, "build_quantization_plan", lambda resolved_quant: object()
+    )
     monkeypatch.setattr(
         passes_module,
         "execute_quantization_plan",
@@ -425,7 +429,9 @@ def test_run_quant_stage_does_not_require_prepopulated_runtime_quant_config(
             reports=[],
         ),
     )
-    monkeypatch.setattr(passes_module, "summarize_quantization_reports", lambda reports: {})
+    monkeypatch.setattr(
+        passes_module, "summarize_quantization_reports", lambda reports: {}
+    )
     monkeypatch.setattr(
         passes_module,
         "_build_quant_layer_analysis_summary",
@@ -581,7 +587,9 @@ def test_benchmark_pass_prefers_context_runtime_benchmark_config(
     monkeypatch.setattr(
         passes_module,
         "benchmark_memory",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected memory benchmark")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unexpected memory benchmark")
+        ),
     )
 
     output = BenchmarkPass().run(context)
@@ -988,7 +996,10 @@ def test_xdl_checkpoint_adapter_accepts_optimization_config(tmp_path: Path) -> N
                 "name": "xdl_checkpoint_adapter_workflow",
                 "artifact_dir": str(tmp_path / "artifacts"),
             },
-            "model": {"target": "torch.nn:Linear", "params": {"in_features": 4, "out_features": 4}},
+            "model": {
+                "target": "torch.nn:Linear",
+                "params": {"in_features": 4, "out_features": 4},
+            },
         }
     )
     source_model = torch.nn.Linear(4, 4).eval()
@@ -1031,7 +1042,9 @@ def test_optimization_workflow_config_accepts_benchmark_defaults() -> None:
     assert config.benchmark.measure_memory is False
 
 
-def test_optimization_workflow_config_accepts_operator_stage_benchmark_override() -> None:
+def test_optimization_workflow_config_accepts_operator_stage_benchmark_override() -> (
+    None
+):
     config = load_optimization_config(
         {
             "project": {
@@ -1066,7 +1079,9 @@ def test_optimization_workflow_config_accepts_operator_stage_benchmark_override(
     assert benchmark.measure_memory is False
 
 
-def test_optimization_workflow_config_types_export_validate_and_deploy_runtime_handle() -> None:
+def test_optimization_workflow_config_types_export_validate_and_deploy_runtime_handle() -> (
+    None
+):
     config = load_optimization_config(
         {
             "project": {
@@ -1078,7 +1093,20 @@ def test_optimization_workflow_config_types_export_validate_and_deploy_runtime_h
                     "name": "export_model",
                     "kind": "export",
                     "params": {
-                        "targets": [{"format": "onnx", "output_path": "artifacts/model.onnx"}],
+                        "targets": [
+                            {
+                                "format": "onnx",
+                                "output_path": "artifacts/model.onnx",
+                                "onnx": {
+                                    "dynamo": False,
+                                    "runtime_diff": False,
+                                    "optimization": {
+                                        "enabled": True,
+                                        "level": "basic",
+                                    },
+                                },
+                            }
+                        ],
                         "validate": {"atol": 1e-4, "rtol": 1e-3},
                     },
                 },
@@ -1090,13 +1118,17 @@ def test_optimization_workflow_config_types_export_validate_and_deploy_runtime_h
                             {
                                 "format": "tensorrt",
                                 "output_path": "artifacts/model.engine",
-                                "params": {"dry_run": True},
+                                "tensorrt": {"dry_run": True},
                             }
                         ],
                         "runtime_handle": {
                             "runtime": "tensorrt",
                             "handle_kind": "engine",
                             "materialize": False,
+                            "tensorrt": {
+                                "device": "cuda:1",
+                                "plugin_libraries": ["plugins/custom.so"],
+                            },
                         },
                     },
                 },
@@ -1109,13 +1141,425 @@ def test_optimization_workflow_config_types_export_validate_and_deploy_runtime_h
     assert export_stage.spec.validate is not None
     assert export_stage.spec.validate.atol == pytest.approx(1e-4)
     assert export_stage.spec.validate.rtol == pytest.approx(1e-3)
+    export_target = export_stage.spec.targets[0]
+    assert export_target.onnx.dynamo is False
+    assert export_target.onnx.runtime_diff is False
+    assert export_target.onnx.optimization.enabled is True
+    assert export_target.onnx.optimization.level == "basic"
 
     deploy_stage = config.stages[1]
     assert isinstance(deploy_stage.spec, DeployStageSpec)
+    assert deploy_stage.spec.targets[0].tensorrt.dry_run is True
     assert deploy_stage.spec.runtime_handle is not None
     assert deploy_stage.spec.runtime_handle.runtime == "tensorrt"
     assert deploy_stage.spec.runtime_handle.handle_kind == "engine"
     assert deploy_stage.spec.runtime_handle.materialize is False
+    assert deploy_stage.spec.runtime_handle.tensorrt.device == "cuda:1"
+    assert deploy_stage.spec.runtime_handle.tensorrt.plugin_libraries == [
+        "plugins/custom.so"
+    ]
+
+
+def test_optimization_workflow_config_rejects_legacy_onnx_target_params() -> None:
+    with pytest.raises(XQTConfigError, match="legacy ONNX keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "onnx",
+                                    "output_path": "artifacts/model.onnx",
+                                    "params": {"dynamo": False},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_tensorrt_target_params() -> None:
+    with pytest.raises(XQTConfigError, match="legacy TensorRT keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "tensorrt",
+                                    "output_path": "artifacts/model.engine",
+                                    "params": {"dry_run": True},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_openvino_target_params() -> None:
+    with pytest.raises(XQTConfigError, match="legacy OpenVINO keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "openvino",
+                                    "output_path": "artifacts/model.xml",
+                                    "params": {"dry_run": True},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_torch_export_target_params() -> (
+    None
+):
+    with pytest.raises(XQTConfigError, match="legacy TorchExport keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "torch_export",
+                                    "output_path": "artifacts/model.pt2",
+                                    "params": {"strict": True},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_torchscript_target_params() -> (
+    None
+):
+    with pytest.raises(XQTConfigError, match="legacy TorchScript keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "torchscript",
+                                    "output_path": "artifacts/model.pt",
+                                    "params": {"method": "script"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_executorch_target_params() -> None:
+    with pytest.raises(XQTConfigError, match="legacy ExecuTorch keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "executorch",
+                                    "output_path": "artifacts/model.pte",
+                                    "params": {"dry_run": True},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_ncnn_target_params() -> None:
+    with pytest.raises(XQTConfigError, match="legacy ncnn keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "ncnn",
+                                    "output_path": "artifacts/model.param",
+                                    "params": {"onnx_path": "artifacts/model.onnx"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_mnn_target_params() -> None:
+    with pytest.raises(XQTConfigError, match="legacy MNN keys"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "mnn",
+                                    "output_path": "artifacts/model.mnn",
+                                    "params": {"onnx_path": "artifacts/model.onnx"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_invalid_ncnn_converter() -> None:
+    with pytest.raises(
+        XQTConfigError,
+        match="converter must be onnx2ncnn or pnnx",
+    ):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "ncnn",
+                                    "output_path": "artifacts/model.param",
+                                    "ncnn": {"converter": "invalid"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_invalid_torchscript_method() -> None:
+    with pytest.raises(XQTConfigError, match="method must be trace or script"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "export_model",
+                        "kind": "export",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "torchscript",
+                                    "output_path": "artifacts/model.pt",
+                                    "torchscript": {"method": "compile"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_legacy_runtime_handle_params() -> None:
+    with pytest.raises(XQTConfigError, match="runtime_handle.params is removed"):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "deploy_model",
+                        "kind": "deploy",
+                        "params": {
+                            "targets": [],
+                            "runtime_handle": {
+                                "runtime": "onnxruntime",
+                                "materialize": True,
+                                "params": {"providers": ["CPUExecutionProvider"]},
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_preflight_uses_typed_onnx_target_config() -> None:
+    report = preflight_optimization_config(
+        {
+            "stages": [
+                {
+                    "name": "export_model",
+                    "kind": "export",
+                    "params": {
+                        "targets": [
+                            {
+                                "format": "onnx",
+                                "output_path": "artifacts/model.onnx",
+                                "onnx": {
+                                    "runtime_diff": False,
+                                    "optimization": {"enabled": True},
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+    check_names = [check.name for check in report.checks]
+
+    assert "dependency.onnx" in check_names
+    assert check_names.count("dependency.onnxruntime") == 1
+
+
+def test_preflight_uses_typed_openvino_target_config() -> None:
+    report = preflight_optimization_config(
+        {
+            "stages": [
+                {
+                    "name": "export_model",
+                    "kind": "export",
+                    "params": {
+                        "targets": [
+                            {
+                                "format": "openvino",
+                                "output_path": "artifacts/model.xml",
+                                "openvino": {"dry_run": True},
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["dependency.openvino"].passed is True
+    assert checks["dependency.openvino"].metadata["dry_run"] is True
+
+
+def test_preflight_uses_typed_mobile_target_configs() -> None:
+    report = preflight_optimization_config(
+        {
+            "stages": [
+                {
+                    "name": "export_model",
+                    "kind": "export",
+                    "params": {
+                        "targets": [
+                            {
+                                "format": "executorch",
+                                "output_path": "artifacts/model.pte",
+                                "executorch": {"dry_run": True},
+                            },
+                            {
+                                "format": "ncnn",
+                                "output_path": "artifacts/model.param",
+                                "ncnn": {
+                                    "converter": "pnnx",
+                                    "pnnx_path": "missing-pnnx",
+                                    "dry_run": True,
+                                },
+                            },
+                            {
+                                "format": "mnn",
+                                "output_path": "artifacts/model.mnn",
+                                "mnn": {
+                                    "converter_path": "missing-mnnconvert",
+                                    "dry_run": True,
+                                },
+                            },
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["dependency.executorch"].passed is True
+    assert checks["dependency.executorch"].metadata["dry_run"] is True
+    assert checks["stages.0.export_model.targets.1.ncnn.pnnx"].passed is True
+    assert (
+        checks["stages.0.export_model.targets.1.ncnn.pnnx"].metadata["dry_run"] is True
+    )
+    assert checks["stages.0.export_model.targets.2.mnn.MNNConvert"].passed is True
+    assert (
+        checks["stages.0.export_model.targets.2.mnn.MNNConvert"].metadata["dry_run"]
+        is True
+    )
+
+
+def test_preflight_checks_materialized_typed_runtime_handle() -> None:
+    report = preflight_optimization_config(
+        {
+            "stages": [
+                {
+                    "name": "deploy_onnxruntime",
+                    "kind": "deploy",
+                    "params": {
+                        "targets": [
+                            {
+                                "format": "onnx",
+                                "output_path": "artifacts/model.onnx",
+                                "onnx": {"runtime_diff": False},
+                            }
+                        ],
+                        "runtime_handle": {
+                            "runtime": "onnxruntime",
+                            "handle_kind": "inference_session",
+                            "materialize": True,
+                            "onnxruntime": {
+                                "providers": ["CPUExecutionProvider"],
+                            },
+                        },
+                    },
+                }
+            ]
+        }
+    )
+    checks = {check.name: check for check in report.checks}
+
+    runtime_check = checks["stages.0.deploy_onnxruntime.runtime_handle.runtime"]
+    assert runtime_check.passed is True
+    assert runtime_check.metadata["runtime"] == "onnxruntime"
+    assert "dependency.onnxruntime" in checks
 
 
 def test_optimization_workflow_config_rejects_old_top_level_schema() -> None:
@@ -1172,7 +1616,9 @@ def test_load_optimization_config_rebuilds_existing_stage_spec() -> None:
     assert stage.spec.strategy == "fp8_dynamic"
 
 
-def test_run_stage_rebuilds_existing_stage_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_stage_rebuilds_existing_stage_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stage = OptimizationStageConfig(
         name="direct_quant",
         kind="quant",

@@ -1,5 +1,7 @@
 """Cross-subsystem model and runtime contract schemas for XQT."""
 
+from .quantized import QuantizedModel, QuantizedModelPayload
+from .pruned import PrunedModelPayload
 from .module import (
     FeedForwardPrecisionPolicy,
     FusionIntent,
@@ -9,7 +11,6 @@ from .module import (
     PrecisionPolicy,
     TensorStorageSpec,
 )
-from .quantized import QuantizedModelPayload
 from .runtime import (
     ExportBundlePayload,
     RuntimeArtifactPayload,
@@ -25,6 +26,8 @@ __all__ = [
     "OperatorContract",
     "OperatorKind",
     "PrecisionPolicy",
+    "PrunedModelPayload",
+    "QuantizedModel",
     "QuantizedModelPayload",
     "RuntimeArtifactPayload",
     "RuntimeHandlePayload",
