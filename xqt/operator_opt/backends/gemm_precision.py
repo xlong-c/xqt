@@ -35,7 +35,7 @@ def _precision_name_to_dtype(
 
 
 def _resolve_matmul_precision(
-    precision: str | MatmulPrecisionSpec | Mapping[str, str],
+    precision: str | MatmulPrecisionSpec | Mapping[str, Any],
 ) -> MatmulPrecisionSpec:
     if isinstance(precision, MatmulPrecisionSpec):
         return precision
@@ -64,7 +64,7 @@ def gemm_with_precision(
     b: torch.Tensor,
     bias: torch.Tensor | None = None,
     *,
-    precision: str | MatmulPrecisionSpec | Mapping[str, str] = "fp16",
+    precision: str | MatmulPrecisionSpec | Mapping[str, Any] = "fp16",
     engine: str = "triton",
     activation: str | None = None,
     transpose_b: bool = True,
