@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .artifact import ArtifactManifest, MetricRecord
+from .serialization import json_safe_value
 
 
 CAPABILITY_STATUSES = (
@@ -32,20 +32,9 @@ def _tuple_of_str(value: Sequence[str] | None) -> tuple[str, ...]:
 
 
 def _json_safe(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, tuple):
-        return [_json_safe(item) for item in value]
-    if hasattr(value, "item"):
-        try:
-            return value.item()
-        except Exception:
-            return str(value)
-    return value
+    """Return a JSON-safe report value without persisting live handles."""
+
+    return json_safe_value(value)
 
 
 def _find_first_numeric(value: Any, key: str) -> float | int | None:
@@ -156,7 +145,9 @@ def _collect_text_values(value: Any, key: str) -> list[str]:
     return []
 
 
-def _artifact_kinds(metrics: Mapping[str, Any], artifacts: Mapping[str, Any]) -> list[str]:
+def _artifact_kinds(
+    metrics: Mapping[str, Any], artifacts: Mapping[str, Any]
+) -> list[str]:
     values: list[str] = []
     for key in ("artifact_kind", "format"):
         for value in _collect_text_values(metrics, key):
@@ -241,13 +232,11 @@ class OptimizationCapability:
             artifact_kind=artifact_kind,
             requires_cuda=bool(payload.get("requires_cuda", False)),
             requires_calibration=bool(payload.get("requires_calibration", False)),
-            requires_exportable_graph=bool(payload.get("requires_exportable_graph", False)),
-            available=(
-                bool(payload["available"]) if "available" in payload else None
+            requires_exportable_graph=bool(
+                payload.get("requires_exportable_graph", False)
             ),
-            supported=(
-                bool(payload["supported"]) if "supported" in payload else None
-            ),
+            available=(bool(payload["available"]) if "available" in payload else None),
+            supported=(bool(payload["supported"]) if "supported" in payload else None),
             methods=_tuple_of_str(payload.get("methods")),
             model_families=_tuple_of_str(payload.get("model_families")),
             target_module_types=_tuple_of_str(
@@ -529,9 +518,8 @@ def normalize_stage_execution(
 ) -> dict[str, Any]:
     """Project every workflow stage onto a fixed runtime-reporting envelope."""
 
-    metric_shape = (
-        _find_first_value(metrics, "shape_signature")
-        or _find_first_value(metrics, "input_shapes")
+    metric_shape = _find_first_value(metrics, "shape_signature") or _find_first_value(
+        metrics, "input_shapes"
     )
     fallback = (
         _find_first_text(metrics, "fallback_reason")
@@ -551,7 +539,9 @@ def normalize_stage_execution(
         "shape": _json_safe(metric_shape)
         if metric_shape is not None
         else _shape_signature(shape),
-        "warmup": warmup if warmup is not None else _find_first_numeric(metrics, "warmup"),
+        "warmup": warmup
+        if warmup is not None
+        else _find_first_numeric(metrics, "warmup"),
         "iterations": (
             iterations
             if iterations is not None
