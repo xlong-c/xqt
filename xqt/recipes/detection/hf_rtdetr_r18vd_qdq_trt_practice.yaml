@@ -51,7 +51,7 @@ stages:
           - 3
           - 640
           - 640
-      params:
+      tensorrt:
         backend: python_api
         dry_run: true
         onnx_path: artifacts/xqt/detection/hf_rtdetr_r18vd_qdq_trt_practice/quant/hf_rtdetr_r18vd_qdq.onnx

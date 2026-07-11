@@ -40,7 +40,7 @@ stages:
     - format: onnx
       output_path: artifacts/xqt/detection/yolo_smoke/smoke_detection.onnx
       opset: 18
-      params:
+      onnx:
         input_names:
         - image
         output_names:
@@ -50,7 +50,7 @@ stages:
     - format: openvino
       output_path: artifacts/xqt/detection/yolo_smoke/smoke_detection.xml
       precision: fp32
-      params:
+      openvino:
         dry_run: true
         input_shape:
         - 1

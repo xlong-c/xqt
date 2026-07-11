@@ -42,7 +42,7 @@ stages:
     targets:
     - format: onnx
       output_path: artifacts/xqt/quant/int8/qdq_export_guard/model.onnx
-      params:
+      onnx:
         runtime_diff: false
 - name: benchmark_model
   kind: benchmark

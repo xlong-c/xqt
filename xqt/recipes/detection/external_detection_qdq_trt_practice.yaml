@@ -59,7 +59,7 @@ stages:
           max:
           - 1
           - 2
-      params:
+      tensorrt:
         backend: python_api
         dry_run: true
         onnx_path: artifacts/xqt/detection/external_detection_qdq_trt_practice/quant/external_detection_qdq.onnx

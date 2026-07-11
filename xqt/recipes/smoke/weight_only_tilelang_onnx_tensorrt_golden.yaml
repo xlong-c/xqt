@@ -74,9 +74,15 @@ stages:
       targets:
         - format: onnx
           output_path: artifacts/xqt/smoke/weight_only_tilelang_onnx_tensorrt_golden/model.onnx
-          params:
-            dynamo: true
+          dynamic_shapes:
+            input:
+              0: batch
+          onnx:
+            dynamo: false
             runtime_diff: false
+            pre_export_lowering:
+              enabled: true
+              mode: fp4_weight_only_to_dense_linear
   - name: deploy_tensorrt
     kind: deploy
     save_model: false
@@ -90,9 +96,16 @@ stages:
               min: [1, 64]
               opt: [64, 64]
               max: [256, 64]
-          params:
+          tensorrt:
             backend: python_api
             dry_run: true
+            runtime_benchmark:
+              enabled: true
+              input_shapes:
+                input: [8, 64]
+              warmup: 2
+              iterations: 5
+              device: cuda:0
       runtime_handle:
         runtime: tensorrt
         handle_kind: runtime_session

@@ -28,7 +28,7 @@ stages:
     targets:
     - format: torch_export
       output_path: artifacts/xqt/smoke/cpu/model.pt2
-      params:
+      torch_export:
         validate: true
         runtime_diff: true
 - name: benchmark_model

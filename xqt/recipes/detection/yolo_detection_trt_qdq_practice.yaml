@@ -23,7 +23,7 @@ stages:
     - format: onnx
       output_path: artifacts/xqt/detection/yolo_trt_qdq_practice/export_fp32_onnx/smoke_detection_fp32.onnx
       opset: 18
-      params:
+      onnx:
         input_names:
         - images
         output_names:
@@ -74,7 +74,7 @@ stages:
           - 3
           - 640
           - 640
-      params:
+      tensorrt:
         backend: python_api
         dry_run: true
         onnx_path: artifacts/xqt/detection/yolo_trt_qdq_practice/quant_qdq/smoke_detection_qdq.onnx

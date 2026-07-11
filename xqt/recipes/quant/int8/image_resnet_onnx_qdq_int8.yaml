@@ -45,7 +45,7 @@ stages:
     - format: tensorrt
       output_path: artifacts/xqt/quant/int8/resnet_onnx_qdq/resnet18_int8.engine
       precision: int8
-      params:
+      tensorrt:
         dry_run: true
         performance_thresholds:
           throughput_qps_min: 1.0
