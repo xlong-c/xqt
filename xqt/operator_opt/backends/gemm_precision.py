@@ -2,66 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Mapping
 
 import torch
 
+from xqt.contracts import PrecisionPolicy
 from xqt.core.errors import XQTBackendError
 
-
-@dataclass(frozen=True)
-class MatmulPrecisionSpec:
-    """Structured precision contract for one GEMM invocation."""
-
-    activation: str = "fp16"
-    weight: str = "fp16"
-    bias: str = "fp16"
-    mma: str = "fp16"
-    accum: str = "fp32"
-    output: str = "fp16"
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "activation": self.activation,
-            "weight": self.weight,
-            "bias": self.bias,
-            "mma": self.mma,
-            "accum": self.accum,
-            "output": self.output,
-        }
-
-    @classmethod
-    def from_roles(
-        cls,
-        *,
-        A: str | None = None,
-        B: str | None = None,
-        C: str | None = None,
-        O: str | None = None,
-        activation: str | None = None,
-        weight: str | None = None,
-        bias: str | None = None,
-        mma: str = "fp16",
-        accum: str = "fp32",
-        output: str | None = None,
-    ) -> "MatmulPrecisionSpec":
-        """Build a GEMM precision spec from ``A x B + C = O`` role names."""
-
-        return _resolve_matmul_precision(
-            {
-                "A": A
-                if A is not None
-                else activation
-                if activation is not None
-                else "fp16",
-                "B": B if B is not None else weight if weight is not None else "fp16",
-                "C": C if C is not None else bias if bias is not None else "fp16",
-                "mma": mma,
-                "accum": accum,
-                "O": O if O is not None else output if output is not None else "fp16",
-            }
-        )
+MatmulPrecisionSpec = PrecisionPolicy
 
 
 _DTYPE_PRECISIONS: dict[str, torch.dtype] = {
@@ -69,85 +17,13 @@ _DTYPE_PRECISIONS: dict[str, torch.dtype] = {
     "bf16": torch.bfloat16,
     "fp32": torch.float32,
 }
-_LOW_BIT_PRECISIONS = {
-    "int8",
-    "fp8",
-    "int4",
-    "fp4",
-    "nvfp4",
-    "mxfp8",
-    "mxfp6",
-    "mxfp4",
-}
-_SUPPORTED_PRECISION_NAMES = set(_DTYPE_PRECISIONS) | _LOW_BIT_PRECISIONS
-_PRECISION_ALIASES = {
-    "float16": "fp16",
-    "half": "fp16",
-    "bfloat16": "bf16",
-    "float32": "fp32",
-    "float": "fp32",
-    "fp4e2m1": "fp4",
-    "nv_fp4": "nvfp4",
-    "nv-fp4": "nvfp4",
-}
-_ROLE_ALIASES = {
-    "a": "activation",
-    "lhs": "activation",
-    "input": "activation",
-    "activation": "activation",
-    "activation_dtype": "activation",
-    "b": "weight",
-    "rhs": "weight",
-    "weight": "weight",
-    "weight_dtype": "weight",
-    "c": "bias",
-    "bias": "bias",
-    "bias_dtype": "bias",
-    "addend": "bias",
-    "addend_dtype": "bias",
-    "mma": "mma",
-    "mma_dtype": "mma",
-    "acc": "accum",
-    "accum": "accum",
-    "accum_dtype": "accum",
-    "accumulator": "accum",
-    "accumulator_dtype": "accum",
-    "o": "output",
-    "out": "output",
-    "output": "output",
-    "output_dtype": "output",
-}
-
-
-def _canonical_precision_name(name: str) -> str:
-    normalized = str(name).strip().lower()
-    canonical = _PRECISION_ALIASES.get(normalized, normalized)
-    if canonical not in _SUPPORTED_PRECISION_NAMES:
-        choices = ", ".join(sorted(_SUPPORTED_PRECISION_NAMES))
-        raise XQTBackendError(
-            f"Unsupported GEMM precision name: {name}. Allowed: {choices}"
-        )
-    return canonical
-
-
-def _canonical_precision_key(name: str) -> str:
-    normalized = str(name).strip().lower()
-    try:
-        return _ROLE_ALIASES[normalized]
-    except KeyError as exc:
-        choices = ", ".join(sorted(_ROLE_ALIASES))
-        raise XQTBackendError(
-            f"Unsupported GEMM precision field: {name}. Allowed: {choices}"
-        ) from exc
-
-
 def _precision_name_to_dtype(
     name: str,
     *,
     fallback: torch.dtype | None = None,
     role: str = "precision",
 ) -> torch.dtype:
-    canonical = _canonical_precision_name(name)
+    canonical = PrecisionPolicy.canonical_name(name)
     dtype = _DTYPE_PRECISIONS.get(canonical)
     if dtype is not None:
         return dtype
@@ -164,8 +40,8 @@ def _resolve_matmul_precision(
     if isinstance(precision, MatmulPrecisionSpec):
         return precision
     if isinstance(precision, str):
-        canonical = _canonical_precision_name(precision)
-        return MatmulPrecisionSpec(
+        canonical = PrecisionPolicy.canonical_name(precision)
+        return PrecisionPolicy(
             activation=canonical,
             weight=canonical,
             bias=canonical,
@@ -173,20 +49,7 @@ def _resolve_matmul_precision(
             accum="fp32",
             output=canonical,
         )
-    payload = {
-        _canonical_precision_key(str(key)): _canonical_precision_name(str(value))
-        for key, value in precision.items()
-    }
-    return MatmulPrecisionSpec(
-        activation=payload.get("activation", "fp16"),
-        weight=payload.get("weight", payload.get("activation", "fp16")),
-        bias=payload.get(
-            "bias", payload.get("output", payload.get("activation", "fp16"))
-        ),
-        mma=payload.get("mma", payload.get("activation", "fp16")),
-        accum=payload.get("accum", "fp32"),
-        output=payload.get("output", payload.get("activation", "fp16")),
-    )
+    return PrecisionPolicy.from_mapping(precision)
 
 
 def _resolve_gemm_engine(

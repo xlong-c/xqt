@@ -32,8 +32,9 @@ _CONTRACT_PATTERNS: dict[str, frozenset[str]] = {
     "conv2d": frozenset({"conv"}),
     "feedforward": frozenset({"feedforward"}),
     "layernorm": frozenset({"norm"}),
+    "attention": frozenset({"attention"}),
+    "transformer_block": frozenset({"attention", "feedforward"}),
 }
-
 
 def _resolve_component_model(
     model: nn.Module,

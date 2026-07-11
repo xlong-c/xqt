@@ -592,7 +592,13 @@ def _match_fx_patterns(graph_module: fx.GraphModule) -> list[OperatorPatternCand
                 )
         if node.op == "call_module":
             module = graph_module.get_submodule(str(node.target))
-            if isinstance(module, nn.MultiheadAttention):
+            try:
+                from xqt import nn as xqt_nn
+
+                is_xqt_attention = isinstance(module, xqt_nn.Attention)
+            except Exception:
+                is_xqt_attention = False
+            if isinstance(module, nn.MultiheadAttention) or is_xqt_attention:
                 candidates.append(
                     _build_candidate(
                         "attention",

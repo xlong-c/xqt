@@ -41,6 +41,7 @@ from .tilelang_wrappers import (
     _TileLangDequantGemmWrapper,
     _TileLangLinearWrapper,
     _TileLangNormWrapper,
+    _TileLangXqtAttentionWrapper,
 )
 from .triton_wrappers import triton_execution_metadata
 from .types import OperatorOptimizationTargetPlan
@@ -215,6 +216,7 @@ def operator_engine_execution_metadata(
             return dict(attached)
         wrappers = (
             _TileLangAttentionWrapper,
+            _TileLangXqtAttentionWrapper,
             _TileLangConvWrapper,
             _TileLangConv3dWrapper,
             _TileLangLinearWrapper,

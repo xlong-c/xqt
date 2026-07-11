@@ -93,7 +93,7 @@ class OperatorOptimizationReport:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "target_name": self.target_name,
             "module_path": self.module_path,
             "engine": self.engine,
@@ -114,6 +114,11 @@ class OperatorOptimizationReport:
             "artifact_paths": dict(self.artifact_paths),
             "metadata": dict(self.metadata),
         }
+        module_contract = self.metadata.get("module_contract")
+        if isinstance(module_contract, dict):
+            payload["module_contract"] = dict(module_contract)
+        return payload
+
 
 
 @dataclass

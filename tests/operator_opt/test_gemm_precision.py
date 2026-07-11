@@ -10,6 +10,7 @@ from xqt.operator_opt.backends.gemm_precision import (
     gemm_with_precision,
     list_available_precisions,
 )
+from xqt.contracts import PrecisionPolicy
 from xqt.operator_opt.kernels.tilelang.gemm import (
     nvfp4_packed_dequant_gemm_epilogue_reference,
 )
@@ -249,6 +250,7 @@ class TestUnifiedGEMMInterface:
         assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3)
 
     def test_matmul_precision_spec_from_roles_records_low_bit_storage(self) -> None:
+        assert MatmulPrecisionSpec is PrecisionPolicy
         spec = MatmulPrecisionSpec.from_roles(
             A="nvfp4",
             B="fp16",

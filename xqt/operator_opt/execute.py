@@ -519,6 +519,28 @@ def execute_operator_optimization_plan(
             "compiled_regions": compile_explain.get("graph_count"),
             "explain": compile_explain,
         }
+        report_metadata: dict[str, Any] = {
+            "execution_state": "executed" if applied else "fallback",
+            "fallback_policy": fallback_policy,
+            "fallback_reason": fallback_reason,
+            "fallback_detail": fallback_detail,
+            "graph_break_report": compile_explain,
+            "options": dict(target.options),
+            "mode": target.mode,
+            "patterns": list(target.patterns),
+            "min_speedup": target.min_speedup,
+            "effective_min_speedup": effective_min_speedup,
+            "benchmark_strategy": benchmark_strategy,
+            "candidate_materialization": "target_only_benchmark_no_root_deepcopy",
+            "speedup_metric": speedup_metric,
+            "speedup_statistics": speedup_statistics,
+            "capability": capability.to_dict(),
+            **engine_metadata,
+            **execution_detail,
+        }
+        module_contract = getattr(compiled_model, "_xqt_module_contract", None)
+        if isinstance(module_contract, dict):
+            report_metadata["module_contract"] = dict(module_contract)
         reports.append(
             OperatorOptimizationReport(
                 target_name=target.name,
@@ -539,25 +561,7 @@ def execute_operator_optimization_plan(
                 shape_signature=shape_signature(module_inputs),
                 exportable=capability.exportable,
                 artifact_paths=artifact_paths,
-                metadata={
-                    "execution_state": "executed" if applied else "fallback",
-                    "fallback_policy": fallback_policy,
-                    "fallback_reason": fallback_reason,
-                    "fallback_detail": fallback_detail,
-                    "graph_break_report": compile_explain,
-                    "options": dict(target.options),
-                    "mode": target.mode,
-                    "patterns": list(target.patterns),
-                    "min_speedup": target.min_speedup,
-                    "effective_min_speedup": effective_min_speedup,
-                    "benchmark_strategy": benchmark_strategy,
-                    "candidate_materialization": "target_only_benchmark_no_root_deepcopy",
-                    "speedup_metric": speedup_metric,
-                    "speedup_statistics": speedup_statistics,
-                    "capability": capability.to_dict(),
-                    **engine_metadata,
-                    **execution_detail,
-                },
+                metadata=report_metadata,
             )
         )
 
