@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from xqt.contracts.module import coerce_composite_precision_gemm_spec
+from xqt.quant.types import build_composite_quantization_artifact
+
 from .runtime import _json_safe_contract_value
 
 
@@ -18,6 +21,49 @@ def _resolve_module_contract(
     if isinstance(raw, Mapping):
         return dict(raw)
     return None
+
+
+def _component_name_from_metrics(metrics: Mapping[str, Any], *, fallback: str) -> str:
+    components = metrics.get("components", [])
+    if isinstance(components, list):
+        for item in components:
+            if isinstance(item, Mapping) and item.get("component_name") is not None:
+                return str(item["component_name"])
+    return fallback
+
+
+def _resolve_composite_quant_artifacts(
+    metrics: Mapping[str, Any],
+    *,
+    module_contract: Mapping[str, Any] | None,
+    backend: str,
+    fallback_component_name: str,
+) -> list[dict[str, Any]]:
+    raw_artifacts = metrics.get("composite_quant_artifacts", [])
+    if isinstance(raw_artifacts, list):
+        items = [dict(item) for item in raw_artifacts if isinstance(item, Mapping)]
+        if items:
+            return items
+    raw_single = metrics.get("composite_quant_artifact")
+    if isinstance(raw_single, Mapping):
+        return [dict(raw_single)]
+    if not isinstance(module_contract, Mapping):
+        return []
+    raw_policy = module_contract.get("policy")
+    if not isinstance(raw_policy, Mapping):
+        return []
+    spec = coerce_composite_precision_gemm_spec(raw_policy.get("composite_gemm"))
+    if spec is None:
+        return []
+    artifact = build_composite_quantization_artifact(
+        spec,
+        component_name=_component_name_from_metrics(
+            metrics,
+            fallback=fallback_component_name,
+        ),
+        backend=backend,
+    )
+    return [artifact.to_dict()]
 
 
 @dataclass(kw_only=True)
@@ -61,6 +107,9 @@ class QuantizedModelPayload(QuantizedModel):
     components: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     capability: dict[str, Any] | None = None
+    algorithm_metadata: dict[str, Any] | None = None
+    execution_policies: list[dict[str, Any]] = field(default_factory=list)
+    composite_quant_artifacts: list[dict[str, Any]] = field(default_factory=list)
     module_contract: dict[str, Any] | None = None
     artifact_kind: str = field(default="quantized_model", init=False)
 
@@ -86,13 +135,17 @@ class QuantizedModelPayload(QuantizedModel):
             quantized_modules = []
         calibration_samples = metrics.get("calibration_samples")
         calibration_summary = metrics.get("calibration_summary")
+        algorithm_metadata = metrics.get("algorithm_metadata")
+        execution_policies = metrics.get("execution_policies", [])
+        if not isinstance(execution_policies, list):
+            execution_policies = []
+        resolved_contract = _resolve_module_contract(model, module_contract)
+        backend = str(metrics.get("backend") or stage_params.get("backend") or "unknown")
         return cls(
             stage_name=stage_name,
             source_model_stage=source_model_stage,
             model=model,
-            backend=str(
-                metrics.get("backend") or stage_params.get("backend") or "unknown"
-            ),
+            backend=backend,
             method=str(metrics.get("method") or stage_params.get("method") or "unknown"),
             strategy=str(
                 metrics.get("strategy") or stage_params.get("strategy") or "unknown"
@@ -111,7 +164,21 @@ class QuantizedModelPayload(QuantizedModel):
             ],
             artifacts={str(key): str(value) for key, value in dict(artifacts or {}).items()},
             capability=dict(capability) if isinstance(capability, Mapping) else None,
-            module_contract=_resolve_module_contract(model, module_contract),
+            algorithm_metadata=(
+                dict(algorithm_metadata)
+                if isinstance(algorithm_metadata, Mapping)
+                else None
+            ),
+            execution_policies=[
+                dict(item) for item in execution_policies if isinstance(item, Mapping)
+            ],
+            composite_quant_artifacts=_resolve_composite_quant_artifacts(
+                metrics,
+                module_contract=resolved_contract,
+                backend=backend,
+                fallback_component_name=stage_name,
+            ),
+            module_contract=resolved_contract,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,7 +194,13 @@ class QuantizedModelPayload(QuantizedModel):
             "components": _json_safe_contract_value(self.components),
             "artifacts": dict(self.artifacts),
             "capability": _json_safe_contract_value(self.capability),
+            "algorithm_metadata": _json_safe_contract_value(self.algorithm_metadata),
+            "execution_policies": _json_safe_contract_value(self.execution_policies),
         }
+        if self.composite_quant_artifacts:
+            payload["composite_quant_artifacts"] = _json_safe_contract_value(
+                self.composite_quant_artifacts
+            )
         if self.module_contract is not None:
             payload["module_contract"] = _json_safe_contract_value(self.module_contract)
         return payload

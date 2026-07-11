@@ -33,11 +33,14 @@ from .sensitivity import (
 )
 from .backends.torchao import TorchAOQuantizationResult, quantize_with_torchao
 from .types import (
+    CompositeQuantBranchArtifact,
+    CompositeQuantizationArtifact,
     QuantizationComponentPlan,
     QuantizationExecutionPlan,
     QuantizationExecutionResult,
     QuantizationNature,
     QuantizationReport,
+    build_composite_quantization_artifact,
 )
 from .execution import execute_quantization_plan, summarize_quantization_reports
 from .quantizers import Quantizer, QuantizerOptions, QuantizerResult
@@ -64,6 +67,13 @@ from .quantizers.w4_storage_int8_mma import (
     W4StorageInt8MmaLinear,
     W4StorageInt8MmaQuantizationResult,
     quantize_with_w4_storage_int8_mma,
+)
+from .quantizers.convrot_4bit import (
+    ConvRot4BitQuantizationResult,
+    ConvRotMixedPrecisionLinear,
+    build_regular_hadamard_matrix,
+    materialize_convrot_execution_policy,
+    quantize_with_convrot_4bit,
 )
 from .quantizers.mxfp_weight_only import (
     MXFPQuantizationResult,
@@ -94,6 +104,10 @@ __all__ = [
     "FakeQDQSurrogateResult",
     "FP4QuantizationResult",
     "IterableCalibrationDataReader",
+    "ConvRot4BitQuantizationResult",
+    "ConvRotMixedPrecisionLinear",
+    "CompositeQuantBranchArtifact",
+    "CompositeQuantizationArtifact",
     "Int8MmaLinear",
     "Int8MmaQuantizationResult",
     "LayerAnalysisRecord",
@@ -125,6 +139,8 @@ __all__ = [
     "analyze_layer_errors",
     "analyze_layer_sensitivity",
     "build_quantization_plan",
+    "build_composite_quantization_artifact",
+    "build_regular_hadamard_matrix",
     "build_fake_qdq_surrogate",
     "bridge_module_to_nvfp4_linear",
     "bridge_module_to_nvfp4_linear_shared",
@@ -137,6 +153,7 @@ __all__ = [
     "list_quantizable_modules",
     "quantize_with_awq_fp4",
     "quantize_with_awq_weight_only",
+    "quantize_with_convrot_4bit",
     "quantize_with_int8_mma",
     "quantize_onnx_qdq_static",
     "quantize_with_mxfp_weight_only",
@@ -146,6 +163,7 @@ __all__ = [
     "quantize_with_svd",
     "quantize_with_torchao",
     "quantize_with_w4_storage_int8_mma",
+    "materialize_convrot_execution_policy",
     "recommend_high_precision_modules",
     "should_quantize_module",
     "summarize_quantization_reports",

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from xqt.contracts import QuantizedModel, QuantizedModelPayload
+from xqt.contracts import ExecutionPolicyPayload, QuantizedModel, QuantizedModelPayload
 from xqt.quant.backends.torchao import TorchAOQuantizationResult
 from xqt.quant.quantizers.awq_gptq_weight_only import (
     AWQGPTQWeightOnlyQuantizationResult,
@@ -70,3 +70,64 @@ def test_quantized_model_contract_serializes_algorithm_metadata_and_stage_proven
     assert payload.to_dict()["artifact_kind"] == "quantized_model"
     assert payload.to_dict()["stage_name"] == "quant"
     assert payload.to_dict()["metadata"] == result.to_dict()["metadata"]
+
+
+def test_quantized_model_payload_serializes_algorithm_metadata_and_execution_policies() -> None:
+    payload = QuantizedModelPayload.from_stage_metrics(
+        stage_name="quant",
+        source_model_stage="baseline",
+        model=torch.nn.Linear(2, 2),
+        metrics={
+            "backend": "pytorch",
+            "method": "convrot",
+            "strategy": "convrot_w4a4",
+            "quantized_modules": ["proj"],
+            "algorithm_metadata": {
+                "rotation_kind": "regular_hadamard",
+                "weight_bits": 4,
+                "activation_bits": 4,
+            },
+            "execution_policies": [
+                {
+                    "policy_kind": "mixed_precision",
+                    "runtime": "pytorch",
+                    "precision_overrides": [{"module": "proj", "precision": "w8a8"}],
+                }
+            ],
+        },
+    )
+
+    serialized = payload.to_dict()
+    assert serialized["algorithm_metadata"]["rotation_kind"] == "regular_hadamard"
+    assert serialized["execution_policies"][0]["policy_kind"] == "mixed_precision"
+    assert serialized["execution_policies"][0]["precision_overrides"][0]["precision"] == "w8a8"
+
+
+def test_execution_policy_payload_serializes_mixed_precision_policy() -> None:
+    payload = ExecutionPolicyPayload(
+        stage_name="quant",
+        source_model_stage="baseline",
+        policy_kind="mixed_precision",
+        runtime="pytorch",
+        module_count=2,
+        precision_overrides=[
+            {"module": "proj", "precision": "w8a8"},
+            {"module": "fc2", "precision": "bf16"},
+        ],
+        metadata={"runtime_strategy": "mixed_precision_linear"},
+    )
+
+    assert payload.to_dict() == {
+        "artifact_kind": "execution_policy",
+        "stage_name": "quant",
+        "source_model_stage": "baseline",
+        "artifacts": {},
+        "policy_kind": "mixed_precision",
+        "runtime": "pytorch",
+        "module_count": 2,
+        "precision_overrides": [
+            {"module": "proj", "precision": "w8a8"},
+            {"module": "fc2", "precision": "bf16"},
+        ],
+        "metadata": {"runtime_strategy": "mixed_precision_linear"},
+    }

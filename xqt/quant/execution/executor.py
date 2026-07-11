@@ -34,6 +34,10 @@ from xqt.quant.quantizers.w4_storage_int8_mma import (
     execute_w4_storage_int8_mma_component,
     quantize_with_w4_storage_int8_mma,
 )
+from xqt.quant.quantizers.convrot_4bit import (
+    execute_convrot_4bit_component,
+    quantize_with_convrot_4bit,
+)
 from xqt.quant.quantizers.mxfp_weight_only import (
     execute_mxfp_weight_only_component,
     quantize_with_mxfp_weight_only,
@@ -179,6 +183,18 @@ def execute_quantization_plan(
             )
             reports.append(report)
             continue
+        if (
+            component.backend in {"pytorch", "tilelang"}
+            and component.strategy == "convrot_w4a4"
+        ):
+            current_model, report = execute_convrot_4bit_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_convrot_4bit,
+            )
+            reports.append(report)
+            continue
         if component.backend == "svdquant" or (
             component.backend == "pytorch"
             and component.strategy in {"svd_fp4", "svd_int4"}
@@ -227,6 +243,7 @@ __all__ = [
     "_onnx_qdq_graph_summary",
     "execute_quantization_plan",
     "quantize_with_awq_weight_only",
+    "quantize_with_convrot_4bit",
     "quantize_onnx_qdq_static",
     "quantize_with_fp4_weight_only",
     "quantize_with_gptq_weight_only",
