@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import torch
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.core.errors import XQTBackendError
 from xqt.core.types import XQTContext
 from xqt.operator_opt.kernels.tilelang.int8_mma import (
@@ -46,14 +47,11 @@ _SELECTION_MODES = {"default", "include_only"}
 
 
 @dataclass
-class Int8MmaQuantizationResult:
+class Int8MmaQuantizationResult(QuantizedModel):
     """Result returned by the true INT8 MMA quantization helper."""
 
-    model: nn.Module
     backend: str = "pytorch"
     strategy: str = "dynamic_int8_mma"
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:

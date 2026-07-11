@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.core.errors import XQTBackendError
 from xqt.core.types import XQTContext
 
@@ -34,14 +35,11 @@ from ..types import (
 
 
 @dataclass
-class TorchAOQuantizationResult:
+class TorchAOQuantizationResult(QuantizedModel):
     """Result returned by the torchao quantization adapter."""
 
-    model: nn.Module
     backend: str = "torchao"
     strategy: str = ""
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _import_torchao_quantization() -> Any:

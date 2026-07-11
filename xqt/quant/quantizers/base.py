@@ -7,6 +7,8 @@ from typing import Any, Mapping, Protocol
 
 from torch import nn
 
+from xqt.contracts import QuantizedModel
+
 
 @dataclass(frozen=True)
 class QuantizerOptions:
@@ -19,21 +21,13 @@ class QuantizerOptions:
     inplace: bool = True
 
 
-@dataclass
-class QuantizerResult:
-    """Backend-neutral result returned by model-side quantizer implementations."""
-
-    model: nn.Module
-    backend: str
-    strategy: str | None = None
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+QuantizerResult = QuantizedModel
 
 
 class Quantizer(Protocol):
     """Protocol implemented by concrete quantizer algorithms."""
 
-    def quantize(self, model: nn.Module, options: QuantizerOptions) -> QuantizerResult:
+    def quantize(self, model: nn.Module, options: QuantizerOptions) -> QuantizedModel:
         """Quantize a model or component and return a normalized result."""
 
 

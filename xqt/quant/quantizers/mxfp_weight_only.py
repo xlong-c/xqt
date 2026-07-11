@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.core.types import XQTContext
 
 from ..execution.component import (
@@ -44,14 +45,11 @@ def _can_mutate_runtime_cache() -> bool:
 
 
 @dataclass
-class MXFPQuantizationResult:
+class MXFPQuantizationResult(QuantizedModel):
     """Result returned by the MXFP weight-only quantization backend."""
 
-    model: nn.Module
     backend: str = "pytorch"
     strategy: str = "mxfp_weight_only"
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:

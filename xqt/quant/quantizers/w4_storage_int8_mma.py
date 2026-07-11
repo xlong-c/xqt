@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import torch
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.core.errors import XQTBackendError
 from xqt.core.types import XQTContext
 
@@ -43,12 +44,9 @@ _SOURCE_KINDS = {"linear", "fp4_weight_only", "auto"}
 
 
 @dataclass
-class W4StorageInt8MmaQuantizationResult:
-    model: nn.Module
+class W4StorageInt8MmaQuantizationResult(QuantizedModel):
     backend: str = "pytorch"
     strategy: str = "w4_storage_int8_mma"
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:

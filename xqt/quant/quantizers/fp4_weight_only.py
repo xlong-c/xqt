@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.types import XQTContext
 
@@ -45,14 +46,11 @@ def _can_mutate_runtime_cache() -> bool:
 
 
 @dataclass
-class FP4QuantizationResult:
+class FP4QuantizationResult(QuantizedModel):
     """Result returned by the FP4 weight-only quantization backend."""
 
-    model: nn.Module
     backend: str = "pytorch"
     strategy: str = "fp4_weight_only"
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

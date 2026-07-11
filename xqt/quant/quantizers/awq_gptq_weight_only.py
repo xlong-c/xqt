@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.core.types import XQTContext
 
 from ..execution.component import (
@@ -43,14 +44,11 @@ from .fp4_weight_only import (
 
 
 @dataclass
-class AWQGPTQWeightOnlyQuantizationResult:
+class AWQGPTQWeightOnlyQuantizationResult(QuantizedModel):
     """Result returned by algorithmic AWQ/GPTQ weight-only quantization."""
 
-    model: nn.Module
     backend: str = "pytorch"
     strategy: str = "weight_only_int4"
-    quantized_modules: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _bits_from_strategy_policy(

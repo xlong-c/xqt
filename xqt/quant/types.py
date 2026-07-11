@@ -102,7 +102,7 @@ class QuantizationReport:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "component_name": self.component_name,
             "backend": self.backend,
             "runtime": self.runtime,
@@ -124,6 +124,10 @@ class QuantizationReport:
             "dequant_nodes_eliminated": self.dequant_nodes_eliminated,
             "metadata": dict(self.metadata),
         }
+        module_contract = self.metadata.get("module_contract")
+        if isinstance(module_contract, dict):
+            payload["module_contract"] = dict(module_contract)
+        return payload
 
 
 @dataclass

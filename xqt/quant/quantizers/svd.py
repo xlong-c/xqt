@@ -20,13 +20,14 @@ Phase 2-3 (future): CuTe DSL kernels for TRUE INT4 MMA + SVDQuant fusion kernels
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from xqt.contracts import QuantizedModel
 from xqt.analysis.svd_analysis import (
     SVDQuantAnalysis,
     decompose_weight_svd,
@@ -58,15 +59,12 @@ from ..types import QuantizationComponentPlan, QuantizationReport
 
 
 @dataclass
-class SVDQuantResult:
+class SVDQuantResult(QuantizedModel):
     """Result returned by the SVDQuant backend."""
 
-    model: nn.Module
     backend: str = "svdquant"
     strategy: str = "svd_fp4"
-    quantized_modules: list[str] = field(default_factory=list)
     svd_analysis: Optional[SVDQuantAnalysis] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Low-rank branch ──────────────────────────────────────────────────────
