@@ -56,7 +56,7 @@ def handle_torchscript(
         },
     )
     context.artifacts[f"export_{index}"] = result.path
-    context.artifacts.setdefault("last_torchscript", result.path)
+    context.artifacts["last_torchscript"] = result.path
     if context.manifest is not None:
         context.manifest.add_artifact(record)
     exported_entry: dict[str, object] = {

@@ -21,13 +21,20 @@ from xqt.model import (
     compile_flux2_klein_nvfp4_transformer,
     collect_flux2_klein_nvfp4_engine_targets,
     flux2_klein_nvfp4_single_file_url,
+    load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit,
+    load_flux2_klein_bf16_pipeline,
+    load_flux2_klein_bf16_transformer,
     load_flux2_klein_nvfp4_transformer,
     materialize_flux2_klein_nvfp4_engine,
     normalize_flux2_klein_nvfp4_engine,
     optimize_flux2_klein_nvfp4_transformer,
+    quantize_flux2_klein_bf16_pipeline_to_convrot_4bit,
+    quantize_flux2_klein_bf16_transformer_to_convrot_4bit,
+    run_flux2_klein_bf16_convrot_4bit_inference,
     run_flux2_klein_nvfp4_inference,
     warmup_flux2_klein_nvfp4_transformer,
 )
+from xqt.quant import ConvRotMixedPrecisionLinear
 from xqt.quant import expand_group_scale, unpack_nvfp4e2m1
 
 
@@ -171,6 +178,185 @@ def test_load_flux2_klein_nvfp4_transformer_passes_diffusers_config(
         "config": FLUX2_KLEIN_4B_REPO_ID,
         "subfolder": "transformer",
     }
+
+
+def test_load_flux2_klein_bf16_transformer_uses_from_pretrained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _FakeFlux2Transformer2DModel:
+        @classmethod
+        def from_pretrained(cls, repo_id: str, **kwargs: object) -> nn.Module:
+            calls["repo_id"] = repo_id
+            calls["kwargs"] = dict(kwargs)
+            return nn.Linear(1, 1)
+
+    fake_diffusers = types.SimpleNamespace(
+        Flux2Transformer2DModel=_FakeFlux2Transformer2DModel
+    )
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    model = load_flux2_klein_bf16_transformer(
+        dtype=torch.bfloat16,
+        local_files_only=True,
+    )
+
+    assert isinstance(model, nn.Linear)
+    assert calls["repo_id"] == FLUX2_KLEIN_4B_REPO_ID
+    assert calls["kwargs"] == {
+        "subfolder": "transformer",
+        "torch_dtype": torch.bfloat16,
+        "local_files_only": True,
+    }
+
+
+def test_load_flux2_klein_bf16_pipeline_reuses_loaded_transformer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_transformer = nn.Linear(1, 1)
+    calls: dict[str, object] = {}
+
+    class _FakeFlux2KleinPipeline:
+        @classmethod
+        def from_pretrained(cls, repo_id: str, **kwargs: object) -> object:
+            calls["repo_id"] = repo_id
+            calls["kwargs"] = dict(kwargs)
+            return types.SimpleNamespace(transformer=kwargs["transformer"])
+
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein.load.load_flux2_klein_bf16_transformer",
+        lambda **kwargs: loaded_transformer,
+    )
+    fake_diffusers = types.SimpleNamespace(Flux2KleinPipeline=_FakeFlux2KleinPipeline)
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    pipeline = load_flux2_klein_bf16_pipeline(
+        dtype=torch.bfloat16,
+        local_files_only=True,
+    )
+
+    assert pipeline.transformer is loaded_transformer
+    assert calls["repo_id"] == FLUX2_KLEIN_4B_REPO_ID
+    assert calls["kwargs"]["transformer"] is loaded_transformer
+    assert calls["kwargs"]["torch_dtype"] == torch.bfloat16
+    assert calls["kwargs"]["local_files_only"] is True
+
+
+def test_quantize_flux2_klein_bf16_transformer_to_convrot_4bit_materializes_policy() -> None:
+    model = nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+    calibration_inputs = [torch.randn(2, 16)]
+
+    result = quantize_flux2_klein_bf16_transformer_to_convrot_4bit(
+        model,
+        policy={
+            "dtype": "int4",
+            "scheme": "convrot_w4a4",
+            "include_module_names": ["0"],
+            "group_size": 8,
+            "rot_size": 4,
+            "mixed_precision_ratio": 1.0,
+        },
+        calibration_inputs=calibration_inputs,
+        inplace=False,
+        materialize_mixed_precision=True,
+    )
+
+    assert isinstance(result.model[0], ConvRotMixedPrecisionLinear)
+    assert result.model[0].compute_precision == "w8a8"
+    assert result.strategy == "convrot_w4a4"
+
+
+def test_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit_replaces_transformer() -> None:
+    pipeline = types.SimpleNamespace(
+        transformer=nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+    )
+
+    quantized_pipeline, result = quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
+        pipeline,
+        policy={
+            "dtype": "int4",
+            "scheme": "convrot_w4a4",
+            "include_module_names": ["0"],
+            "group_size": 8,
+            "rot_size": 4,
+            "mixed_precision_ratio": 1.0,
+        },
+        calibration_inputs=[torch.randn(2, 16)],
+        inplace=False,
+        materialize_mixed_precision=True,
+    )
+
+    assert isinstance(quantized_pipeline.transformer[0], ConvRotMixedPrecisionLinear)
+    assert quantized_pipeline.transformer[0].compute_precision == "w8a8"
+    assert isinstance(pipeline.transformer[0], nn.Linear)
+    assert result.strategy == "convrot_w4a4"
+
+
+def test_load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit_uses_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_pipeline = types.SimpleNamespace(
+        transformer=nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+    )
+
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein.load.load_flux2_klein_bf16_pipeline",
+        lambda **kwargs: loaded_pipeline,
+    )
+
+    quantized_pipeline, result = load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
+        policy={
+            "dtype": "int4",
+            "scheme": "convrot_w4a4",
+            "include_module_names": ["0"],
+            "group_size": 8,
+            "rot_size": 4,
+            "mixed_precision_ratio": 1.0,
+        },
+        calibration_inputs=[torch.randn(2, 16)],
+    )
+
+    assert quantized_pipeline is loaded_pipeline
+    assert isinstance(quantized_pipeline.transformer[0], ConvRotMixedPrecisionLinear)
+    assert result.strategy == "convrot_w4a4"
+
+
+def test_run_flux2_klein_bf16_convrot_4bit_inference_quantizes_then_calls_pipeline() -> None:
+    class _TinyPipeline:
+        def __init__(self) -> None:
+            self.transformer = nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+            self.calls: list[dict[str, object]] = []
+
+        def __call__(self, *, prompt: str | list[str], input_tensor: torch.Tensor) -> dict[str, object]:
+            self.calls.append({"prompt": prompt, "input_shape": tuple(input_tensor.shape)})
+            return {
+                "prompt": prompt,
+                "output": self.transformer(input_tensor),
+            }
+
+    pipeline = _TinyPipeline()
+    result = run_flux2_klein_bf16_convrot_4bit_inference(
+        pipeline,
+        prompt="test",
+        input_tensor=torch.randn(2, 16),
+        policy={
+            "dtype": "int4",
+            "scheme": "convrot_w4a4",
+            "include_module_names": ["0"],
+            "group_size": 8,
+            "rot_size": 4,
+            "mixed_precision_ratio": 1.0,
+        },
+        calibration_inputs=[torch.randn(2, 16)],
+        inplace=False,
+    )
+
+    assert isinstance(result["pipeline"].transformer[0], ConvRotMixedPrecisionLinear)
+    assert result["pipeline"].transformer[0].compute_precision == "w8a8"
+    assert result["quantization"]["strategy"] == "convrot_w4a4"
+    assert result["output"]["prompt"] == "test"
+    assert pipeline.calls == []
 
 
 def test_load_flux2_klein_nvfp4_transformer_maps_modelopt_qkv(

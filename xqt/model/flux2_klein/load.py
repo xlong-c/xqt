@@ -1,15 +1,21 @@
-"""FLUX.2 klein NVFP4 model loading, modelopt mapping, and inference helpers."""
+"""FLUX.2 klein loading, modelopt mapping, and inference helpers."""
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import torch
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
+from xqt.quant.quantizers.convrot_4bit import (
+    ConvRot4BitQuantizationResult,
+    materialize_convrot_execution_policy,
+    quantize_with_convrot_4bit,
+)
 
 from .types import (
     FLUX2_KLEIN_4B_NVFP4_FILENAME,
@@ -431,6 +437,202 @@ def load_flux2_klein_nvfp4_pipeline(
     if device is not None:
         pipeline.to(device)
     return pipeline
+
+
+def load_flux2_klein_bf16_transformer(
+    *,
+    repo_id: str = FLUX2_KLEIN_4B_REPO_ID,
+    subfolder: str = "transformer",
+    dtype: torch.dtype = torch.bfloat16,
+    device: str | torch.device | None = None,
+    local_files_only: bool = False,
+    **kwargs: Any,
+) -> nn.Module:
+    """Lazy-load the FLUX.2 klein BF16 transformer from Diffusers."""
+
+    try:
+        from diffusers import Flux2Transformer2DModel
+    except ImportError as exc:
+        raise XQTBackendError(
+            "diffusers is required to load FLUX.2 klein BF16. Install a version exposing Flux2Transformer2DModel."
+        ) from exc
+    transformer = Flux2Transformer2DModel.from_pretrained(
+        repo_id,
+        subfolder=subfolder,
+        torch_dtype=dtype,
+        local_files_only=local_files_only,
+        **kwargs,
+    )
+    transformer.eval()
+    if device is not None:
+        transformer.to(device=device)
+    return transformer
+
+
+def load_flux2_klein_bf16_pipeline(
+    *,
+    repo_id: str = FLUX2_KLEIN_4B_REPO_ID,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str | torch.device | None = None,
+    local_files_only: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Lazy-load a Diffusers FLUX.2 klein pipeline with the BF16 transformer."""
+
+    try:
+        from diffusers import Flux2KleinPipeline
+    except ImportError as exc:
+        raise XQTBackendError(
+            "diffusers is required to load FLUX.2 klein pipelines. Install a version exposing Flux2KleinPipeline."
+        ) from exc
+    transformer = load_flux2_klein_bf16_transformer(
+        repo_id=repo_id,
+        subfolder="transformer",
+        dtype=dtype,
+        device=device,
+        local_files_only=local_files_only,
+    )
+    pipeline = Flux2KleinPipeline.from_pretrained(
+        repo_id,
+        transformer=transformer,
+        torch_dtype=dtype,
+        local_files_only=local_files_only,
+        **kwargs,
+    )
+    if device is not None:
+        pipeline.to(device)
+    return pipeline
+
+
+def quantize_flux2_klein_bf16_transformer_to_convrot_4bit(
+    model: nn.Module,
+    *,
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    inplace: bool = False,
+    materialize_mixed_precision: bool = True,
+) -> ConvRot4BitQuantizationResult:
+    """Quantize one FLUX.2 klein BF16 transformer with ConvRot W4A4 and optional policy materialization."""
+
+    result = quantize_with_convrot_4bit(
+        model,
+        policy=policy,
+        strategy="convrot_w4a4",
+        calibration_inputs=calibration_inputs,
+        inplace=inplace,
+    )
+    if not materialize_mixed_precision:
+        return result
+    execution_policies = result.metadata.get("execution_policies", [])
+    if not execution_policies:
+        return result
+    first_policy = execution_policies[0]
+    if not isinstance(first_policy, Mapping):
+        return result
+    precision_overrides = first_policy.get("precision_overrides", [])
+    model_with_policy = materialize_convrot_execution_policy(
+        result.model,
+        precision_overrides=precision_overrides if isinstance(precision_overrides, list) else None,
+        default_precision="w4a4",
+        inplace=False,
+    )
+    return ConvRot4BitQuantizationResult(
+        model=model_with_policy,
+        backend=result.backend,
+        method=result.method,
+        strategy=result.strategy,
+        quantized_modules=list(result.quantized_modules),
+        metadata=dict(result.metadata),
+    )
+
+
+def quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
+    pipeline: Any,
+    *,
+    transformer_attr: str = "transformer",
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    inplace: bool = False,
+    materialize_mixed_precision: bool = True,
+) -> tuple[Any, ConvRot4BitQuantizationResult]:
+    """Quantize the BF16 FLUX.2 klein transformer attached to one pipeline."""
+
+    if not hasattr(pipeline, transformer_attr):
+        raise XQTBackendError(
+            f"pipeline does not expose transformer attribute {transformer_attr!r}"
+        )
+    target_pipeline = pipeline if inplace else copy.deepcopy(pipeline)
+    transformer = getattr(target_pipeline, transformer_attr)
+    result = quantize_flux2_klein_bf16_transformer_to_convrot_4bit(
+        transformer,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=True,
+        materialize_mixed_precision=materialize_mixed_precision,
+    )
+    setattr(target_pipeline, transformer_attr, result.model)
+    return target_pipeline, result
+
+
+def load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
+    *,
+    repo_id: str = FLUX2_KLEIN_4B_REPO_ID,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str | torch.device | None = None,
+    local_files_only: bool = False,
+    transformer_attr: str = "transformer",
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    materialize_mixed_precision: bool = True,
+    **kwargs: Any,
+) -> tuple[Any, ConvRot4BitQuantizationResult]:
+    """Load one BF16 FLUX.2 klein pipeline and quantize its transformer to ConvRot W4A4."""
+
+    pipeline = load_flux2_klein_bf16_pipeline(
+        repo_id=repo_id,
+        dtype=dtype,
+        device=device,
+        local_files_only=local_files_only,
+        **kwargs,
+    )
+    return quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
+        pipeline,
+        transformer_attr=transformer_attr,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=True,
+        materialize_mixed_precision=materialize_mixed_precision,
+    )
+
+
+def run_flux2_klein_bf16_convrot_4bit_inference(
+    pipeline: Any,
+    *,
+    prompt: str | list[str],
+    transformer_attr: str = "transformer",
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    materialize_mixed_precision: bool = True,
+    inplace: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Quantize one BF16 FLUX.2 klein pipeline to ConvRot W4A4 and execute it once."""
+
+    quantized_pipeline, result = quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
+        pipeline,
+        transformer_attr=transformer_attr,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=inplace,
+        materialize_mixed_precision=materialize_mixed_precision,
+    )
+    with torch.inference_mode():
+        output = quantized_pipeline(prompt=prompt, **kwargs)
+    return {
+        "pipeline": quantized_pipeline,
+        "quantization": result.to_dict(),
+        "output": output,
+    }
 
 
 def run_flux2_klein_nvfp4_inference(

@@ -111,7 +111,12 @@ def preflight_optimization_config(
                 report, list(spec.targets), prefix=f"{prefix}.targets"
             )
             if isinstance(spec, DeployStageSpec):
-                _check_deploy_runtime_handle(report, spec.runtime_handle, prefix=prefix)
+                _check_deploy_runtime_handle(
+                    report,
+                    spec.runtime_handle,
+                    prefix=prefix,
+                    targets=list(spec.targets),
+                )
         elif isinstance(spec, AnalyzeStageSpec):
             report.add(
                 f"{prefix}.analysis.metrics",

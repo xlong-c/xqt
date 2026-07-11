@@ -99,6 +99,7 @@ def _quant_runtime_config(
         method=resolved_quant.method,
         strategy=resolved_quant.strategy,
         policy=dict(resolved_quant.policy),
+        composite_gemm=resolved_quant.composite_gemm,
         keep_high_precision=list(resolved_quant.keep_high_precision),
         skip_quantize=list(resolved_quant.skip_quantize),
         force_quantize=list(resolved_quant.force_quantize),

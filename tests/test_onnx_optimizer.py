@@ -157,6 +157,20 @@ def test_export_pass_uses_context_runtime_export_targets() -> None:
     assert context.artifacts == {}
 
 
+def test_export_pass_empty_targets_overwrites_stale_export_metrics() -> None:
+    context = XQTContext(
+        model=torch.nn.Identity().eval(),
+        example_inputs=torch.randn(1, 4),
+        export_targets=[],
+        output_diff_config=OutputDiffConfig(),
+    )
+    context.metrics["export"] = {"target_count": 99, "targets": ["stale"]}
+
+    ExportPass().run(context, stage_kind="deploy")
+
+    assert "export" not in context.metrics
+
+
 def test_deploy_onnxruntime_materializes_runtime_handle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -225,6 +239,72 @@ def test_deploy_onnxruntime_materializes_runtime_handle(
     assert handle["artifacts"] == {"onnx": str(output)}
     assert captured["path"] == output
     assert captured["providers"] == ["CPUExecutionProvider"]
+
+
+def test_deploy_onnxruntime_runtime_handle_rejects_multiple_onnx_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.onnx"
+    second = tmp_path / "second.onnx"
+    first.write_bytes(b"onnx-model-a")
+    second.write_bytes(b"onnx-model-b")
+
+    monkeypatch.setattr(
+        export_pass,
+        "export_onnx",
+        lambda model, example_input, output_path, **kwargs: ONNXExportResult(
+            path=Path(output_path),
+            opset=17,
+            checksum=file_sha256(Path(output_path)),
+            checked=True,
+            metadata={"input_names": ["input"], "output_names": ["output"]},
+        ),
+    )
+
+    def _unexpected_session(*args: object, **kwargs: object) -> None:
+        raise AssertionError("create_onnxruntime_session should not be called")
+
+    monkeypatch.setattr(
+        export_pass,
+        "create_onnxruntime_session",
+        _unexpected_session,
+    )
+    context = XQTContext(
+        model=torch.nn.Identity().eval(),
+        example_inputs=torch.randn(1, 4),
+        artifact_dir=str(tmp_path),
+        export_targets=[
+            ExportTargetConfig(
+                format="onnx",
+                output_path=str(first),
+                onnx=ONNXExportConfig(runtime_diff=False),
+            ),
+            ExportTargetConfig(
+                format="onnx",
+                output_path=str(second),
+                onnx=ONNXExportConfig(runtime_diff=False),
+            ),
+        ],
+        output_diff_config=OutputDiffConfig(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires exactly one ONNX export target",
+    ):
+        ExportPass().run(
+            context,
+            stage_kind="deploy",
+            runtime_handle_request=DeployRuntimeHandleSpec(
+                runtime="onnxruntime",
+                handle_kind="inference_session",
+                materialize=True,
+                onnxruntime=ONNXRuntimeHandleConfig(
+                    providers=["CPUExecutionProvider"],
+                ),
+            ),
+        )
 
 
 def test_deploy_tensorrt_materializes_runtime_handle(
@@ -310,6 +390,76 @@ def test_deploy_tensorrt_materializes_runtime_handle(
     assert captured["path"] == engine_path
     assert captured["device"] == "cuda:1"
     assert captured["plugin_libraries"] == ["plugins/custom.so"]
+
+
+def test_deploy_tensorrt_runtime_handle_rejects_multiple_tensorrt_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    first_engine = tmp_path / "first.engine"
+    second_engine = tmp_path / "second.engine"
+    onnx_path.write_bytes(b"onnx-model")
+    first_engine.write_bytes(b"tensorrt-engine-a")
+    second_engine.write_bytes(b"tensorrt-engine-b")
+
+    def _build_engine(
+        onnx: object,
+        output_path: object,
+        **kwargs: object,
+    ) -> TensorRTBuildResult:
+        del onnx, kwargs
+        path = Path(output_path)
+        return TensorRTBuildResult(
+            engine_path=path,
+            command=["trtexec", str(path)],
+            checksum=file_sha256(path),
+            dry_run=False,
+            metadata={},
+        )
+
+    def _unexpected_runtime_session(
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        raise AssertionError("create_tensorrt_runtime_session should not be called")
+
+    monkeypatch.setattr(export_pass, "build_tensorrt_engine", _build_engine)
+    monkeypatch.setattr(
+        export_pass,
+        "create_tensorrt_runtime_session",
+        _unexpected_runtime_session,
+    )
+    context = XQTContext(
+        artifact_dir=str(tmp_path),
+        export_targets=[
+            ExportTargetConfig(
+                format="tensorrt",
+                output_path=str(first_engine),
+                tensorrt=TensorRTExportConfig(onnx_path=str(onnx_path)),
+            ),
+            ExportTargetConfig(
+                format="tensorrt",
+                output_path=str(second_engine),
+                tensorrt=TensorRTExportConfig(onnx_path=str(onnx_path)),
+            ),
+        ],
+        output_diff_config=OutputDiffConfig(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires exactly one TensorRT export target",
+    ):
+        ExportPass().run(
+            context,
+            stage_kind="deploy",
+            runtime_handle_request=DeployRuntimeHandleSpec(
+                runtime="tensorrt",
+                handle_kind="runtime_session",
+                materialize=True,
+            ),
+        )
 
 
 def test_export_pass_forwards_typed_tensorrt_target_config(
@@ -776,6 +926,79 @@ def test_export_pass_forwards_typed_mobile_target_configs(
     assert summaries[1]["ncnn"]["converter"] == "pnnx"
     assert summaries[2]["ncnn"]["converter"] == "onnx2ncnn"
     assert summaries[3]["mnn"]["converter_path"] == "custom-mnnconvert"
+
+
+def test_export_pass_updates_last_torchscript_before_default_pnnx_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.pt"
+    second = tmp_path / "second.pt"
+    param_path = tmp_path / "model.param"
+    bin_path = tmp_path / "model.bin"
+    captured: dict[str, object] = {}
+
+    def _export_torchscript(
+        model: torch.nn.Module,
+        example_input: object,
+        output_path: object,
+        **kwargs: object,
+    ) -> TorchScriptExportResult:
+        del model, example_input, kwargs
+        path = Path(output_path)
+        path.write_bytes(path.name.encode("utf-8"))
+        return TorchScriptExportResult(
+            path=path,
+            checksum=file_sha256(path),
+            output_diff=None,
+            metadata={},
+        )
+
+    def _export_ncnn_pnnx(
+        model_path: object,
+        **kwargs: object,
+    ) -> CommandExportResult:
+        captured["model_path"] = model_path
+        return CommandExportResult(
+            output_paths=[param_path, bin_path],
+            command=["pnnx", str(model_path)],
+            dry_run=True,
+        )
+
+    monkeypatch.setattr(export_pass, "export_torchscript", _export_torchscript)
+    monkeypatch.setattr(export_pass, "export_ncnn_with_pnnx", _export_ncnn_pnnx)
+    context = XQTContext(
+        model=torch.nn.Identity().eval(),
+        example_inputs=torch.randn(1, 4),
+        artifact_dir=str(tmp_path),
+        export_targets=[
+            ExportTargetConfig(
+                format="torchscript",
+                output_path=str(first),
+                torchscript=TorchScriptExportConfig(runtime_diff=False),
+            ),
+            ExportTargetConfig(
+                format="torchscript",
+                output_path=str(second),
+                torchscript=TorchScriptExportConfig(runtime_diff=False),
+            ),
+            ExportTargetConfig(
+                format="ncnn",
+                output_path=str(param_path),
+                ncnn=NCNNExportConfig(
+                    converter="pnnx",
+                    bin_path=str(bin_path),
+                    dry_run=True,
+                ),
+            ),
+        ],
+        output_diff_config=OutputDiffConfig(),
+    )
+
+    ExportPass().run(context)
+
+    assert context.artifacts["last_torchscript"] == second
+    assert captured["model_path"] == second
 
 
 def test_optimize_onnx_writes_metadata_without_real_onnxruntime(

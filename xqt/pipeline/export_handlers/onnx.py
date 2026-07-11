@@ -108,8 +108,12 @@ def handle_onnx(
     exported_entry: dict[str, object] = {
         "path": str(result.path),
         "format": "onnx",
+        "opset": result.opset,
         "checked": result.checked,
         "checksum": result.checksum,
+        "input_names": list(result_metadata.get("input_names", [])),
+        "output_names": list(result_metadata.get("output_names", [])),
+        "dynamic_shapes": dict(result_metadata.get("dynamic_shapes", {})),
         "output_diff": diff.to_dict() if diff is not None else None,
         "pre_export_fusion": result_metadata.get("pre_export_fusion"),
         "pre_export_lowering": result_metadata.get("pre_export_lowering"),

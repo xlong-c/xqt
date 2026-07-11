@@ -1,4 +1,4 @@
-"""Export pass implementation for the legacy XQT pipeline."""
+"""Export pass implementation for XQT stage workflows."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ from xqt.export import (
     optimize_onnx,
 )
 from xqt.export.input_utils import first_tensor_output
+from xqt.runtime.package import write_model_package
 
 from .export_handlers._context import (
     call_model,
@@ -57,6 +58,103 @@ from .export_handlers.torch_export import handle_torch_export
 from .export_handlers.torchscript import handle_torchscript
 
 
+def _package_io_entries(names: Any) -> list[dict[str, str]]:
+    if not isinstance(names, list):
+        return []
+    return [{"name": str(item)} for item in names if isinstance(item, str)]
+
+
+def _default_package_runtime_config(
+    runtime_handle_request: DeployRuntimeHandleSpec | None,
+) -> dict[str, Any]:
+    providers = ["CPUExecutionProvider"]
+    if runtime_handle_request is not None:
+        resolved_runtime = runtime_handle_request.runtime or "onnxruntime"
+        if resolved_runtime == "onnxruntime" and runtime_handle_request.onnxruntime.providers:
+            providers = list(runtime_handle_request.onnxruntime.providers)
+    return {
+        "runtime": "onnxruntime",
+        "providers": providers,
+    }
+
+
+def _attach_onnx_model_packages(
+    context: XQTContext,
+    *,
+    export_targets: list[ExportTargetConfig],
+    exported: list[dict[str, object]],
+    target_summaries: list[dict[str, object]],
+    artifact_dir: Path,
+    stage_kind: str,
+    runtime_handle_request: DeployRuntimeHandleSpec | None,
+) -> None:
+    runtime_config = _default_package_runtime_config(runtime_handle_request)
+    for index, target in enumerate(export_targets):
+        if target.format != "onnx":
+            continue
+        if index >= len(exported) or index >= len(target_summaries):
+            continue
+        item = exported[index]
+        summary = target_summaries[index]
+        raw_path = item.get("path")
+        if not isinstance(raw_path, (str, Path)) or not str(raw_path):
+            raise ValueError(
+                "ONNX model package generation requires a materialized ONNX artifact path"
+            )
+        model_path = Path(raw_path)
+        package_dir = artifact_dir / f"{model_path.stem}.xqtpkg"
+        input_names = item.get("input_names")
+        output_names = item.get("output_names")
+        package_dir = write_model_package(
+            model_path=model_path,
+            output_dir=package_dir,
+            model_format="onnx",
+            runtime_name="onnxruntime",
+            runtime_config=runtime_config,
+            model_metadata={
+                "opset": item.get("opset", target.opset),
+                "checked": item.get("checked"),
+                "input_names": input_names if isinstance(input_names, list) else [],
+                "output_names": output_names if isinstance(output_names, list) else [],
+                "dynamic_shapes": item.get("dynamic_shapes", {}),
+            },
+            io={
+                "inputs": _package_io_entries(input_names),
+                "outputs": _package_io_entries(output_names),
+            },
+            metadata={
+                "project_name": context.project_name,
+                "stage_kind": stage_kind,
+                "source_artifact": str(model_path),
+                "compression_axes": list(context.compression_axes),
+                "export_guard": item.get("export_guard"),
+                "pre_export_fusion": item.get("pre_export_fusion"),
+                "pre_export_lowering": item.get("pre_export_lowering"),
+                "onnx_optimization": item.get("onnx_optimization"),
+            },
+        )
+        manifest_path = package_dir / "manifest.json"
+        context.artifacts[f"model_package_{index}"] = package_dir
+        context.artifacts[f"model_package_{index}_manifest"] = manifest_path
+        context.artifacts["last_model_package"] = package_dir
+        if context.manifest is not None:
+            context.manifest.add_artifact(
+                ArtifactRecord.from_file(
+                    manifest_path,
+                    format="xqt_model_package",
+                    runtime="onnxruntime",
+                    metadata={
+                        "stage_kind": stage_kind,
+                        "source_artifact": str(model_path),
+                    },
+                )
+            )
+        item["model_package"] = str(package_dir)
+        item["model_package_manifest"] = str(manifest_path)
+        summary["model_package"] = str(package_dir)
+        summary["model_package_manifest"] = str(manifest_path)
+
+
 def materialize_deploy_runtime_handle(
     context: XQTContext,
     request: DeployRuntimeHandleSpec,
@@ -67,11 +165,23 @@ def materialize_deploy_runtime_handle(
     runtime = request.runtime or "onnxruntime"
     handle_kind = request.handle_kind
     if runtime == "onnxruntime":
-        onnx_path = context.artifacts.get("last_onnx")
-        if onnx_path is None:
+        onnx_targets = [
+            item for item in target_summaries if item.get("format") == "onnx"
+        ]
+        if not onnx_targets:
             raise ValueError(
                 "ONNX Runtime handle requires an ONNX export target in the same deploy stage"
             )
+        if len(onnx_targets) != 1:
+            raise ValueError(
+                "ONNX Runtime handle requires exactly one ONNX export target in the same deploy stage"
+            )
+        onnx_path = onnx_targets[0].get("path")
+        if not isinstance(onnx_path, (str, Path)) or not str(onnx_path):
+            raise ValueError(
+                "ONNX Runtime handle requires a materialized ONNX artifact in the same deploy stage"
+            )
+        onnx_path = Path(onnx_path)
         providers = request.onnxruntime.providers
         session = create_onnxruntime_session(
             onnx_path,
@@ -81,10 +191,8 @@ def materialize_deploy_runtime_handle(
             "runtime": runtime,
             "handle_kind": handle_kind,
             "handle": session,
-            "target_count": 1,
-            "targets": [
-                item for item in target_summaries if item.get("format") == "onnx"
-            ],
+            "target_count": len(onnx_targets),
+            "targets": onnx_targets,
             "artifacts": {"onnx": str(onnx_path)},
             "metadata": {
                 "providers": list(session.get_providers()),
@@ -97,11 +205,6 @@ def materialize_deploy_runtime_handle(
             "deploy runtime-handle materialization supports runtime=onnxruntime or runtime=tensorrt"
         )
 
-    engine_path = context.artifacts.get("last_engine")
-    if engine_path is None:
-        raise ValueError(
-            "TensorRT runtime handle requires a non-dry-run TensorRT export target in the same deploy stage"
-        )
     tensorrt_targets = [
         item for item in target_summaries if item.get("format") == "tensorrt"
     ]
@@ -109,10 +212,20 @@ def materialize_deploy_runtime_handle(
         raise ValueError(
             "TensorRT runtime handle requires a TensorRT export target in the same deploy stage"
         )
+    if len(tensorrt_targets) != 1:
+        raise ValueError(
+            "TensorRT runtime handle requires exactly one TensorRT export target in the same deploy stage"
+        )
     if any(bool(item.get("dry_run")) for item in tensorrt_targets):
         raise ValueError(
             "TensorRT runtime handle cannot materialize a dry-run engine artifact"
         )
+    engine_path = tensorrt_targets[0].get("path")
+    if not isinstance(engine_path, (str, Path)) or not str(engine_path):
+        raise ValueError(
+            "TensorRT runtime handle requires a materialized TensorRT engine artifact in the same deploy stage"
+        )
+    engine_path = Path(engine_path)
     device = request.tensorrt.device or context.device or "cuda:0"
     plugin_libraries = list(request.tensorrt.plugin_libraries) or None
     session = create_tensorrt_runtime_session(
@@ -178,6 +291,7 @@ class ExportPass:
         export_targets = list(resolved_targets)
         context.export_targets = copy.deepcopy(export_targets)
         if not export_targets:
+            context.metrics.pop("export", None)
             return context
         resolved_output_diff = output_diff or context.output_diff_config
         if resolved_output_diff is None:
@@ -263,6 +377,15 @@ class ExportPass:
             "targets": target_summaries,
             "stage_kind": stage_kind,
         }
+        _attach_onnx_model_packages(
+            context,
+            export_targets=export_targets,
+            exported=exported,
+            target_summaries=target_summaries,
+            artifact_dir=artifact_dir,
+            stage_kind=stage_kind,
+            runtime_handle_request=runtime_handle_request,
+        )
         if runtime_handle_request is not None:
             metrics["runtime_handle_request"] = asdict(runtime_handle_request)
             if runtime_handle_request.materialize:

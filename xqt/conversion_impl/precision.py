@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 from xqt.contracts import FeedForwardPrecisionPolicy, PrecisionPolicy
 from xqt.core.errors import XQTBackendError
@@ -20,7 +20,7 @@ def _resolve_engine_alias(
 
 def _runtime_precision_dict(
     policy: PrecisionPolicy | Mapping[str, str],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if isinstance(policy, PrecisionPolicy):
         return policy.to_dict()
     if isinstance(policy, FeedForwardPrecisionPolicy):
@@ -32,7 +32,7 @@ def _projection_precision_dict(
     policy: PrecisionPolicy
     | Mapping[str, str]
     | FeedForwardPrecisionPolicy,
-) -> dict[str, dict[str, str]] | None:
+) -> dict[str, dict[str, Any]] | None:
     if isinstance(policy, FeedForwardPrecisionPolicy):
         return {
             name: projection_policy.to_dict()
@@ -46,13 +46,13 @@ def _projection_precision_dict(
     }
 
 
-def _precision_policy_from_mapping(policy: Mapping[str, str]) -> PrecisionPolicy:
+def _precision_policy_from_mapping(policy: Mapping[str, Any]) -> PrecisionPolicy:
     return PrecisionPolicy.from_mapping(policy)
 
 
 def _projection_policy_dict(
-    policy: PrecisionPolicy | Mapping[str, str],
-) -> dict[str, str]:
+    policy: PrecisionPolicy | Mapping[str, Any],
+) -> dict[str, Any]:
     if isinstance(policy, PrecisionPolicy):
         return policy.to_dict()
     return PrecisionPolicy.normalize_fields(policy)

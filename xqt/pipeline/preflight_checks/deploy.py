@@ -13,6 +13,7 @@ def _check_deploy_runtime_handle(
     handle: DeployRuntimeHandleSpec | None,
     *,
     prefix: str,
+    targets: list[object],
 ) -> None:
     if handle is None or not handle.materialize:
         return
@@ -29,10 +30,34 @@ def _check_deploy_runtime_handle(
         handle_kind=handle.handle_kind,
     )
     if runtime == "onnxruntime":
+        onnx_targets = [
+            target for target in targets if getattr(target, "format", None) == "onnx"
+        ]
+        report.add(
+            f"{prefix}.runtime_handle.targets",
+            len(onnx_targets) == 1,
+            "runtime handle has exactly one ONNX target"
+            if len(onnx_targets) == 1
+            else "runtime handle requires exactly one ONNX target",
+            level="info" if len(onnx_targets) == 1 else "error",
+            target_count=len(onnx_targets),
+        )
         _check_dependency(report, "onnxruntime")
         return
     if runtime != "tensorrt":
         return
+    tensorrt_targets = [
+        target for target in targets if getattr(target, "format", None) == "tensorrt"
+    ]
+    report.add(
+        f"{prefix}.runtime_handle.targets",
+        len(tensorrt_targets) == 1,
+        "runtime handle has exactly one TensorRT target"
+        if len(tensorrt_targets) == 1
+        else "runtime handle requires exactly one TensorRT target",
+        level="info" if len(tensorrt_targets) == 1 else "error",
+        target_count=len(tensorrt_targets),
+    )
     _check_dependency(report, "tensorrt")
     for index, plugin_path in enumerate(handle.tensorrt.plugin_libraries):
         validation = validate_tensorrt_plugin_libraries(

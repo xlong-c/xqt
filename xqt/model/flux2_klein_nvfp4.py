@@ -29,8 +29,14 @@ from .flux2_klein.optimize import (
     optimize_flux2_klein_nvfp4_transformer,
 )
 from .flux2_klein.load import (
+    load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit,
+    load_flux2_klein_bf16_pipeline,
+    load_flux2_klein_bf16_transformer,
     load_flux2_klein_nvfp4_pipeline,
     load_flux2_klein_nvfp4_transformer,
+    quantize_flux2_klein_bf16_pipeline_to_convrot_4bit,
+    quantize_flux2_klein_bf16_transformer_to_convrot_4bit,
+    run_flux2_klein_bf16_convrot_4bit_inference,
     run_flux2_klein_nvfp4_inference,
 )
 
@@ -51,11 +57,17 @@ __all__ = [
     "collect_flux2_klein_nvfp4_engine_targets",
     "collect_flux2_klein_nvfp4_targets",
     "flux2_klein_nvfp4_single_file_url",
+    "load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
+    "load_flux2_klein_bf16_pipeline",
+    "load_flux2_klein_bf16_transformer",
     "load_flux2_klein_nvfp4_pipeline",
     "load_flux2_klein_nvfp4_transformer",
     "materialize_flux2_klein_nvfp4_engine",
     "normalize_flux2_klein_nvfp4_engine",
     "optimize_flux2_klein_nvfp4_transformer",
+    "quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
+    "quantize_flux2_klein_bf16_transformer_to_convrot_4bit",
+    "run_flux2_klein_bf16_convrot_4bit_inference",
     "run_flux2_klein_nvfp4_inference",
     "warmup_flux2_klein_nvfp4_transformer",
 ]
