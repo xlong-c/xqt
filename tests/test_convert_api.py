@@ -9,7 +9,12 @@ import torch.nn.functional as F
 from torch import nn
 
 import xqt
-from xqt.conversion import ConvertResult, FeedForwardPrecisionPolicy, PrecisionPolicy
+from xqt.conversion import (
+    ConvertResult,
+    FeedForwardPrecisionPolicy,
+    MatmulPrecisionSpec,
+    PrecisionPolicy,
+)
 from xqt.contracts import FusionIntent, ModuleContract
 from xqt.quant import FP4WeightOnlyLinear
 
@@ -190,6 +195,24 @@ def test_precision_policy_from_matmul_accepts_abco_roles() -> None:
         "accum": "fp32",
         "output": "bf16",
     }
+
+
+def test_conversion_matmul_precision_name_is_shared_contract_alias() -> None:
+    assert MatmulPrecisionSpec is PrecisionPolicy
+
+
+def test_semantic_facade_and_contract_share_precision_canonicalization() -> None:
+    linear = xqt.nn.Linear(4, 3)
+    linear.configure_runtime(
+        activation_dtype="bfloat16",
+        output_dtype="auto",
+    )
+
+    assert PrecisionPolicy.canonical_name("bfloat16") == "bf16"
+    assert PrecisionPolicy.canonical_name("auto", allow_auto=True) == "auto"
+    assert PrecisionPolicy.canonical_field("addend_dtype") == "bias"
+    assert linear.runtime_config()["activation"] == "bf16"
+    assert linear.runtime_config()["output"] == "auto"
 
 
 def test_convert_conv2d_tilelang_delegates_to_materializer(

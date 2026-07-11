@@ -23,10 +23,7 @@ from xqt.operator_opt import (
     OperatorOptimizationTargetPlan,
     materialize_module,
 )
-from xqt.operator_opt.backends.gemm_precision import (
-    MatmulPrecisionSpec,
-    gemm_with_precision,
-)
+from xqt.operator_opt.backends.gemm_precision import gemm_with_precision
 from xqt.quant import (
     FP4WeightOnlyLinear,
     infer_nvfp4_tensor_layout,
@@ -34,6 +31,7 @@ from xqt.quant import (
 
 
 EngineKind = Literal["torch", "triton", "tilelang", "cutile", "cute_dsl"]
+MatmulPrecisionSpec = PrecisionPolicy
 
 
 def _resolve_engine_alias(
@@ -47,20 +45,17 @@ def _resolve_engine_alias(
 
 
 def _runtime_precision_dict(
-    policy: PrecisionPolicy | MatmulPrecisionSpec | Mapping[str, str],
+    policy: PrecisionPolicy | Mapping[str, str],
 ) -> dict[str, str]:
     if isinstance(policy, PrecisionPolicy):
         return policy.to_dict()
     if isinstance(policy, FeedForwardPrecisionPolicy):
         return policy.default.to_dict()
-    if isinstance(policy, MatmulPrecisionSpec):
-        return policy.to_dict()
-    return MatmulPrecisionSpec.from_roles(**_matmul_role_kwargs(policy)).to_dict()
+    return PrecisionPolicy.from_mapping(policy).to_dict()
 
 
 def _projection_precision_dict(
     policy: PrecisionPolicy
-    | MatmulPrecisionSpec
     | Mapping[str, str]
     | FeedForwardPrecisionPolicy,
 ) -> dict[str, dict[str, str]] | None:
@@ -77,91 +72,16 @@ def _projection_precision_dict(
     }
 
 
-def _precision_policy_from_matmul_spec(policy: MatmulPrecisionSpec) -> PrecisionPolicy:
-    return PrecisionPolicy(
-        activation=policy.activation,
-        weight=policy.weight,
-        bias=policy.bias,
-        mma=policy.mma,
-        accum=policy.accum,
-        output=policy.output,
-    )
-
-
 def _precision_policy_from_mapping(policy: Mapping[str, str]) -> PrecisionPolicy:
-    return _precision_policy_from_matmul_spec(
-        MatmulPrecisionSpec.from_roles(**_matmul_role_kwargs(policy))
-    )
-
-
-def _matmul_spec_from_precision_policy(policy: PrecisionPolicy) -> MatmulPrecisionSpec:
-    return MatmulPrecisionSpec(
-        activation=policy.activation,
-        weight=policy.weight,
-        bias=policy.bias,
-        mma=policy.mma,
-        accum=policy.accum,
-        output=policy.output,
-    )
-
-
-def _matmul_role_kwargs(policy: Mapping[str, str]) -> dict[str, str]:
-    key_aliases = {
-        "a": "A",
-        "activation": "activation",
-        "activation_dtype": "activation",
-        "input": "activation",
-        "lhs": "activation",
-        "b": "B",
-        "weight": "weight",
-        "weight_dtype": "weight",
-        "rhs": "weight",
-        "c": "C",
-        "bias": "bias",
-        "bias_dtype": "bias",
-        "addend": "bias",
-        "addend_dtype": "bias",
-        "mma": "mma",
-        "mma_dtype": "mma",
-        "acc": "accum",
-        "accum": "accum",
-        "accum_dtype": "accum",
-        "accumulator": "accum",
-        "accumulator_dtype": "accum",
-        "o": "O",
-        "out": "output",
-        "output": "output",
-        "output_dtype": "output",
-    }
-    payload: dict[str, str] = {}
-    for key, value in policy.items():
-        normalized = str(key).strip().lower()
-        try:
-            canonical_key = key_aliases[normalized]
-        except KeyError as exc:
-            allowed = ", ".join(sorted(key_aliases))
-            raise XQTBackendError(
-                f"unsupported precision policy field: {key}. Allowed: {allowed}"
-            ) from exc
-        payload[canonical_key] = str(value)
-    return payload
+    return PrecisionPolicy.from_mapping(policy)
 
 
 def _projection_policy_dict(
-    policy: PrecisionPolicy | MatmulPrecisionSpec | Mapping[str, str],
+    policy: PrecisionPolicy | Mapping[str, str],
 ) -> dict[str, str]:
     if isinstance(policy, PrecisionPolicy):
         return policy.to_dict()
-    if isinstance(policy, MatmulPrecisionSpec):
-        return policy.to_dict()
-    role_kwargs = _matmul_role_kwargs(policy)
-    key_aliases = {
-        "A": "activation",
-        "B": "weight",
-        "C": "bias",
-        "O": "output",
-    }
-    return {key_aliases.get(key, key): str(value) for key, value in role_kwargs.items()}
+    return PrecisionPolicy.normalize_fields(policy)
 
 
 @dataclass(frozen=True)
@@ -193,7 +113,7 @@ class _RuntimeLinearModule(nn.Module):
         module: nn.Linear,
         *,
         engine: str,
-        precision: MatmulPrecisionSpec,
+        precision: PrecisionPolicy,
     ) -> None:
         super().__init__()
         if engine not in {"torch", "triton"}:
@@ -206,7 +126,7 @@ class _RuntimeLinearModule(nn.Module):
         self,
         *,
         engine: str | None = None,
-        precision: MatmulPrecisionSpec | Mapping[str, str] | None = None,
+        precision: PrecisionPolicy | Mapping[str, str] | None = None,
         activation_dtype: str | None = None,
         weight_dtype: str | None = None,
         bias_dtype: str | None = None,
@@ -261,7 +181,7 @@ class _RuntimeLinearModule(nn.Module):
             flat_x,
             weight,
             bias,
-            precision=MatmulPrecisionSpec(**self.runtime_precision),
+            precision=PrecisionPolicy(**self.runtime_precision),
             engine=self.engine,
             transpose_b=True,
         )
@@ -311,6 +231,10 @@ class _ModuleConverter:
             return self._convert_layernorm(working, contract)
         if contract.operator_kind == "feedforward":
             return self._convert_feedforward(working, contract)
+        if contract.operator_kind == "attention":
+            return self._convert_attention(working, contract)
+        if contract.operator_kind == "transformer_block":
+            return self._convert_transformer_block(working, contract)
         raise XQTBackendError(
             f"Unsupported conversion operator kind: {contract.operator_kind}"
         )
@@ -327,8 +251,43 @@ class _ModuleConverter:
             return self._build_layernorm_contract(module)
         if isinstance(module, xqt_nn.FeedForward):
             return self._build_feedforward_contract(module)
+        if isinstance(module, xqt_nn.Attention):
+            return self._build_attention_contract(module)
+        if isinstance(module, xqt_nn.TransformerBlock):
+            return self._build_transformer_block_contract(module)
         raise XQTBackendError(
-            "xqt.convert currently supports Linear, Conv2d, LayerNorm, FeedForward, FP4WeightOnlyLinear, and bridgeable NVFP4 Linear modules"
+            "xqt.convert currently supports Linear, Conv2d, LayerNorm, FeedForward, "
+            "Attention, TransformerBlock, FP4WeightOnlyLinear, and bridgeable NVFP4 Linear modules"
+        )
+
+    def _attach_contract(
+        self,
+        module: nn.Module,
+        contract: OperatorContract,
+    ) -> nn.Module:
+        setattr(module, "_xqt_module_contract", contract.to_dict())
+        return module
+
+    def _result(
+        self,
+        *,
+        model: nn.Module,
+        contract: OperatorContract,
+        converted: bool,
+        report: dict[str, Any],
+    ) -> ConvertResult:
+        model = self._attach_contract(model, contract)
+        payload = dict(report)
+        payload.setdefault("contract", contract.to_dict())
+        payload.setdefault("engine", self.engine)
+        payload.setdefault("converted", converted)
+        return ConvertResult(
+            model=model,
+            engine=self.engine,
+            target=self.target,
+            contract=contract,
+            converted=converted,
+            report=payload,
         )
 
     def _build_linear_contract(self, module: nn.Module) -> OperatorContract:
@@ -449,9 +408,7 @@ class _ModuleConverter:
     ) -> OperatorContract:
         norm_kind = "none" if module.norm is None else str(module.norm_kind)
         has_gate = module.proj_gate is not None
-        epilogue = ("dropout",) if module.dropout_p > 0.0 else ()
-        if module.final_dropout_enabled:
-            epilogue = (*epilogue, "final_dropout")
+        fusion = module.fusion_intent()
         runtime_fusion = module.runtime_config()["fusion"]
         return OperatorContract(
             operator_kind="feedforward",
@@ -467,11 +424,8 @@ class _ModuleConverter:
                 layout="row_major_dense",
             ),
             output_dtype=self.policy.output,
-            epilogue=epilogue,
-            fusion=FusionIntent(
-                patterns=tuple(runtime_fusion["realized_patterns"]),
-                epilogue=epilogue,
-            ),
+            epilogue=fusion.epilogue,
+            fusion=fusion,
             metadata={
                 "source_module_type": type(module).__name__,
                 "dim": int(module.dim),
@@ -490,24 +444,19 @@ class _ModuleConverter:
     ) -> ConvertResult:
         if self.engine == "torch":
             if not isinstance(module, nn.Linear) or not self.policy_was_explicit:
-                report = {
-                    "engine": self.engine,
-                    "converted": False,
-                    "reason": "torch engine keeps the original Linear-compatible implementation",
-                }
-                return ConvertResult(
+                return self._result(
                     model=module,
-                    engine=self.engine,
-                    target=self.target,
                     contract=contract,
                     converted=False,
-                    report=report,
+                    report={
+                        "reason": "torch engine keeps the original Linear-compatible implementation",
+                    },
                 )
         if isinstance(module, nn.Linear) and self.engine in {"torch", "triton"}:
             runtime_linear = _RuntimeLinearModule(
                 module,
                 engine=self.engine,
-                precision=_matmul_spec_from_precision_policy(self.policy),
+                precision=self.policy,
             )
             converted = self.engine == "triton"
             reason = (
@@ -515,18 +464,13 @@ class _ModuleConverter:
                 if self.engine == "torch"
                 else "triton engine uses a runtime-configured Linear wrapper"
             )
-            return ConvertResult(
+            return self._result(
                 model=runtime_linear,
-                engine=self.engine,
-                target=self.target,
                 contract=contract,
                 converted=converted,
                 report={
-                    "engine": self.engine,
-                    "converted": converted,
                     "reason": reason,
                     "runtime_config": runtime_linear.runtime_config(),
-                    "contract": contract.to_dict(),
                 },
             )
         target_plan = self._lower_linear_contract_to_target_plan(contract)
@@ -535,34 +479,22 @@ class _ModuleConverter:
             contract=contract,
             target=target_plan,
         )
-        report = {
-            "engine": self.engine,
-            "converted": True,
-            "target_plan": target_plan.to_dict(),
-            "contract": contract.to_dict(),
-        }
-        return ConvertResult(
+        return self._result(
             model=converted_module,
-            engine=self.engine,
-            target=self.target,
             contract=contract,
             converted=True,
-            report=report,
+            report={"target_plan": target_plan.to_dict()},
         )
 
     def _convert_conv2d(
         self, module: nn.Conv2d, contract: OperatorContract
     ) -> ConvertResult:
         if self.engine == "torch":
-            return ConvertResult(
+            return self._result(
                 model=module,
-                engine=self.engine,
-                target=self.target,
                 contract=contract,
                 converted=False,
                 report={
-                    "engine": self.engine,
-                    "converted": False,
                     "reason": "torch engine keeps the original Conv2d implementation",
                 },
             )
@@ -588,33 +520,22 @@ class _ModuleConverter:
             contract=contract,
             target=target_plan,
         )
-        return ConvertResult(
+        return self._result(
             model=converted_module,
-            engine=self.engine,
-            target=self.target,
             contract=contract,
             converted=True,
-            report={
-                "engine": self.engine,
-                "converted": True,
-                "target_plan": target_plan.to_dict(),
-                "contract": contract.to_dict(),
-            },
+            report={"target_plan": target_plan.to_dict()},
         )
 
     def _convert_layernorm(
         self, module: nn.LayerNorm, contract: OperatorContract
     ) -> ConvertResult:
         if self.engine == "torch":
-            return ConvertResult(
+            return self._result(
                 model=module,
-                engine=self.engine,
-                target=self.target,
                 contract=contract,
                 converted=False,
                 report={
-                    "engine": self.engine,
-                    "converted": False,
                     "reason": "torch engine keeps the original LayerNorm implementation",
                 },
             )
@@ -640,18 +561,11 @@ class _ModuleConverter:
             contract=contract,
             target=target_plan,
         )
-        return ConvertResult(
+        return self._result(
             model=converted_module,
-            engine=self.engine,
-            target=self.target,
             contract=contract,
             converted=True,
-            report={
-                "engine": self.engine,
-                "converted": True,
-                "target_plan": target_plan.to_dict(),
-                "contract": contract.to_dict(),
-            },
+            report={"target_plan": target_plan.to_dict()},
         )
 
     def _convert_feedforward(
@@ -674,19 +588,14 @@ class _ModuleConverter:
                 output_dtype=self.policy.output,
                 projection_policies=self._feedforward_projection_policies(),
             )
-            return ConvertResult(
+            return self._result(
                 model=module,
-                engine=self.engine,
-                target=self.target,
                 contract=contract,
                 converted=False,
                 report={
-                    "engine": self.engine,
-                    "converted": False,
                     "reason": "torch engine keeps the original FeedForward implementation",
                     "runtime_config": module.runtime_config(),
                     "fusion": module.runtime_config()["fusion"],
-                    "contract": contract.to_dict(),
                 },
             )
         target_plan = OperatorOptimizationTargetPlan(
@@ -712,20 +621,194 @@ class _ModuleConverter:
             contract=contract,
             target=target_plan,
         )
-        return ConvertResult(
+        return self._result(
             model=converted_module,
-            engine=self.engine,
-            target=self.target,
             contract=contract,
             converted=True,
             report={
-                "engine": self.engine,
-                "converted": True,
                 "reason": "Triton FeedForward candidate materialized from shared module contract",
                 "runtime_config": converted_module.runtime_config(),
                 "fusion": converted_module.runtime_config()["fusion"],
                 "target_plan": target_plan.to_dict(),
-                "contract": contract.to_dict(),
+            },
+        )
+
+    def _build_attention_contract(
+        self, module: xqt_nn.Attention
+    ) -> OperatorContract:
+        return OperatorContract(
+            operator_kind="attention",
+            policy=self.policy,
+            input_spec=TensorStorageSpec(
+                storage_dtype=self.policy.activation,
+                logical_dtype=self.policy.activation,
+                layout="row_major_dense",
+            ),
+            weight_spec=TensorStorageSpec(
+                storage_dtype=self.policy.weight,
+                logical_dtype=self.policy.weight,
+                layout="row_major_dense",
+            ),
+            output_dtype=self.policy.output,
+            metadata={
+                "source_module_type": type(module).__name__,
+                "dim": int(module.dim),
+                "dim_out": int(module.dim_out),
+                "heads": int(module.heads),
+                "head_dim": int(module.head_dim),
+                "causal": bool(module.causal),
+                "dropout": float(module.dropout_p),
+                "engine": module.engine,
+            },
+        )
+
+    def _build_transformer_block_contract(
+        self, module: xqt_nn.TransformerBlock
+    ) -> OperatorContract:
+        return OperatorContract(
+            operator_kind="transformer_block",
+            policy=self.policy,
+            input_spec=TensorStorageSpec(
+                storage_dtype=self.policy.activation,
+                logical_dtype=self.policy.activation,
+                layout="row_major_dense",
+            ),
+            weight_spec=TensorStorageSpec(
+                storage_dtype=self.policy.weight,
+                logical_dtype=self.policy.weight,
+                layout="row_major_dense",
+            ),
+            output_dtype=self.policy.output,
+            metadata={
+                "source_module_type": type(module).__name__,
+                "dim": int(module.dim),
+                "dim_out": int(module.dim_out),
+                "heads": int(module.heads),
+                "norm": "none" if module.norm_kind is None else str(module.norm_kind),
+                "ffn_activation": str(module.ffn.activation),
+                "engine": module.engine,
+            },
+        )
+
+    def _convert_attention(
+        self,
+        module: xqt_nn.Attention,
+        contract: OperatorContract,
+    ) -> ConvertResult:
+        if self.engine not in {"torch", "tilelang"}:
+            raise XQTBackendError(
+                f"xqt.convert Attention currently supports only engine='torch' or engine='tilelang', got {self.engine}"
+            )
+        module.configure_runtime(
+            engine=self.engine,
+            activation_dtype=self.policy.activation,
+            weight_dtype=self.policy.weight,
+            bias_dtype=self.policy.bias,
+            mma_dtype=self.policy.mma,
+            accum_dtype=self.policy.accum,
+            output_dtype=self.policy.output,
+        )
+        if self.engine == "torch":
+            return self._result(
+                model=module,
+                contract=contract,
+                converted=False,
+                report={
+                    "reason": "torch engine keeps the Attention facade with SDPA forward",
+                    "runtime_config": module.runtime_config(),
+                },
+            )
+        target_plan = OperatorOptimizationTargetPlan(
+            name=f"{type(module).__name__}_{self.engine}",
+            engine=self.engine,
+            target_path=None,
+            patterns=["attention"],
+            fallback=self.fallback,
+            min_speedup=0.0,
+            validate={"atol": 1e-2, "rtol": 1e-2},
+            tilelang={
+                "target": self.target,
+                "target_arch": self.target_arch,
+            },
+        )
+        converted_module, _ = materialize_module(
+            module,
+            contract=contract,
+            target=target_plan,
+        )
+        return self._result(
+            model=converted_module,
+            contract=contract,
+            converted=True,
+            report={
+                "reason": "Attention candidate materialized from shared module contract",
+                "target_plan": target_plan.to_dict(),
+            },
+        )
+
+    def _convert_transformer_block(
+        self,
+        module: xqt_nn.TransformerBlock,
+        contract: OperatorContract,
+    ) -> ConvertResult:
+        if self.engine not in {"torch", "tilelang"}:
+            raise XQTBackendError(
+                "xqt.convert TransformerBlock currently supports only "
+                f"engine='torch' or engine='tilelang', got {self.engine}"
+            )
+        module.configure_runtime(
+            engine=self.engine,
+            activation_dtype=self.policy.activation,
+            weight_dtype=self.policy.weight,
+            bias_dtype=self.policy.bias,
+            mma_dtype=self.policy.mma,
+            accum_dtype=self.policy.accum,
+            output_dtype=self.policy.output,
+        )
+        if self.engine == "torch":
+            return self._result(
+                model=module,
+                contract=contract,
+                converted=False,
+                report={
+                    "reason": "torch engine keeps the TransformerBlock facade composition",
+                    "runtime_config": module.runtime_config(),
+                },
+            )
+        target_plan = OperatorOptimizationTargetPlan(
+            name=f"{type(module).__name__}_attn_{self.engine}",
+            engine=self.engine,
+            target_path="attn",
+            patterns=["attention"],
+            fallback=self.fallback,
+            min_speedup=0.0,
+            validate={"atol": 1e-2, "rtol": 1e-2},
+            tilelang={
+                "target": self.target,
+                "target_arch": self.target_arch,
+            },
+        )
+        converted_module, _ = materialize_module(
+            module,
+            contract=contract,
+            target=target_plan,
+        )
+        return self._result(
+            model=converted_module,
+            contract=contract,
+            converted=True,
+            report={
+                "reason": (
+                    "TransformerBlock tilelang: internal Attention materialized via "
+                    "shared module contract; full block-level single-kernel fusion "
+                    "remains future work"
+                ),
+                "target_plan": target_plan.to_dict(),
+                "runtime_config": (
+                    converted_module.runtime_config()
+                    if hasattr(converted_module, "runtime_config")
+                    else module.runtime_config()
+                ),
             },
         )
 
@@ -796,7 +879,6 @@ def convert(
     target: str = "cuda",
     policy: PrecisionPolicy
     | FeedForwardPrecisionPolicy
-    | MatmulPrecisionSpec
     | Mapping[str, str]
     | None = None,
     projection_policies: Mapping[str, PrecisionPolicy | Mapping[str, str]]
@@ -820,9 +902,6 @@ def convert(
             raise XQTBackendError(
                 "xqt.convert does not allow both FeedForwardPrecisionPolicy and projection_policies"
             )
-    elif isinstance(policy, MatmulPrecisionSpec):
-        resolved_policy = _precision_policy_from_matmul_spec(policy)
-        resolved_projection_policies = projection_policies
     elif isinstance(policy, Mapping):
         resolved_policy = _precision_policy_from_mapping(policy)
         resolved_projection_policies = projection_policies
