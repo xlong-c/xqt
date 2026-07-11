@@ -16,6 +16,7 @@ import xqt.core.schema as core_schema_module
 import xqt.pipeline as pipeline_module
 import xqt.pipeline.preflight as preflight_module
 import xqt.pipeline.passes as passes_module
+import xqt.pipeline.pass_helpers.quant_stage as quant_stage_module
 import xqt.pipeline.runner as runner_module
 from xqt.core.errors import XQTConfigError
 from xqt.core.schema import (
@@ -369,22 +370,22 @@ def test_run_quant_stage_sets_runtime_quant_config(
         return _FakeQuantExecution(context_value.require_model())
 
     monkeypatch.setattr(
-        passes_module,
+        quant_stage_module,
         "build_quantization_plan",
         _fake_build_quantization_plan,
     )
     monkeypatch.setattr(
-        passes_module,
+        quant_stage_module,
         "execute_quantization_plan",
         _fake_execute_quantization_plan,
     )
     monkeypatch.setattr(
-        passes_module,
+        quant_stage_module,
         "summarize_quantization_reports",
         lambda reports: {"quantized_module_count": len(reports)},
     )
     monkeypatch.setattr(
-        passes_module,
+        quant_stage_module,
         "_build_quant_layer_analysis_summary",
         lambda context: {"available": False, "reason": "test"},
     )
@@ -418,10 +419,10 @@ def test_run_quant_stage_does_not_require_prepopulated_runtime_quant_config(
     context.quant_config = None
 
     monkeypatch.setattr(
-        passes_module, "build_quantization_plan", lambda resolved_quant: object()
+        quant_stage_module, "build_quantization_plan", lambda resolved_quant: object()
     )
     monkeypatch.setattr(
-        passes_module,
+        quant_stage_module,
         "execute_quantization_plan",
         lambda context_value, plan, **kwargs: SimpleNamespace(
             model=context_value.require_model(),
@@ -430,10 +431,10 @@ def test_run_quant_stage_does_not_require_prepopulated_runtime_quant_config(
         ),
     )
     monkeypatch.setattr(
-        passes_module, "summarize_quantization_reports", lambda reports: {}
+        quant_stage_module, "summarize_quantization_reports", lambda reports: {}
     )
     monkeypatch.setattr(
-        passes_module,
+        quant_stage_module,
         "_build_quant_layer_analysis_summary",
         lambda context: {"available": False, "reason": "test"},
     )

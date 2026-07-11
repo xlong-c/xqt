@@ -118,7 +118,7 @@ def test_cutile_capability_uses_cuda_tile_runtime_probe() -> None:
 def test_preflight_records_cutile_config_and_missing_dependency() -> None:
     with (
         patch("xqt.operator_opt.backends.cutile.cutile_available", return_value=False),
-        patch("xqt.pipeline.preflight._cutile_available", return_value=False),
+        patch("xqt.pipeline.preflight_checks.operator._cutile_available", return_value=False),
     ):
         report = preflight_optimization_config(_cutile_operator_workflow_config())
 

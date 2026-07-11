@@ -122,7 +122,7 @@ def test_convert_fp4_weight_only_linear_tilelang_returns_operator_candidate(
         return module_arg, None
 
     monkeypatch.setattr(
-        "xqt.conversion.materialize_module",
+        "xqt.operator_opt.materialize_module",
         fake_materialize,
     )
 
@@ -233,7 +233,7 @@ def test_convert_conv2d_tilelang_delegates_to_materializer(
         return module_arg, None
 
     monkeypatch.setattr(
-        "xqt.conversion.materialize_module",
+        "xqt.operator_opt.materialize_module",
         fake_materialize,
     )
 
@@ -801,7 +801,7 @@ def test_xqt_feedforward_records_triton_linear_fallback_reason(
         del args, kwargs
         raise RuntimeError("synthetic Triton failure")
 
-    monkeypatch.setattr("xqt.nn.gemm_fp16_triton", _raise_triton)
+    monkeypatch.setattr("xqt.nn.feedforward.gemm_fp16_triton", _raise_triton)
     output = module(torch.randn(2, 8))
 
     runtime = module.runtime_config()

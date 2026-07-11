@@ -242,7 +242,7 @@ def test_tilelang_dequant_materialization_prefers_fp16_for_float32_only_buffers(
     )
 
     monkeypatch.setattr(
-        "xqt.operator_opt.tilelang_wrappers._module_has_cuda_state",
+        "xqt.operator_opt.wrappers.dequant_gemm._module_has_cuda_state",
         lambda module: True,
     )
     candidate = build_tilelang_candidate_model(_FakeNVFP4Linear(), target)

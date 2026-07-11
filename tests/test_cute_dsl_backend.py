@@ -108,7 +108,7 @@ def test_cute_dsl_capability_reports_missing_runtime() -> None:
 def test_preflight_records_cute_dsl_config_and_missing_dependency() -> None:
     with (
         patch("xqt.operator_opt.capability._package_available", return_value=False),
-        patch("xqt.pipeline.preflight._package_available", return_value=False),
+        patch("xqt.pipeline.preflight_checks.operator._package_available", return_value=False),
     ):
         report = preflight_optimization_config(_cute_dsl_operator_workflow_config())
 

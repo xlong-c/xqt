@@ -516,7 +516,7 @@ def test_compile_flux2_klein_nvfp4_transformer_delegates_to_compile_engine(
         return module, 12.5
 
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.compile_with_torch",
+        "xqt.model.flux2_klein.runtime.compile_with_torch",
         fake_compile_with_torch,
     )
 
@@ -596,11 +596,11 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_then_compiles(
         )
 
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_engine",
+        "xqt.model.flux2_klein.optimize.materialize_flux2_klein_nvfp4_engine",
         fake_materialize,
     )
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.compile_flux2_klein_nvfp4_transformer",
+        "xqt.model.flux2_klein.optimize.compile_flux2_klein_nvfp4_transformer",
         fake_compile,
     )
 
@@ -680,11 +680,11 @@ def test_optimize_flux2_klein_nvfp4_transformer_skips_tilelang_materialization_f
         )
 
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_engine",
+        "xqt.model.flux2_klein.optimize.materialize_flux2_klein_nvfp4_engine",
         fake_materialize,
     )
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.capture_flux2_klein_nvfp4_transformer_cuda_graph",
+        "xqt.model.flux2_klein.optimize.capture_flux2_klein_nvfp4_transformer_cuda_graph",
         fake_capture,
     )
 
@@ -766,11 +766,11 @@ def test_optimize_flux2_klein_nvfp4_transformer_materializes_tilelang_for_non_sm
     txt_ids = torch.zeros(3, 4)
 
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.materialize_flux2_klein_nvfp4_engine",
+        "xqt.model.flux2_klein.optimize.materialize_flux2_klein_nvfp4_engine",
         fake_materialize,
     )
     monkeypatch.setattr(
-        "xqt.model.flux2_klein_nvfp4.capture_flux2_klein_nvfp4_transformer_cuda_graph",
+        "xqt.model.flux2_klein.optimize.capture_flux2_klein_nvfp4_transformer_cuda_graph",
         fake_capture,
     )
 

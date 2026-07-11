@@ -142,7 +142,7 @@ def test_workflow_preflight_warns_but_does_not_fail_when_tilelang_package_missin
         ],
     }
 
-    with patch("xqt.pipeline.preflight._package_available", return_value=False):
+    with patch("xqt.pipeline.preflight_checks.operator._package_available", return_value=False):
         report = preflight_optimization_config(workflow)
 
     checks = {check.name: check for check in report.checks}
