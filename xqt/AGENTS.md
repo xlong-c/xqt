@@ -40,6 +40,10 @@ Recipe 按技术栈分层组织在 `recipes/` 下:
 
 `recipes/` 下所有 YAML 都必须是 stage workflow, 且必须能由 `load_optimization_config()` 加载. 顶层只保留 `project`, `model`, `task`, `compression_axes`, `hardware`, `benchmark`, `stages`, `device`; 优化和导出路径全部写入 `stages`. 不要再新增旧式顶层 `compression`, `export`, `operator_optimization`, `analysis`, `validation` 或 `config_version`.
 
+ONNX target 的已知字段只写在 `stages[*].params.targets[*].onnx`: `input_names`, `output_names`, `dynamo`, `validate`, `runtime_diff`, `pre_export_fusion`, `pre_export_lowering` 与 `optimization`. TensorRT engine-build 已知字段只写在 `stages[*].params.targets[*].tensorrt`: `onnx_path`, `backend`, `trtexec_path`, `extra_args`, `timeout`, `dry_run`, `performance_thresholds`, `workspace_mib`, `builder_optimization_level`, `timing_cache_path`, `log_level`, `plugin_libraries`, `serialize_plugin_libraries`, `validate_plugin_libraries_loadable` 与 `runtime_benchmark`. OpenVINO 已知字段只写在 `stages[*].params.targets[*].openvino`: `onnx_path`, `input_shape`, `dry_run`, `runtime_diff` 与 `device`. TorchExport 已知字段只写在 `stages[*].params.targets[*].torch_export`: `strict`, `validate` 与 `runtime_diff`. TorchScript 已知字段只写在 `stages[*].params.targets[*].torchscript`: `method`, `check_trace` 与 `runtime_diff`. ExecuTorch 已知字段只写在 `stages[*].params.targets[*].executorch`: `dry_run`. ncnn 已知字段只写在 `stages[*].params.targets[*].ncnn`: `source_path`, `converter`, `onnx2ncnn_path`, `pnnx_path`, `bin_path`, `extra_args`, `timeout` 与 `dry_run`; `converter=pnnx` 可显式使用 ONNX 或 TorchScript source. MNN 已知字段只写在 `stages[*].params.targets[*].mnn`: `source_path`, `converter_path`, `framework`, `extra_args`, `timeout` 与 `dry_run`. 不要把这些字段放回 target `params`; loader 会明确拒绝所有已知 target 配置的同名旧键.
+
+materialized deploy runtime handle 的已知字段也不能写入 `runtime_handle.params`: ONNX Runtime 的 providers 写在 `runtime_handle.onnxruntime.providers`; TensorRT 的 device 与 runtime plugin libraries 写在 `runtime_handle.tensorrt`. TensorRT runtime handle 若依赖 plugin, 必须在该 runtime config 中显式列出, 不从 engine-build target 隐式继承.
+
 不要新增 XQT 训练 recipe. `finetune`,`distill`,`recovery`,`QAT training` 等 recipe 应放到 XDL 或外部训练工具侧.
 
 ### 配置方式

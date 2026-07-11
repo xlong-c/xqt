@@ -43,7 +43,7 @@ ONNX 是否有用取决于两件事: exporter 是否能正确表达模型, 目�
 源码位置: `xqt/export/onnx_exporter.py`
 
 - `ONNXExportResult`: ONNX 产物 metadata, 包含 path, opset, checksum, checked, output_diff, metadata.
-- `export_onnx(model, example_input, output_path, opset=None, input_names=None, output_names=None, dynamic_shapes=None, dynamo=True, validate=True, pre_export_fusion=None)`: 使用 PyTorch ONNX exporter 导出模型, 默认启用现代 dynamo exporter.
+- `export_onnx(model, example_input, output_path, opset=None, input_names=None, output_names=None, dynamic_shapes=None, dynamo=True, validate=True, pre_export_fusion=None, pre_export_lowering=None)`: 使用 PyTorch ONNX exporter 导出模型, 默认启用现代 dynamo exporter. `pre_export_lowering` 仅在显式启用时变换 export copy, 当前支持将 `FP4WeightOnlyLinear` materialize 为等价 dense dequantized `nn.Linear`.
 - `validate_onnx(path)`: 使用 `onnx.checker` 校验 ONNX 文件.
 - `convert_onnx_to_fp16(onnx_path, output_path, keep_io_types=False, validate=True)`: 使用 `onnxconverter-common` 做 FP16 转换.
 - `compare_onnxruntime_outputs(onnx_path, reference_output, example_input, input_name="input", input_names=None, atol=1e-5, rtol=1e-5)`: 用 ONNX Runtime CPU EP 跑首个输出并和 PyTorch tensor 比较.
@@ -87,7 +87,8 @@ diff = compare_onnxruntime_outputs(
 ## 后端实现注意点
 
 - `dynamo=True` 是 XQT 默认路径, 但部分旧模型可能需要 fallback 到传统 exporter.
-- `dynamic_shapes` 是 PyTorch exporter 参数, 不是所有后端都能完整消费.
+- `dynamic_shapes` 是唯一的动态 shape 配置. `dynamo=True` 时直传现代 exporter; `dynamo=False` 时需使用 `{input_name: {axis: symbol}}` 形式, XQT 会转换为 legacy ONNX `dynamic_axes`. 目标后端不一定完整消费它, TensorRT 仍要声明相容的 optimization profile.
+- `pre_export_lowering` 必须显式启用. `fp4_weight_only_to_dense_linear` 在复制的 export model 中把 packed FP4 storage materialize 为 dense dequantized 权重, 因此可避免通用 ONNX / TensorRT parser 遇到 unpack bitwise nodes, 但 resulting artifact 不是 packed-FP4 runtime.
 - `input_names` 和 `output_names` 要在导出, runtime feed, report 中保持一致.
 - `validate_onnx` 只能证明 ONNX 文件结构合法, 不能证明 TensorRT / OpenVINO 可转换.
 - FP16 转换可能改变输入输出 dtype; 如果应用侧仍期望 FP32 IO, 使用 `keep_io_types=True`.
@@ -106,4 +107,3 @@ diff = compare_onnxruntime_outputs(
 - ONNX home: <https://onnx.ai/>
 - ONNX concepts: <https://onnx.ai/onnx/intro/concepts.html>
 - PyTorch ONNX exporter: <https://docs.pytorch.org/docs/stable/onnx.html>
-

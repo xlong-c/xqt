@@ -124,6 +124,13 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 - `calibration_inputs` 由调用方传入, recipe 不声明数据来源
 - planned / capability-only 后端必须在 preflight 和文档中标注
 - workflow stage 必须写入 `stage_reports` 和 manifest stage metric
+- ONNX target 的已知配置收敛为 `targets[*].onnx`: input/output names, `dynamo`, validate, runtime diff, pre-export fusion/lowering 和 ONNX optimization 不再藏在 target `params`. `pre_export_lowering.fp4_weight_only_to_dense_linear` 只在 export copy 上把 `FP4WeightOnlyLinear` materialize 成等价 dense dequantized `nn.Linear`, 并把 source/target storage 与 note 写入 artifact metadata; TensorRT artifact 因此不是 packed-FP4 runtime. `dynamic_shapes` 是唯一的动态 shape 字段: `dynamo=true` 直传现代 exporter, `dynamo=false` 规范化为 legacy ONNX `dynamic_axes`, 必须与 TensorRT profile 一致.
+- TensorRT engine-build 的已知配置收敛为 `targets[*].tensorrt`: `onnx_path`, `backend`, `trtexec_path`, `extra_args`, `timeout`, `dry_run`, `performance_thresholds`, `workspace_mib`, `builder_optimization_level`, `timing_cache_path`, `log_level`, `plugin_libraries`, `serialize_plugin_libraries`, `validate_plugin_libraries_loadable` 与 `runtime_benchmark`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口也经 `tensorrt` 参数走同一 StageSpec 解析路径. engine-build plugin 配置只作用于构建, 不会隐式成为 runtime handle 配置.
+- OpenVINO 的已知配置收敛为 `targets[*].openvino`: `onnx_path`, `input_shape`, `dry_run`, `runtime_diff` 与 `device`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口也经 `openvino` 参数走同一 StageSpec 解析路径. 未声明 `openvino.onnx_path` 时, export pass 依序使用同 workflow 的先前 ONNX artifact 与当前模型; `runtime_diff` 只在 materialized IR 和 reference output 可用时执行.
+- TorchExport 的已知配置收敛为 `targets[*].torch_export`: `strict`, `validate` 与 `runtime_diff`. TorchScript 的已知配置收敛为 `targets[*].torchscript`: `method`, `check_trace` 与 `runtime_diff`, 其中 `method` 只能是 `trace` 或 `script`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口分别经 `torch_export` 与 `torchscript` 参数走同一 StageSpec 解析路径.
+- ExecuTorch 的已知配置收敛为 `targets[*].executorch`: `dry_run`. ncnn 的已知配置收敛为 `targets[*].ncnn`: `source_path`, `converter`, `onnx2ncnn_path`, `pnnx_path`, `bin_path`, `extra_args`, `timeout` 与 `dry_run`; `converter` 只能是 `onnx2ncnn` 或 `pnnx`. pnnx 未显式配置 source 时优先使用同 workflow 的 TorchScript artifact, 再回退 ONNX, 使 preflight 与 ExportPass 选择同一 converter. MNN 的已知配置收敛为 `targets[*].mnn`: `source_path`, `converter_path`, `framework`, `extra_args`, `timeout` 与 `dry_run`. 同名 target `params` 旧键由 loader 明确拒绝; 三者的 Session 单 target 入口也经对应 typed 参数走同一 StageSpec 解析路径. dry-run preflight 不要求可选依赖或 converter executable 已安装.
+- materialized deploy runtime handle 的 known config 也已脱离无类型 `params`: ONNX Runtime providers 位于 `runtime_handle.onnxruntime`, TensorRT device 与 runtime plugin libraries 位于 `runtime_handle.tensorrt`. TensorRT runtime session 不再从 engine-build target 隐式继承 plugin libraries.
+- `PrecisionPolicy` 是 module conversion, `xqt.nn` facade runtime intent 与 GEMM 的共享精度 contract. `MatmulPrecisionSpec` 只在 `gemm_precision` 和 `conversion` 的兼容导入位置作为 `PrecisionPolicy` identity alias 保留; 不再有第二套字段 schema 或双向转换. facade 的 `auto` 仍表示输入 dtype 延迟决策, 但名称与角色字段的规范化同样来自 contract.
 
 ### Session stage 协议
 
@@ -138,11 +145,12 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 
 当前 payload kind:
 
-- `torch_module`: baseline, prune, benchmark, analyze 等默认模型态 stage.
-- `quantized_model`: quant stage, 对应 `xqt.contracts.QuantizedModelPayload`; `xqt.workflows.stage` 仅重导出该 artifact contract.
+- `torch_module`: baseline, benchmark, analyze 等默认模型态 stage.
+- `pruned_model`: prune stage, 对应 `xqt.contracts.PrunedModelPayload`; 保留模型,method,目标/实际 sparsity,execution state 和完整 prune report, 不把裸模型误当成剪枝产物语义.
+- `quantized_model`: quant stage, 对应 `xqt.contracts.QuantizedModelPayload`; 它继承模型侧通用 `QuantizedModel` contract, 只额外记录 stage lineage, artifacts 和 capability. `xqt.workflows.stage` 仅重导出该 artifact contract.
 - `runtime_plan`: operator stage, 对应 `RuntimePlanPayload`.
-- `export_bundle`: export / deploy stage, 对应 `ExportBundlePayload`.
-- `runtime_handle`: executable runtime handle, 对应 `RuntimeHandlePayload`. deploy stage 可创建 ONNX Runtime `InferenceSession`, 或反序列化同 stage 的非 dry-run TensorRT engine 并创建 execution context. runtime session creation 不替代数值或性能验收.
+- `export_bundle`: export stage, 或仅构建 deploy artifact 而未 materialize runtime handle 的 deploy stage, 对应 `ExportBundlePayload`.
+- `runtime_handle`: materialized deploy stage 的 executable runtime handle, 对应 `RuntimeHandlePayload`. deploy stage 可创建 ONNX Runtime `InferenceSession`, 或反序列化同 stage 的非 dry-run TensorRT engine 并创建 execution context. runtime session creation 不替代数值或性能验收.
 
 当前 transform-side provider:
 
