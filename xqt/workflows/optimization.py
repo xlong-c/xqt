@@ -16,6 +16,7 @@ from xdl.config.resolver import register_default_resolvers
 from xqt.core.config import ConfigInput
 from xqt.core.errors import XQTConfigError
 from xqt.core.reporting import add_stage_report_to_manifest, build_stage_report
+from xqt.core.serialization import json_safe_value
 from xqt.core.schema import (
     AnalysisConfig,
     BenchmarkConfig,
@@ -193,7 +194,9 @@ class _OptimizationRunState:
     stage_counter: Any = field(default_factory=lambda: count(1))
 
 
-def load_optimization_config(config: ConfigInput | OptimizationConfig) -> OptimizationConfig:
+def load_optimization_config(
+    config: ConfigInput | OptimizationConfig,
+) -> OptimizationConfig:
     """Load a stage workflow config using OmegaConf structured defaults."""
 
     if is_dataclass(config) and isinstance(config, OptimizationConfig):
@@ -201,7 +204,11 @@ def load_optimization_config(config: ConfigInput | OptimizationConfig) -> Optimi
         return config
 
     register_default_resolvers()
-    raw = OmegaConf.load(config) if isinstance(config, (str, Path)) else OmegaConf.create(config)
+    raw = (
+        OmegaConf.load(config)
+        if isinstance(config, (str, Path))
+        else OmegaConf.create(config)
+    )
     try:
         _validate_raw_optimization_config(raw)
         merged = OmegaConf.merge(OmegaConf.structured(OptimizationConfig), raw)
@@ -222,8 +229,7 @@ def _validate_raw_optimization_config(raw_config: Any) -> None:
     removed = sorted(set(raw) & _REMOVED_WORKFLOW_TOP_LEVEL_KEYS)
     if removed:
         migration = ", ".join(
-            f"{key} -> {_REMOVED_KEY_MIGRATIONS[key]}"
-            for key in removed
+            f"{key} -> {_REMOVED_KEY_MIGRATIONS[key]}" for key in removed
         )
         raise XQTConfigError(
             "OptimizationConfig does not accept removed recipe top-level keys: "
@@ -241,11 +247,15 @@ def _attach_stage_specs(config: OptimizationConfig) -> None:
         seen.add(stage.name)
         if stage.kind not in STAGE_KINDS:
             allowed = ", ".join(sorted(STAGE_KINDS))
-            raise XQTConfigError(f"unsupported stage kind {stage.kind}. Allowed: {allowed}")
+            raise XQTConfigError(
+                f"unsupported stage kind {stage.kind}. Allowed: {allowed}"
+            )
         ensure_stage_spec(stage, rebuild=True)
 
 
-def _typed_stage_spec(stage: OptimizationStageConfig, spec_type: type[_StageSpecT]) -> _StageSpecT:
+def _typed_stage_spec(
+    stage: OptimizationStageConfig, spec_type: type[_StageSpecT]
+) -> _StageSpecT:
     spec = ensure_stage_spec(stage)
     if not isinstance(spec, spec_type):
         raise XQTConfigError(
@@ -255,10 +265,14 @@ def _typed_stage_spec(stage: OptimizationStageConfig, spec_type: type[_StageSpec
     return spec
 
 
-def _project(config: OptimizationConfig, *, stage_name: str | None = None) -> dict[str, Any]:
+def _project(
+    config: OptimizationConfig, *, stage_name: str | None = None
+) -> dict[str, Any]:
     project = dict(config.project)
     if stage_name is not None:
-        artifact_dir = Path(str(project.get("artifact_dir", "artifacts/xqt/optimization")))
+        artifact_dir = Path(
+            str(project.get("artifact_dir", "artifacts/xqt/optimization"))
+        )
         project["artifact_dir"] = str(artifact_dir / stage_name)
     return project
 
@@ -301,6 +315,7 @@ def _register_stage(
     payload_kind = payload_kind_for_stage(
         stage_kind,
         transform_kind=created_by.kind,
+        payload_value=payload_value,
     )
     payload = StagePayload(
         payload_kind=payload_kind,
@@ -312,7 +327,11 @@ def _register_stage(
         requested=save_requested,
         state="materialized" if save_requested else "transient",
     )
-    parent_stage_ids = [state.stages_by_name[parent].stage_id for parent in parent_names if parent in state.stages_by_name]
+    parent_stage_ids = [
+        state.stages_by_name[parent].stage_id
+        for parent in parent_names
+        if parent in state.stages_by_name
+    ]
     stage = SessionStage(
         stage_id=_stage_id(state),
         name=name,
@@ -340,7 +359,7 @@ def _restore_stage_model(state: _OptimizationRunState, stage_name: str) -> Any:
         raise ValueError(f"unknown stage: {stage_name}")
     if stage_name in state.model_snapshots:
         return _snapshot_model(state.model_snapshots[stage_name])
-    if stage.payload.payload_kind == "quantized_model":
+    if stage.payload.payload_kind in {"quantized_model", "pruned_model"}:
         payload_value = stage.payload.value
         if getattr(payload_value, "model", None) is not None:
             return _snapshot_model(payload_value.model)
@@ -436,7 +455,9 @@ def _max_nested_numeric(value: Any, key: str) -> Optional[float]:
     return max(values) if values else None
 
 
-def _benchmark_speedup(reference: Mapping[str, Any] | None, metrics: Mapping[str, Any]) -> Optional[float]:
+def _benchmark_speedup(
+    reference: Mapping[str, Any] | None, metrics: Mapping[str, Any]
+) -> Optional[float]:
     if reference is None:
         return None
     reference_latency = _max_nested_numeric(reference, "p50_ms")
@@ -475,7 +496,9 @@ def _accept_stage(
     return accepted, "ok" if accepted else "rejected by acceptance thresholds"
 
 
-def _new_artifacts(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+def _new_artifacts(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> dict[str, Any]:
     return {
         key: value
         for key, value in after.items()
@@ -535,7 +558,9 @@ def _record_stage_report(
         device=state.context.device or None,
         shape=state.context.example_inputs,
         warmup=benchmark_config.warmup if benchmark_config is not None else None,
-        iterations=benchmark_config.iterations if benchmark_config is not None else None,
+        iterations=benchmark_config.iterations
+        if benchmark_config is not None
+        else None,
     )
     stage_reports = state.context.metrics.setdefault("stage_reports", {})
     if isinstance(stage_reports, dict):
@@ -623,7 +648,10 @@ def _run_optimization_stage(
         allowed = ", ".join(sorted(STAGE_KINDS))
         raise ValueError(f"unsupported stage kind {stage.kind}. Allowed: {allowed}")
     if stage.from_stage is not None:
-        if stage.from_stage not in state.model_snapshots and stage.from_stage not in state.stages_by_name:
+        if (
+            stage.from_stage not in state.model_snapshots
+            and stage.from_stage not in state.stages_by_name
+        ):
             raise ValueError(f"unknown from_stage: {stage.from_stage}")
         state.context.model = _restore_stage_model(state, stage.from_stage)
 
@@ -660,7 +688,9 @@ def _run_optimization_stage(
         metrics,
         reference_benchmark=reference_benchmark,
     )
-    source_stage_name = stage.from_stage or state.best_stage or state.baseline_stage or "baseline"
+    source_stage_name = (
+        stage.from_stage or state.best_stage or state.baseline_stage or "baseline"
+    )
     if accepted and stage.save_model:
         state.model_snapshots[stage.name] = _snapshot_model(state.context.model)
         state.best_stage = stage.name
@@ -709,20 +739,9 @@ def _run_optimization_stage(
 
 
 def _json_safe(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, tuple):
-        return [_json_safe(item) for item in value]
-    if hasattr(value, "item"):
-        try:
-            return value.item()
-        except Exception:
-            return str(value)
-    return value
+    """Return the shared JSON-safe representation for workflow outputs."""
+
+    return json_safe_value(value)
 
 
 def _write_workflow_outputs(result: OptimizedModelResult) -> None:
@@ -786,7 +805,9 @@ def _acceptance_from_mapping(
     if isinstance(accept, StageAcceptanceConfig):
         return accept
     try:
-        merged = OmegaConf.merge(OmegaConf.structured(StageAcceptanceConfig), dict(accept))
+        merged = OmegaConf.merge(
+            OmegaConf.structured(StageAcceptanceConfig), dict(accept)
+        )
         return cast(StageAcceptanceConfig, OmegaConf.to_object(merged))
     except Exception as exc:
         raise ValueError(f"failed to load stage acceptance config: {exc}") from exc
@@ -929,7 +950,9 @@ class XQTOptimizationSession:
                 stem=name,
             )
             self._state.context.artifacts[f"{name}_json"] = artifact_paths["json"]
-            self._state.context.artifacts[f"{name}_markdown"] = artifact_paths["markdown"]
+            self._state.context.artifacts[f"{name}_markdown"] = artifact_paths[
+                "markdown"
+            ]
         self._state.context.metrics[name] = report.to_dict()
         if self._state.context.manifest is not None:
             report.add_to_manifest(
@@ -937,21 +960,27 @@ class XQTOptimizationSession:
                 artifact_paths=artifact_paths,
             )
             if write_artifacts:
-                manifest_path = Path(
-                    str(
-                        self._state.config.project.get(
-                            "artifact_dir",
-                            "artifacts/xqt/optimization",
+                manifest_path = (
+                    Path(
+                        str(
+                            self._state.config.project.get(
+                                "artifact_dir",
+                                "artifacts/xqt/optimization",
+                            )
                         )
                     )
-                ) / "manifest.json"
+                    / "manifest.json"
+                )
                 self._state.context.manifest.write_json(manifest_path)
                 self._state.context.artifacts["manifest"] = manifest_path
         self._outputs_written = False
         return report
 
     def revert_to(self, stage_name: str) -> None:
-        if stage_name not in self._state.model_snapshots and stage_name not in self._state.stages_by_name:
+        if (
+            stage_name not in self._state.model_snapshots
+            and stage_name not in self._state.stages_by_name
+        ):
             raise ValueError(f"unknown model snapshot: {stage_name}")
         self._state.context.model = _restore_stage_model(self._state, stage_name)
 
@@ -1076,6 +1105,14 @@ class XQTOptimizationSession:
         output_path: str | Path | None = None,
         targets: list[Mapping[str, Any]] | None = None,
         target_params: Mapping[str, Any] | None = None,
+        onnx: Mapping[str, Any] | None = None,
+        openvino: Mapping[str, Any] | None = None,
+        tensorrt: Mapping[str, Any] | None = None,
+        torch_export: Mapping[str, Any] | None = None,
+        torchscript: Mapping[str, Any] | None = None,
+        executorch: Mapping[str, Any] | None = None,
+        ncnn: Mapping[str, Any] | None = None,
+        mnn: Mapping[str, Any] | None = None,
         opset: int | None = None,
         from_stage: str | None = None,
         compare_to: str | None = None,
@@ -1083,6 +1120,24 @@ class XQTOptimizationSession:
         save_model: bool = False,
         **params: Any,
     ) -> OptimizationStageResult:
+        typed_target_configs = (
+            onnx,
+            openvino,
+            tensorrt,
+            torch_export,
+            torchscript,
+            executorch,
+            ncnn,
+            mnn,
+        )
+        if targets is not None and any(
+            config is not None for config in typed_target_configs
+        ):
+            raise ValueError(
+                "export accepts a typed target config only with format + output_path"
+            )
+        if sum(config is not None for config in typed_target_configs) > 1:
+            raise ValueError("export accepts only one typed target config")
         if targets is None:
             if format is None or output_path is None:
                 raise ValueError("export requires targets or format + output_path")
@@ -1094,6 +1149,22 @@ class XQTOptimizationSession:
                 target["opset"] = opset
             if target_params is not None:
                 target["params"] = dict(target_params)
+            if onnx is not None:
+                target["onnx"] = dict(onnx)
+            if openvino is not None:
+                target["openvino"] = dict(openvino)
+            if tensorrt is not None:
+                target["tensorrt"] = dict(tensorrt)
+            if torch_export is not None:
+                target["torch_export"] = dict(torch_export)
+            if torchscript is not None:
+                target["torchscript"] = dict(torchscript)
+            if executorch is not None:
+                target["executorch"] = dict(executorch)
+            if ncnn is not None:
+                target["ncnn"] = dict(ncnn)
+            if mnn is not None:
+                target["mnn"] = dict(mnn)
             targets = [target]
         params["targets"] = [dict(target) for target in targets]
         return self._run(
@@ -1114,6 +1185,14 @@ class XQTOptimizationSession:
         output_path: str | Path | None = None,
         targets: list[Mapping[str, Any]] | None = None,
         target_params: Mapping[str, Any] | None = None,
+        onnx: Mapping[str, Any] | None = None,
+        openvino: Mapping[str, Any] | None = None,
+        tensorrt: Mapping[str, Any] | None = None,
+        torch_export: Mapping[str, Any] | None = None,
+        torchscript: Mapping[str, Any] | None = None,
+        executorch: Mapping[str, Any] | None = None,
+        ncnn: Mapping[str, Any] | None = None,
+        mnn: Mapping[str, Any] | None = None,
         runtime_handle: Mapping[str, Any] | None = None,
         opset: int | None = None,
         from_stage: str | None = None,
@@ -1122,6 +1201,24 @@ class XQTOptimizationSession:
         save_model: bool = False,
         **params: Any,
     ) -> OptimizationStageResult:
+        typed_target_configs = (
+            onnx,
+            openvino,
+            tensorrt,
+            torch_export,
+            torchscript,
+            executorch,
+            ncnn,
+            mnn,
+        )
+        if targets is not None and any(
+            config is not None for config in typed_target_configs
+        ):
+            raise ValueError(
+                "deploy accepts a typed target config only with format + output_path"
+            )
+        if sum(config is not None for config in typed_target_configs) > 1:
+            raise ValueError("deploy accepts only one typed target config")
         if targets is None:
             if format is None or output_path is None:
                 raise ValueError("deploy requires targets or format + output_path")
@@ -1133,6 +1230,22 @@ class XQTOptimizationSession:
                 target["opset"] = opset
             if target_params is not None:
                 target["params"] = dict(target_params)
+            if onnx is not None:
+                target["onnx"] = dict(onnx)
+            if openvino is not None:
+                target["openvino"] = dict(openvino)
+            if tensorrt is not None:
+                target["tensorrt"] = dict(tensorrt)
+            if torch_export is not None:
+                target["torch_export"] = dict(torch_export)
+            if torchscript is not None:
+                target["torchscript"] = dict(torchscript)
+            if executorch is not None:
+                target["executorch"] = dict(executorch)
+            if ncnn is not None:
+                target["ncnn"] = dict(ncnn)
+            if mnn is not None:
+                target["mnn"] = dict(mnn)
             targets = [target]
         params["targets"] = [dict(target) for target in targets]
         if runtime_handle is not None:
@@ -1208,10 +1321,18 @@ class XQTOptimizationSession:
         if stage.kind not in STAGE_KINDS:
             allowed = ", ".join(sorted(STAGE_KINDS))
             raise ValueError(f"unsupported stage kind {stage.kind}. Allowed: {allowed}")
-        seen = {"initial", *(item.name for item in self._state.config.stages), *self._state.stages_by_name.keys()}
+        seen = {
+            "initial",
+            *(item.name for item in self._state.config.stages),
+            *self._state.stages_by_name.keys(),
+        }
         if stage.name in seen:
             raise ValueError(f"stage names must be unique: {stage.name}")
-        if stage.from_stage is not None and stage.from_stage not in self._state.model_snapshots and stage.from_stage not in self._state.stages_by_name:
+        if (
+            stage.from_stage is not None
+            and stage.from_stage not in self._state.model_snapshots
+            and stage.from_stage not in self._state.stages_by_name
+        ):
             raise ValueError(f"unknown from_stage: {stage.from_stage}")
 
 

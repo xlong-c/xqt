@@ -183,3 +183,55 @@ def test_stage_report_extracts_engine_target_benchmark_and_diff() -> None:
         "fallback": None,
         "artifact_kinds": ["quant_model"],
     }
+
+
+def test_stage_report_serializes_tensorrt_runtime_session_without_live_handles() -> None:
+    from pathlib import Path
+
+    import tensorrt as trt
+
+    from xqt.export.tensorrt import TensorRTRuntimeSession
+
+    session = TensorRTRuntimeSession(
+        engine_path=Path("artifacts/model.engine"),
+        device="cuda:0",
+        trt=trt,
+        runtime=object(),
+        engine=object(),
+        context=object(),
+        engine_inspector={"layer_count": 2},
+    )
+    report = build_stage_report(
+        stage_name="deploy_tensorrt",
+        stage_kind="deploy",
+        accepted=True,
+        message="ok",
+        metrics={
+            "runtime_handle": {
+                "runtime": "tensorrt",
+                "handle_kind": "runtime_session",
+                "handle": session,
+                "metadata": {
+                    "runtime_validation": {
+                        "status": "session_created",
+                        "engine_deserialized": True,
+                        "execution_context_created": True,
+                    }
+                },
+            }
+        },
+        artifacts={"tensorrt_engine": "artifacts/model.engine"},
+    ).to_dict()
+
+    handle = report["metrics"]["runtime_handle"]["handle"]
+    assert handle == {
+        "engine_path": "artifacts/model.engine",
+        "device": "cuda:0",
+        "handle_materialized": True,
+        "engine_inspector": {"layer_count": 2},
+    }
+    assert report["metrics"]["runtime_handle"]["metadata"]["runtime_validation"] == {
+        "status": "session_created",
+        "engine_deserialized": True,
+        "execution_context_created": True,
+    }

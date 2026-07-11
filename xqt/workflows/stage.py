@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -14,6 +14,8 @@ from xqt.contracts.runtime import (
     RuntimePlanPayload,
 )
 from xqt.contracts.quantized import QuantizedModelPayload
+from xqt.contracts.pruned import PrunedModelPayload
+from xqt.core.serialization import json_safe_value
 
 
 StageKind = Literal[
@@ -27,6 +29,7 @@ StageKind = Literal[
 
 PayloadKind = Literal[
     "torch_module",
+    "pruned_model",
     "quantized_model",
     "runtime_plan",
     "export_bundle",
@@ -72,6 +75,13 @@ _PAYLOAD_CAPABILITIES_BY_KIND: dict[PayloadKind, dict[str, bool]] = {
         "can_optimize_ops": True,
         "can_restore_model": True,
     },
+    "pruned_model": {
+        "can_evaluate": True,
+        "can_export": True,
+        "can_quantize": True,
+        "can_optimize_ops": True,
+        "can_restore_model": True,
+    },
     "runtime_plan": {
         "can_evaluate": False,
         "can_export": True,
@@ -112,13 +122,24 @@ def payload_kind_for_stage(
     stage_kind: StageKind | str,
     *,
     transform_kind: str | None = None,
+    payload_value: Any = None,
 ) -> PayloadKind:
-    """Resolve the canonical payload kind for one session stage."""
+    """Resolve the canonical payload kind for one session stage.
+
+    A materialized runtime handle is more specific than the enclosing deploy
+    stage. Preserve that distinction so its executable capability is not
+    downgraded to an export-bundle capability.
+    """
+
+    if stage_kind == "exported" and isinstance(payload_value, RuntimeHandlePayload):
+        return "runtime_handle"
 
     if stage_kind == "exported":
         return "export_bundle"
     if stage_kind == "quantized" and transform_kind == "quant":
         return "quantized_model"
+    if stage_kind == "optimized" and transform_kind == "prune":
+        return "pruned_model"
     if stage_kind == "optimized" and transform_kind == "operator":
         return "runtime_plan"
     return "torch_module"
@@ -135,31 +156,16 @@ def payload_capabilities_for_kind(payload_kind: PayloadKind | str) -> dict[str, 
 def payload_can_restore_model(payload: "StagePayload" | PayloadKind | str) -> bool:
     """Whether this payload kind can restore the session model directly."""
 
-    payload_kind = payload.payload_kind if isinstance(payload, StagePayload) else payload
+    payload_kind = (
+        payload.payload_kind if isinstance(payload, StagePayload) else payload
+    )
     return bool(payload_capabilities_for_kind(payload_kind).get("can_restore_model"))
 
 
 def _json_safe_stage_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if hasattr(value, "to_dict"):
-        return _json_safe_stage_value(value.to_dict())
-    if is_dataclass(value):
-        return _json_safe_stage_value(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe_stage_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe_stage_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_json_safe_stage_value(item) for item in value]
-    if hasattr(value, "item"):
-        try:
-            return value.item()
-        except Exception:
-            return None
-    return None
+    """Return the shared JSON-safe representation for stage data."""
+
+    return json_safe_value(value)
 
 
 @dataclass
@@ -247,7 +253,14 @@ class SessionStage:
     stage_kind: StageKind
     payload: StagePayload
     parent_stage_ids: list[str] = field(default_factory=list)
-    created_by: TransformLineage = field(default_factory=lambda: TransformLineage(kind="unknown", transform="unknown", transform_family="transform", transform_name="unknown"))
+    created_by: TransformLineage = field(
+        default_factory=lambda: TransformLineage(
+            kind="unknown",
+            transform="unknown",
+            transform_family="transform",
+            transform_name="unknown",
+        )
+    )
     metrics: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
     persistence: StagePersistence = field(default_factory=StagePersistence)
@@ -305,7 +318,9 @@ class StageComparison:
             "source_payload_kind": self.source_payload_kind,
             "target_payload_kind": self.target_payload_kind,
             "payload_kind_changed": self.payload_kind_changed,
-            "payload_capability_delta": _json_safe_stage_value(self.payload_capability_delta),
+            "payload_capability_delta": _json_safe_stage_value(
+                self.payload_capability_delta
+            ),
             "metrics_added": list(self.metrics_added),
             "metrics_removed": list(self.metrics_removed),
             "metrics_changed": list(self.metrics_changed),
@@ -336,7 +351,9 @@ def _mapping_key_delta(
     added = sorted(target_keys - source_keys)
     removed = sorted(source_keys - target_keys)
     changed = sorted(
-        key for key in source_keys & target_keys if _values_differ(source[key], target[key])
+        key
+        for key in source_keys & target_keys
+        if _values_differ(source[key], target[key])
     )
     return added, removed, changed
 
@@ -404,6 +421,7 @@ __all__ = [
     "PayloadKind",
     "PersistenceState",
     "ExportBundlePayload",
+    "PrunedModelPayload",
     "QuantizedModelPayload",
     "RuntimeArtifactPayload",
     "RuntimeHandlePayload",

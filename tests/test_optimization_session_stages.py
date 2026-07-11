@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
 
 from xqt.contracts import RuntimeHandlePayload as ContractRuntimeHandlePayload
 from xqt.contracts import RuntimePlanPayload as ContractRuntimePlanPayload
+from xqt.contracts import PrunedModelPayload as ContractPrunedModelPayload
 from xqt.contracts import QuantizedModelPayload as ContractQuantizedModelPayload
 from xqt.workflows import XQTOptimizationSession
 from xqt.workflows.stage import (
     ExportBundlePayload,
+    PrunedModelPayload,
     QuantizedModelPayload,
     RuntimeHandlePayload,
     payload_capabilities_for_kind,
@@ -104,7 +107,10 @@ def test_quant_and_operator_create_stage_lineage(tmp_path: Path) -> None:
     assert quantized.payload.value.backend == "pytorch"
     assert quantized.payload.value.method == "awq"
     assert quantized.payload.value.strategy == "fp4_weight_only"
-    assert quantized.payload.metadata["quantized_model"]["artifact_kind"] == "quantized_model"
+    assert (
+        quantized.payload.metadata["quantized_model"]["artifact_kind"]
+        == "quantized_model"
+    )
     assert optimized.payload.payload_kind == "runtime_plan"
     assert isinstance(optimized.payload.value, RuntimePlanPayload)
     assert isinstance(optimized.payload.value, RuntimeArtifactPayload)
@@ -150,6 +156,7 @@ def test_quantized_model_payload_is_contract_reexport() -> None:
         "strategy": "fp4_weight_only",
         "quantized_module_count": 0,
         "quantized_modules": [],
+        "metadata": {},
         "calibration_samples": None,
         "calibration_summary": {"samples": 4},
         "components": [{"target": "weight"}],
@@ -158,7 +165,42 @@ def test_quantized_model_payload_is_contract_reexport() -> None:
     }
 
 
-def test_quant_stage_without_explicit_from_stage_uses_baseline_as_parent(tmp_path: Path) -> None:
+def test_pruned_model_payload_is_contract_reexport() -> None:
+    assert PrunedModelPayload is ContractPrunedModelPayload
+    payload = ContractPrunedModelPayload(
+        stage_name="l1_prune",
+        source_model_stage="baseline",
+        model=torch.nn.Linear(2, 2),
+        method="global_l1_unstructured",
+        granularity="weight",
+        target_sparsity=0.5,
+        sparsity=0.5,
+        execution_state="applied",
+        applied=True,
+        report={"sparsity": 0.5},
+        artifacts={"checkpoint": "pruned.pt"},
+    )
+
+    assert payload.to_dict() == {
+        "artifact_kind": "pruned_model",
+        "stage_name": "l1_prune",
+        "source_model_stage": "baseline",
+        "model_type": "torch.nn.modules.linear.Linear",
+        "method": "global_l1_unstructured",
+        "granularity": "weight",
+        "target_sparsity": 0.5,
+        "sparsity": 0.5,
+        "execution_state": "applied",
+        "applied": True,
+        "report": {"sparsity": 0.5},
+        "artifacts": {"checkpoint": "pruned.pt"},
+        "capability": None,
+    }
+
+
+def test_quant_stage_without_explicit_from_stage_uses_baseline_as_parent(
+    tmp_path: Path,
+) -> None:
     session = XQTOptimizationSession(
         project={
             "name": "session_stage_default_parent",
@@ -211,7 +253,9 @@ def test_session_quant_routes_through_run_quant_stage(
         }
         return context
 
-    monkeypatch.setattr("xqt.workflows.optimization.run_quant_stage", _fake_run_quant_stage)
+    monkeypatch.setattr(
+        "xqt.workflows.optimization.run_quant_stage", _fake_run_quant_stage
+    )
 
     result = session.quant(
         name="fp4_quant",
@@ -259,7 +303,9 @@ def test_session_prune_routes_through_run_prune_stage(
         }
         return context
 
-    monkeypatch.setattr("xqt.workflows.optimization.run_prune_stage", _fake_run_prune_stage)
+    monkeypatch.setattr(
+        "xqt.workflows.optimization.run_prune_stage", _fake_run_prune_stage
+    )
 
     result = session.prune(
         name="l1_prune",
@@ -272,7 +318,50 @@ def test_session_prune_routes_through_run_prune_stage(
         "method": "global_l1_unstructured",
         "target_sparsity": 0.4,
     }
-    assert session.session_stages[-1].name == "l1_prune"
+    pruned = session.session_stages[-1]
+    assert pruned.name == "l1_prune"
+    assert pruned.stage_kind == "optimized"
+    assert pruned.payload.payload_kind == "pruned_model"
+    assert isinstance(pruned.payload.value, PrunedModelPayload)
+    assert pruned.payload.value.method == "global_l1_unstructured"
+    assert pruned.payload.value.target_sparsity == pytest.approx(0.4)
+    assert pruned.payload.value.sparsity == pytest.approx(0.4)
+    assert pruned.payload.value.execution_state == "applied"
+    assert pruned.payload.value.applied is True
+    assert pruned.payload.metadata["pruned_model"]["report"] == {
+        "sparsity": 0.4,
+        "method": "global_l1_unstructured",
+        "target_sparsity": 0.4,
+    }
+
+
+def test_session_prune_materializes_pruned_model_payload(tmp_path: Path) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_prune_payload",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    result = session.prune(
+        name="l1_prune",
+        method="global_l1_unstructured",
+        target_sparsity=0.5,
+    )
+
+    assert result.accepted is True
+    pruned = session.session_stages[-1]
+    assert pruned.payload.payload_kind == "pruned_model"
+    assert isinstance(pruned.payload.value, PrunedModelPayload)
+    assert pruned.payload.value.applied is True
+    assert pruned.payload.value.sparsity == pytest.approx(
+        pruned.payload.value.report["sparsity"]
+    )
+    assert pruned.payload.value.report["method"] == "global_l1_unstructured"
+    session.use("l1_prune")
+    assert isinstance(session.model, _TinyLinear)
 
 
 def test_workflow_result_writes_session_stages(tmp_path: Path) -> None:
@@ -302,10 +391,16 @@ def test_workflow_result_writes_session_stages(tmp_path: Path) -> None:
     assert len(result.session_stages) == 2
     workflow_path = result.context.artifacts["workflow_result"]
     payload = json.loads(workflow_path.read_text(encoding="utf-8"))
-    assert [item["name"] for item in payload["session_stages"]] == ["baseline", "fp4_quant"]
+    assert [item["name"] for item in payload["session_stages"]] == [
+        "baseline",
+        "fp4_quant",
+    ]
     assert payload["session_stages"][1]["stage_kind"] == "quantized"
     assert payload["session_stages"][1]["payload"]["payload_kind"] == "quantized_model"
-    assert payload["session_stages"][1]["payload"]["value"]["artifact_kind"] == "quantized_model"
+    assert (
+        payload["session_stages"][1]["payload"]["value"]["artifact_kind"]
+        == "quantized_model"
+    )
 
 
 def test_runtime_plan_payload_serializes_as_plain_mapping(tmp_path: Path) -> None:
@@ -366,6 +461,8 @@ def test_export_bundle_payload_serializes_as_plain_mapping(
     )
 
     def _fake_run_export(config, stage, context) -> None:
+        assert stage.spec.targets[0].onnx.dynamo is False
+        assert stage.spec.targets[0].onnx.runtime_diff is False
         output = tmp_path / "model.onnx"
         output.write_bytes(b"fake-onnx")
         context.artifacts["export_onnx"] = output
@@ -381,6 +478,7 @@ def test_export_bundle_payload_serializes_as_plain_mapping(
         format="onnx",
         output_path=tmp_path / "model.onnx",
         opset=17,
+        onnx={"dynamo": False, "runtime_diff": False},
     )
 
     result = session.write_outputs()
@@ -391,6 +489,10 @@ def test_export_bundle_payload_serializes_as_plain_mapping(
     assert stage_payload["value"]["artifact_kind"] == "export_bundle"
     assert stage_payload["value"]["format"] == "onnx"
     assert stage_payload["value"]["source_model_stage"] == "baseline"
+    assert (
+        session.session_stages[-1].created_by.params["targets"][0]["onnx"]["dynamo"]
+        is False
+    )
 
 
 def test_export_stage_uses_export_bundle_payload_kind(
@@ -407,35 +509,297 @@ def test_export_stage_uses_export_bundle_payload_kind(
     )
 
     def _fake_run_export(config, stage, context) -> None:
-        output = tmp_path / "model.onnx"
-        output.write_bytes(b"fake-onnx")
-        context.artifacts["export_onnx"] = output
+        target = stage.spec.targets[0]
+        assert target.tensorrt.onnx_path == "artifacts/model.onnx"
+        assert target.tensorrt.dry_run is True
+        output = tmp_path / "model.engine"
+        output.write_bytes(b"fake-engine")
+        context.artifacts["export_engine"] = output
         context.metrics["export"] = {
             "target_count": 1,
-            "targets": [{"format": "onnx", "output_path": str(output)}],
+            "targets": [{"format": "tensorrt", "output_path": str(output)}],
         }
 
     monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
 
     export_stage = session.export(
-        name="onnx_export",
-        format="onnx",
-        output_path=tmp_path / "model.onnx",
-        opset=17,
+        name="tensorrt_export",
+        format="tensorrt",
+        output_path=tmp_path / "model.engine",
+        tensorrt={"onnx_path": "artifacts/model.onnx", "dry_run": True},
     )
 
     assert export_stage.accepted is True
     exported = session.session_stages[-1]
-    assert exported.name == "onnx_export"
+    assert exported.name == "tensorrt_export"
     assert exported.stage_kind == "exported"
     assert exported.payload.payload_kind == "export_bundle"
     assert isinstance(exported.payload.value, ExportBundlePayload)
     assert isinstance(exported.payload.value, RuntimeArtifactPayload)
     assert exported.payload.value.artifact_kind == "export_bundle"
-    assert exported.payload.value.format == "onnx"
+    assert exported.payload.value.format == "tensorrt"
     assert exported.payload.value.source_model_stage == "baseline"
-    assert exported.payload.metadata["export_bundle"]["artifact_kind"] == "export_bundle"
+    assert (
+        exported.payload.metadata["export_bundle"]["artifact_kind"] == "export_bundle"
+    )
     assert exported.created_by.transform_family == "export"
+
+
+def test_export_stage_accepts_openvino_target_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_openvino_export",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    def _fake_run_export(config: Any, stage: Any, context: Any) -> None:
+        target = stage.spec.targets[0]
+        assert target.openvino.onnx_path == "artifacts/model.onnx"
+        assert target.openvino.input_shape == [1, 16]
+        assert target.openvino.dry_run is True
+        assert target.openvino.runtime_diff is False
+        assert target.openvino.device == "GPU"
+        output = tmp_path / "model.xml"
+        output.write_bytes(b"fake-openvino")
+        context.artifacts["export_openvino"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": "openvino", "output_path": str(output)}],
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    export_stage = session.export(
+        name="openvino_export",
+        format="openvino",
+        output_path=tmp_path / "model.xml",
+        openvino={
+            "onnx_path": "artifacts/model.onnx",
+            "input_shape": [1, 16],
+            "dry_run": True,
+            "runtime_diff": False,
+            "device": "GPU",
+        },
+    )
+
+    assert export_stage.accepted is True
+
+
+def test_deploy_stage_accepts_openvino_target_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_openvino_deploy",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    def _fake_run_export(config: Any, stage: Any, context: Any) -> None:
+        assert isinstance(stage.spec, DeployStageSpec)
+        target = stage.spec.targets[0]
+        assert target.openvino.onnx_path == "artifacts/model.onnx"
+        assert target.openvino.dry_run is True
+        output = tmp_path / "model.xml"
+        output.write_bytes(b"fake-openvino")
+        context.artifacts["deploy_openvino"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": "openvino", "output_path": str(output)}],
+            "stage_kind": "deploy",
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    deploy_stage = session.deploy(
+        name="openvino_deploy",
+        format="openvino",
+        output_path=tmp_path / "model.xml",
+        openvino={
+            "onnx_path": "artifacts/model.onnx",
+            "dry_run": True,
+        },
+    )
+
+    assert deploy_stage.accepted is True
+
+
+def test_export_stage_accepts_torch_export_target_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_torch_export",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    def _fake_run_export(config: Any, stage: Any, context: Any) -> None:
+        target = stage.spec.targets[0]
+        assert target.torch_export.strict is True
+        assert target.torch_export.validate is False
+        assert target.torch_export.runtime_diff is False
+        output = tmp_path / "model.pt2"
+        output.write_bytes(b"fake-torch-export")
+        context.artifacts["export_torch_export"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": "torch_export", "output_path": str(output)}],
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    export_stage = session.export(
+        name="torch_export",
+        format="torch_export",
+        output_path=tmp_path / "model.pt2",
+        torch_export={
+            "strict": True,
+            "validate": False,
+            "runtime_diff": False,
+        },
+    )
+
+    assert export_stage.accepted is True
+
+
+def test_deploy_stage_accepts_torchscript_target_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_torchscript_deploy",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    def _fake_run_export(config: Any, stage: Any, context: Any) -> None:
+        assert isinstance(stage.spec, DeployStageSpec)
+        target = stage.spec.targets[0]
+        assert target.torchscript.method == "script"
+        assert target.torchscript.check_trace is False
+        assert target.torchscript.runtime_diff is False
+        output = tmp_path / "model.pt"
+        output.write_bytes(b"fake-torchscript")
+        context.artifacts["deploy_torchscript"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": "torchscript", "output_path": str(output)}],
+            "stage_kind": "deploy",
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    deploy_stage = session.deploy(
+        name="torchscript_deploy",
+        format="torchscript",
+        output_path=tmp_path / "model.pt",
+        torchscript={
+            "method": "script",
+            "check_trace": False,
+            "runtime_diff": False,
+        },
+    )
+
+    assert deploy_stage.accepted is True
+
+
+@pytest.mark.parametrize("operation", ["export", "deploy"])
+@pytest.mark.parametrize(
+    ("format_name", "config_name", "config", "expected"),
+    [
+        ("executorch", "executorch", {"dry_run": True}, {"dry_run": True}),
+        (
+            "ncnn",
+            "ncnn",
+            {
+                "source_path": "artifacts/model.pt",
+                "converter": "pnnx",
+                "pnnx_path": "custom-pnnx",
+                "dry_run": True,
+            },
+            {
+                "source_path": "artifacts/model.pt",
+                "converter": "pnnx",
+                "pnnx_path": "custom-pnnx",
+                "dry_run": True,
+            },
+        ),
+        (
+            "mnn",
+            "mnn",
+            {
+                "source_path": "artifacts/model.onnx",
+                "converter_path": "custom-mnnconvert",
+                "dry_run": True,
+            },
+            {
+                "source_path": "artifacts/model.onnx",
+                "converter_path": "custom-mnnconvert",
+                "dry_run": True,
+            },
+        ),
+    ],
+)
+def test_session_accepts_typed_mobile_target_config(
+    operation: str,
+    format_name: str,
+    config_name: str,
+    config: dict[str, Any],
+    expected: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": f"session_stage_{operation}_{format_name}",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+    suffix = {"executorch": ".pte", "ncnn": ".param", "mnn": ".mnn"}[format_name]
+    output = tmp_path / f"model{suffix}"
+
+    def _fake_run_export(config_: Any, stage: Any, context: Any) -> None:
+        target = stage.spec.targets[0]
+        typed_config = getattr(target, config_name)
+        for key, value in expected.items():
+            assert getattr(typed_config, key) == value
+        output.write_bytes(b"fake-mobile-export")
+        context.artifacts[f"{operation}_{format_name}"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": format_name, "output_path": str(output)}],
+            "stage_kind": operation,
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    stage_method = getattr(session, operation)
+    stage_result = stage_method(
+        name=f"{format_name}_{operation}",
+        format=format_name,
+        output_path=output,
+        **{config_name: config},
+    )
+
+    assert stage_result.accepted is True
 
 
 def test_deploy_stage_accepts_runtime_handle_request(
@@ -456,6 +820,10 @@ def test_deploy_stage_accepts_runtime_handle_request(
     def _fake_run_export(config, stage, context) -> None:
         assert isinstance(stage.spec, DeployStageSpec)
         assert stage.spec.runtime_handle is not None
+        target = stage.spec.targets[0]
+        assert target.tensorrt.onnx_path == "artifacts/model.onnx"
+        assert target.tensorrt.backend == "python_api"
+        assert target.tensorrt.dry_run is True
         captured["runtime"] = stage.spec.runtime_handle.runtime
         captured["handle_kind"] = stage.spec.runtime_handle.handle_kind
         captured["materialize"] = stage.spec.runtime_handle.materialize
@@ -479,6 +847,11 @@ def test_deploy_stage_accepts_runtime_handle_request(
         name="build_engine",
         format="tensorrt",
         output_path=tmp_path / "model.engine",
+        tensorrt={
+            "onnx_path": "artifacts/model.onnx",
+            "backend": "python_api",
+            "dry_run": True,
+        },
         runtime_handle={
             "runtime": "tensorrt",
             "handle_kind": "engine",
@@ -498,6 +871,85 @@ def test_deploy_stage_accepts_runtime_handle_request(
     assert exported.payload.payload_kind == "export_bundle"
     assert exported.created_by.transform == "deploy"
     assert exported.created_by.transform_family == "export"
+
+
+def test_deploy_stage_materialized_runtime_handle_uses_runtime_handle_payload_kind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_runtime_handle",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    def _fake_run_export(config, stage, context) -> None:
+        output = tmp_path / "model.onnx"
+        output.write_bytes(b"fake-onnx")
+        handle = object()
+        context.artifacts["deploy_onnx"] = output
+        context.metrics["export"] = {
+            "target_count": 1,
+            "targets": [{"format": "onnx", "output_path": str(output)}],
+            "runtime_handle": {
+                "runtime": "onnxruntime",
+                "handle_kind": "inference_session",
+                "handle": handle,
+                "target_count": 1,
+                "targets": [{"format": "onnx", "output_path": str(output)}],
+                "artifacts": {"onnx": str(output)},
+                "metadata": {"runtime_validation": {"status": "session_created"}},
+            },
+        }
+
+    monkeypatch.setattr("xqt.workflows.optimization._run_export", _fake_run_export)
+
+    deploy_stage = session.deploy(
+        name="materialize_onnxruntime",
+        format="onnx",
+        output_path=tmp_path / "model.onnx",
+        runtime_handle={
+            "runtime": "onnxruntime",
+            "handle_kind": "inference_session",
+            "materialize": True,
+        },
+    )
+
+    assert deploy_stage.accepted is True
+    exported = session.session_stages[-1]
+    assert exported.stage_kind == "exported"
+    assert exported.payload.payload_kind == "runtime_handle"
+    assert isinstance(exported.payload.value, RuntimeHandlePayload)
+    assert exported.payload.value.handle is not None
+    assert exported.payload.capabilities == payload_capabilities_for_kind(
+        "runtime_handle"
+    )
+    assert exported.payload.capabilities["can_evaluate"] is True
+
+    result = session.write_outputs()
+    payload = json.loads(
+        result.context.artifacts["workflow_result"].read_text(encoding="utf-8")
+    )
+    stage_payload = payload["session_stages"][-1]["payload"]
+    assert stage_payload["payload_kind"] == "runtime_handle"
+    assert stage_payload["value"]["artifact_kind"] == "runtime_handle"
+    assert stage_payload["value"]["handle_materialized"] is True
+    assert payload["metrics"]["export"]["runtime_handle"]["handle"] is None
+
+    manifest = result.context.manifest
+    assert manifest is not None
+    manifest_path = tmp_path / "manifest.json"
+    manifest.write_json(manifest_path)
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stage_report = next(
+        metric["metadata"]
+        for metric in manifest_payload["metrics"]
+        if metric["name"] == "stage.materialize_onnxruntime.status"
+    )
+    assert stage_report["metrics"]["runtime_handle"]["handle"] is None
 
 
 def test_stage_created_by_tracks_transform_metadata(tmp_path: Path) -> None:
@@ -540,13 +992,21 @@ def test_stage_protocol_helpers_define_stable_contracts() -> None:
     assert transform_family_for_kind("operator") == "operator_optimizer"
     assert transform_family_for_kind("unknown_transform") == "transform"
 
-    assert payload_kind_for_stage("optimized", transform_kind="operator") == "runtime_plan"
-    assert payload_kind_for_stage("exported", transform_kind="export") == "export_bundle"
-    assert payload_kind_for_stage("quantized", transform_kind="quant") == "quantized_model"
+    assert (
+        payload_kind_for_stage("optimized", transform_kind="operator") == "runtime_plan"
+    )
+    assert payload_kind_for_stage("optimized", transform_kind="prune") == "pruned_model"
+    assert (
+        payload_kind_for_stage("exported", transform_kind="export") == "export_bundle"
+    )
+    assert (
+        payload_kind_for_stage("quantized", transform_kind="quant") == "quantized_model"
+    )
 
     runtime_capabilities = payload_capabilities_for_kind("runtime_plan")
     assert runtime_capabilities["can_restore_model"] is False
     assert payload_can_restore_model("torch_module") is True
+    assert payload_can_restore_model("pruned_model") is True
     assert payload_can_restore_model("quantized_model") is True
     assert payload_can_restore_model("runtime_plan") is False
 

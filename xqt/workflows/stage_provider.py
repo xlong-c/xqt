@@ -7,11 +7,13 @@ from typing import Any, Mapping, Protocol
 
 from xqt.contracts import (
     ExportBundlePayload,
+    PrunedModelPayload,
     QuantizedModelPayload,
     RuntimeHandlePayload,
     RuntimePlanPayload,
 )
 from xqt.quant.capability import describe_quant_backend_capability
+from xqt.prune.capability import prune_runtime_capability_from_report
 
 from .stage_specs import stage_params
 from .stage import (
@@ -79,13 +81,6 @@ def _artifact_paths(context: StagePayloadBuildContext) -> dict[str, str]:
     return {key: str(value) for key, value in context.new_artifacts.items()}
 
 
-def _first_mapping_list(metrics: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
-    value = metrics.get(key, [])
-    if not isinstance(value, list):
-        return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
-
-
 def _quant_capability(stage: Any, metrics: Mapping[str, Any]) -> dict[str, Any] | None:
     params = stage_params(stage)
     backend = str(metrics.get("backend") or params.get("backend") or "")
@@ -105,6 +100,17 @@ def _quant_capability(stage: Any, metrics: Mapping[str, Any]) -> dict[str, Any] 
         return None
 
 
+def _prune_capability(
+    metrics: Mapping[str, Any],
+    *,
+    device: str | None,
+) -> dict[str, Any] | None:
+    try:
+        return prune_runtime_capability_from_report(metrics, device=device)
+    except ValueError:
+        return None
+
+
 class DefaultStageProvider:
     """Provider for model-state transforms that do not need typed artifacts."""
 
@@ -117,34 +123,28 @@ class DefaultStageProvider:
         )
 
 
+def _model_module_contract(context: StagePayloadBuildContext) -> dict[str, Any] | None:
+    model = getattr(context.state.context, "model", None)
+    raw = getattr(model, "_xqt_module_contract", None)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return None
+
+
 class ModelQuantizerProvider:
     """Provider for quantization stages and quantized model payloads."""
 
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
         metrics = context.metrics
-        params = stage_params(context.stage)
-        components = _first_mapping_list(metrics, "components")
-        quantized_modules = metrics.get("quantized_modules", [])
-        if not isinstance(quantized_modules, list):
-            quantized_modules = []
-        payload_value = QuantizedModelPayload(
+        payload_value = QuantizedModelPayload.from_stage_metrics(
             stage_name=context.stage.name,
             source_model_stage=context.source_stage_name,
             model=context.state.context.model,
-            backend=str(metrics.get("backend") or params.get("backend") or "unknown"),
-            method=str(metrics.get("method") or params.get("method") or "unknown"),
-            strategy=str(metrics.get("strategy") or params.get("strategy") or "unknown"),
-            quantized_module_count=int(metrics.get("quantized_module_count") or 0),
-            quantized_modules=[str(item) for item in quantized_modules],
-            calibration_samples=metrics.get("calibration_samples")
-            if isinstance(metrics.get("calibration_samples"), int)
-            else None,
-            calibration_summary=dict(metrics.get("calibration_summary"))
-            if isinstance(metrics.get("calibration_summary"), Mapping)
-            else None,
-            components=components,
+            metrics=metrics,
+            params=stage_params(context.stage),
             artifacts=_artifact_paths(context),
             capability=_quant_capability(context.stage, metrics),
+            module_contract=_model_module_contract(context),
         )
         payload_metadata = _base_payload_metadata(context)
         payload_metadata["quantized_model"] = payload_value.to_dict()
@@ -156,23 +156,44 @@ class ModelQuantizerProvider:
         )
 
 
+class ModelPrunerProvider:
+    """Provider for pruning stages and pruned model payloads."""
+
+    def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
+        metrics = context.metrics
+        payload_value = PrunedModelPayload.from_stage_metrics(
+            stage_name=context.stage.name,
+            source_model_stage=context.source_stage_name,
+            model=context.state.context.model,
+            metrics=metrics,
+            params=stage_params(context.stage),
+            artifacts=_artifact_paths(context),
+            capability=_prune_capability(
+                metrics,
+                device=getattr(context.state.context, "device", None),
+            ),
+            module_contract=_model_module_contract(context),
+        )
+        payload_metadata = _base_payload_metadata(context)
+        payload_metadata["pruned_model"] = payload_value.to_dict()
+        return StageProviderOutput(
+            session_stage_kind="optimized",
+            lineage=build_stage_lineage(context.stage),
+            payload_value=payload_value,
+            payload_metadata=payload_metadata,
+        )
+
+
 class OperatorOptimizerProvider:
     """Provider for operator optimization runtime-plan payloads."""
 
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
-        targets = _first_mapping_list(context.metrics, "targets")
-        target_engines = [
-            str(target.get("engine"))
-            for target in targets
-            if target.get("engine")
-        ]
-        payload_value = RuntimePlanPayload(
+        payload_value = RuntimePlanPayload.from_stage_metrics(
             stage_name=context.stage.name,
             source_model_stage=context.source_stage_name,
-            engine=target_engines[0] if target_engines else "unknown",
-            target_count=len(targets),
-            targets=targets,
+            metrics=context.metrics,
             artifacts=_artifact_paths(context),
+            module_contract=_model_module_contract(context),
         )
         payload_metadata = _base_payload_metadata(context)
         payload_metadata["runtime_plan"] = payload_value.to_dict()
@@ -188,22 +209,12 @@ class ExportProvider:
     """Provider for export and deploy bundle payloads."""
 
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
-        targets = _first_mapping_list(context.metrics, "targets")
         runtime_handle = context.metrics.get("runtime_handle")
         if isinstance(runtime_handle, Mapping):
-            payload_value = RuntimeHandlePayload(
+            payload_value = RuntimeHandlePayload.from_stage_metrics(
                 stage_name=context.stage.name,
                 source_model_stage=context.source_stage_name,
-                runtime=str(runtime_handle["runtime"]),
-                handle_kind=str(runtime_handle["handle_kind"]),
-                target_count=int(runtime_handle.get("target_count", 0)),
-                targets=_first_mapping_list(runtime_handle, "targets"),
-                handle=runtime_handle.get("handle"),
-                artifacts={
-                    str(key): str(value)
-                    for key, value in dict(runtime_handle.get("artifacts", {})).items()
-                },
-                metadata=dict(runtime_handle.get("metadata", {})),
+                runtime_handle=runtime_handle,
             )
             payload_metadata = _base_payload_metadata(context)
             payload_metadata["runtime_handle"] = payload_value.to_dict()
@@ -213,16 +224,12 @@ class ExportProvider:
                 payload_value=payload_value,
                 payload_metadata=payload_metadata,
             )
-        first_format = "unknown"
-        if targets:
-            first_format = str(targets[0].get("format", "unknown"))
-        payload_value = ExportBundlePayload(
+        payload_value = ExportBundlePayload.from_stage_metrics(
             stage_name=context.stage.name,
             source_model_stage=context.source_stage_name,
-            format=first_format,
-            target_count=len(targets),
-            targets=targets,
+            metrics=context.metrics,
             artifacts=_artifact_paths(context),
+            module_contract=_model_module_contract(context),
         )
         payload_metadata = _base_payload_metadata(context)
         payload_metadata["export_bundle"] = payload_value.to_dict()
@@ -237,6 +244,7 @@ class ExportProvider:
 _DEFAULT_PROVIDER = DefaultStageProvider()
 _STAGE_PROVIDERS: dict[str, StageProvider] = {
     "quant": ModelQuantizerProvider(),
+    "prune": ModelPrunerProvider(),
     "operator": OperatorOptimizerProvider(),
     "export": ExportProvider(),
     "deploy": ExportProvider(),
@@ -253,6 +261,7 @@ def resolve_stage_provider(context: StagePayloadBuildContext) -> StageProviderOu
 __all__ = [
     "DefaultStageProvider",
     "ExportProvider",
+    "ModelPrunerProvider",
     "ModelQuantizerProvider",
     "OperatorOptimizerProvider",
     "StagePayloadBuildContext",
