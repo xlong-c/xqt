@@ -22,6 +22,7 @@ from xqt.workflows.stage import (
     payload_kind_for_stage,
     RuntimeArtifactPayload,
     RuntimePlanPayload,
+    StageReportPayload,
     stage_kind_for_transform,
     transform_family_for_kind,
 )
@@ -162,6 +163,8 @@ def test_quantized_model_payload_is_contract_reexport() -> None:
         "components": [{"target": "weight"}],
         "artifacts": {"checkpoint": "quantized.pt"},
         "capability": None,
+        "algorithm_metadata": None,
+        "execution_policies": [],
     }
 
 
@@ -952,6 +955,34 @@ def test_deploy_stage_materialized_runtime_handle_uses_runtime_handle_payload_ki
     assert stage_report["metrics"]["runtime_handle"]["handle"] is None
 
 
+def test_session_export_rejects_empty_targets(tmp_path: Path) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_empty_export_targets",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    with pytest.raises(ValueError, match="export requires at least one target"):
+        session.export(name="empty_export", targets=[])
+
+
+def test_session_deploy_rejects_empty_targets(tmp_path: Path) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_empty_deploy_targets",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    with pytest.raises(ValueError, match="deploy requires at least one target"):
+        session.deploy(name="empty_deploy", targets=[])
+
+
 def test_stage_created_by_tracks_transform_metadata(tmp_path: Path) -> None:
     session = XQTOptimizationSession(
         project={
@@ -986,10 +1017,13 @@ def test_stage_created_by_tracks_transform_metadata(tmp_path: Path) -> None:
 def test_stage_protocol_helpers_define_stable_contracts() -> None:
     assert stage_kind_for_transform("quant") == "quantized"
     assert stage_kind_for_transform("operator") == "optimized"
+    assert stage_kind_for_transform("benchmark") == "observed"
+    assert stage_kind_for_transform("analyze") == "observed"
     assert stage_kind_for_transform("unknown_transform") == "custom"
 
     assert transform_family_for_kind("quant") == "model_quantizer"
     assert transform_family_for_kind("operator") == "operator_optimizer"
+    assert transform_family_for_kind("benchmark") == "evaluation"
     assert transform_family_for_kind("unknown_transform") == "transform"
 
     assert (
@@ -998,6 +1032,10 @@ def test_stage_protocol_helpers_define_stable_contracts() -> None:
     assert payload_kind_for_stage("optimized", transform_kind="prune") == "pruned_model"
     assert (
         payload_kind_for_stage("exported", transform_kind="export") == "export_bundle"
+    )
+    assert (
+        payload_kind_for_stage("observed", transform_kind="benchmark")
+        == "stage_report"
     )
     assert (
         payload_kind_for_stage("quantized", transform_kind="quant") == "quantized_model"
@@ -1009,10 +1047,65 @@ def test_stage_protocol_helpers_define_stable_contracts() -> None:
     assert payload_can_restore_model("pruned_model") is True
     assert payload_can_restore_model("quantized_model") is True
     assert payload_can_restore_model("runtime_plan") is False
+    assert payload_can_restore_model("stage_report") is False
 
     runtime_capabilities["can_export"] = False
     fresh_runtime_capabilities = payload_capabilities_for_kind("runtime_plan")
     assert fresh_runtime_capabilities["can_export"] is True
+
+
+def test_benchmark_stage_uses_observation_payload_and_keeps_best_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = XQTOptimizationSession(
+        project={
+            "name": "session_stage_benchmark_observation",
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        model=_TinyLinear().eval(),
+        example_inputs=torch.randn(4, 16),
+    )
+
+    session.quant(
+        name="fp4_quant",
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={
+            "dtype": "fp4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc"],
+            "group_size": 16,
+        },
+    )
+
+    def _fake_run_benchmark_stage(context, spec, *, base_benchmark_config=None) -> object:
+        del spec, base_benchmark_config
+        context.metrics["benchmark"] = {
+            "latency": {"p50_ms": 1.5},
+            "p50_ms": 1.5,
+        }
+        return context
+
+    monkeypatch.setattr(
+        "xqt.workflows.optimization.run_benchmark_stage", _fake_run_benchmark_stage
+    )
+
+    result = session.benchmark(name="post_quant_benchmark", save_model=True)
+
+    assert result.accepted is True
+    assert session.best_stage == "fp4_quant"
+    observed = session.session_stages[-1]
+    assert observed.name == "post_quant_benchmark"
+    assert observed.stage_kind == "observed"
+    assert observed.payload.payload_kind == "stage_report"
+    assert isinstance(observed.payload.value, StageReportPayload)
+    assert observed.payload.value.report_kind == "benchmark"
+    assert observed.payload.capabilities == payload_capabilities_for_kind("stage_report")
+
+    with pytest.raises(ValueError, match="restorable model payload"):
+        session.use("post_quant_benchmark")
 
 
 def test_stage_payload_dispatch_uses_specialized_and_default_builders(

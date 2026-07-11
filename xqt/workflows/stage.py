@@ -12,6 +12,7 @@ from xqt.contracts.runtime import (
     RuntimeArtifactPayload,
     RuntimeHandlePayload,
     RuntimePlanPayload,
+    StageReportPayload,
 )
 from xqt.contracts.quantized import QuantizedModelPayload
 from xqt.contracts.pruned import PrunedModelPayload
@@ -22,6 +23,7 @@ StageKind = Literal[
     "baseline",
     "quantized",
     "optimized",
+    "observed",
     "exported",
     "imported",
     "custom",
@@ -32,6 +34,7 @@ PayloadKind = Literal[
     "pruned_model",
     "quantized_model",
     "runtime_plan",
+    "stage_report",
     "export_bundle",
     "runtime_handle",
 ]
@@ -40,13 +43,13 @@ PersistenceState = Literal["transient", "materialized", "persisted"]
 
 
 _STAGE_KIND_BY_TRANSFORM: dict[str, StageKind] = {
-    "benchmark": "optimized",
+    "benchmark": "observed",
     "prune": "optimized",
     "quant": "quantized",
     "operator": "optimized",
     "export": "exported",
     "deploy": "exported",
-    "analyze": "optimized",
+    "analyze": "observed",
 }
 
 _TRANSFORM_FAMILY_BY_KIND: dict[str, str] = {
@@ -89,6 +92,13 @@ _PAYLOAD_CAPABILITIES_BY_KIND: dict[PayloadKind, dict[str, bool]] = {
         "can_optimize_ops": False,
         "can_restore_model": False,
     },
+    "stage_report": {
+        "can_evaluate": False,
+        "can_export": False,
+        "can_quantize": False,
+        "can_optimize_ops": False,
+        "can_restore_model": False,
+    },
     "export_bundle": {
         "can_evaluate": False,
         "can_export": False,
@@ -118,6 +128,12 @@ def transform_family_for_kind(transform_kind: str) -> str:
     return _TRANSFORM_FAMILY_BY_KIND.get(transform_kind, "transform")
 
 
+def transform_mutates_model(transform_kind: str) -> bool:
+    """Whether this workflow transform is expected to produce a new model state."""
+
+    return transform_kind in {"quant", "prune", "operator"}
+
+
 def payload_kind_for_stage(
     stage_kind: StageKind | str,
     *,
@@ -134,6 +150,8 @@ def payload_kind_for_stage(
     if stage_kind == "exported" and isinstance(payload_value, RuntimeHandlePayload):
         return "runtime_handle"
 
+    if stage_kind == "observed":
+        return "stage_report"
     if stage_kind == "exported":
         return "export_bundle"
     if stage_kind == "quantized" and transform_kind == "quant":
@@ -426,6 +444,7 @@ __all__ = [
     "RuntimeArtifactPayload",
     "RuntimeHandlePayload",
     "RuntimePlanPayload",
+    "StageReportPayload",
     "StageComparison",
     "SessionStage",
     "TransformLineage",
@@ -437,5 +456,6 @@ __all__ = [
     "payload_capabilities_for_kind",
     "payload_kind_for_stage",
     "stage_kind_for_transform",
+    "transform_mutates_model",
     "transform_family_for_kind",
 ]

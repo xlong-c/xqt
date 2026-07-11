@@ -20,6 +20,7 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 | `RuntimeHandlePayload` | executable runtime handle typed payload; materialized deploy stage 使用该 payload, 可生产 ONNX Runtime `InferenceSession` 或非 dry-run TensorRT runtime session. |
 | `StageComparison` | session 内 stage-to-stage 结构化比较结果. |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪. |
+| `ModelPackageManifest` / `load_model_package()` | 推理侧文件加载标准, 当前最小闭环为 `manifest.json + runtime/config.json`. |
 | `MetricRecord` | 结构化指标记录. |
 | `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 engine,status,maturity,runtime,artifact_kind 和硬件/校准/导出要求. |
 | `XQTReadinessReport` / `assess_xqt_readiness()` | readiness 汇总入口,输出场景状态,capability matrix 和 reporting schema. |
@@ -28,7 +29,12 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 
 ## Backend / Engine 术语
 
-XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.*` facade 和后续 runtime manager.
+XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.*` facade 和 `xqt.runtime` hybrid inference engine.
+
+- `xqt.quant` 只负责量化算法与 artifact (packed weight, scale, rotation, execution policy metadata, channel hybrid mask).
+- `xqt.runtime.HybridInferenceEngine` 只消费已量化模型与 execution policy, 做模块级 / 通道级混合精度推理调度; 不跑 quantizer / calibration / sensitivity.
+- `ArtifactManifest` 只用于 workflow / experiment 追踪, 不是 file-based inference 的加载契约. 推理侧标准入口是 `xqt.runtime` 下的模型包 `manifest.json`.
+- 通道级混合精度: 部分 channel 走 16-bit (或更高), 其余走 4-bit. Quant 侧选 outlier channel 并写入 mask; Runtime 侧 dual-path reference 前向 (`channel_hybrid_linear_reference`), 后续可替换为真实 kernel.
 
 - `backend`: 外部 quant/export/runtime 选择, 例如 `torchao`, `pytorch`, `onnxruntime_qdq`, `tensorrt`, `openvino`. Quant recipe 继续使用 `quant.params.backend`.
 - `engine`: XQT 内部实现选择和公开 report 字段, 例如 `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda`, `torch_compile`. `xqt.convert(...)`, 单算子 dispatcher, `OptimizationCapability`, `StageReport`, `operator_optimization.default_engine` 和 `targets[*].engine` 统一使用这个字段.
@@ -74,6 +80,7 @@ YAML workflow 只保留一种配置形态:
 - workflow stage 必须写入 `stage_reports` 和 manifest stage metric,保留 stage name,engine,target module,artifact 和 lineage.
 - `xqt.nn.Linear` / `Conv2d` / `LayerNorm` 已是保留 PyTorch module/state_dict 语义的 `torch.nn` 子类 facade, 并显式承载 engine 与 precision runtime intent. `FeedForward` / `RMSNorm` / `Attention` / `TransformerBlock` 也是 semantic facade; Attention 的 torch 路径走 SDPA, tilelang 路径经 `materialize_module` 落到 `_TileLangXqtAttentionWrapper`. TransformerBlock 的 tilelang 会 materialize 内部 `attn` 子模块, 但不是完整 block-level 单 kernel fusion. 文档不得把 block-level 生产性能写成已完成事实.
 - ONNX target 的已知字段统一写在 `targets[*].onnx`: `input_names`, `output_names`, `dynamo`, `validate`, `runtime_diff`, pre-export fusion/lowering 和 ONNX optimization. target `params` 不再承载这些键. `pre_export_lowering` 中当前的 `fp4_weight_only_to_dense_linear` 会复制 export model, 将 `FP4WeightOnlyLinear` materialize 成等价的 dense dequantized `nn.Linear`, 并在 artifact metadata 记录 lowering. 这让通用 ONNX / TensorRT adapter 可消费该模型, 但 resulting artifact 不是 packed-FP4 runtime.
+- 当前 export 会为 ONNX target 额外落一个 `*.xqtpkg/manifest.json` 标准模型包, 并附带 `model/*` 与 `runtime/config.json`. file-based inference 通过 `load_model_package()` / `create_inference_runner()` 只消费该包; 现阶段最小闭环只保证 `ONNX + ONNX Runtime`.
 - TensorRT engine-build 的已知字段统一写在 `targets[*].tensorrt`: `onnx_path`, `backend`, `trtexec_path`, `extra_args`, `timeout`, `dry_run`, `performance_thresholds`, `workspace_mib`, `builder_optimization_level`, `timing_cache_path`, `log_level`, `plugin_libraries`, `serialize_plugin_libraries`, `validate_plugin_libraries_loadable` 与 `runtime_benchmark`. loader 明确拒绝 target `params` 中的同名旧键; `params` 只保留其他 export backend 的专有选项. `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口也通过 `tensorrt` 参数构造同一个 typed `StageSpec`.
 - OpenVINO target 的已知字段统一写在 `targets[*].openvino`: `onnx_path`, `input_shape`, `dry_run`, `runtime_diff` 与 `device`. loader 明确拒绝 target `params` 中的同名旧键; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口通过 `openvino` 参数构造同一个 typed `StageSpec`. `openvino.onnx_path` 缺失时, export pass 使用同 workflow 的先前 ONNX artifact, 再回退到当前模型转换; `runtime_diff` 只在 materialized IR 与可用 reference output 时执行.
 - TorchExport target 的已知字段统一写在 `targets[*].torch_export`: `strict`, `validate` 与 `runtime_diff`. TorchScript target 的已知字段统一写在 `targets[*].torchscript`: `method`, `check_trace` 与 `runtime_diff`, 其中 `method` 只能是 `trace` 或 `script`. loader 明确拒绝 target `params` 中的同名旧键; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口分别通过 `torch_export` 与 `torchscript` 参数构造同一个 typed `StageSpec`.
@@ -91,15 +98,18 @@ YAML workflow 只保留一种配置形态:
 - `OperatorOptimizerProvider`.
 - `ExportProvider`.
 
-`SessionStage.payload` 描述阶段产物, `model_snapshots` 描述可恢复模型态. `use(name)` / `revert_to(name)` 必须保持模型恢复语义, 不能把 `runtime_plan`, `export_bundle` 或其他非模型 artifact 当成当前模型.
+`SessionStage.payload` 描述阶段产物, `model_snapshots` 只描述可恢复模型态. `use(name)` / `revert_to(name)` 必须保持模型恢复语义, 不能把 `runtime_plan`, `stage_report`, `export_bundle` 或其他非模型 artifact 当成当前模型.
 
 当前 payload kind:
 
 - `torch_module`: 默认模型态.
 - `quantized_model`: quant stage.
 - `runtime_plan`: operator stage.
+- `stage_report`: benchmark / analyze 这类 observation stage 的报告 payload, 不进入可恢复模型快照.
 - `export_bundle`: export stage, 或仅构建 deploy artifact 而未 materialize runtime handle 的 deploy stage.
 - `runtime_handle`: materialized deploy stage 的 executable runtime handle. ONNX Runtime producer 创建 `InferenceSession`; TensorRT producer 反序列化同 stage 的非 dry-run engine 并创建 execution context. 二者不替代数值或性能验收.
+
+`benchmark` / `analyze` 在 session graph 中注册为 observation-side `SessionStage`, 不再把 `best_stage` 推进到非模型 stage.
 
 `compare_stages()` / `compare_to_baseline()` 返回 `StageComparison`, 只比较 session 内 stage kind, payload kind, capability, metrics 和 artifacts, 不引入 dataset / dataloader 或 task-level validation.
 

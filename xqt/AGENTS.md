@@ -22,7 +22,9 @@ XQT 负责模型压缩,图变换,导出适配,误差分析和 benchmark. XQT 不
 - `workflows/`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
 - `analysis/`: tensor output diff,layer analysis 和 report helper.
 - `benchmark/`: latency 和 memory benchmark helper.
-- `quant/`: 量化子系统. 根目录保留 policy/strategy/capability/plan/types 等 schema 和事实源; `execution/` 负责 plan dispatch 与 report 组装; `quantizers/` 放模型侧量化算法实现,如 FP4 weight-only,MXFP weight-only,SVD 以及后续 AWQ/GPTQ; `backends/` 放 torchao/onnxruntime_qdq 等外部 runtime 或导出适配; `calibration/` 放 activation calibration 和 calibration summary; `bridges/` 放 NVFP4/packed weight runtime bridge.
+- `quant/`: 量化子系统. 根目录保留 policy/strategy/capability/plan/types 等 schema 和事实源; `execution/` 负责 plan dispatch 与 report 组装; `quantizers/` 放模型侧量化算法实现,如 FP4 weight-only,MXFP weight-only,ConvRot W4A4,SVD 以及后续 AWQ/GPTQ; `backends/` 放 torchao/onnxruntime_qdq 等外部 runtime 或导出适配; `calibration/` 放 activation calibration 和 calibration summary; `bridges/` 放 NVFP4/packed weight runtime bridge.
+- `runtime/`: 混合推理引擎. 只消费已量化 artifact 与 execution policy, 做模块级 / 通道级混合精度调度 (`HybridInferenceEngine`, `apply_execution_policy`, `ChannelHybridSpec`); 不跑 quantizer / calibration / sensitivity.
+- `nn/`: 转换向 facade (`Linear` / `Attention` / `FeedForward` 等), 承载 engine 与 precision intent; 与 quant artifact 解耦.
 - `prune/`: unstructured,structured,N:M 和 block sparse pruning helper.
 - `operator_opt/`: `torch.compile`-first operator optimization pass,backend capability matrix and runtime fallback reporting.
 - `export/`: torch.export,TorchScript,ONNX,TensorRT,OpenVINO,ExecuTorch,ncnn,MNN 等导出 adapter.

@@ -112,6 +112,23 @@ def _find_first_value(value: Any, key: str) -> Any:
     return None
 
 
+def _find_first_mapping(value: Any, key: str) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        raw = value.get(key)
+        if isinstance(raw, Mapping):
+            return raw
+        for item in value.values():
+            found = _find_first_mapping(item, key)
+            if found is not None:
+                return found
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _find_first_mapping(item, key)
+            if found is not None:
+                return found
+    return None
+
+
 def _shape_signature(value: Any) -> Any:
     if value is None:
         return None
@@ -368,6 +385,27 @@ class RuntimeFeatureSchema:
 
 
 @dataclass(frozen=True)
+class CompositePrecisionSchema:
+    """Composite-precision runtime fields reserved for GEMM/Linear reports."""
+
+    fields: tuple[str, ...] = (
+        "composite_precision",
+        "requested_mode",
+        "actual_mode",
+        "partition_group_count",
+        "residual_group_count",
+        "branch_formats",
+        "accumulation_dtype",
+        "kernel_count",
+        "workspace_bytes",
+        "fallback_reason",
+    )
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {"composite_precision": list(self.fields)}
+
+
+@dataclass(frozen=True)
 class StageReport:
     """Manifest-friendly report for one optimization workflow stage."""
 
@@ -465,6 +503,12 @@ def default_runtime_feature_schema() -> RuntimeFeatureSchema:
     return RuntimeFeatureSchema()
 
 
+def default_composite_precision_schema() -> CompositePrecisionSchema:
+    """Return composite-precision fields reserved for GEMM/Linear reports."""
+
+    return CompositePrecisionSchema()
+
+
 def reporting_schema_payload() -> dict[str, Any]:
     """Return all shared reporting schemas as one dictionary."""
 
@@ -472,6 +516,7 @@ def reporting_schema_payload() -> dict[str, Any]:
         "benchmark": default_benchmark_metric_schema().to_dict(),
         "numeric_diff": default_numeric_diff_schema().to_dict(),
         "runtime_features": default_runtime_feature_schema().to_dict(),
+        "composite_precision": default_composite_precision_schema().to_dict(),
     }
 
 
@@ -526,7 +571,7 @@ def normalize_stage_execution(
         or _find_first_text(metrics, "skip_reason")
         or _find_first_text(metrics, "fallback")
     )
-    return {
+    execution = {
         "backend": _find_first_text(metrics, "backend")
         or _find_first_text(metrics, "runtime")
         or engine
@@ -549,6 +594,60 @@ def normalize_stage_execution(
         ),
         "fallback": fallback,
         "artifact_kinds": _artifact_kinds(metrics, artifacts),
+    }
+    composite = _resolve_composite_precision_execution(metrics, backend=execution["backend"])
+    if composite is not None:
+        execution.update(composite)
+    return execution
+
+
+def _resolve_composite_precision_execution(
+    metrics: Mapping[str, Any],
+    *,
+    backend: str | None,
+) -> dict[str, Any] | None:
+    direct_requested = _find_first_text(metrics, "requested_mode")
+    direct_actual = _find_first_text(metrics, "actual_mode")
+    direct_branch_formats = _find_first_value(metrics, "branch_formats")
+    if direct_requested is not None or direct_actual is not None:
+        payload: dict[str, Any] = {
+            "composite_precision": True,
+            "requested_mode": direct_requested,
+            "actual_mode": direct_actual,
+            "partition_group_count": _find_first_numeric(metrics, "partition_group_count"),
+            "residual_group_count": _find_first_numeric(metrics, "residual_group_count"),
+            "branch_formats": _json_safe(direct_branch_formats)
+            if direct_branch_formats is not None
+            else {},
+            "accumulation_dtype": _find_first_text(metrics, "accumulation_dtype"),
+            "kernel_count": _find_first_numeric(metrics, "kernel_count"),
+            "workspace_bytes": _find_first_numeric(metrics, "workspace_bytes"),
+            "fallback_reason": _find_first_text(metrics, "fallback_reason"),
+        }
+        return payload
+    module_contract = _find_first_mapping(metrics, "module_contract")
+    if module_contract is None:
+        return None
+    raw_policy = module_contract.get("policy")
+    if not isinstance(raw_policy, Mapping):
+        return None
+    from xqt.contracts.module import coerce_composite_precision_gemm_spec
+
+    spec = coerce_composite_precision_gemm_spec(raw_policy.get("composite_gemm"))
+    if spec is None:
+        return None
+    runtime_plan = spec.resolve_runtime_plan(backend=backend)
+    return {
+        "composite_precision": True,
+        "requested_mode": runtime_plan["requested_mode"],
+        "actual_mode": runtime_plan["actual_mode"],
+        "partition_group_count": runtime_plan["partition_group_count"],
+        "residual_group_count": runtime_plan["residual_group_count"],
+        "branch_formats": _json_safe(runtime_plan["branch_formats"]),
+        "accumulation_dtype": runtime_plan["accumulation_dtype"],
+        "kernel_count": runtime_plan["kernel_count"],
+        "workspace_bytes": runtime_plan["workspace_bytes"],
+        "fallback_reason": runtime_plan["fallback_reason"],
     }
 
 
@@ -650,6 +749,7 @@ __all__ = [
     "CAPABILITY_MATURITIES",
     "CAPABILITY_STATUSES",
     "BenchmarkMetricSchema",
+    "CompositePrecisionSchema",
     "NumericDiffSchema",
     "OptimizationCapability",
     "RuntimeFeatureSchema",
@@ -657,6 +757,7 @@ __all__ = [
     "add_stage_report_to_manifest",
     "build_stage_report",
     "default_benchmark_metric_schema",
+    "default_composite_precision_schema",
     "default_numeric_diff_schema",
     "default_runtime_feature_schema",
     "normalize_benchmark_metrics",

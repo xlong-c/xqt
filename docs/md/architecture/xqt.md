@@ -112,6 +112,7 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 | `StageSpec` | loader 后的 typed stage 参数 |
 | `XQTOptimizationSession` | 交互式 stage 编排入口 |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪 |
+| `ModelPackageManifest` / `load_model_package()` | 推理侧文件加载标准, 当前最小闭环为 `manifest.json + runtime/config.json` |
 | `MetricRecord` | 结构化指标记录 |
 | `OptimizationCapability` | 统一 capability 投影 |
 | `XQTReadinessReport` / `assess_xqt_readiness()` | readiness 汇总入口 |
@@ -124,7 +125,9 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 - `calibration_inputs` 由调用方传入, recipe 不声明数据来源
 - planned / capability-only 后端必须在 preflight 和文档中标注
 - workflow stage 必须写入 `stage_reports` 和 manifest stage metric
+- `ArtifactManifest` 是 workflow / experiment 追踪, 不是推理加载 contract. file-based inference 只消费标准模型包 `manifest.json`, 不直接解析 quant recipe, workflow YAML 或算法私有配置.
 - ONNX target 的已知配置收敛为 `targets[*].onnx`: input/output names, `dynamo`, validate, runtime diff, pre-export fusion/lowering 和 ONNX optimization 不再藏在 target `params`. `pre_export_lowering.fp4_weight_only_to_dense_linear` 只在 export copy 上把 `FP4WeightOnlyLinear` materialize 成等价 dense dequantized `nn.Linear`, 并把 source/target storage 与 note 写入 artifact metadata; TensorRT artifact 因此不是 packed-FP4 runtime. `dynamic_shapes` 是唯一的动态 shape 字段: `dynamo=true` 直传现代 exporter, `dynamo=false` 规范化为 legacy ONNX `dynamic_axes`, 必须与 TensorRT profile 一致.
+- 当前 runtime 标准包最小闭环由 export 自动产出 `*.xqtpkg/manifest.json`, 并配套 `model/*` 与 `runtime/config.json`. 现阶段只保证 `ONNX + ONNX Runtime` 闭环; inference 入口通过 `xqt.runtime.load_model_package()` 和 `create_inference_runner()` 消费该包.
 - TensorRT engine-build 的已知配置收敛为 `targets[*].tensorrt`: `onnx_path`, `backend`, `trtexec_path`, `extra_args`, `timeout`, `dry_run`, `performance_thresholds`, `workspace_mib`, `builder_optimization_level`, `timing_cache_path`, `log_level`, `plugin_libraries`, `serialize_plugin_libraries`, `validate_plugin_libraries_loadable` 与 `runtime_benchmark`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口也经 `tensorrt` 参数走同一 StageSpec 解析路径. engine-build plugin 配置只作用于构建, 不会隐式成为 runtime handle 配置.
 - OpenVINO 的已知配置收敛为 `targets[*].openvino`: `onnx_path`, `input_shape`, `dry_run`, `runtime_diff` 与 `device`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口也经 `openvino` 参数走同一 StageSpec 解析路径. 未声明 `openvino.onnx_path` 时, export pass 依序使用同 workflow 的先前 ONNX artifact 与当前模型; `runtime_diff` 只在 materialized IR 和 reference output 可用时执行.
 - TorchExport 的已知配置收敛为 `targets[*].torch_export`: `strict`, `validate` 与 `runtime_diff`. TorchScript 的已知配置收敛为 `targets[*].torchscript`: `method`, `check_trace` 与 `runtime_diff`, 其中 `method` 只能是 `trace` 或 `script`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口分别经 `torch_export` 与 `torchscript` 参数走同一 StageSpec 解析路径.

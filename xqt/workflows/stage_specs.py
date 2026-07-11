@@ -13,6 +13,7 @@ from xqt.core.schema import (
     AnalysisExportConfig,
     AnalysisRecommendationConfig,
     AnalysisStructuredConfig,
+    CompositePrecisionGemmSpec,
     ExportTargetConfig,
     MNNExportConfig,
     NCNNExportConfig,
@@ -123,11 +124,15 @@ class QuantStageSpec:
     method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
+    composite_gemm: CompositePrecisionGemmSpec | None = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
     analysis_only_modules: List[str] = field(default_factory=list)
     component_policies: List[QuantComponentPolicyConfig] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.composite_gemm = _composite_gemm_config(self.composite_gemm)
 
 
 @dataclass
@@ -275,6 +280,8 @@ def build_stage_spec(kind: str, params: Mapping[str, Any] | None = None) -> Stag
         spec = cast(StageSpec, OmegaConf.to_object(merged))
     except OmegaConfBaseException as exc:
         raise XQTConfigError(f"failed to load {kind} stage params: {exc}") from exc
+    except Exception as exc:
+        raise XQTConfigError(f"failed to load {kind} stage params: {exc}") from exc
     _validate_stage_spec(kind, spec)
     return spec
 
@@ -348,7 +355,10 @@ def _validate_quant_stage_spec(spec: QuantStageSpec) -> None:
         for component in spec.component_policies
     ]
     params = stage_spec_to_params(spec)
-    quant = QuantConfig(enabled=True, **params)
+    try:
+        quant = QuantConfig(enabled=True, **params)
+    except Exception as exc:
+        raise XQTConfigError(f"invalid quant.params: {exc}") from exc
     quant.component_policies = [
         _quant_component_policy_config(component)
         for component in quant.component_policies
@@ -402,6 +412,17 @@ def _quant_component_policy_config(value: Any) -> QuantComponentPolicyConfig:
         raise XQTConfigError(f"failed to load quant component policy: {exc}") from exc
 
 
+def _composite_gemm_config(
+    value: Any,
+) -> CompositePrecisionGemmSpec | None:
+    if value is None or isinstance(value, CompositePrecisionGemmSpec):
+        return value
+    try:
+        return CompositePrecisionGemmSpec.from_mapping(dict(value))
+    except Exception as exc:
+        raise XQTConfigError(f"failed to load composite_gemm spec: {exc}") from exc
+
+
 def _validate_prune_stage_spec(spec: PruneStageSpec) -> None:
     PruneConfig(enabled=True, **stage_spec_to_params(spec))
 
@@ -434,6 +455,7 @@ def _validate_deploy_stage_spec(spec: DeployStageSpec, *, location: str) -> None
         _validate_runtime_handle_spec(
             spec.runtime_handle,
             location=f"{location}.runtime_handle",
+            targets=spec.targets,
         )
 
 
@@ -441,17 +463,28 @@ def _validate_runtime_handle_spec(
     spec: DeployRuntimeHandleSpec,
     *,
     location: str,
+    targets: list[ExportTargetConfig],
 ) -> None:
     if spec.runtime not in {"onnxruntime", "tensorrt"}:
         raise XQTConfigError(
             f"{location}.runtime must be onnxruntime or tensorrt when materialize=true"
         )
     if spec.runtime == "onnxruntime":
+        onnx_targets = [target for target in targets if target.format == "onnx"]
+        if len(onnx_targets) != 1:
+            raise XQTConfigError(
+                f"{location} requires exactly one ONNX target when runtime=onnxruntime and materialize=true"
+            )
         if any(not provider for provider in spec.onnxruntime.providers):
             raise XQTConfigError(
                 f"{location}.onnxruntime.providers must not contain empty values"
             )
         return
+    tensorrt_targets = [target for target in targets if target.format == "tensorrt"]
+    if len(tensorrt_targets) != 1:
+        raise XQTConfigError(
+            f"{location} requires exactly one TensorRT target when runtime=tensorrt and materialize=true"
+        )
     if any(not path for path in spec.tensorrt.plugin_libraries):
         raise XQTConfigError(
             f"{location}.tensorrt.plugin_libraries must not contain empty paths"
@@ -463,6 +496,8 @@ def _validate_export_targets(
     *,
     location: str,
 ) -> None:
+    if not targets:
+        raise XQTConfigError(f"{location} must declare at least one export target")
     for index, target in enumerate(targets):
         target_location = f"{location}.{index}"
         if target.format == "onnx":

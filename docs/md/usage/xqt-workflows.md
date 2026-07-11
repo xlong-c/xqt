@@ -78,6 +78,7 @@ YAML workflow 只保留一种配置项集合:
 - `assess_xqt_readiness()`: readiness audit 入口
 - `XQTReadinessReport.write_artifacts()`: readiness 产物落盘
 - `ArtifactManifest` / `ArtifactRecord`: 统一产物追踪
+- `xqt.runtime.load_model_package()` / `create_inference_runner()`: 推理侧标准文件加载入口. 当前 ONNX export 会额外落一个 `*.xqtpkg/manifest.json` 包, runtime 只消费这个包, 不直接读 quant recipe 或 workflow manifest.
 
 使用原则:
 

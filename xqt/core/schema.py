@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from xdl.metric.detection_utils import DetectionPostprocessConfig
+from xqt.contracts.module import (
+    CompositePrecisionBranchSpec,
+    CompositePrecisionGemmSpec,
+    CompositePrecisionPartitionSpec,
+    coerce_composite_precision_gemm_spec,
+)
 
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
 TASK_TYPES = ("classification", "detection")
@@ -62,6 +68,7 @@ CANONICAL_QUANT_STRATEGIES = (
     "svd_fp4",
     "svd_int4",
     "w4_storage_int8_mma",
+    "convrot_w4a4",
 )
 OPTIONAL_QUANT_STRATEGIES = ("fp8_weight_only",)
 SUPPORTED_QUANT_STRATEGIES = CANONICAL_QUANT_STRATEGIES + OPTIONAL_QUANT_STRATEGIES
@@ -98,6 +105,9 @@ QUANT_STRATEGY_ALIASES = {
     "w4_int8_mma": "w4_storage_int8_mma",
     "retarget_w4_to_w8a8": "w4_storage_int8_mma",
     "fp4_to_int8_mma": "w4_storage_int8_mma",
+    "convrot_w4a4": "convrot_w4a4",
+    "convrot_4bit": "convrot_w4a4",
+    "convrot": "convrot_w4a4",
 }
 
 
@@ -144,6 +154,12 @@ def normalize_quant_strategy(
             "int8_mma",
         }:
             raw = "w4_storage_int8_mma"
+        elif dtype == "int4" and scheme in {
+            "convrot",
+            "convrot_4bit",
+            "convrot_w4a4",
+        }:
+            raw = "convrot_w4a4"
         elif dtype == "int8" and scheme in {"", "dynamic"}:
             raw = "dynamic_int8"
         elif dtype in {"fp8", "float8"} and scheme in {"", "dynamic"}:
@@ -219,11 +235,15 @@ class QuantConfig:
     method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
+    composite_gemm: CompositePrecisionGemmSpec | None = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
     analysis_only_modules: List[str] = field(default_factory=list)
     component_policies: List["QuantComponentPolicyConfig"] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.composite_gemm = coerce_composite_precision_gemm_spec(self.composite_gemm)
 
 
 @dataclass
@@ -237,10 +257,14 @@ class QuantComponentPolicyConfig:
     method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
+    composite_gemm: CompositePrecisionGemmSpec | None = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
     analysis_only: bool = False
+
+    def __post_init__(self) -> None:
+        self.composite_gemm = coerce_composite_precision_gemm_spec(self.composite_gemm)
 
 
 @dataclass
@@ -607,6 +631,9 @@ __all__ = [
     "AnalysisStructuredConfig",
     "BenchmarkConfig",
     "ComponentConfig",
+    "CompositePrecisionBranchSpec",
+    "CompositePrecisionGemmSpec",
+    "CompositePrecisionPartitionSpec",
     "CuTileKernelConfig",
     "CutlassKernelConfig",
     "CuteDSLKernelConfig",

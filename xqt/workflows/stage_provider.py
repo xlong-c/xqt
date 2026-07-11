@@ -11,6 +11,7 @@ from xqt.contracts import (
     QuantizedModelPayload,
     RuntimeHandlePayload,
     RuntimePlanPayload,
+    StageReportPayload,
 )
 from xqt.quant.capability import describe_quant_backend_capability
 from xqt.prune.capability import prune_runtime_capability_from_report
@@ -241,13 +242,36 @@ class ExportProvider:
         )
 
 
+class ObservationProvider:
+    """Provider for benchmark/analyze observation-only stage payloads."""
+
+    def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
+        payload_value = StageReportPayload.from_stage_metrics(
+            stage_name=context.stage.name,
+            source_model_stage=context.source_stage_name,
+            report_kind=context.stage.kind,
+            metrics=context.metrics,
+            artifacts=_artifact_paths(context),
+        )
+        payload_metadata = _base_payload_metadata(context)
+        payload_metadata["stage_report"] = payload_value.to_dict()
+        return StageProviderOutput(
+            session_stage_kind="observed",
+            lineage=build_stage_lineage(context.stage),
+            payload_value=payload_value,
+            payload_metadata=payload_metadata,
+        )
+
+
 _DEFAULT_PROVIDER = DefaultStageProvider()
 _STAGE_PROVIDERS: dict[str, StageProvider] = {
+    "benchmark": ObservationProvider(),
     "quant": ModelQuantizerProvider(),
     "prune": ModelPrunerProvider(),
     "operator": OperatorOptimizerProvider(),
     "export": ExportProvider(),
     "deploy": ExportProvider(),
+    "analyze": ObservationProvider(),
 }
 
 

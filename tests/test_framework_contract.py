@@ -1560,7 +1560,64 @@ def test_preflight_checks_materialized_typed_runtime_handle() -> None:
     runtime_check = checks["stages.0.deploy_onnxruntime.runtime_handle.runtime"]
     assert runtime_check.passed is True
     assert runtime_check.metadata["runtime"] == "onnxruntime"
+    target_check = checks["stages.0.deploy_onnxruntime.runtime_handle.targets"]
+    assert target_check.passed is True
+    assert target_check.metadata["target_count"] == 1
     assert "dependency.onnxruntime" in checks
+
+
+def test_optimization_workflow_config_rejects_materialized_runtime_handle_with_multiple_onnx_targets() -> None:
+    with pytest.raises(
+        XQTConfigError,
+        match="requires exactly one ONNX target",
+    ):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "deploy_onnxruntime",
+                        "kind": "deploy",
+                        "params": {
+                            "targets": [
+                                {
+                                    "format": "onnx",
+                                    "output_path": "artifacts/model_a.onnx",
+                                    "onnx": {"runtime_diff": False},
+                                },
+                                {
+                                    "format": "onnx",
+                                    "output_path": "artifacts/model_b.onnx",
+                                    "onnx": {"runtime_diff": False},
+                                },
+                            ],
+                            "runtime_handle": {
+                                "runtime": "onnxruntime",
+                                "handle_kind": "inference_session",
+                                "materialize": True,
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+
+
+def test_optimization_workflow_config_rejects_empty_export_targets() -> None:
+    with pytest.raises(
+        XQTConfigError,
+        match="must declare at least one export target",
+    ):
+        load_optimization_config(
+            {
+                "stages": [
+                    {
+                        "name": "empty_export",
+                        "kind": "export",
+                        "params": {"targets": []},
+                    }
+                ]
+            }
+        )
 
 
 def test_optimization_workflow_config_rejects_old_top_level_schema() -> None:
