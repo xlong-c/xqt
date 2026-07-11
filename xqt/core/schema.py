@@ -63,9 +63,7 @@ CANONICAL_QUANT_STRATEGIES = (
     "svd_int4",
     "w4_storage_int8_mma",
 )
-OPTIONAL_QUANT_STRATEGIES = (
-    "fp8_weight_only",
-)
+OPTIONAL_QUANT_STRATEGIES = ("fp8_weight_only",)
 SUPPORTED_QUANT_STRATEGIES = CANONICAL_QUANT_STRATEGIES + OPTIONAL_QUANT_STRATEGIES
 QUANT_STRATEGY_ALIASES = {
     "int8_dynamic_activation_int8_weight": "dynamic_int8",
@@ -354,6 +352,154 @@ class OperatorOptimizationConfig:
 
 
 @dataclass
+class PreExportFusionConfig:
+    """PyTorch module fusion settings applied on an ONNX export copy."""
+
+    enabled: bool = False
+    mode: str = "eager"
+    inplace: bool = False
+    modules_to_fuse: List[List[str]] = field(default_factory=list)
+
+
+@dataclass
+class PreExportLoweringConfig:
+    """Explicit deployment lowering settings applied on an ONNX export copy."""
+
+    enabled: bool = False
+    mode: str = "fp4_weight_only_to_dense_linear"
+    inplace: bool = False
+
+
+@dataclass
+class ONNXOptimizationConfig:
+    """Typed ONNX graph optimization settings for one ONNX export target."""
+
+    enabled: bool = False
+    backend: str = "onnxruntime"
+    level: str = "extended"
+    output_path: Optional[str] = None
+    output_suffix: str = ".optimized"
+    validate: bool = True
+    providers: List[str] = field(default_factory=lambda: ["CPUExecutionProvider"])
+    native_qdq: bool = True
+
+
+@dataclass
+class ONNXExportConfig:
+    """Typed ONNX-specific settings for one export target."""
+
+    input_names: List[str] = field(default_factory=list)
+    output_names: List[str] = field(default_factory=list)
+    dynamo: bool = True
+    validate: bool = True
+    runtime_diff: bool = True
+    pre_export_fusion: PreExportFusionConfig = field(
+        default_factory=PreExportFusionConfig
+    )
+    pre_export_lowering: PreExportLoweringConfig = field(
+        default_factory=PreExportLoweringConfig
+    )
+    optimization: ONNXOptimizationConfig = field(default_factory=ONNXOptimizationConfig)
+
+
+@dataclass
+class OpenVINOExportConfig:
+    """Typed OpenVINO-specific settings for one export target."""
+
+    onnx_path: Optional[str] = None
+    input_shape: Optional[List[int]] = None
+    dry_run: bool = False
+    runtime_diff: bool = True
+    device: str = "CPU"
+
+
+@dataclass
+class TensorRTRuntimeBenchmarkConfig:
+    """Optional runtime benchmark settings for one materialized TensorRT engine."""
+
+    enabled: bool = False
+    input_shapes: Dict[str, List[int]] = field(default_factory=dict)
+    warmup: int = 10
+    iterations: int = 50
+    device: str = "cuda:0"
+    fill_random: bool = True
+
+
+@dataclass
+class TensorRTExportConfig:
+    """Typed TensorRT engine-build settings for one export target."""
+
+    onnx_path: Optional[str] = None
+    backend: str = "trtexec"
+    trtexec_path: str = "trtexec"
+    extra_args: List[str] = field(default_factory=list)
+    timeout: Optional[float] = None
+    dry_run: bool = False
+    performance_thresholds: Dict[str, float] = field(default_factory=dict)
+    workspace_mib: int = 4096
+    builder_optimization_level: Optional[int] = None
+    timing_cache_path: Optional[str] = None
+    log_level: Optional[str] = None
+    plugin_libraries: List[str] = field(default_factory=list)
+    serialize_plugin_libraries: bool = True
+    validate_plugin_libraries_loadable: bool = False
+    runtime_benchmark: TensorRTRuntimeBenchmarkConfig = field(
+        default_factory=TensorRTRuntimeBenchmarkConfig
+    )
+
+
+@dataclass
+class TorchExportConfig:
+    """Typed torch.export-specific settings for one export target."""
+
+    strict: bool = False
+    validate: bool = True
+    runtime_diff: bool = True
+
+
+@dataclass
+class TorchScriptExportConfig:
+    """Typed TorchScript-specific settings for one export target."""
+
+    method: str = "trace"
+    check_trace: bool = True
+    runtime_diff: bool = True
+
+
+@dataclass
+class ExecuTorchExportConfig:
+    """Typed ExecuTorch-specific settings for one export target."""
+
+    dry_run: bool = False
+
+
+@dataclass
+class NCNNExportConfig:
+    """Typed ncnn converter settings for one export target."""
+
+    source_path: Optional[str] = None
+    converter: str = "onnx2ncnn"
+    onnx2ncnn_path: str = "onnx2ncnn"
+    pnnx_path: str = "pnnx"
+    bin_path: Optional[str] = None
+    extra_args: List[str] = field(default_factory=list)
+    timeout: Optional[float] = None
+    dry_run: bool = False
+
+
+@dataclass
+class MNNExportConfig:
+    """Typed MNNConvert settings for one export target."""
+
+    source_path: Optional[str] = None
+    converter_path: str = "MNNConvert"
+    framework: str = "ONNX"
+    extra_args: List[str] = field(default_factory=list)
+    timeout: Optional[float] = None
+    dry_run: bool = False
+
+
+@dataclass
 class ExportTargetConfig:
     """Single export target settings."""
 
@@ -363,6 +509,16 @@ class ExportTargetConfig:
     precision: Optional[str] = None
     dynamic_shapes: Dict[str, Any] = field(default_factory=dict)
     profiles: Dict[str, Any] = field(default_factory=dict)
+    onnx: ONNXExportConfig = field(default_factory=ONNXExportConfig)
+    openvino: OpenVINOExportConfig = field(default_factory=OpenVINOExportConfig)
+    tensorrt: TensorRTExportConfig = field(default_factory=TensorRTExportConfig)
+    torch_export: TorchExportConfig = field(default_factory=TorchExportConfig)
+    torchscript: TorchScriptExportConfig = field(
+        default_factory=TorchScriptExportConfig
+    )
+    executorch: ExecuTorchExportConfig = field(default_factory=ExecuTorchExportConfig)
+    ncnn: NCNNExportConfig = field(default_factory=NCNNExportConfig)
+    mnn: MNNExportConfig = field(default_factory=MNNExportConfig)
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -421,7 +577,9 @@ class AnalysisConfig:
     metrics: List[str] = field(
         default_factory=lambda: ["max_abs", "mean_abs", "cosine_similarity"]
     )
-    structured: AnalysisStructuredConfig = field(default_factory=AnalysisStructuredConfig)
+    structured: AnalysisStructuredConfig = field(
+        default_factory=AnalysisStructuredConfig
+    )
     recommendations: AnalysisRecommendationConfig = field(
         default_factory=AnalysisRecommendationConfig
     )
@@ -431,6 +589,7 @@ class AnalysisConfig:
     sample_seed: int = 0
     histogram_bins: int = 32
     export: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
+
 
 __all__ = [
     "COMPRESSION_AXES",
@@ -452,15 +611,27 @@ __all__ = [
     "CutlassKernelConfig",
     "CuteDSLKernelConfig",
     "DetectionPostprocessConfig",
+    "ExecuTorchExportConfig",
     "ExportTargetConfig",
+    "MNNExportConfig",
     "ModelConfig",
+    "NCNNExportConfig",
+    "ONNXExportConfig",
+    "ONNXOptimizationConfig",
+    "OpenVINOExportConfig",
     "OperatorOptimizationConfig",
     "OperatorOptimizationTargetConfig",
     "OperatorOptimizationValidationConfig",
     "OutputDiffConfig",
+    "PreExportFusionConfig",
+    "PreExportLoweringConfig",
     "PruneConfig",
     "QuantComponentPolicyConfig",
     "QuantConfig",
     "TaskConfig",
+    "TensorRTExportConfig",
+    "TensorRTRuntimeBenchmarkConfig",
     "TileLangKernelConfig",
+    "TorchExportConfig",
+    "TorchScriptExportConfig",
 ]
