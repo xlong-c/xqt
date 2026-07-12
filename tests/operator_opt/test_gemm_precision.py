@@ -2,14 +2,30 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 import triton.language as tl
 
 from xqt.operator_opt.backends.gemm_precision import (
     MatmulPrecisionSpec,
+    conv1x1_as_gemm_with_precision,
+    conv2d_as_gemm_with_precision,
+    conv3x3_im2col_gemm_with_precision,
+    attention_score_gemm_with_precision,
+    attention_value_gemm_with_precision,
+    batched_gemm_with_precision,
     describe_gemm_precision_capability,
+    expert_gemm_with_precision,
     gemm_with_precision,
+    lm_head_gemm_with_precision,
+    grouped_gemm_with_precision,
+    list_gemm_variant_dispatch_specs,
+    projection_gemm_with_precision,
+    gemm_variant_with_precision,
     list_available_precisions,
+    router_gemm_with_precision,
 )
+from xqt.operator_opt.backends.triton import get_triton_kernel_spec
+from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
 from xqt.contracts import PrecisionPolicy
 from xqt.operator_opt.kernels.tilelang.gemm import (
     nvfp4_packed_dequant_gemm_epilogue_reference,
@@ -318,6 +334,468 @@ class TestUnifiedGEMMInterface:
         )
         assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3)
 
+
+def test_batched_gemm_shared_weight_uses_one_flattened_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[tuple[int, ...], tuple[int, ...], dict[str, object]]] = []
+
+    def fake_gemm_with_precision(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del bias
+        captured.append((tuple(a.shape), tuple(b.shape), dict(kwargs)))
+        return torch.empty((a.shape[0], b.shape[0]), dtype=torch.float32)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.gemm_with_precision",
+        fake_gemm_with_precision,
+    )
+
+    a = torch.randn(2, 3, 4)
+    b = torch.randn(5, 4)
+
+    output = batched_gemm_with_precision(
+        a,
+        b,
+        precision="fp32",
+        engine="tilelang",
+        pattern="linear_marlin",
+    )
+
+    assert output.shape == (2, 3, 5)
+    assert captured == [
+        (
+            (6, 4),
+            (5, 4),
+            {
+                "precision": "fp32",
+                "engine": "tilelang",
+                "pattern": "linear_marlin",
+                "activation": None,
+                "transpose_b": True,
+            },
+        )
+    ]
+
+
+def test_batched_gemm_per_batch_weight_matches_torch_reference() -> None:
+    torch.manual_seed(11)
+    a = torch.randn(2, 3, 4)
+    b = torch.randn(2, 5, 4)
+    bias = torch.randn(2, 5)
+
+    output = batched_gemm_with_precision(
+        a,
+        b,
+        bias,
+        precision="fp32",
+        engine="torch",
+    )
+    expected = torch.stack(
+        [torch.matmul(a[index], b[index].t()) + bias[index] for index in range(2)],
+        dim=0,
+    )
+
+    assert torch.allclose(output, expected)
+
+
+def test_grouped_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(12)
+    a_groups = (
+        torch.randn(3, 4),
+        torch.randn(5, 4),
+    )
+    b_groups = (
+        torch.randn(6, 4),
+        torch.randn(2, 4),
+    )
+    bias_groups = (
+        torch.randn(6),
+        torch.randn(2),
+    )
+
+    outputs = grouped_gemm_with_precision(
+        a_groups,
+        b_groups,
+        bias_groups,
+        precision="fp32",
+        engine="torch",
+    )
+
+    assert isinstance(outputs, tuple)
+    assert len(outputs) == 2
+    for output, a, b, bias in zip(
+        outputs, a_groups, b_groups, bias_groups, strict=True
+    ):
+        assert torch.allclose(output, torch.matmul(a, b.t()) + bias)
+
+
+def test_expert_gemm_with_precision_aliases_grouped_gemm() -> None:
+    torch.manual_seed(13)
+    token_groups = (
+        torch.randn(2, 4),
+        torch.randn(1, 4),
+    )
+    expert_weights = (
+        torch.randn(8, 4),
+        torch.randn(8, 4),
+    )
+
+    outputs = expert_gemm_with_precision(
+        token_groups,
+        expert_weights,
+        precision="fp32",
+        engine="torch",
+    )
+
+    assert len(outputs) == 2
+    assert torch.allclose(outputs[0], torch.matmul(token_groups[0], expert_weights[0].t()))
+    assert torch.allclose(outputs[1], torch.matmul(token_groups[1], expert_weights[1].t()))
+
+
+def test_projection_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(17)
+    x = torch.randn(2, 3, 4)
+    weight = torch.randn(7, 4)
+    bias = torch.randn(7)
+
+    output = projection_gemm_with_precision(
+        x,
+        weight,
+        bias,
+        precision="fp32",
+        engine="torch",
+    )
+
+    expected = torch.matmul(x, weight.t()) + bias
+    assert output.shape == (2, 3, 7)
+    assert torch.allclose(output, expected)
+
+
+def test_gemm_variant_dispatch_table_lists_expected_entries() -> None:
+    table = list_gemm_variant_dispatch_specs()
+    assert "gemm_bias_gelu" in table
+    assert "qkv_projection_gemm" in table
+    assert "conv3x3_im2col_gemm" in table
+    assert table["gemm_bias_gelu"]["op"] == "gemm"
+    assert table["qkv_projection_gemm"]["op"] == "projection"
+    assert table["conv3x3_im2col_gemm"]["op"] == "conv3x3"
+
+
+def test_gemm_variant_with_precision_routes_dense_variants_to_torch_reference() -> None:
+    torch.manual_seed(1711)
+    a = torch.randn(4, 8)
+    b = torch.randn(6, 8)
+    bias = torch.randn(6)
+
+    output = gemm_variant_with_precision(
+        "gemm_bias_gelu",
+        a,
+        b,
+        bias,
+        precision="fp32",
+        engine="torch",
+    )
+
+    expected = torch.nn.functional.gelu(torch.matmul(a, b.t()) + bias)
+    assert torch.allclose(output, expected)
+
+
+def test_gemm_variant_with_precision_routes_projection_variants_to_torch_reference() -> None:
+    torch.manual_seed(1712)
+    x = torch.randn(2, 3, 4)
+    weight = torch.randn(7, 4)
+
+    output = gemm_variant_with_precision(
+        "qkv_projection_gemm",
+        x,
+        weight,
+        precision="fp32",
+        engine="torch",
+    )
+
+    expected = torch.matmul(x, weight.t())
+    assert output.shape == expected.shape
+    assert torch.allclose(output, expected)
+
+
+def test_gemm_variant_with_precision_routes_conv_variants_to_torch_reference() -> None:
+    torch.manual_seed(1713)
+    x = torch.randn(2, 3, 5, 7)
+    weight = torch.randn(4, 3, 3, 3)
+    bias = torch.randn(4)
+
+    output = gemm_variant_with_precision(
+        "conv3x3_im2col_gemm",
+        x,
+        weight,
+        bias,
+        precision="fp32",
+        engine="torch",
+        padding=1,
+    )
+    expected = F.conv2d(x, weight, bias=bias, padding=1)
+
+    assert output.shape == expected.shape
+    assert torch.allclose(output, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_gemm_variant_with_precision_routes_int8_tilelang_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(pattern: str, *args: object, **kwargs: object) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["kwargs"] = kwargs
+        a = args[0]
+        weight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(weight, torch.Tensor)
+        return torch.empty((a.shape[0], weight.shape[0]), dtype=kwargs["output_dtype"])
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randint(-8, 8, (8, 16), dtype=torch.int8)
+    b = torch.randint(-8, 8, (12, 16), dtype=torch.int8)
+    a_scale = torch.tensor([0.02], dtype=torch.float32)
+    b_scale = torch.ones(12, dtype=torch.float32) * 0.01
+
+    output = gemm_variant_with_precision(
+        "int8_linear",
+        a,
+        b,
+        precision="int8",
+        engine="tilelang",
+        a_scale=a_scale,
+        b_scale=b_scale,
+    )
+
+    assert output.dtype == torch.float16
+    assert captured["pattern"] == "int8_linear"
+
+
+def test_gemm_variant_with_precision_rejects_non_gemm_names() -> None:
+    with pytest.raises(Exception, match="Unsupported GEMM variant"):
+        gemm_variant_with_precision("router_softmax_topk")
+
+
+@pytest.mark.parametrize("engine", ["triton", "tilelang"])
+def test_projection_gemm_with_precision_reuses_configured_engines(engine: str) -> None:
+    torch.manual_seed(171)
+    x = torch.randn(2, 3, 4, dtype=torch.float16)
+    weight = torch.randn(7, 4, dtype=torch.float16)
+    bias = torch.randn(7, dtype=torch.float16)
+
+    output = projection_gemm_with_precision(
+        x,
+        weight,
+        bias,
+        precision="fp16",
+        engine=engine,
+    )
+
+    expected = torch.matmul(x, weight.t()) + bias
+    assert output.shape == (2, 3, 7)
+    assert torch.allclose(output.float(), expected.float(), rtol=1e-3, atol=1e-3)
+
+
+def test_lm_head_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(18)
+    x = torch.randn(2, 5, 4)
+    weight = torch.randn(11, 4)
+
+    output = lm_head_gemm_with_precision(
+        x,
+        weight,
+        precision="fp32",
+        engine="torch",
+    )
+
+    expected = torch.matmul(x, weight.t())
+    assert output.shape == (2, 5, 11)
+    assert torch.allclose(output, expected)
+
+
+def test_conv1x1_as_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(19)
+    x = torch.randn(2, 3, 5, 7)
+    weight = torch.randn(4, 3, 1, 1)
+    bias = torch.randn(4)
+
+    output = conv1x1_as_gemm_with_precision(
+        x,
+        weight,
+        bias,
+        precision="fp32",
+        engine="torch",
+    )
+    expected = F.conv2d(x, weight, bias=bias)
+
+    assert output.shape == expected.shape
+    assert torch.allclose(output, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_conv3x3_im2col_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(20)
+    x = torch.randn(2, 3, 6, 6)
+    weight = torch.randn(4, 3, 3, 3)
+    bias = torch.randn(4)
+
+    output = conv3x3_im2col_gemm_with_precision(
+        x,
+        weight,
+        bias,
+        precision="fp32",
+        engine="torch",
+        padding=1,
+    )
+    expected = F.conv2d(x, weight, bias=bias, padding=1)
+
+    assert output.shape == expected.shape
+    assert torch.allclose(output, expected)
+
+
+def test_conv2d_as_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(21)
+    x = torch.randn(2, 3, 5, 7)
+    weight = torch.randn(4, 3, 3, 3)
+    bias = torch.randn(4)
+
+    output = conv2d_as_gemm_with_precision(
+        x,
+        weight,
+        bias,
+        precision="fp32",
+        engine="torch",
+        padding=1,
+        activation="relu",
+    )
+    expected = F.relu(F.conv2d(x, weight, bias=bias, padding=1))
+
+    assert output.shape == expected.shape
+    assert torch.allclose(output, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_gemm_with_precision_rejects_cross_engine_pattern() -> None:
+    a = torch.randn(4, 8)
+    b = torch.randn(6, 8)
+
+    with pytest.raises(Exception, match="not compatible"):
+        gemm_with_precision(
+            a,
+            b,
+            precision="fp16",
+            engine="triton",
+            pattern="linear_marlin",
+            transpose_b=True,
+        )
+
+
+def test_tilelang_int8_explicit_pattern_is_respected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(pattern: str, *args: object, **kwargs: object) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        a = args[0]
+        weight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(weight, torch.Tensor)
+        return torch.empty(
+            (a.shape[0], weight.shape[1]),
+            dtype=kwargs["output_dtype"],
+        )
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randint(-8, 8, (8, 16), dtype=torch.int8)
+    b = torch.randint(-8, 8, (12, 16), dtype=torch.int8)
+    a_scale = torch.tensor([0.02], dtype=torch.float32)
+    b_scale = torch.ones(12, dtype=torch.float32) * 0.01
+
+    output = gemm_with_precision(
+        a,
+        b,
+        precision="int8",
+        engine="tilelang",
+        pattern="int8_linear",
+        transpose_b=True,
+        a_scale=a_scale,
+        b_scale=b_scale,
+    )
+
+    assert output.dtype == torch.float16
+    assert captured["pattern"] == "int8_linear"
+
+
+def test_attention_score_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(14)
+    q = torch.randn(2, 3, 4, 5)
+    k = torch.randn(2, 3, 6, 5)
+
+    output = attention_score_gemm_with_precision(
+        q,
+        k,
+        scale=0.5,
+        precision="fp32",
+        engine="torch",
+    )
+    expected = torch.matmul(q, k.transpose(-1, -2)) * 0.5
+
+    assert output.shape == (2, 3, 4, 6)
+    assert torch.allclose(output, expected)
+
+
+def test_attention_value_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(15)
+    probabilities = torch.softmax(torch.randn(2, 3, 4, 6), dim=-1)
+    value = torch.randn(2, 3, 6, 5)
+
+    output = attention_value_gemm_with_precision(
+        probabilities,
+        value,
+        precision="fp32",
+        engine="torch",
+    )
+    expected = torch.matmul(probabilities, value)
+
+    assert output.shape == (2, 3, 4, 5)
+    assert torch.allclose(output, expected)
+
+
+def test_router_gemm_with_precision_matches_torch_reference() -> None:
+    torch.manual_seed(16)
+    x = torch.randn(2, 3, 4)
+    router_weight = torch.randn(7, 4)
+    bias = torch.randn(7)
+
+    output = router_gemm_with_precision(
+        x,
+        router_weight,
+        bias,
+        precision="fp32",
+        engine="torch",
+    )
+    expected = torch.matmul(x, router_weight.t()) + bias
+
+    assert output.shape == (2, 3, 7)
+    assert torch.allclose(output, expected)
+
+
 def test_gemm_fp16_triton_forwards_accum_and_output_dtype_to_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -403,6 +881,226 @@ def test_gemm_bf16_triton_preserves_bf16_inputs_and_forwards_precision_kwargs(
     assert captured["bias_dtype"] == torch.bfloat16
     assert captured["kwargs"]["accum_dtype"] == torch.float32
     assert captured["kwargs"]["output_dtype"] == torch.bfloat16
+
+
+def test_triton_registry_exposes_mxfp_gemm_families() -> None:
+    for pattern in ("gemm_mxfp8", "gemm_mxfp6", "gemm_mxfp4"):
+        spec = get_triton_kernel_spec(pattern)
+        assert spec.metadata["precision"] in {"mxfp8", "mxfp6", "mxfp4"}
+        assert "mxfp" in spec.pattern
+
+
+def test_tilelang_registry_exposes_int8_linear_families() -> None:
+    linear = get_tilelang_kernel_spec("int8_linear")
+    fused = get_tilelang_kernel_spec("int8_linear_static_activation")
+
+    assert linear.metadata["fusion_status"] == "tilelang_dequant_output_epilogue"
+    assert (
+        fused.metadata["fusion_status"]
+        == "tilelang_static_activation_quant_dequant_output_epilogue"
+    )
+
+
+def test_gemm_with_precision_tilelang_bf16_uses_marlin_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(pattern: str, *args: object, **kwargs: object) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["kwargs"] = kwargs
+        a = args[0]
+        weight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(weight, torch.Tensor)
+        return torch.empty((a.shape[0], weight.shape[0]), dtype=torch.bfloat16)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randn(8, 16, dtype=torch.bfloat16)
+    b = torch.randn(12, 16, dtype=torch.bfloat16)
+    bias = torch.randn(12, dtype=torch.bfloat16)
+
+    output = gemm_with_precision(
+        a,
+        b,
+        bias,
+        precision="bf16",
+        engine="tilelang",
+        transpose_b=True,
+    )
+
+    assert output.dtype == torch.bfloat16
+    assert captured["pattern"] == "linear_marlin"
+    assert captured["kwargs"]["precision"] == "bf16"
+
+
+def test_gemm_with_precision_tilelang_int8_static_activation_uses_fused_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(pattern: str, *args: object, **kwargs: object) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        a = args[0]
+        weight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(weight, torch.Tensor)
+        return torch.empty((a.shape[0], weight.shape[1]), dtype=torch.float16)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randn(8, 16, dtype=torch.float16)
+    b = torch.randint(-8, 8, (12, 16), dtype=torch.int8)
+    a_scale = torch.tensor([0.02], dtype=torch.float32)
+    b_scale = torch.ones(12, dtype=torch.float32) * 0.01
+
+    output = gemm_with_precision(
+        a,
+        b,
+        precision="int8",
+        engine="tilelang",
+        transpose_b=True,
+        a_scale=a_scale,
+        b_scale=b_scale,
+    )
+
+    assert output.dtype == torch.float16
+    assert captured["pattern"] == "int8_linear_static_activation"
+
+
+def test_gemm_with_precision_tilelang_int8_marlin_pattern_uses_linear_marlin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(
+        pattern: str, *args: object, **kwargs: object
+    ) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        a = args[0]
+        weight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(weight, torch.Tensor)
+        return torch.empty((a.shape[0], weight.shape[0]), dtype=torch.float16)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randn(8, 16, dtype=torch.float16)
+    b = torch.randint(-8, 8, (12, 16), dtype=torch.int8)
+    b_scale = torch.ones(12, 1, 1, dtype=torch.float16) * 0.01
+
+    output = gemm_with_precision(
+        a,
+        b,
+        precision={"activation": "fp16", "weight": "int8", "mma": "int8", "output": "fp16"},
+        engine="tilelang",
+        pattern="linear_marlin",
+        transpose_b=True,
+        b_scale=b_scale,
+        group_size=16,
+    )
+
+    assert output.dtype == torch.float16
+    assert captured["pattern"] == "linear_marlin"
+    assert captured["kwargs"]["precision"] == "int8"
+
+
+def test_gemm_with_precision_tilelang_int8_dequant_pattern_uses_dequant_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(
+        pattern: str, *args: object, **kwargs: object
+    ) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        a = args[0]
+        qweight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(qweight, torch.Tensor)
+        return torch.empty((a.shape[0], qweight.shape[0]), dtype=torch.float16)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randn(8, 16, dtype=torch.float16)
+    b = torch.randint(-8, 8, (12, 16), dtype=torch.int8)
+    b_scale = torch.ones(12, dtype=torch.float16) * 0.01
+
+    output = gemm_with_precision(
+        a,
+        b,
+        precision={"activation": "fp16", "weight": "int8", "mma": "int8", "output": "fp16"},
+        engine="tilelang",
+        pattern="dequant_gemm_epilogue",
+        transpose_b=True,
+        b_scale=b_scale,
+        activation="relu",
+    )
+
+    assert output.dtype == torch.float16
+    assert captured["pattern"] == "dequant_gemm_epilogue"
+
+
+def test_gemm_with_precision_tilelang_int4_marlin_pattern_uses_linear_marlin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_tilelang_kernel(
+        pattern: str, *args: object, **kwargs: object
+    ) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        a = args[0]
+        weight = args[1]
+        assert isinstance(a, torch.Tensor)
+        assert isinstance(weight, torch.Tensor)
+        return torch.empty((a.shape[0], weight.shape[0]), dtype=torch.float16)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        fake_run_tilelang_kernel,
+    )
+
+    a = torch.randn(8, 16, dtype=torch.float16)
+    b = torch.randint(0, 255, (12, 8), dtype=torch.uint8)
+    b_scale = torch.ones(12, 1, 1, dtype=torch.float16) * 0.05
+
+    output = gemm_with_precision(
+        a,
+        b,
+        precision={"activation": "fp16", "weight": "int4", "mma": "int4", "output": "fp16"},
+        engine="tilelang",
+        pattern="linear_marlin",
+        transpose_b=True,
+        b_scale=b_scale,
+        input_features=16,
+        group_size=16,
+    )
+
+    assert output.dtype == torch.float16
+    assert captured["pattern"] == "linear_marlin"
+    assert captured["kwargs"]["precision"] == "int4"
 
 
 class TestCapabilityReporting:

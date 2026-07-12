@@ -7,12 +7,14 @@
 - 说明 `XQT` 做什么, 不做什么.
 - 说明主链路, 配置方式和 Stage 约定.
 - 说明 profiling 与 manifest 的工程边界.
+- 说明 `xqt.nn`, `wrapper/materialize`, `kernel` 的总体分工入口.
 
 ## 不负责什么
 
 - 不提供完整训练流程.
 - 不承载 task-level validation 设计.
 - 不替代具体 runtime / engine 官方文档.
+- 不单独展开 `kernel` / `wrapper` / `xqt.nn` 的细边界表.
 
 ## 项目定位
 
@@ -39,8 +41,9 @@ PyTorch model / checkpoint / exported artifact
 - 覆盖 PTQ / QDQ, 权重量化, 剪枝, 算子优化, 导出前适配和部署格式转换.
 - 能导出 ONNX, TensorRT, OpenVINO, torch.export, TorchScript, ExecuTorch, ncnn, MNN 等产物.
 - 记录配置, 源 checkpoint, 指标, 产物校验和执行阶段, 保证结果可复现.
-- 以 Python API 为主入口表达模型变换, 例如 `XQTOptimizationSession`, `xqt.convert(...)`, 当前真实的 `xqt.nn.Linear` / `Conv2d` / `LayerNorm` / `FeedForward` / `RMSNorm` facade, 以及后续计划中的 `Attention`, `TransformerBlock` semantic facade.
-- 以语义块替换作为推理优化目标: Python 层逐步表达 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock`; engine 层再决定落成一个 kernel, 一组 kernel 或 megakernel. `Linear` / `Conv2d` / `LayerNorm` 是保留 PyTorch module/state_dict 语义并记录 runtime intent 的 facade; `FeedForward` / `RMSNorm` 还承载专用 runtime 路径. 这不表示 `Attention` / `TransformerBlock` 或完整 megakernel 已实现.
+- 以 Python API 为主入口表达模型变换, 例如 `XQTOptimizationSession`, `xqt.convert(...)` 和 `xqt.nn.*` facade.
+- 以语义块替换作为推理优化目标: Python 层表达 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock`; 中间经 `wrapper/materialize` 做 contract 校验, candidate module 构造和 fallback 记录; engine 层再决定落成一个 kernel, 一组 kernel 或 megakernel.
+- `Linear` / `Conv2d` / `LayerNorm` 是保留 PyTorch module/state_dict 语义并记录 runtime intent 的 facade; `FeedForward` / `RMSNorm` / `Attention` / `TransformerBlock` 也是 facade, 但这不表示它们天然等于某个 kernel pattern 或完整 megakernel 已实现.
 
 非目标:
 
@@ -77,14 +80,19 @@ XQT 文档和代码必须分词. **完整硬规则** 见 [xqt-engine-quant-bound
 Public API:
   xqt.convert(model, engine=..., policy=...)
   xqt.nn.Linear / Conv2d / LayerNorm / FeedForward / RMSNorm
-  future: Attention / TransformerBlock
+  xqt.nn.Attention / TransformerBlock
 
 XQT contract:
   precision, layout, packing, fusion, runtime state, target architecture
 
+XQT boundary layer:
+  wrapper / materialize / candidate module / fallback metadata
+
 XQT engine:
   triton, tilelang, cutlass, cute_dsl, cutile, custom_cuda
 ```
+
+`kernel` 与 `xqt.nn` 的明确分割线见 [xqt-kernel-wrapper-nn-boundary.md](xqt-kernel-wrapper-nn-boundary.md). 文档和实现都不应跳过中间的 `wrapper/materialize` 层直接把 facade 等同于 kernel.
 
 `engine="auto"` 这类策略未来应由 XQT capability 和 benchmark/report 决定. 文档不能把 metadata-only engine 写成已验证 executable path.
 
@@ -186,6 +194,7 @@ session 内比较使用 `XQTOptimizationSession.compare_stages()` 或 `compare_t
 
 - [../explanation/xqt-concepts.md](../explanation/xqt-concepts.md)
 - [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md)
+- [xqt-kernel-wrapper-nn-boundary.md](xqt-kernel-wrapper-nn-boundary.md)
 - [../usage/xqt-workflows.md](../usage/xqt-workflows.md)
 - [xqt-realignment-guide.md](xqt-realignment-guide.md)
 - [../XQT.md](../XQT.md)

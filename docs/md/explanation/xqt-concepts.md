@@ -28,6 +28,7 @@
 - `backend` (export/deploy): 外部 runtime, 例如 TensorRT, ONNX Runtime, OpenVINO
 - `compute_config`: quant→infer 可选计算配置 (精度 + required_capabilities)
 - `semantic replacement`: Python 层以 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock` 为单位替换模型语义块
+- `wrapper/materialize`: 夹在 facade 和 kernel 之间的边界翻译层, 负责 candidate module, fallback 和 execution metadata
 
 ## 与相近概念的区别
 
@@ -47,6 +48,7 @@ XQT 的推理优化以 Python API 为主入口. `XQTOptimizationSession`, `xqt.c
 XQT model transform
   -> semantic block replacement
   -> operator contract
+  -> wrapper / materialize
   -> internal engine lowering
   -> benchmark, report, manifest
 ```
@@ -57,9 +59,15 @@ XQT model transform
 用户直接选择一组外部 inference backend 来替换 XQT
 ```
 
-块级替换和 kernel fusion 不冲突. `FeedForward -> XQTFeedForward`, `Attention -> XQTPagedAttention`, `TransformerBlock -> XQTTransformerBlock` 是 Python 层语义替换; 底层可以是一组 kernel, 也可以是 megakernel. 是否真的合成单 kernel 必须由 capability 和 benchmark 证明.
+块级替换和 kernel fusion 不冲突. `FeedForward -> XQTFeedForward`, `Attention -> XQTPagedAttention`, `TransformerBlock -> XQTTransformerBlock` 是 Python 层语义替换; 中间仍需经 wrapper/materialize 把模块语义翻译成 engine 可执行对象; 底层可以是一组 kernel, 也可以是 megakernel. 是否真的合成单 kernel 必须由 capability 和 benchmark 证明.
 
-当前实现状态需要区分: `xqt.nn.Linear`, `Conv2d`, `LayerNorm`, `FeedForward` 和 `RMSNorm` 均为 XQT facade. 前三者保留 PyTorch module/state_dict 语义并显式记录 runtime intent; `FeedForward` / `RMSNorm` 还提供专用 runtime 路径. `Attention` 和 `TransformerBlock` 仍是目标方向.
+当前实现状态需要区分:
+
+- `xqt.nn.*` 是 facade, 不是 kernel catalog.
+- `wrapper/materialize` 是模块级边界翻译层, 不是临时胶水.
+- `kernel` 是 pattern 级执行实现, 不直接理解 `FeedForward` / `TransformerBlock` 这类语义块.
+
+这条边界的正式规则见 [../architecture/xqt-kernel-wrapper-nn-boundary.md](../architecture/xqt-kernel-wrapper-nn-boundary.md).
 
 ## 当前能力地图
 
@@ -101,6 +109,7 @@ XQT 做 quant / operator / export 路由时, 不要先问 "哪种位宽最好", 
 ## 继续阅读
 
 - [../architecture/xqt-engine-quant-boundary.md](../architecture/xqt-engine-quant-boundary.md) - engine / quant 边界规则
+- [../architecture/xqt-kernel-wrapper-nn-boundary.md](../architecture/xqt-kernel-wrapper-nn-boundary.md) - `kernel` / `wrapper` / `xqt.nn` 分层
 - [xqt-engines.md](xqt-engines.md) - operator engine 能力矩阵
 - [xqt-quant.md](xqt-quant.md) - quant backend / method / strategy
 - [xqt-inference.md](xqt-inference.md) - 推理路径与模型包

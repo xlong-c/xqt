@@ -816,6 +816,53 @@ def int8_linear_mma_reference(
     return output
 
 
+def int8_linear_reference(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Reference dequantized INT8 Linear output for pre-quantized activations."""
+
+    return int8_linear_mma_reference(
+        a,
+        b,
+        activation_scale,
+        weight_scale,
+        bias,
+    ).to(output_dtype)
+
+
+def int8_linear_static_activation_reference(
+    inputs: torch.Tensor,
+    b: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Reference fused activation-quant INT8 Linear output."""
+
+    if activation_scale.numel() != 1:
+        raise XQTBackendError("activation_scale must contain one scalar")
+    quantized = torch.round(
+        inputs.to(torch.float32)
+        / activation_scale.reshape(1).to(device=inputs.device, dtype=torch.float32)
+    ).clamp(-127, 127).to(torch.int8)
+    return int8_linear_reference(
+        quantized,
+        b,
+        activation_scale,
+        weight_scale,
+        bias,
+        output_dtype=output_dtype,
+    )
+
+
 def pad_rows_to_block(x: torch.Tensor, block_m: int) -> tuple[torch.Tensor, int]:
     """Pad rows to a block multiple and return the original row count."""
 
@@ -844,6 +891,38 @@ TILELANG_INT8_MMA_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "mma_instruction": "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32",
         "quantization_nature": "true",
     },
+    "int8_linear": {
+        "kernel_name": "int8_linear",
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 64,
+        "threads": 128,
+        "num_stages": 2,
+        "baseline": "torch._int_mm + dequant epilogue",
+        "usage": "True W8A8 GEMM with dequantized linear output epilogue.",
+        "supported_precisions": ["int8"],
+        "activation_encoding": "signed_int8",
+        "weight_encoding": "signed_int8_transposed",
+        "accumulation": "int32",
+        "quantization_nature": "true",
+        "fusion_status": "tilelang_dequant_output_epilogue",
+    },
+    "int8_linear_static_activation": {
+        "kernel_name": "int8_linear_static_activation",
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 64,
+        "threads": 128,
+        "num_stages": 2,
+        "baseline": "activation_quant + torch._int_mm + dequant epilogue",
+        "usage": "INT8 GEMM with activation quantization fused into the TileLang kernel.",
+        "supported_precisions": ["int8"],
+        "activation_encoding": "static_scaled_fp16_bf16_fp32_to_int8",
+        "weight_encoding": "signed_int8_transposed",
+        "accumulation": "int32",
+        "quantization_nature": "true_with_fused_activation_quant",
+        "fusion_status": "tilelang_static_activation_quant_dequant_output_epilogue",
+    },
 }
 
 
@@ -853,6 +932,8 @@ __all__ = [
     "build_tilelang_int8_linear_static_activation_kernel",
     "build_tilelang_int8_mma_kernel",
     "build_tilelang_static_activation_quant_kernel",
+    "int8_linear_reference",
+    "int8_linear_static_activation_reference",
     "int8_linear_static_activation_tilelang",
     "int8_linear_tilelang",
     "int8_linear_mma_reference",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 from typing import Any, Callable
 
 import torch
@@ -30,10 +31,18 @@ from ..kernels.triton.gemm import (
     TRITON_GEMM_KERNEL_METADATA,
     gemm_bf16_triton,
     gemm_fp16_triton,
+    gemm_fp8_reference,
     gemm_fp8_triton,
+    gemm_int4_dequant_reference,
     gemm_int4_dequant_triton,
+    gemm_int8_reference,
     gemm_int8_triton,
     gemm_reference,
+)
+from ..kernels.triton.mxfp_gemm import (
+    MXFP_GEMM_KERNEL_METADATA,
+    gemm_mxfp_reference,
+    gemm_mxfp_triton,
 )
 
 
@@ -115,21 +124,39 @@ TRITON_KERNEL_REGISTRY: dict[str, TritonKernelSpec] = {
     ),
     "gemm_int8": TritonKernelSpec(
         pattern="gemm_int8",
-        reference=gemm_reference,
+        reference=gemm_int8_reference,
         kernel=gemm_int8_triton,
         metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_int8"]),
     ),
     "gemm_fp8": TritonKernelSpec(
         pattern="gemm_fp8",
-        reference=gemm_reference,
+        reference=gemm_fp8_reference,
         kernel=gemm_fp8_triton,
         metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_fp8"]),
     ),
     "gemm_int4_dequant": TritonKernelSpec(
         pattern="gemm_int4_dequant",
-        reference=gemm_reference,
+        reference=gemm_int4_dequant_reference,
         kernel=gemm_int4_dequant_triton,
         metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_int4_dequant"]),
+    ),
+    "gemm_mxfp8": TritonKernelSpec(
+        pattern="gemm_mxfp8",
+        reference=gemm_mxfp_reference,
+        kernel=gemm_mxfp_triton,
+        metadata=dict(MXFP_GEMM_KERNEL_METADATA["gemm_mxfp8"]),
+    ),
+    "gemm_mxfp6": TritonKernelSpec(
+        pattern="gemm_mxfp6",
+        reference=gemm_mxfp_reference,
+        kernel=gemm_mxfp_triton,
+        metadata=dict(MXFP_GEMM_KERNEL_METADATA["gemm_mxfp6"]),
+    ),
+    "gemm_mxfp4": TritonKernelSpec(
+        pattern="gemm_mxfp4",
+        reference=gemm_mxfp_reference,
+        kernel=gemm_mxfp_triton,
+        metadata=dict(MXFP_GEMM_KERNEL_METADATA["gemm_mxfp4"]),
     ),
 }
 
@@ -153,11 +180,16 @@ def run_triton_kernel(
     """Run a Triton kernel when CUDA is available, otherwise use configured fallback."""
 
     spec = get_triton_kernel_spec(pattern)
-    if not all(isinstance(arg, torch.Tensor) for arg in args):
-        raise TypeError("Triton kernel arguments must be tensors")
-    if spec.cuda_only and not all(arg.is_cuda for arg in args):
+    if not all(isinstance(arg, torch.Tensor) for arg in args if arg is not None):
+        raise TypeError("Triton kernel arguments must be tensors or None")
+    tensor_args = tuple(arg for arg in args if isinstance(arg, torch.Tensor))
+    if spec.cuda_only and not all(arg.is_cuda for arg in tensor_args):
         if fallback == "eager":
-            return spec.reference(*args, **kwargs)
+            allowed = set(inspect.signature(spec.reference).parameters)
+            filtered_kwargs = {
+                key: value for key, value in kwargs.items() if key in allowed
+            }
+            return spec.reference(*args, **filtered_kwargs)
         raise XQTBackendError(f"Triton pattern '{pattern}' requires CUDA tensors")
     return spec.kernel(*args, **kwargs)
 

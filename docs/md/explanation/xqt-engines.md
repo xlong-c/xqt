@@ -15,6 +15,7 @@
 - 列出 `OPERATOR_OPT_ENGINES` 与 `list_operator_engine_capabilities()` 的对照表.
 - 列出各 engine 注册的 kernel pattern (`list_*_kernel_specs()`).
 - 说明 built-in materialize 实际覆盖到哪, 与 "registry 里有名字" 的区别.
+- 说明 `kernel`, `wrapper/materialize`, `xqt.nn` 三层在 engine 视角下怎么分工.
 - 说明 engine 与 quant 的衔接点 (不写 quant method 表).
 
 ## 不负责什么
@@ -25,6 +26,7 @@
 - 不把 planned / reference_guarded 写成生产性能承诺.
 - 不展开厂商 profiler 或手写 CUDA 调优 (见 [operator-kernel-tuning-guide.md](operator-kernel-tuning-guide.md)).
 - 不把 TensorRT / ONNX Runtime 写成 engine (它们是 **export/deploy backend**).
+- 不把 `xqt.nn` facade 直接当作 kernel pattern 表.
 
 ## 术语 (engine 视角)
 
@@ -32,11 +34,15 @@
 | --- | --- | --- |
 | `engine` | XQT 内部 kernel / lowering 选择 | `OPERATOR_OPT_ENGINES`; `operator_opt/capability.py` |
 | `pattern` | engine registry 中的算子名 | 各 `*_KERNEL_REGISTRY` |
+| `wrapper` | 模块级 adapter / candidate module / fallback 边界层 | `operator_opt/wrappers/`, `materialize.py` |
+| `xqt.nn facade` | 语义块级 public `nn.Module` | `xqt/nn/` |
 | `maturity` / `status` | 实现成熟度 / 接口可用性 | capability API |
 | quant method | 算法身份 (awq/gptq/svd) | **不在本文主表**; 见 quant 文档 |
 | quant backend | pytorch/torchao/... | **不是** engine 名 |
 
 **重要**: package 可导入或 `available=True` **不等于** 本机 correctness / 性能验收通过.
+
+`kernel` 与 `xqt.nn` 的正式边界规则见 [../architecture/xqt-kernel-wrapper-nn-boundary.md](../architecture/xqt-kernel-wrapper-nn-boundary.md). 本文默认中间的 `wrapper/materialize` 层存在, 不再省略.
 
 ## 如何从代码刷新本页信息
 
@@ -99,7 +105,7 @@ schema 集合: `OPERATOR_OPT_ENGINES = torch_compile, deployment_engine, triton,
 
 kernel 实现目录: `xqt/operator_opt/kernels/tilelang/` (`attention.py`, `conv.py`, `linear.py`, `linear_marlin.py`, `norm.py`, `gemm.py`, `int8_mma.py`, ...).
 
-wrapper: `xqt/operator_opt/wrappers/` (`attention.py`, `xqt_attention.py`, `linear.py`, `conv.py`, `conv3d.py`, `norm.py`, `dequant_gemm.py`, ...).
+对应 wrapper / candidate module 目录: `xqt/operator_opt/wrappers/` (`attention.py`, `xqt_attention.py`, `linear.py`, `conv.py`, `conv3d.py`, `norm.py`, `dequant_gemm.py`, ...). 这些 wrapper 负责把 `nn.Module` 级语义翻译成 TileLang pattern 调用, 不属于 kernel 本体.
 
 ### 2.2 Triton (`xqt/operator_opt/backends/triton.py`)
 
@@ -115,6 +121,8 @@ wrapper: `xqt/operator_opt/wrappers/` (`attention.py`, `xqt_attention.py`, `line
 kernel 目录: `xqt/operator_opt/kernels/triton/` (`gemm.py`, `linear.py`, `pointwise.py`, `mxfp_gemm.py`, ...).
 
 **materialize 缺口** (capability limitations 原文语义): 除 RMSNorm 与 `FeedForward` 组合外, 其它 registered pattern **尚未** 都有通用 operator wrapper.
+
+也就是说, `registry 里有 kernel pattern` 不等于 `已经有与之对应的稳定 module-level wrapper`.
 
 ### 2.3 CuTile (`xqt/operator_opt/backends/cutile.py`)
 
@@ -164,19 +172,35 @@ convert 的 `engine=` 是 materialize **preference**, 不是 quant 输出主键.
 
 ---
 
-## 4. convert / nn facade 与 engine
+## 4. facade / wrapper / kernel 的分工
+
+这一节只说 engine 视角下的落点, 不重复架构层总规则.
+
+| 层 | 源码 | 在 engine 体系中的职责 |
+| --- | --- | --- |
+| `xqt.nn facade` | `xqt/nn/` | 表达语义块身份和 runtime intent, 对外保持 `nn.Module` 语义 |
+| `wrapper/materialize` | `xqt/operator_opt/materialize.py`, `xqt/operator_opt/wrappers/` | 把 facade 或普通 module 翻译为 engine candidate, 处理 reshape/cache/fallback/metadata |
+| `kernel` | `xqt/operator_opt/kernels/`, `*_KERNEL_REGISTRY` | 只做 pattern 级 tensor 计算实现 |
+
+禁止反向简化成:
+
+- `xqt.nn.FeedForward = Triton kernel`
+- `TileLang attention kernel = Attention facade`
+- `kernel 直接消费高层模块 schema`
+
+## 5. convert / nn facade 与 engine
 
 | 入口 | 源码 | 当前行为 |
 | --- | --- | --- |
-| `xqt.convert(..., engine=...)` | `xqt/conversion.py`, `conversion_impl/` | 建 `OperatorContract` 并可能 **eager materialize**; `EngineKind` 子集为 `torch/triton/tilelang/cutile/cute_dsl` |
+| `xqt.convert(..., engine=...)` | `xqt/conversion.py`, `conversion_impl/` | 建 `OperatorContract`, 再经 `materialize_module(...)` 进入 wrapper / candidate 路径 |
 | `xqt.nn.*` | `xqt/nn/` | facade 构造带 engine intent; 导出 `Linear`, `Conv2d`, `LayerNorm`, `FeedForward`, `RMSNorm`, `Attention`, `TransformerBlock` |
 | operator stage | `xqt/operator_opt/execute.py`, `materialize.py` | workflow 内正式 plan + capability + fallback report |
 
-`Attention` / `TransformerBlock` 当前 engine 以 `torch` / `tilelang` 为主; **不是** 完整 block-level 生产 megakernel.
+`Attention` / `TransformerBlock` 当前 engine 以 `torch` / `tilelang` 为主; 这表示 facade/runtime intent 和 wrapper 接线已存在, **不是** 完整 block-level 生产 megakernel.
 
 ---
 
-## 5. 源码地图
+## 6. 源码地图
 
 ```text
 xqt/operator_opt/
@@ -184,7 +208,7 @@ xqt/operator_opt/
   execute.py / materialize.py / plan.py
   backends/              # tilelang, triton, cutile, cutlass, cute_dsl, gemm_*
   kernels/               # 各 engine 实现与公共 pattern
-  wrappers/              # 模块级 wrapper
+  wrappers/              # facade/module 到 kernel 的边界翻译层
   triton_wrappers.py / tilelang_wrappers.py / reference_wrappers.py
 
 xqt/core/schema.py       # OPERATOR_OPT_ENGINES, quant strategies
@@ -196,8 +220,10 @@ xqt/nn/                  # semantic facade
 
 ---
 
-## 6. 继续阅读
+## 7. 继续阅读
 
+- facade / kernel 分层: [../architecture/xqt-kernel-wrapper-nn-boundary.md](../architecture/xqt-kernel-wrapper-nn-boundary.md)
+- 三类模型的细粒度 kernel 指导表: [xqt-kernel-guidance.md](xqt-kernel-guidance.md)
 - 边界规则: [../architecture/xqt-engine-quant-boundary.md](../architecture/xqt-engine-quant-boundary.md)
 - Quant 说明: [xqt-quant.md](xqt-quant.md)
 - Infer 交接: [../architecture/xqt-infer-handoff.md](../architecture/xqt-infer-handoff.md)

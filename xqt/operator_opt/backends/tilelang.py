@@ -35,8 +35,12 @@ from ..kernels.tilelang.gemm import (
 )
 from ..kernels.tilelang.int8_mma import (
     TILELANG_INT8_MMA_KERNEL_METADATA,
+    int8_linear_reference,
+    int8_linear_static_activation_reference,
     int8_mma_reference,
     int8_mma_tilelang,
+    int8_linear_static_activation_tilelang,
+    int8_linear_tilelang,
 )
 from ..kernels.tilelang.linear import (
     TILELANG_LINEAR_KERNEL_METADATA,
@@ -167,6 +171,18 @@ TILELANG_KERNEL_REGISTRY: dict[str, TileLangKernelSpec] = {
         reference=int8_mma_reference,
         kernel=int8_mma_tilelang,
         metadata=dict(TILELANG_KERNEL_METADATA["int8_mma"]),
+    ),
+    "int8_linear": TileLangKernelSpec(
+        pattern="int8_linear",
+        reference=int8_linear_reference,
+        kernel=int8_linear_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["int8_linear"]),
+    ),
+    "int8_linear_static_activation": TileLangKernelSpec(
+        pattern="int8_linear_static_activation",
+        reference=int8_linear_static_activation_reference,
+        kernel=int8_linear_static_activation_tilelang,
+        metadata=dict(TILELANG_KERNEL_METADATA["int8_linear_static_activation"]),
     ),
     "linear": TileLangKernelSpec(
         pattern="linear",

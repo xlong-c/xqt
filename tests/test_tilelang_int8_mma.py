@@ -21,6 +21,11 @@ def test_tilelang_registry_exposes_true_int8_mma() -> None:
     assert spec.metadata["accumulation"] == "int32"
     assert "s8.s8" in spec.metadata["mma_instruction"]
 
+    linear_spec = get_tilelang_kernel_spec("int8_linear")
+    fused_spec = get_tilelang_kernel_spec("int8_linear_static_activation")
+    assert linear_spec.metadata["quantization_nature"] == "true"
+    assert fused_spec.metadata["quantization_nature"] == "true_with_fused_activation_quant"
+
 
 def test_int8_mma_reference_matches_int32_matmul_cpu() -> None:
     torch.manual_seed(0)
