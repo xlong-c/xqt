@@ -3,9 +3,9 @@ import torch
 from xqt.quant import (
     ConvRotMixedPrecisionLinear,
     build_regular_hadamard_matrix,
-    materialize_convrot_execution_policy,
     quantize_with_convrot_4bit,
 )
+from xqt.runtime import apply_execution_policy
 from xqt.workflows import XQTOptimizationSession
 
 
@@ -82,7 +82,7 @@ def test_materialize_convrot_execution_policy_switches_runtime_precision() -> No
         inplace=False,
     )
 
-    candidate = materialize_convrot_execution_policy(
+    candidate = apply_execution_policy(
         result.model,
         precision_overrides=[{"module": "fc", "precision": "bf16"}],
         default_precision="w4a4",

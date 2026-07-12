@@ -30,7 +30,6 @@ from .convrot_4bit import (
     ConvRotMixedPrecisionLinear,
     build_regular_hadamard_matrix,
     execute_convrot_4bit_component,
-    materialize_convrot_execution_policy,
     quantize_with_convrot_4bit,
 )
 from .mxfp_weight_only import (
@@ -63,7 +62,6 @@ __all__ = [
     "build_regular_hadamard_matrix",
     "build_fake_qdq_surrogate",
     "execute_convrot_4bit_component",
-    "materialize_convrot_execution_policy",
     "quantize_with_awq_fp4",
     "quantize_with_awq_weight_only",
     "quantize_with_convrot_4bit",

@@ -10,19 +10,35 @@ from typing import Any, Mapping, Optional
 import torch
 from torch import nn
 
-from xqt.contracts import QuantizedModel
+from xqt.contracts import ComputeConfig, QuantizedModel
 from xqt.core.errors import XQTBackendError
 from xqt.core.types import XQTContext
-from xqt.operator_opt.kernels.tilelang.int8_mma import (
-    int8_linear_tilelang,
-    int8_linear_static_activation_tilelang,
-    int8_mma_reference,
-    pad_rows_to_block,
-    static_activation_quantize_tilelang,
+from xqt.runtime.engine_resolve import (
+    normalize_engine_name,
+    resolve_int8_mma_engine,
 )
 
 _PTX_SM89_ENGINES = frozenset({"ptx_sm89", "native_sm89"})
 _VALID_ENGINES = frozenset({"auto", "tilelang", "torch_int_mm"}) | _PTX_SM89_ENGINES
+
+
+def _tilelang_int8_api():
+    """Lazy import TileLang INT8 kernels (not at quantizer module import time)."""
+    from xqt.operator_opt.kernels.tilelang.int8_mma import (
+        int8_linear_static_activation_tilelang,
+        int8_linear_tilelang,
+        int8_mma_reference,
+        pad_rows_to_block,
+        static_activation_quantize_tilelang,
+    )
+
+    return {
+        "int8_linear_tilelang": int8_linear_tilelang,
+        "int8_linear_static_activation_tilelang": int8_linear_static_activation_tilelang,
+        "int8_mma_reference": int8_mma_reference,
+        "pad_rows_to_block": pad_rows_to_block,
+        "static_activation_quantize_tilelang": static_activation_quantize_tilelang,
+    }
 
 from ..execution.component import (
     ordered_unique,
@@ -139,7 +155,7 @@ class Int8MmaLinear(nn.Module):
         bias: torch.Tensor | None,
         input_features: int,
         output_features: int,
-        engine: str = "tilelang",
+        engine: str = "auto",
         fallback_engine: str = "torch_int_mm",
         block_m: int = 64,
         block_n: int = 64,
@@ -151,21 +167,29 @@ class Int8MmaLinear(nn.Module):
         activation_scale: torch.Tensor | float | None = None,
         activation_quant_block_size: int = 256,
         eps: float = 1e-6,
+        preferred_engines: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
-        normalized_engine = str(engine)
+        normalized_engine = normalize_engine_name(engine)
         if normalized_engine == "native_sm89":
             normalized_engine = "ptx_sm89"
         if normalized_engine not in _VALID_ENGINES:
             raise ValueError(
                 "engine must be one of auto, tilelang, torch_int_mm, ptx_sm89"
             )
+        self.preferred_engines = [
+            normalize_engine_name(item)
+            for item in (preferred_engines or [])
+            if normalize_engine_name(item) != "auto"
+        ]
         if str(fallback_engine) not in {"torch_int_mm", "reference"}:
             raise ValueError("fallback_engine must be torch_int_mm or reference")
         self.input_features = int(input_features)
         self.output_features = int(output_features)
         self.engine = normalized_engine
         self.fallback_engine = str(fallback_engine)
+        if not hasattr(self, "preferred_engines"):
+            self.preferred_engines = []
         self.block_m = int(block_m)
         self.block_n = int(block_n)
         self.block_k = int(block_k)
@@ -200,7 +224,7 @@ class Int8MmaLinear(nn.Module):
         cls,
         module: nn.Linear,
         *,
-        engine: str = "tilelang",
+        engine: str = "auto",
         fallback_engine: str = "torch_int_mm",
         block_m: int = 64,
         block_n: int = 64,
@@ -211,6 +235,7 @@ class Int8MmaLinear(nn.Module):
         activation_scale: torch.Tensor | float | None = None,
         activation_quant_block_size: int = 256,
         eps: float = 1e-6,
+        preferred_engines: list[str] | tuple[str, ...] | None = None,
     ) -> "Int8MmaLinear":
         weight = module.weight.detach().to(torch.float32)
         max_abs = weight.abs().amax(dim=1, keepdim=True)
@@ -239,6 +264,7 @@ class Int8MmaLinear(nn.Module):
             activation_scale=activation_scale,
             activation_quant_block_size=activation_quant_block_size,
             eps=eps,
+            preferred_engines=preferred_engines,
         )
 
     @staticmethod
@@ -290,7 +316,8 @@ class Int8MmaLinear(nn.Module):
                 torch.bfloat16,
                 torch.float32,
             }:
-                qactivation = static_activation_quantize_tilelang(
+                api = _tilelang_int8_api()
+                qactivation = api["static_activation_quantize_tilelang"](
                     flat_input,
                     scale,
                     block_size=self.activation_quant_block_size,
@@ -318,7 +345,8 @@ class Int8MmaLinear(nn.Module):
         int_mm = getattr(torch, "_int_mm", None)
         if qactivation.is_cuda and self.qweight_t.is_cuda and callable(int_mm):
             return int_mm(qactivation, self.qweight_t)
-        return int8_mma_reference(qactivation, self.qweight_t)
+        api = _tilelang_int8_api()
+        return api["int8_mma_reference"](qactivation, self.qweight_t)
 
     def _can_use_ptx_sm89(self, qactivation: torch.Tensor) -> tuple[bool, str]:
         if not qactivation.is_cuda or not self.qweight_t.is_cuda:
@@ -404,9 +432,10 @@ class Int8MmaLinear(nn.Module):
         activation_scale: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, int, str]:
-        padded, original_rows = pad_rows_to_block(qactivation, self.block_m)
+        api = _tilelang_int8_api()
+        padded, original_rows = api["pad_rows_to_block"](qactivation, self.block_m)
         target_arch = _target_arch_from_device(padded.device)
-        output = int8_linear_tilelang(
+        output = api["int8_linear_tilelang"](
             padded,
             self.qweight_t,
             activation_scale,
@@ -439,9 +468,10 @@ class Int8MmaLinear(nn.Module):
         activation_scale: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, int, str]:
-        padded, original_rows = pad_rows_to_block(flat_inputs, self.block_m)
+        api = _tilelang_int8_api()
+        padded, original_rows = api["pad_rows_to_block"](flat_inputs, self.block_m)
         target_arch = _target_arch_from_device(padded.device)
-        output = int8_linear_static_activation_tilelang(
+        output = api["int8_linear_static_activation_tilelang"](
             padded,
             self.qweight_t,
             activation_scale,
@@ -464,17 +494,27 @@ class Int8MmaLinear(nn.Module):
             )
         original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
         selected_engine = self.engine
-        prefer_tilelang = selected_engine == "tilelang" or (
-            selected_engine == "auto" and inputs.is_cuda and self.qweight_t.is_cuda
-        )
         flat_inputs = inputs.reshape(-1, self.input_features)
-        if selected_engine == "auto" and inputs.is_cuda and self.qweight_t.is_cuda:
-            m_rows = int(flat_inputs.shape[0])
-            ptx_ok, _ = self._can_use_ptx_sm89(flat_inputs)
-            if ptx_ok and m_rows >= 192:
-                selected_engine = "ptx_sm89"
-            else:
-                selected_engine = "tilelang"
+        if selected_engine == "auto":
+            resolved = resolve_int8_mma_engine(
+                "auto",
+                preferred_engines=self.preferred_engines,
+                fallback=self.fallback_engine,
+            )
+            selected_engine = resolved.engine
+            if selected_engine == "ptx_sm89":
+                m_rows = int(flat_inputs.shape[0])
+                ptx_ok, _ = self._can_use_ptx_sm89(flat_inputs)
+                if not (ptx_ok and m_rows >= 192 and inputs.is_cuda):
+                    # Prefer tilelang when ptx not suitable for this shape/device.
+                    selected_engine = (
+                        "tilelang"
+                        if inputs.is_cuda and self.qweight_t.is_cuda
+                        else self.fallback_engine
+                    )
+            elif not inputs.is_cuda:
+                selected_engine = self.fallback_engine
+        prefer_tilelang = selected_engine == "tilelang"
         prefer_ptx = selected_engine == "ptx_sm89"
         prefer_tilelang = selected_engine == "tilelang" or (
             selected_engine == "auto" and inputs.is_cuda and self.qweight_t.is_cuda
@@ -657,7 +697,7 @@ def quantize_with_int8_mma(
     policy: Optional[Mapping[str, Any] | QuantizationPolicy] = None,
     strategy: Optional[str] = None,
     inplace: bool = True,
-    engine: str = "tilelang",
+    engine: str = "auto",
     fallback_engine: str = "torch_int_mm",
     block_m: int = 64,
     block_n: int = 64,
@@ -736,18 +776,38 @@ def quantize_with_int8_mma(
         )
         quantized_modules.append(name)
 
+    preferred_hint = [] if normalize_engine_name(engine) == "auto" else [normalize_engine_name(engine)]
+    compute_config = ComputeConfig.from_modules(
+        module_names=quantized_modules,
+        compute_contract="int8_mma",
+        precision="w8a8",
+        required_capabilities=["int8_mma"],
+        preferred_engines=preferred_hint,
+        default_precision="w8a8",
+        storage={
+            "format": "int8_per_out_channel",
+            "layout": "qweight_t",
+        },
+        metadata={
+            "activation_scale_mode": activation_scale_mode,
+            "fallback_engine": fallback_engine,
+        },
+    )
     return Int8MmaQuantizationResult(
         model=target_model,
         strategy=selected_strategy,
         quantized_modules=quantized_modules,
+        compute_config=compute_config,
         metadata={
             "implementation": "dynamic_w8a8_int8_mma_linear",
             "quantization_nature": "true",
             "activation_encoding": f"{activation_scale_mode}_signed_int8_per_tensor",
             "weight_encoding": "signed_int8_per_output_channel",
             "accumulation": "int32",
-            "engine": engine,
+            "engine_preference": normalize_engine_name(engine),
+            "preferred_engines": preferred_hint,
             "fallback_engine": fallback_engine,
+            "compute_config": compute_config.to_dict(),
             "activation_scale_mode": activation_scale_mode,
             "static_scale_module_count": static_scale_modules,
             "dynamic_fallback_module_count": dynamic_fallback_modules,
@@ -789,7 +849,7 @@ def execute_int8_mma_component(
         policy=effective_policy,
         strategy=component.strategy or effective_policy.get("strategy"),
         inplace=True,
-        engine=str(component.policy.get("engine", "tilelang")),
+        engine=str(component.policy.get("engine", "auto")),
         fallback_engine=str(component.policy.get("fallback_engine", "torch_int_mm")),
         block_m=int(component.policy.get("block_m", 64)),
         block_n=int(component.policy.get("block_n", 64)),

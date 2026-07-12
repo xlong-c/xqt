@@ -76,7 +76,45 @@ class HybridInferenceEngine:
         """Build an engine from a quant-stage artifact without re-quantizing."""
 
         metadata = dict(quantized.metadata)
+        handoff = (
+            quantized.infer_handoff()
+            if hasattr(quantized, "infer_handoff")
+            else {"model": quantized.model, "compute_config": None}
+        )
+        compute_config = handoff.get("compute_config")
         raw_policies = metadata.get("execution_policies", [])
+        if not raw_policies and isinstance(compute_config, Mapping):
+            from xqt.contracts.compute import ComputeConfig
+
+            parsed = ComputeConfig.from_mapping(compute_config)
+            overrides = [] if parsed is None else parsed.precision_overrides()
+            caps = [] if parsed is None else parsed.all_required_capabilities()
+            preferred: list[str] = []
+            if parsed is not None:
+                for module in parsed.modules:
+                    preferred.extend(module.preferred_engines)
+            policy = build_execution_policy_payload(
+                stage_name=stage_name,
+                source_model_stage=source_model_stage,
+                policy_kind="compute_config",
+                runtime=runtime,
+                precision_overrides=overrides,
+                required_capabilities=caps,
+                preferred_engines=preferred,
+                compute_config=compute_config,
+                metadata={
+                    "default_precision": default_precision,
+                    "source": "quantized_model.compute_config",
+                },
+                module_count=len(list(quantized.quantized_modules)),
+            )
+            return cls(
+                quantized.model,
+                default_precision=default_precision,
+                runtime=runtime,
+                policy=policy,
+                apply_policy_on_init=apply_policy_on_init,
+            )
         policy: ExecutionPolicyPayload | None = None
         if isinstance(raw_policies, list) and raw_policies:
             first = raw_policies[0]

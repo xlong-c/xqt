@@ -197,3 +197,33 @@ def test_run_export_stage_attaches_onnx_model_package(
         artifact.format == "xqt_model_package"
         for artifact in context.manifest.artifacts
     )
+
+
+def test_write_and_load_model_package_with_compute_config(tmp_path: Path) -> None:
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"fake-onnx")
+    package_dir = write_model_package(
+        model_path=model_path,
+        output_dir=tmp_path / "model_compute.xqtpkg",
+        model_format="onnx",
+        runtime_name="onnxruntime",
+        runtime_config={"providers": ["CPUExecutionProvider"]},
+        compute_config={
+            "schema_version": "1.0",
+            "default_precision": "w8a8",
+            "modules": [
+                {
+                    "name": "proj",
+                    "compute_contract": "int8_mma",
+                    "required_capabilities": ["int8_mma"],
+                    "preferred_engines": ["tilelang"],
+                }
+            ],
+        },
+    )
+    package = load_model_package(package_dir)
+    assert package.compute_config is not None
+    assert package.compute_config["modules"][0]["compute_contract"] == "int8_mma"
+    assert "required_engine" not in package.compute_config
+    assert package.manifest.entrypoints["compute_config"] == "runtime/compute.json"
+    assert package.manifest.runtime.get("has_compute_config") is True

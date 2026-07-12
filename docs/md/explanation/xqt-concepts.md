@@ -22,8 +22,11 @@
 - `stage`: 一次模型侧变换, 分析或导出动作
 - `manifest`: 产物, 指标和 lineage 的统一记录
 - `readiness`: 对某个场景是否可用的能力判断
-- `backend`: 外部 quant/export/runtime 选择, 例如 torchao, ONNX Runtime QDQ, TensorRT, OpenVINO, ExecuTorch, ncnn, MNN
-- `engine`: XQT 内部 kernel 实现选择, 例如 Triton, TileLang, CUTLASS, CuTe DSL, CuTile, custom CUDA
+- `backend` (quant): 量化适配路径, 例如 `pytorch`, `torchao`, `onnxruntime_qdq` (**不是** tilelang/svdquant)
+- `method` (quant): 量化算法, 例如 `awq`, `gptq`, `svd` (**不是** engine)
+- `engine` (operator): XQT 内部 kernel / lowering, 例如 Triton, TileLang, CUTLASS, CuTe DSL
+- `backend` (export/deploy): 外部 runtime, 例如 TensorRT, ONNX Runtime, OpenVINO
+- `compute_config`: quant→infer 可选计算配置 (精度 + required_capabilities)
 - `semantic replacement`: Python 层以 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock` 为单位替换模型语义块
 
 ## 与相近概念的区别
@@ -89,12 +92,18 @@ XQT 做 quant / operator / export 路由时, 不要先问 "哪种位宽最好", 
 - 不要把 `XQT` 当成训练恢复或 QAT 工具
 - 不要把 profiler 诊断结果和 benchmark 指标混为一谈
 - 不要把 `TileLang available` 理解成所有 pattern 都已经是同等成熟的通用 executor
-- 不要把 `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 写成和 TensorRT / ONNX Runtime 并列的外部 backend; 它们是 XQT 内部 engine
+- 不要把 `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 写成和 TensorRT / ONNX Runtime 并列的外部 backend; 它们是 XQT 内部 **engine**
+- 不要把 `awq` / `gptq` / `svd` 当成 engine 或 quant backend; 它们是 quant **method**, 配置写 `backend=pytorch` + `method=...`
+- 不要写 `quant.params.backend=tilelang` 或 `=svdquant` (已禁止)
 - 不要把 1~8 的长期指导写成全部完成; 当前只是配置单轨化主路径完成, God module 拆分, contract 层和能力面收敛仍未完成
 - 不要在 recipe 里声明 dataset 来源
 
 ## 继续阅读
 
+- [../architecture/xqt-engine-quant-boundary.md](../architecture/xqt-engine-quant-boundary.md) - engine / quant 边界规则
+- [xqt-engines.md](xqt-engines.md) - operator engine 能力矩阵
+- [xqt-quant.md](xqt-quant.md) - quant backend / method / strategy
+- [xqt-inference.md](xqt-inference.md) - 推理路径与模型包
 - [../architecture/xqt.md](../architecture/xqt.md)
 - [../usage/xqt-workflows.md](../usage/xqt-workflows.md)
 - [../XQT_SUMMARY.md](../XQT_SUMMARY.md) - 兼容摘要入口

@@ -17,19 +17,20 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from xqt.contracts import QuantizedModel
-from xqt.core.types import XQTContext
-from xqt.runtime.channel import (
+from xqt.contracts import (
     ChannelHybridSpec,
-    build_channel_mask,
-    channel_hybrid_linear_reference,
-    normalize_channel_axis,
-    select_outlier_channels,
-)
-from xqt.runtime.policy import (
+    QuantizedModel,
     SUPPORTED_COMPUTE_PRECISIONS,
-    apply_execution_policy,
+    compute_hybrid_linear,
+    normalize_channel_axis,
     normalize_compute_precision,
+)
+from xqt.core.types import XQTContext
+
+from ..channel_helpers import (
+    build_channel_mask,
+    normalize_channel_indices,
+    select_outlier_channels,
 )
 
 from ..execution.component import (
@@ -532,7 +533,7 @@ class ConvRotMixedPrecisionLinear(nn.Module):
             high_w = high_weight[mask, :]
             low_act = low_activation
             high_act = high_activation
-        return channel_hybrid_linear_reference(
+        return compute_hybrid_linear(
             inputs,
             low_weight=low_w,
             high_weight=high_w,
@@ -578,23 +579,6 @@ class ConvRotMixedPrecisionLinear(nn.Module):
 
         allowed = ", ".join(sorted(SUPPORTED_COMPUTE_PRECISIONS))
         raise ValueError(f"unsupported compute_precision {precision!r}; expected {allowed}")
-
-
-def materialize_convrot_execution_policy(
-    model: nn.Module,
-    *,
-    precision_overrides: Sequence[Mapping[str, Any]] | None = None,
-    default_precision: str = "w4a4",
-    inplace: bool = False,
-) -> nn.Module:
-    """Apply mixed-precision overrides via ``xqt.runtime`` without re-quantizing."""
-
-    return apply_execution_policy(
-        model,
-        precision_overrides=precision_overrides,
-        default_precision=default_precision,
-        inplace=inplace,
-    )
 
 
 def _collect_convrot_activation_stats(
@@ -994,7 +978,6 @@ def execute_convrot_4bit_component(
             **dict(result.metadata),
             "execution_policies": execution_policies,
             "algorithm_executable": True,
-            "tilelang_quant_backend": component.backend == "tilelang",
             "analysis_only": component.analysis_only,
             "policy": effective_policy,
             "selection_policy": selection_policy_metadata(component),
@@ -1012,6 +995,5 @@ __all__ = [
     "ConvRot4BitQuantizationResult",
     "build_regular_hadamard_matrix",
     "execute_convrot_4bit_component",
-    "materialize_convrot_execution_policy",
     "quantize_with_convrot_4bit",
 ]

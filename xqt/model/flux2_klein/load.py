@@ -13,9 +13,9 @@ from torch import nn
 from xqt.core.errors import XQTBackendError
 from xqt.quant.quantizers.convrot_4bit import (
     ConvRot4BitQuantizationResult,
-    materialize_convrot_execution_policy,
     quantize_with_convrot_4bit,
 )
+from xqt.runtime import apply_execution_policy
 
 from .types import (
     FLUX2_KLEIN_4B_NVFP4_FILENAME,
@@ -530,7 +530,7 @@ def quantize_flux2_klein_bf16_transformer_to_convrot_4bit(
     if not isinstance(first_policy, Mapping):
         return result
     precision_overrides = first_policy.get("precision_overrides", [])
-    model_with_policy = materialize_convrot_execution_policy(
+    model_with_policy = apply_execution_policy(
         result.model,
         precision_overrides=precision_overrides if isinstance(precision_overrides, list) else None,
         default_precision="w4a4",

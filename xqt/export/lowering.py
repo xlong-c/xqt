@@ -24,13 +24,32 @@ class PreExportLoweringResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _is_packed_weight_dequant_module(module: nn.Module) -> bool:
+    """Recognize packed-weight storage via duck type (G6), not quantizer class alone."""
+    if not callable(getattr(module, "dequantize_weight", None)):
+        return False
+    if not hasattr(module, "input_features") or not hasattr(module, "output_features"):
+        return False
+    return (
+        hasattr(module, "packed_weight")
+        or hasattr(module, "qweight")
+        or hasattr(module, "qweight_t")
+    )
+
+
 def _fp4_weight_only_linear_to_dense(module: nn.Module) -> nn.Linear:
-    """Materialize an FP4 storage module as an equivalent dense Linear module."""
+    """Materialize packed FP4-style storage as an equivalent dense Linear module."""
 
-    from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
-
-    if not isinstance(module, FP4WeightOnlyLinear):
-        raise TypeError(f"expected FP4WeightOnlyLinear, got {type(module).__name__}")
+    if not _is_packed_weight_dequant_module(module):
+        # Compatibility: still accept the historical quantizer class by name.
+        type_name = type(module).__name__
+        if type_name != "FP4WeightOnlyLinear" or not callable(
+            getattr(module, "dequantize_weight", None)
+        ):
+            raise TypeError(
+                "expected packed-weight module with dequantize_weight(), "
+                f"got {type(module).__name__}"
+            )
     weight = module.dequantize_weight().detach()
     bias = module.bias.detach() if module.bias is not None else None
     lowered = nn.Linear(
@@ -48,13 +67,11 @@ def _fp4_weight_only_linear_to_dense(module: nn.Module) -> nn.Linear:
 def _replace_fp4_weight_only_linears(model: nn.Module) -> list[dict[str, Any]]:
     """Replace every FP4 storage Linear with its dense dequantized equivalent."""
 
-    from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
-
     replacements: list[dict[str, Any]] = []
     candidates = [
         (name, module)
         for name, module in model.named_modules()
-        if name and isinstance(module, FP4WeightOnlyLinear)
+        if name and _is_packed_weight_dequant_module(module)
     ]
     for name, module in candidates:
         parent_path, _, child_name = name.rpartition(".")
@@ -81,8 +98,6 @@ def apply_pre_export_lowering(
 ) -> PreExportLoweringResult:
     """Apply an explicitly configured module lowering before model export."""
 
-    from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
-
     if not config or not bool(config.get("enabled", False)):
         return PreExportLoweringResult(
             model=model,
@@ -99,7 +114,7 @@ def apply_pre_export_lowering(
 
     target_model = model if inplace else deepcopy(model)
     target_model.eval()
-    if isinstance(target_model, FP4WeightOnlyLinear):
+    if _is_packed_weight_dequant_module(target_model):
         lowered_root = _fp4_weight_only_linear_to_dense(target_model)
         replacements = [
             {
@@ -118,7 +133,7 @@ def apply_pre_export_lowering(
     if not replacements:
         raise XQTBackendError(
             "pre_export_lowering mode=fp4_weight_only_to_dense_linear requires "
-            "at least one FP4WeightOnlyLinear module"
+            "at least one packed-weight module with dequantize_weight()"
         )
 
     return PreExportLoweringResult(

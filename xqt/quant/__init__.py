@@ -72,7 +72,6 @@ from .quantizers.convrot_4bit import (
     ConvRot4BitQuantizationResult,
     ConvRotMixedPrecisionLinear,
     build_regular_hadamard_matrix,
-    materialize_convrot_execution_policy,
     quantize_with_convrot_4bit,
 )
 from .quantizers.mxfp_weight_only import (
@@ -163,7 +162,6 @@ __all__ = [
     "quantize_with_svd",
     "quantize_with_torchao",
     "quantize_with_w4_storage_int8_mma",
-    "materialize_convrot_execution_policy",
     "recommend_high_precision_modules",
     "should_quantize_module",
     "summarize_quantization_reports",

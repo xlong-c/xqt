@@ -1,7 +1,26 @@
 """Cross-subsystem model and runtime contract schemas for XQT."""
 
-from .quantized import QuantizedModel, QuantizedModelPayload
-from .pruned import PrunedModelPayload
+from .channel import (
+    SUPPORTED_CHANNEL_AXES,
+    ChannelAxis,
+    ChannelHybridSpec,
+    SupportsChannelHybrid,
+    compute_hybrid_linear,
+    normalize_channel_axis,
+)
+from .compute import (
+    COMPUTE_CONFIG_SCHEMA_VERSION,
+    ComputeConfig,
+    ModuleComputeSpec,
+    SUPPORTED_COMPUTE_CONTRACTS,
+    SUPPORTED_COMPUTE_PRECISIONS,
+    SupportsComputePrecision,
+    SupportsPackedWeightDequant,
+    compute_config_from_mapping,
+    compute_config_to_dict,
+    normalize_compute_contract,
+    normalize_compute_precision,
+)
 from .module import (
     CompositeExecutionMode,
     CompositePrecisionBranchSpec,
@@ -15,6 +34,8 @@ from .module import (
     PrecisionPolicy,
     TensorStorageSpec,
 )
+from .pruned import PrunedModelPayload
+from .quantized import QuantizedModel, QuantizedModelPayload
 from .runtime import (
     ExecutionPolicyPayload,
     ExportBundlePayload,
@@ -25,14 +46,19 @@ from .runtime import (
 )
 
 __all__ = [
+    "COMPUTE_CONFIG_SCHEMA_VERSION",
+    "ChannelAxis",
+    "ChannelHybridSpec",
+    "ComputeConfig",
     "CompositeExecutionMode",
     "CompositePrecisionBranchSpec",
     "CompositePrecisionGemmSpec",
     "CompositePrecisionPartitionSpec",
-    "FeedForwardPrecisionPolicy",
     "ExecutionPolicyPayload",
     "ExportBundlePayload",
+    "FeedForwardPrecisionPolicy",
     "FusionIntent",
+    "ModuleComputeSpec",
     "ModuleContract",
     "OperatorContract",
     "OperatorKind",
@@ -43,6 +69,18 @@ __all__ = [
     "RuntimeArtifactPayload",
     "RuntimeHandlePayload",
     "RuntimePlanPayload",
+    "SUPPORTED_CHANNEL_AXES",
+    "SUPPORTED_COMPUTE_CONTRACTS",
+    "SUPPORTED_COMPUTE_PRECISIONS",
     "StageReportPayload",
+    "SupportsChannelHybrid",
+    "SupportsComputePrecision",
+    "SupportsPackedWeightDequant",
     "TensorStorageSpec",
+    "compute_config_from_mapping",
+    "compute_config_to_dict",
+    "compute_hybrid_linear",
+    "normalize_channel_axis",
+    "normalize_compute_contract",
+    "normalize_compute_precision",
 ]

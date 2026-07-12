@@ -172,6 +172,8 @@ class LoadedModelPackage:
     model_path: Path
     runtime_config_path: Path
     runtime_config: dict[str, Any]
+    compute_config_path: Path | None = None
+    compute_config: dict[str, Any] | None = None
 
     @property
     def model_format(self) -> str:
@@ -179,6 +181,7 @@ class LoadedModelPackage:
 
     @property
     def preferred_backend(self) -> str:
+        """External file runtime name (ORT/TRT/...), not operator engine."""
         runtime_name = self.runtime_config.get("runtime")
         if isinstance(runtime_name, str) and runtime_name:
             return runtime_name
@@ -243,6 +246,7 @@ def write_model_package(
     model_format: str,
     runtime_name: str,
     runtime_config: Mapping[str, Any] | None = None,
+    compute_config: Mapping[str, Any] | None = None,
     model_metadata: Mapping[str, Any] | None = None,
     io: Mapping[str, Any] | None = None,
     quantization: Mapping[str, Any] | None = None,
@@ -273,6 +277,30 @@ def write_model_package(
         encoding="utf-8",
     )
 
+    compute_payload = None
+    compute_config_path: Path | None = None
+    entrypoints: dict[str, str] = {
+        "model": packaged_model_path.relative_to(package_dir).as_posix(),
+        "runtime_config": runtime_config_path.relative_to(package_dir).as_posix(),
+    }
+    if compute_config is not None:
+        from xqt.contracts.compute import compute_config_to_dict
+
+        compute_payload = compute_config_to_dict(compute_config)
+        if compute_payload is None:
+            compute_payload = _json_mapping(compute_config, name="compute_config")
+        # Strip forbidden engine primary keys if present.
+        for forbidden in ("required_engine", "force_engine"):
+            compute_payload.pop(forbidden, None)
+        compute_config_path = runtime_dir / "compute.json"
+        compute_config_path.write_text(
+            json.dumps(compute_payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        entrypoints["compute_config"] = compute_config_path.relative_to(
+            package_dir
+        ).as_posix()
+
     manifest_model = _json_mapping(model_metadata, name="model_metadata")
     manifest_model["format"] = str(model_format)
     manifest_model["checksum"] = file_sha256(packaged_model_path)
@@ -292,12 +320,11 @@ def write_model_package(
     manifest_metadata.setdefault("created_at", utc_timestamp())
     manifest_metadata.setdefault("source_model_path", str(source_model_path))
 
+    if compute_payload is not None:
+        manifest_runtime["has_compute_config"] = True
     manifest = ModelPackageManifest(
         package_version=package_version,
-        entrypoints={
-            "model": packaged_model_path.relative_to(package_dir).as_posix(),
-            "runtime_config": runtime_config_path.relative_to(package_dir).as_posix(),
-        },
+        entrypoints=entrypoints,
         model=manifest_model,
         runtime=manifest_runtime,
         io=_json_mapping(io, name="io"),
@@ -334,6 +361,27 @@ def load_model_package(path: str | Path) -> LoadedModelPackage:
         runtime_config_path,
         name="runtime config",
     )
+    compute_config_path: Path | None = None
+    compute_config: dict[str, Any] | None = None
+    raw_compute_entry = manifest.entrypoints.get("compute_config")
+    if isinstance(raw_compute_entry, str) and raw_compute_entry:
+        compute_config_path = _resolve_package_file(
+            package_dir,
+            raw_compute_entry,
+            name="entrypoints.compute_config",
+        )
+        compute_config = _load_json_mapping(
+            compute_config_path,
+            name="compute config",
+        )
+    else:
+        candidate = package_dir / "runtime" / "compute.json"
+        if candidate.is_file():
+            compute_config_path = candidate.resolve()
+            compute_config = _load_json_mapping(
+                compute_config_path,
+                name="compute config",
+            )
     return LoadedModelPackage(
         package_dir=package_dir,
         manifest_path=manifest_path.resolve(),
@@ -341,6 +389,8 @@ def load_model_package(path: str | Path) -> LoadedModelPackage:
         model_path=model_path,
         runtime_config_path=runtime_config_path,
         runtime_config=runtime_config,
+        compute_config_path=compute_config_path,
+        compute_config=compute_config,
     )
 
 

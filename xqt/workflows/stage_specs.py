@@ -8,12 +8,12 @@ from typing import Any, Dict, List, Mapping, Optional, TypeAlias, cast
 from omegaconf import MISSING, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 
+from xqt.contracts.module import CompositePrecisionGemmSpec
 from xqt.core.errors import XQTConfigError
 from xqt.core.schema import (
     AnalysisExportConfig,
     AnalysisRecommendationConfig,
     AnalysisStructuredConfig,
-    CompositePrecisionGemmSpec,
     ExportTargetConfig,
     MNNExportConfig,
     NCNNExportConfig,
@@ -124,7 +124,7 @@ class QuantStageSpec:
     method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
-    composite_gemm: CompositePrecisionGemmSpec | None = None
+    composite_gemm: Any | None = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)

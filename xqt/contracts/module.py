@@ -121,24 +121,25 @@ def _canonical_precision_role(name: str) -> str:
 class CompositePrecisionPartitionSpec:
     """Static K-group partition used by composite-precision GEMM."""
 
-    group_axis: Literal["k"] = "k"
+    group_axis: str = "k"
     group_size: int = 128
     group_count: int = 1
     selected_groups: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "group_size", int(self.group_size))
+        object.__setattr__(self, "group_count", int(self.group_count))
         group_axis = str(self.group_axis).strip().lower()
         if group_axis != "k":
             raise XQTBackendError(
                 f"CompositePrecisionPartitionSpec.group_axis must be 'k', got {self.group_axis}"
             )
         object.__setattr__(self, "group_axis", "k")
-        if not isinstance(self.selected_groups, tuple):
-            object.__setattr__(
-                self,
-                "selected_groups",
-                tuple(int(item) for item in self.selected_groups),
-            )
+        object.__setattr__(
+            self,
+            "selected_groups",
+            tuple(int(item) for item in self.selected_groups),
+        )
         if self.group_size <= 0:
             raise XQTBackendError("CompositePrecisionPartitionSpec.group_size must be positive")
         if self.group_count <= 0:
@@ -257,21 +258,20 @@ class CompositePrecisionGemmSpec:
     partition: CompositePrecisionPartitionSpec
     selected_branch: CompositePrecisionBranchSpec
     residual_branch: CompositePrecisionBranchSpec
-    preferred_mode: CompositeExecutionMode = "split"
-    allowed_modes: tuple[CompositeExecutionMode, ...] = ("split", "reference")
+    preferred_mode: str = "split"
+    allowed_modes: tuple[str, ...] = ("split", "reference")
     accumulation_dtype: str = "fp32"
-    fallback: Literal["reject"] = "reject"
+    fallback: str = "reject"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.allowed_modes, tuple):
-            object.__setattr__(
-                self,
-                "allowed_modes",
-                tuple(
-                    _canonical_composite_execution_mode(str(item))
-                    for item in self.allowed_modes
-                ),
-            )
+        object.__setattr__(
+            self,
+            "allowed_modes",
+            tuple(
+                _canonical_composite_execution_mode(str(item))
+                for item in self.allowed_modes
+            ),
+        )
         preferred_mode = _canonical_composite_execution_mode(str(self.preferred_mode))
         object.__setattr__(self, "preferred_mode", preferred_mode)
         if not self.allowed_modes:

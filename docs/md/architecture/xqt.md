@@ -50,23 +50,24 @@ PyTorch model / checkpoint / exported artifact
 - 不做 task-level validation 或 accuracy / mAP 评测闭环.
 - 不重新实现 TensorRT, OpenVINO, ONNX Runtime, ExecuTorch, ncnn, MNN 等后端.
 
-## Backend / Engine 术语
+## Backend / Engine / Method 术语
 
-XQT 文档和代码必须区分 `backend` 和 `engine`.
+XQT 文档和代码必须分词. **完整硬规则** 见 [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md).
 
-`backend` 表示外部 quant/export/runtime 选择:
+| 词 | 含义 | 示例 |
+| --- | --- | --- |
+| quant `backend` | 量化适配路径 | `pytorch`, `torchao`, `onnxruntime_qdq` |
+| quant `method` | 量化算法 | `awq`, `gptq`, `svd` |
+| operator `engine` | 内部 kernel / lowering | `tilelang`, `triton`, `cutlass` |
+| export/deploy `backend` | 外部 runtime | TensorRT, ONNX Runtime, OpenVINO |
 
-- `quant.params.backend`, 如 `torchao`, `pytorch`, `onnxruntime_qdq`
-- `hardware.backends`
-- TensorRT / ONNX Runtime / OpenVINO / ExecuTorch / ncnn / MNN 等导出或部署 runtime
+禁止: `quant.params.backend=tilelang` 或 `=svdquant`; 禁止把 awq/gptq/svd 写成 engine methods.
 
-`engine` 表示 XQT 自己的 kernel/lowering 实现选择和 report 字段:
+`engine` 字段落点:
 
-- `xqt.convert(..., engine=...)`
-- `operator_optimization.default_engine`
-- `operator_optimization.targets[*].engine`
-- `OptimizationCapability.engine`
-- `StageReport.engine`
+- `xqt.convert(..., engine=...)` (materialize preference)
+- `operator_optimization.default_engine` / `targets[*].engine`
+- `OptimizationCapability.engine`, `StageReport.engine`
 
 用户入口不应把 `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 理解成和 TensorRT / ONNX Runtime 并列的外部后端. 对推理优化来说, 对外主体是 `xqt`; engine 只是 XQT lowering contract 的实现选择.
 
@@ -184,7 +185,7 @@ session 内比较使用 `XQTOptimizationSession.compare_stages()` 或 `compare_t
 ## 继续阅读
 
 - [../explanation/xqt-concepts.md](../explanation/xqt-concepts.md)
+- [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md)
 - [../usage/xqt-workflows.md](../usage/xqt-workflows.md)
-- [xqt-config-unification-todo.md](xqt-config-unification-todo.md)
 - [xqt-realignment-guide.md](xqt-realignment-guide.md)
 - [../XQT.md](../XQT.md)

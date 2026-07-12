@@ -109,6 +109,19 @@ def execute_quantization_plan(
         if component.analysis_only:
             reports.append(_analysis_only_report(component))
             continue
+        if component.backend == "tilelang":
+            raise ValueError(
+                f"Quantization component '{component.name}' uses backend 'tilelang', "
+                "but tilelang is an operator engine, not a quant backend. "
+                "Use backend='pytorch' with method/strategy for quant, then "
+                "operator stage engine='tilelang' for kernel materialize."
+            )
+        if component.backend == "svdquant":
+            raise ValueError(
+                f"Quantization component '{component.name}' uses backend 'svdquant', "
+                "but svdquant is a quant method, not a quant backend. "
+                "Use backend='pytorch' with method='svd' and strategy='svd_fp4'/'svd_int4'."
+            )
         if _component_requires_model(component) and current_model is None:
             raise ValueError(
                 f"PyTorch model is required for quantization component "
@@ -124,7 +137,7 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if (
-            component.backend in {"pytorch", "tilelang"}
+            component.backend == "pytorch"
             and component.strategy == "fp4_weight_only"
         ):
             current_model, report = execute_fp4_weight_only_component(
@@ -136,7 +149,7 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if (
-            component.backend in {"pytorch", "tilelang"}
+            component.backend == "pytorch"
             and component.method in {"awq", "gptq"}
             and component.strategy in {"weight_only_int4", "weight_only_int8"}
         ):
@@ -172,7 +185,7 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if (
-            component.backend in {"pytorch", "tilelang"}
+            component.backend == "pytorch"
             and component.strategy == "w4_storage_int8_mma"
         ):
             current_model, report = execute_w4_storage_int8_mma_component(
@@ -184,7 +197,7 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if (
-            component.backend in {"pytorch", "tilelang"}
+            component.backend == "pytorch"
             and component.strategy == "convrot_w4a4"
         ):
             current_model, report = execute_convrot_4bit_component(
@@ -195,9 +208,9 @@ def execute_quantization_plan(
             )
             reports.append(report)
             continue
-        if component.backend == "svdquant" or (
-            component.backend == "pytorch"
-            and component.strategy in {"svd_fp4", "svd_int4"}
+        if component.backend == "pytorch" and (
+            component.strategy in {"svd_fp4", "svd_int4"}
+            or (component.method or "").lower() in {"svd", "svdquant", "svd_fp4", "svd_int4"}
         ):
             current_model, report = execute_svdquant_component(
                 context,
@@ -219,7 +232,7 @@ def execute_quantization_plan(
             artifacts.update(component_artifacts)
             reports.append(report)
             continue
-        if component.backend in {"pytorch", "tilelang"} and component.method in {"awq", "gptq"}:
+        if component.backend == "pytorch" and component.method in {"awq", "gptq"}:
             current_model, report, component_artifacts = execute_planned_method_component(
                 current_model,
                 component,

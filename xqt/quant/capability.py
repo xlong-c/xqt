@@ -1,4 +1,10 @@
-"""Backend capability matrix for XQT quantization."""
+"""Quant backend capability matrix for XQT quantization.
+
+AWQ / GPTQ / SVD (SVDQuant) are quant *methods*, not operator engines.
+``tilelang`` is an operator engine only. ``svdquant`` is not a quant backend
+name either — use ``backend='pytorch'`` with ``method='svd'`` / strategies
+``svd_fp4`` / ``svd_int4``.
+"""
 
 from __future__ import annotations
 
@@ -234,44 +240,39 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         maturity="reference_guarded",
         runtime="pytorch",
         artifact_kind="pytorch_model",
-        methods=("awq", "dynamic_int8_mma", "gptq", "tilelang_int8_mma", "w4_storage_int8_mma"),
+        methods=(
+            "awq",
+            "gptq",
+            "svd",
+            "svdquant",
+            "svd_fp4",
+            "svd_int4",
+            "dynamic_int8_mma",
+            "tilelang_int8_mma",
+            "w4_storage_int8_mma",
+            "fp4_weight_only",
+            "weight_only_int4",
+            "weight_only_int8",
+            "mxfp_weight_only",
+            "convrot_w4a4",
+        ),
         model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
         preferred_devices=("cuda", "cpu"),
         requires_calibration=True,
         notes=(
-            "PyTorch backend can host method-driven weight-only quantization paths.",
+            "PyTorch quant backend hosts algorithm methods (awq/gptq/svd) and storage/compute strategies.",
+            "awq/gptq/svd are quant methods, not operator engines; TileLang is only an operator engine.",
             "dynamic_int8_mma uses W8A8 int8 inputs with int32 MMA accumulation.",
             "w4_storage_int8_mma keeps packed W4 weights and retargets compute to INT8 MMA.",
+            "Packed FP4 modules may expose operator bridge hooks for later TileLang dequant GEMM materialize.",
         ),
         limitations=(
             "Executable AWQ/GPTQ coverage currently targets FP4, INT4, and INT8 weight-only Linear replacement.",
             "Methods need representative calibration inputs to report algorithm-level execution.",
             "w4_storage_int8_mma is compute retarget, not bit-exact native FP4 MMA.",
-        ),
-    ),
-    "tilelang": QuantBackendCapability(
-        backend="tilelang",
-        status="available",
-        maturity="reference_guarded",
-        runtime="pytorch",
-        artifact_kind="pytorch_model",
-        methods=("awq", "gptq"),
-        model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
-        primary_module_types=("Linear",),
-        default_high_precision=_DEFAULT_HIGH_PRECISION,
-        preferred_devices=("cuda", "cpu"),
-        requires_calibration=True,
-        requires_cuda=False,
-        notes=(
-            "TileLang quant backend emits XQT FP4, INT4, and INT8 weight-only Linear modules with TileLang bridge protocols.",
-            "Weight-only module rewrite can run on CPU; TileLang runtime kernels still require CUDA-capable hardware.",
-            "Operator execution can consume the packed FP4 bridge through TileLang dequant GEMM targets.",
-        ),
-        limitations=(
-            "Current backend still stores low-bit weights and dequantizes before half GEMM when TileLang packed low-bit kernels are unavailable.",
-            "Methods need representative calibration inputs to report algorithm-level execution.",
+            "Do not set quant.params.backend=tilelang; use backend=pytorch and operator stage engine=tilelang.",
         ),
     ),
     "bitsandbytes": QuantBackendCapability(
@@ -288,39 +289,8 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         notes=("Planned HF runtime quantization path for 8-bit and 4-bit model loading.",),
         limitations=("Not wired into XQT execution yet.",),
     ),
-    "svdquant": QuantBackendCapability(
-        backend="svdquant",
-        status="available",
-        maturity="reference_guarded",
-        runtime="pytorch",
-        artifact_kind="pytorch_model",
-        methods=("svd_fp4", "svd_int4"),
-        model_families=(
-            "linear_heavy",
-            "transformer",
-            "vision_transformer",
-            "diffusion_transformer",
-            "moe",
-            "llm",
-            "vlm",
-        ),
-        primary_module_types=("Linear",),
-        default_high_precision=_DEFAULT_HIGH_PRECISION,
-        preferred_devices=("cuda", "cpu"),
-        requires_cuda=False,
-        notes=(
-            "SVDQuant decomposes Linear weights via SVD into a low-rank FP16 branch "
-            "and a quantized residual (INT4/FP4).",
-            "Phase 1 (current): reference dequant+GEMM path. "
-            "Phase 2-3: CuTe DSL W4A4 MMA + kernel fusion for TRUE compute speedup.",
-        ),
-        limitations=(
-            "Phase 1 is PSEUDO quantization (storage compression only, dequant to "
-            "fp16 before MMA). TRUE INT4 MMA + SVDQuant fusion kernels pending Phase 2-3.",
-            "SVD decomposition cost is O(out × in × r) per layer — batch offline, not per-inference.",
-        ),
-    ),
 }
+
 
 
 def _strategy_requires_cuda(
@@ -347,7 +317,23 @@ def describe_quant_backend_capability(
         base = _BASE_CAPABILITIES[backend]
     except KeyError as exc:
         allowed = ", ".join(sorted(_BASE_CAPABILITIES))
-        raise ValueError(f"Unsupported quantization backend: {backend}. Known: {allowed}") from exc
+        hint = ""
+        backend_key = str(backend).strip().lower()
+        if backend_key == "tilelang":
+            hint = (
+                " tilelang is an operator engine, not a quant backend; "
+                "use backend='pytorch' with method='awq'/'gptq' (or storage strategy), "
+                "then operator stage engine='tilelang'."
+            )
+        elif backend_key == "svdquant":
+            hint = (
+                " svdquant is a quant method, not a quant backend; "
+                "use backend='pytorch' with method='svd' (or method='svdquant') "
+                "and strategy='svd_fp4'/'svd_int4'."
+            )
+        raise ValueError(
+            f"Unsupported quantization backend: {backend}. Known: {allowed}.{hint}"
+        ) from exc
 
     selected_method = method or (str(policy.get("method")) if policy and policy.get("method") else None)
     if selected_method is not None:
@@ -369,16 +355,38 @@ def describe_quant_backend_capability(
         notes.append(f"Configured quantization method: {selected_method}.")
     if backend == "pytorch" and selected_method in {"awq", "gptq"}:
         normalized_strategy = normalize_quant_strategy(strategy, policy)
-        if normalized_strategy in {"weight_only_int4", "weight_only_int8", "dynamic_int8_mma", "int8_mma", "tilelang_int8_mma", "w4_storage_int8_mma"}:
+        if normalized_strategy in {
+            "weight_only_int4",
+            "weight_only_int8",
+            "fp4_weight_only",
+            "dynamic_int8_mma",
+            "int8_mma",
+            "tilelang_int8_mma",
+            "w4_storage_int8_mma",
+        }:
             maturity = "executable"
+    if backend == "pytorch" and selected_method in {"svd", "svdquant", "svd_fp4", "svd_int4"}:
+        maturity = "reference_guarded"
+        notes.append(
+            "SVDQuant is a quant method on the pytorch backend "
+            "(low-rank FP16 branch + quantized residual; Phase 1 reference path)."
+        )
     if backend == "pytorch":
         normalized_strategy = normalize_quant_strategy(strategy, policy)
-        if normalized_strategy in {"dynamic_int8_mma", "int8_mma", "tilelang_int8_mma", "w4_storage_int8_mma"}:
+        if normalized_strategy in {
+            "dynamic_int8_mma",
+            "int8_mma",
+            "tilelang_int8_mma",
+            "w4_storage_int8_mma",
+            "fp4_weight_only",
+            "weight_only_int4",
+            "weight_only_int8",
+            "mxfp_weight_only",
+            "convrot_w4a4",
+        }:
             maturity = "executable"
-    if backend == "tilelang" and selected_method in {"awq", "gptq"}:
-        normalized_strategy = normalize_quant_strategy(strategy, policy)
-        if normalized_strategy in {"weight_only_int4", "weight_only_int8"}:
-            maturity = "executable"
+        if normalized_strategy in {"svd_fp4", "svd_int4"}:
+            maturity = "reference_guarded"
     if resolved_nature == QuantizationNature.PSEUDO:
         notes.append(
             "PSEUDO quantization: storage compression only. "

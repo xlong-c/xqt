@@ -2,55 +2,36 @@
 
 Policy application only mutates runtime precision selectors on already
 quantized modules. Quantization algorithms live under ``xqt.quant``.
+
+Types, constants, and normalizers are imported from ``xqt.contracts``.
 """
 
 from __future__ import annotations
 
 import copy
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Sequence
 
 from torch import nn
 
-from xqt.contracts import ExecutionPolicyPayload
+from xqt.contracts import (
+    SUPPORTED_COMPUTE_PRECISIONS,
+    ExecutionPolicyPayload,
+    SupportsComputePrecision,
+    normalize_compute_precision,
+)
 
 from .channel import apply_channel_hybrid_policy
 
-SUPPORTED_COMPUTE_PRECISIONS: frozenset[str] = frozenset(
-    {"w4a4", "w4a16", "w8a8", "bf16"}
-)
-
-
-@runtime_checkable
-class SupportsComputePrecision(Protocol):
-    """Minimal runtime contract for mixed-precision quantized modules."""
-
-    compute_precision: str
-
-    def set_compute_precision(self, precision: str) -> None:
-        """Switch runtime compute precision in place."""
-
-
-def normalize_compute_precision(precision: str) -> str:
-    """Canonicalize one compute-precision name."""
-
-    normalized = str(precision).strip().lower()
-    aliases = {
-        "fp16": "bf16",
-        "float16": "bf16",
-        "bfloat16": "bf16",
-        "int4": "w4a4",
-        "w4": "w4a16",
-        "weight_only_4bit": "w4a16",
-        "int8": "w8a8",
-        "w8": "w8a8",
-    }
-    resolved = aliases.get(normalized, normalized)
-    if resolved not in SUPPORTED_COMPUTE_PRECISIONS:
-        allowed = ", ".join(sorted(SUPPORTED_COMPUTE_PRECISIONS))
-        raise ValueError(
-            f"compute_precision must be one of {allowed}; got {precision!r}"
-        )
-    return resolved
+__all__ = [
+    "SUPPORTED_COMPUTE_PRECISIONS",
+    "SupportsComputePrecision",
+    "apply_execution_policy",
+    "build_execution_policy_payload",
+    "collect_module_precision_map",
+    "normalize_compute_precision",
+    "precision_overrides_to_map",
+    "set_module_compute_precision",
+]
 
 
 def precision_overrides_to_map(
@@ -87,6 +68,9 @@ def build_execution_policy_payload(
     policy_kind: str = "mixed_precision",
     runtime: str = "pytorch",
     precision_overrides: Sequence[Mapping[str, Any]] | None = None,
+    required_capabilities: Sequence[str] | None = None,
+    preferred_engines: Sequence[str] | None = None,
+    compute_config: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
     module_count: int | None = None,
 ) -> ExecutionPolicyPayload:
@@ -98,6 +82,23 @@ def build_execution_policy_payload(
         if module_count is not None
         else len({str(item.get("module")) for item in overrides if "module" in item})
     )
+    caps = [str(item) for item in (required_capabilities or []) if str(item)]
+    preferred = [
+        str(item).strip().lower()
+        for item in (preferred_engines or [])
+        if str(item).strip()
+    ]
+    config_dict = dict(compute_config) if isinstance(compute_config, Mapping) else None
+    if config_dict is not None and not caps:
+        raw_modules = config_dict.get("modules", [])
+        if isinstance(raw_modules, list):
+            for module in raw_modules:
+                if not isinstance(module, Mapping):
+                    continue
+                for cap in module.get("required_capabilities", []) or []:
+                    name = str(cap)
+                    if name and name not in caps:
+                        caps.append(name)
     return ExecutionPolicyPayload(
         stage_name=stage_name,
         source_model_stage=source_model_stage,
@@ -105,6 +106,9 @@ def build_execution_policy_payload(
         runtime=str(runtime),
         module_count=resolved_count,
         precision_overrides=overrides,
+        required_capabilities=caps,
+        preferred_engines=preferred,
+        compute_config=config_dict,
         metadata=dict(metadata or {}),
     )
 

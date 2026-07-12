@@ -57,13 +57,18 @@ XQT 的 operator engine adapter 在 `xqt/operator_opt/backends/` 中声明. 目�
 
 ## 阅读建议
 
-如果你在写导出后端, 先读:
+先看代码对齐的总矩阵:
+
+1. [../xqt-engines.md](../xqt-engines.md): engine / quant strategy / pattern / maturity
+2. [../xqt-inference.md](../xqt-inference.md): hybrid 推理, 模型包, export/deploy runtime
+
+如果你在写导出后端, 再读:
 
 1. [onnx.md](onnx.md)
 2. [onnx-runtime.md](onnx-runtime.md)
 3. 目标后端文档, 例如 [tensorrt.md](tensorrt.md) 或 [openvino.md](openvino.md)
 
-如果你在写 operator engine, 先读:
+如果你在写 operator engine, 再读:
 
 1. [triton.md](triton.md)
 2. [tilelang.md](tilelang.md)

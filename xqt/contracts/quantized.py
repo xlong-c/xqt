@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from xqt.contracts.module import coerce_composite_precision_gemm_spec
-from xqt.quant.types import build_composite_quantization_artifact
 
+from .compute import ComputeConfig, compute_config_from_mapping, compute_config_to_dict
 from .runtime import _json_safe_contract_value
 
 
@@ -55,20 +55,59 @@ def _resolve_composite_quant_artifacts(
     spec = coerce_composite_precision_gemm_spec(raw_policy.get("composite_gemm"))
     if spec is None:
         return []
-    artifact = build_composite_quantization_artifact(
-        spec,
-        component_name=_component_name_from_metrics(
-            metrics,
-            fallback=fallback_component_name,
-        ),
-        backend=backend,
+    component_name = _component_name_from_metrics(
+        metrics,
+        fallback=fallback_component_name,
     )
-    return [artifact.to_dict()]
+    runtime_plan = spec.resolve_runtime_plan(backend=backend)
+    branches = []
+    for branch in (spec.selected_branch, spec.residual_branch):
+        branches.append(
+            {
+                "name": branch.name,
+                "format": branch.format,
+                "weight_format": branch.weight_format or branch.format,
+                "scale_format": branch.scale_format,
+                "weight_artifact": f"{component_name}:{branch.name}:weight",
+                "scale_artifact": (
+                    f"{component_name}:{branch.name}:scale"
+                    if branch.scale_format is not None
+                    else None
+                ),
+            }
+        )
+    return [
+        {
+            "component_name": component_name,
+            "backend": backend,
+            "composite_precision": True,
+            "requested_mode": str(runtime_plan["requested_mode"]),
+            "actual_mode": str(runtime_plan["actual_mode"]),
+            "partition_group_count": int(runtime_plan["partition_group_count"]),
+            "residual_group_count": int(runtime_plan["residual_group_count"]),
+            "partition_map": [
+                dict(item) for item in runtime_plan.get("partition_map", []) or []
+            ],
+            "branch_formats": {
+                str(key): str(value)
+                for key, value in dict(runtime_plan.get("branch_formats", {})).items()
+            },
+            "accumulation_dtype": runtime_plan.get("accumulation_dtype"),
+            "kernel_count": runtime_plan.get("kernel_count"),
+            "workspace_bytes": runtime_plan.get("workspace_bytes"),
+            "fallback_reason": runtime_plan.get("fallback_reason"),
+            "branches": branches,
+        }
+    ]
 
 
 @dataclass(kw_only=True)
 class QuantizedModel:
-    """Backend-neutral semantic result of a model-side quantization algorithm."""
+    """Semantic result of a model-side quantization algorithm.
+
+    Infer handoff uses ``model`` + optional ``compute_config`` only.
+    ``backend`` / ``method`` / ``strategy`` remain for quant lineage / reports.
+    """
 
     model: Any
     backend: str = "unknown"
@@ -76,6 +115,28 @@ class QuantizedModel:
     strategy: str | None = None
     quantized_modules: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    compute_config: ComputeConfig | dict[str, Any] | None = None
+
+    def resolve_compute_config(self) -> ComputeConfig | None:
+        """Return typed compute_config if present."""
+        if self.compute_config is None:
+            raw = self.metadata.get("compute_config")
+            if isinstance(raw, Mapping):
+                return compute_config_from_mapping(raw)
+            return None
+        if isinstance(self.compute_config, ComputeConfig):
+            return self.compute_config
+        if isinstance(self.compute_config, Mapping):
+            return compute_config_from_mapping(self.compute_config)
+        return None
+
+    def infer_handoff(self) -> dict[str, Any]:
+        """Infer-facing view: model + compute_config only (no method identity)."""
+        config = self.resolve_compute_config()
+        return {
+            "model": self.model,
+            "compute_config": None if config is None else config.to_dict(),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe summary without serializing the model object."""
@@ -85,7 +146,7 @@ class QuantizedModel:
             model_type = None
         else:
             model_type = f"{type(self.model).__module__}.{type(self.model).__qualname__}"
-        return {
+        payload = {
             "model_type": model_type,
             "backend": self.backend,
             "method": self.method,
@@ -94,6 +155,10 @@ class QuantizedModel:
             "quantized_modules": list(self.quantized_modules),
             "metadata": _json_safe_contract_value(self.metadata),
         }
+        config_dict = compute_config_to_dict(self.resolve_compute_config())
+        if config_dict is not None:
+            payload["compute_config"] = config_dict
+        return payload
 
 
 @dataclass(kw_only=True)
@@ -111,6 +176,7 @@ class QuantizedModelPayload(QuantizedModel):
     execution_policies: list[dict[str, Any]] = field(default_factory=list)
     composite_quant_artifacts: list[dict[str, Any]] = field(default_factory=list)
     module_contract: dict[str, Any] | None = None
+    # compute_config inherited from QuantizedModel when set on instance
     artifact_kind: str = field(default="quantized_model", init=False)
 
     @classmethod
@@ -141,6 +207,12 @@ class QuantizedModelPayload(QuantizedModel):
             execution_policies = []
         resolved_contract = _resolve_module_contract(model, module_contract)
         backend = str(metrics.get("backend") or stage_params.get("backend") or "unknown")
+        raw_compute = metrics.get("compute_config")
+        if raw_compute is None:
+            raw_compute = stage_params.get("compute_config")
+        compute_config = compute_config_from_mapping(
+            raw_compute if isinstance(raw_compute, Mapping) else None
+        )
         return cls(
             stage_name=stage_name,
             source_model_stage=source_model_stage,
@@ -151,6 +223,7 @@ class QuantizedModelPayload(QuantizedModel):
                 metrics.get("strategy") or stage_params.get("strategy") or "unknown"
             ),
             quantized_modules=[str(item) for item in quantized_modules],
+            compute_config=compute_config,
             calibration_samples=(
                 calibration_samples if isinstance(calibration_samples, int) else None
             ),
@@ -203,6 +276,9 @@ class QuantizedModelPayload(QuantizedModel):
             )
         if self.module_contract is not None:
             payload["module_contract"] = _json_safe_contract_value(self.module_contract)
+        config_dict = compute_config_to_dict(self.resolve_compute_config())
+        if config_dict is not None:
+            payload["compute_config"] = config_dict
         return payload
 
 

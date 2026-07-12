@@ -13,14 +13,15 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 | `load_optimization_config()` | `OptimizationConfig` 加载器. |
 | `XQTOptimizationSession` | 交互式 stage 编排入口. |
 | `SessionStage` / `StagePayload` | session 内部 stage 图和阶段产物协议. |
-| `QuantizedModel` / `QuantizedModelPayload` | `QuantizedModel` 是模型侧量化算法的通用语义结果; `QuantizedModelPayload` 只追加 quant stage 的 lineage, artifacts 和 capability. workflow stage 仅重导出 payload. |
+| `QuantizedModel` / `QuantizedModelPayload` | `QuantizedModel` 是模型侧量化算法的通用语义结果; Infer 交接面是 `model` + 可选 `compute_config` (`infer_handoff()`). `backend`/`method`/`strategy` 仅 quant lineage. `QuantizedModelPayload` 追加 stage lineage, artifacts 和 capability. |
+| `ComputeConfig` / `ModuleComputeSpec` | 可选计算配置: `compute_contract`, `precision`, `required_capabilities`, `preferred_engines` (hint). 禁止 `required_engine` 主键. 见 `docs/md/architecture/xqt-infer-handoff.md`. |
 | `PrunedModelPayload` | `xqt.contracts` 定义的 prune stage typed payload, 记录模型,sparsity report,lineage,artifacts 和 runtime capability. |
 | `RuntimePlanPayload` | operator stage 的 runtime plan typed payload. |
 | `ExportBundlePayload` | export stage, 或未 materialize runtime handle 的 deploy stage 的 export bundle typed payload. |
 | `RuntimeHandlePayload` | executable runtime handle typed payload; materialized deploy stage 使用该 payload, 可生产 ONNX Runtime `InferenceSession` 或非 dry-run TensorRT runtime session. |
 | `StageComparison` | session 内 stage-to-stage 结构化比较结果. |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪. |
-| `ModelPackageManifest` / `load_model_package()` | 推理侧文件加载标准, 当前最小闭环为 `manifest.json + runtime/config.json`. |
+| `ModelPackageManifest` / `load_model_package()` | 推理侧文件加载标准, 当前最小闭环为 `manifest.json + runtime/config.json`; 可选 `runtime/compute.json` (compute_config). |
 | `MetricRecord` | 结构化指标记录. |
 | `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 engine,status,maturity,runtime,artifact_kind 和硬件/校准/导出要求. |
 | `XQTReadinessReport` / `assess_xqt_readiness()` | readiness 汇总入口,输出场景状态,capability matrix 和 reporting schema. |
@@ -29,14 +30,18 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 
 ## Backend / Engine 术语
 
+完整规则: `docs/md/architecture/xqt-engine-quant-boundary.md` (method / storage / compute / engine 分词与禁止清单).
+
 XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQTOptimizationSession`, `xqt.convert(...)`, `xqt.nn.*` facade 和 `xqt.runtime` hybrid inference engine.
 
-- `xqt.quant` 只负责量化算法与 artifact (packed weight, scale, rotation, execution policy metadata, channel hybrid mask).
-- `xqt.runtime.HybridInferenceEngine` 只消费已量化模型与 execution policy, 做模块级 / 通道级混合精度推理调度; 不跑 quantizer / calibration / sensitivity.
+- `xqt.quant` 只负责量化算法与 artifact (packed weight, scale, rotation, execution policy / compute_config metadata, channel hybrid mask). 不把 operator engine 名写成推理必选主键.
+- `xqt.runtime.HybridInferenceEngine` 只消费已量化模型与 execution policy / compute_config, 做模块级 / 通道级混合精度推理调度; 不跑 quantizer / calibration / sensitivity.
+- `xqt.runtime.engine_resolve` 按 `required_capabilities` (+ 可选 preferred_engines hint) 解析 operator engine; 不是 quant method 选择.
+- Operator engine 只管算子实现 / 融合 / MMA lowering. AWQ / GPTQ / SVD 是 quant **method**, 不是 engine methods.
 - `ArtifactManifest` 只用于 workflow / experiment 追踪, 不是 file-based inference 的加载契约. 推理侧标准入口是 `xqt.runtime` 下的模型包 `manifest.json`.
 - 通道级混合精度: 部分 channel 走 16-bit (或更高), 其余走 4-bit. Quant 侧选 outlier channel 并写入 mask; Runtime 侧 dual-path reference 前向 (`channel_hybrid_linear_reference`), 后续可替换为真实 kernel.
 
-- `backend`: 外部 quant/export/runtime 选择, 例如 `torchao`, `pytorch`, `onnxruntime_qdq`, `tensorrt`, `openvino`. Quant recipe 继续使用 `quant.params.backend`.
+- `backend`: 外部 quant/export/runtime 选择, 例如 `torchao`, `pytorch`, `onnxruntime_qdq`, `tensorrt`, `openvino`. Quant recipe 继续使用 `quant.params.backend`. **`tilelang` / `svdquant` 不是 quant backend**; AWQ/GPTQ/SVD 写 `backend=pytorch` + `method=awq|gptq|svd`.
 - `engine`: XQT 内部实现选择和公开 report 字段, 例如 `triton`, `tilelang`, `cutlass`, `cute_dsl`, `cutile`, `custom_cuda`, `torch_compile`. `xqt.convert(...)`, 单算子 dispatcher, `OptimizationCapability`, `StageReport`, `operator_optimization.default_engine` 和 `targets[*].engine` 统一使用这个字段.
 - 不要把 operator engine 写成 quant/export backend alias. 旧 operator 调用点要迁移到 `engine`, 但 quant/backend 语义不能硬改名.
 - `maturity`: capability 的实现成熟度分层, 当前统一为 `executable`, `reference_guarded`, `metadata_only`, `planned`. `status` 继续表达接口/适配可用性, 不与 maturity 混用.

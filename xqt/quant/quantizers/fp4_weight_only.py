@@ -865,7 +865,6 @@ def execute_fp4_weight_only_component(
             **dict(result.metadata),
             "algorithm_executable": algorithm_executable,
             "method_semantics": method_semantics,
-            "tilelang_quant_backend": component.backend == "tilelang",
             "analysis_only": component.analysis_only,
             "policy": effective_policy,
             "selection_policy": selection_policy_metadata(component),

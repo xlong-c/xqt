@@ -60,9 +60,10 @@ from ..types import QuantizationComponentPlan, QuantizationReport
 
 @dataclass
 class SVDQuantResult(QuantizedModel):
-    """Result returned by the SVDQuant backend."""
+    """Result returned by the SVDQuant quant method (pytorch backend)."""
 
-    backend: str = "svdquant"
+    backend: str = "pytorch"
+    method: str | None = "svd"
     strategy: str = "svd_fp4"
     svd_analysis: Optional[SVDQuantAnalysis] = None
 
@@ -428,11 +429,14 @@ def quantize_with_svd(
 
     return SVDQuantResult(
         model=target_model,
+        backend="pytorch",
+        method="svd",
         strategy=selected_strategy,
         quantized_modules=quantized_modules,
         svd_analysis=svd_analysis,
         metadata={
             "implementation": "svdquant_reference",
+            "quant_method": "svd",
             "rank": configured_rank,
             "group_size": configured_group_size,
             "quant_dtype": configured_quant_dtype,
@@ -508,9 +512,9 @@ def execute_svdquant_component(
     method_semantics = "svdquant_reference_low_rank_plus_quantized_residual"
     report = QuantizationReport(
         component_name=component.name,
-        backend=result.backend,
+        backend="pytorch",
         runtime="pytorch",
-        method=component.method,
+        method=component.method or result.method or "svd",
         strategy=result.strategy,
         target_path=component.target_path,
         quantized_modules=quantized_modules,

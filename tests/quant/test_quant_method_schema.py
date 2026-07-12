@@ -174,27 +174,26 @@ def test_capability_rejects_method_backend_mismatch() -> None:
         describe_quant_backend_capability("onnxruntime_qdq", method="awq")
 
 
-def test_tilelang_awq_fp4_capability_reports_cpu_rewrite_and_pseudo_quant() -> None:
+def test_pytorch_awq_fp4_capability_is_quant_method_not_operator_engine() -> None:
     capability = describe_quant_backend_capability(
-        "tilelang",
+        "pytorch",
         method="awq",
         strategy="fp4_weight_only",
         policy={"dtype": "fp4"},
     )
 
     assert capability.status == "available"
-    assert capability.maturity == "reference_guarded"
-    assert capability.methods == ("awq", "gptq")
+    assert capability.backend == "pytorch"
+    assert "awq" in capability.methods
+    assert "gptq" in capability.methods
     assert capability.requires_calibration is True
-    assert capability.requires_cuda is False
-    assert capability.preferred_devices == ("cuda", "cpu")
     assert capability.nature.value == "pseudo"
-    assert any("Weight-only module rewrite can run on CPU" in note for note in capability.notes)
+    assert capability.maturity == "executable"
 
 
-def test_tilelang_gptq_int8_capability_is_executable() -> None:
+def test_pytorch_gptq_int8_capability_is_executable() -> None:
     capability = describe_quant_backend_capability(
-        "tilelang",
+        "pytorch",
         method="gptq",
         strategy="weight_only_int8",
         policy={"dtype": "int8", "bits": 8},
@@ -202,6 +201,11 @@ def test_tilelang_gptq_int8_capability_is_executable() -> None:
 
     assert capability.status == "available"
     assert capability.maturity == "executable"
+
+
+def test_tilelang_is_rejected_as_quant_backend() -> None:
+    with pytest.raises(ValueError, match="operator engine"):
+        describe_quant_backend_capability("tilelang", method="awq")
 
 
 def test_awq_and_gptq_modules_are_explicit_reexports() -> None:
@@ -224,3 +228,18 @@ def test_removed_placeholder_quantizer_modules_are_not_importable() -> None:
 
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("xqt.quant.quantizers.smoothquant")
+
+
+def test_svdquant_is_rejected_as_quant_backend() -> None:
+    with pytest.raises(ValueError, match="quant method"):
+        describe_quant_backend_capability("svdquant", method="svd_fp4")
+
+
+def test_pytorch_hosts_svd_as_quant_method() -> None:
+    capability = describe_quant_backend_capability(
+        "pytorch",
+        method="svd",
+        strategy="svd_int4",
+    )
+    assert "svd" in capability.methods
+    assert capability.backend == "pytorch"

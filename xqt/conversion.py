@@ -67,7 +67,11 @@ def convert(
     inplace: bool = False,
     return_result: bool = False,
 ) -> nn.Module | ConvertResult:
-    """Convert one module through the XQT operator engine facade.
+    """Convert one module through the XQT operator facade (contract + optional materialize).
+
+    ``engine`` is an optional materialize *preference* (DEBT-001), not a quant/infer
+    handoff primary key. When omitted, defaults to ``"torch"`` (intent / minimal path).
+    Capability-based engine selection for Infer lives in ``xqt.runtime.engine_resolve``.
 
     This public API is intentionally function-shaped. Internally it delegates to a
     stateful converter class so future recursive model conversion can share lowering
@@ -88,7 +92,7 @@ def convert(
         resolved_policy = policy or PrecisionPolicy()
         resolved_projection_policies = projection_policies
     resolved_engine = _resolve_engine_alias(
-        engine=engine,
+        engine="torch" if engine is None else engine,
         context="xqt.convert",
     )
     result = _ModuleConverter(

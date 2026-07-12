@@ -442,9 +442,9 @@ def test_gptq_fp4_report_uses_hessian_calibration_when_inputs_provided() -> None
     assert report.metadata["calibrated_module_count"] == 2
 
 
-def test_tilelang_awq_fp4_quant_backend_executes_linear_rewrite() -> None:
+def test_pytorch_awq_fp4_quant_method_executes_linear_rewrite() -> None:
     config_dict = _base_config()
-    config_dict["compression"]["quant"]["backend"] = "tilelang"
+    config_dict["compression"]["quant"]["backend"] = "pytorch"
     quant_config = _quant_config(config_dict)
     model = _TinyMLP().eval()
     calibration_inputs = [torch.randn(2, 8), torch.randn(2, 8)]
@@ -459,12 +459,21 @@ def test_tilelang_awq_fp4_quant_backend_executes_linear_rewrite() -> None:
 
     report = execution.reports[0]
     quantized_model = execution.model
-    assert report.backend == "tilelang"
+    assert report.backend == "pytorch"
+    assert report.method == "awq"
     assert report.algorithm_executable is True
-    assert report.metadata["tilelang_quant_backend"] is True
     assert isinstance(quantized_model, _TinyMLP)
     assert isinstance(quantized_model.fc1, FP4WeightOnlyLinear)
+    # Operator bridge hook remains available for later engine=tilelang materialize.
     assert callable(getattr(quantized_model.fc1, "tilelang_packed_dequant_gemm_args"))
+
+
+def test_quant_backend_tilelang_is_rejected() -> None:
+    config_dict = _base_config()
+    config_dict["compression"]["quant"]["backend"] = "tilelang"
+    quant_config = _quant_config(config_dict)
+    with pytest.raises(ValueError, match="operator engine"):
+        build_quantization_plan(quant_config)
 
 
 def test_torchao_report_includes_calibration_summary_when_inputs_provided(

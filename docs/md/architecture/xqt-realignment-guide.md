@@ -180,7 +180,7 @@ weight-only low-bit
 
 ## 文档写作规则
 
-- 架构目标写入 `docs/md/architecture/xqt-realignment-guide.md` 或 `xqt-config-unification-todo.md`.
+- 架构目标写入 `docs/md/architecture/xqt-realignment-guide.md` 或 `xqt-design-debt.md`.
 - 已实现事实写入 `docs/md/architecture/xqt.md`, `docs/md/explanation/xqt-concepts.md`, `docs/md/usage/xqt-workflows.md`, `xqt/FRAMEWORK.md`.
 - 规划和现状必须分开. 未完成项必须使用 "目标", "计划", "尚未" 等措辞.
 - 修改能力成熟度时, 同步更新 readiness, capability, tests 和文档.
@@ -192,3 +192,8 @@ weight-only low-bit
 2. 在目标 TensorRT 环境和真实部署形状上扩展 complete golden workflow 的 runtime benchmark. 非 dry-run engine, runtime handle, 数值对比和 `[8,64]` 最小 benchmark 已在 `sm_89` 上通过, 但依赖 explicit dense dequantized export lowering, 不代表 packed-FP4 TensorRT runtime. Stage report 对 live TensorRT handle 的序列化回归已修复.
 3. Contract 层: payload 已支持可选 `module_contract` (quant/prune/export/operator), `stage_provider` 会从 model `_xqt_module_contract` 自动提取. 内部 Plan/Report 执行类型仍可继续加深 contract 驱动, 但不扩张平行 schema.
 4. 持续校正 backend / engine capability 的 maturity 和宣传面; TransformerBlock 完整 block-level 单 kernel fusion 与正式性能基线 (非正确性 shape 扫) 仍待加深.
+5. 设计债统一记在 [xqt-design-debt.md](xqt-design-debt.md), 后面批量制定修改方案. 当前 open:
+   - DEBT-001: `convert` 绑推理 engine
+   - DEBT-002: quant capability 把 AWQ/GPTQ/SVD 与 MMA/engine 缠在一起 (method × storage × compute 拆轴)
+   - DEBT-003: 量化与推理严格解耦 (推理只消费 模型 + 计算配置/capability, 不强行指定 engine)
+   建议三债同一方案包处理. 未拍板前勿零散改公开 API.

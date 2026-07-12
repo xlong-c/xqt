@@ -9,6 +9,8 @@ import torch
 from xqt.contracts import PrecisionPolicy
 from xqt.core.errors import XQTBackendError
 
+from .gemm_selector import GemmShape, select_gemm_engine
+
 MatmulPrecisionSpec = PrecisionPolicy
 
 
@@ -91,7 +93,12 @@ def gemm_with_precision(
     precision_spec = _resolve_matmul_precision(precision)
     resolved_engine = _resolve_gemm_engine(engine=engine)
     if resolved_engine == "auto":
-        resolved_engine = _select_engine(precision_spec.mma, a.device)
+        resolved_engine = _select_engine(
+            precision_spec,
+            a.device,
+            shape=_gemm_shape_from_tensors(a, b, transpose_b),
+            fused_ops=_fused_ops_from_call(a, precision_spec.mma, activation),
+        )
 
     if resolved_engine == "triton":
         return _gemm_triton(a, b, bias, precision_spec, activation, transpose_b, kwargs)
@@ -105,25 +112,67 @@ def gemm_with_precision(
         raise XQTBackendError(f"Unsupported GEMM engine: {resolved_engine}")
 
 
-def _select_engine(precision: str, device: torch.device) -> str:
-    """Auto-select best XQT engine for given precision and device."""
-    if not device.type == "cuda":
-        if precision in {"fp4", "nvfp4"}:
-            return "tilelang"
-        return "torch"
+def _select_engine(
+    precision: MatmulPrecisionSpec,
+    device: torch.device,
+    *,
+    shape: GemmShape,
+    fused_ops: frozenset[str] = frozenset(),
+) -> str:
+    """Auto-select best XQT engine for given precision, device, and shape.
 
-    # Triton first: it currently has the broadest GEMM coverage.
-    if precision in {"fp16", "bf16", "int8", "fp8", "mxfp8", "mxfp6", "mxfp4"}:
-        return "triton"
+    Delegates to gemm_selector.select_gemm_engine and keeps only the chosen
+    engine name; gemm_with_precision's call site does not need the full
+    GemmEngineSelection candidate/rationale payload.
+    """
+    return select_gemm_engine(
+        precision=precision,
+        shape=shape,
+        device=device,
+        fused_ops=fused_ops,
+    ).selected_engine
 
-    # INT4 needs a dequantizing path.
-    if precision == "int4":
-        return "triton"
 
-    if precision in {"fp4", "nvfp4"}:
-        return "tilelang"
+def _gemm_shape_from_tensors(
+    a: torch.Tensor, b: torch.Tensor, transpose_b: bool
+) -> GemmShape:
+    """Derive (m, n, k) from the tensors gemm_with_precision was called with.
 
-    return "torch"
+    Mirrors the same shape-extraction convention already used inline by
+    _gemm_triton/_gemm_tilelang below: 2D a/b, transpose_b selects which of
+    b's two dimensions is n.
+    """
+    if a.dim() != 2 or b.dim() != 2:
+        raise ValueError(
+            f"gemm_with_precision expects 2D tensors, got a.shape={tuple(a.shape)}, "
+            f"b.shape={tuple(b.shape)}"
+        )
+    m, k = int(a.shape[0]), int(a.shape[1])
+    n = int(b.shape[0]) if transpose_b else int(b.shape[1])
+    return GemmShape(m=m, n=n, k=k)
+
+
+def _fused_ops_from_call(
+    a: torch.Tensor,
+    precision_mma: str,
+    activation: str | None,
+) -> frozenset[str]:
+    """Infer the fused_ops set implied by one gemm_with_precision call.
+
+    Only int8 currently has more than one input contract in this
+    dispatcher (see gemm_selector's int8 candidates): a.dtype != torch.int8
+    means the caller has not pre-quantized the activation, i.e. it needs
+    activation quantization fused into the kernel. This is read directly
+    from the real tensor dtype rather than guessed from which kwargs are
+    present, since e.g. a_scale can be supplied for a weight-only int8 call
+    where `a` is still a float tensor.
+    """
+    ops: set[str] = set()
+    if activation is not None:
+        ops.add(activation)
+    if precision_mma == "int8" and a.dtype != torch.int8:
+        ops.add("activation_quant")
+    return frozenset(ops)
 
 
 def _gemm_triton(
@@ -362,6 +411,52 @@ def _gemm_tilelang(
             weight_global_scale=weight_global_scale,
             activation=activation,
         )
+    elif precision.mma == "int8":
+        from ..kernels.tilelang.int8_mma import int8_linear_tilelang
+
+        if a.dtype != torch.int8 or b.dtype != torch.int8:
+            raise XQTBackendError(
+                "TileLang int8 GEMM expects a and b to already be torch.int8; "
+                "pre-quantize inputs before calling with engine='tilelang', or "
+                "use engine='triton' for W8A16 weight-only dequant GEMM"
+            )
+        a_scale = kwargs.get("a_scale")
+        b_scale = kwargs.get("b_scale")
+        if a_scale is None or b_scale is None:
+            raise ValueError(
+                "TileLang int8 GEMM requires a_scale (per-tensor activation, "
+                "shape (1,) or scalar tensor) and b_scale (per-channel weight, "
+                "shape [n]); use engine='triton' for reference dequant GEMM if "
+                "scales are not precomputed"
+            )
+        M, K_a = a.shape
+        if transpose_b:
+            N, K_b = b.shape
+            b_kn = b.t().contiguous()
+        else:
+            K_b, N = b.shape
+            b_kn = b.contiguous()
+        if K_a != K_b:
+            raise XQTBackendError(
+                f"int8 GEMM inner-dimension mismatch: a.shape[1]={K_a}, b K={K_b}"
+            )
+        output = int8_linear_tilelang(
+            a,
+            b_kn,
+            a_scale,
+            b_scale,
+            bias,
+            output_dtype=_precision_name_to_dtype(
+                precision.output, role="output", fallback=torch.float16
+            ),
+            block_m=int(kwargs.get("block_m", 64)),
+            block_n=int(kwargs.get("block_n", 64)),
+            block_k=int(kwargs.get("block_k", 64)),
+            threads=int(kwargs.get("threads", 128)),
+            num_stages=int(kwargs.get("num_stages", 2)),
+            target_arch=kwargs.get("target_arch"),
+        )
+        return output
     else:
         raise XQTBackendError(f"TileLang precision {precision.mma} not implemented yet")
 

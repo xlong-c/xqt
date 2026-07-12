@@ -1,15 +1,11 @@
 """Structured config schema for XQT recipes."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from xdl.metric.detection_utils import DetectionPostprocessConfig
-from xqt.contracts.module import (
-    CompositePrecisionBranchSpec,
-    CompositePrecisionGemmSpec,
-    CompositePrecisionPartitionSpec,
-    coerce_composite_precision_gemm_spec,
-)
 
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
 TASK_TYPES = ("classification", "detection")
@@ -235,7 +231,7 @@ class QuantConfig:
     method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
-    composite_gemm: CompositePrecisionGemmSpec | None = None
+    composite_gemm: Any | None = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
@@ -243,6 +239,8 @@ class QuantConfig:
     component_policies: List["QuantComponentPolicyConfig"] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        from xqt.contracts.module import coerce_composite_precision_gemm_spec
+
         self.composite_gemm = coerce_composite_precision_gemm_spec(self.composite_gemm)
 
 
@@ -257,13 +255,15 @@ class QuantComponentPolicyConfig:
     method: Optional[str] = None
     strategy: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
-    composite_gemm: CompositePrecisionGemmSpec | None = None
+    composite_gemm: Any | None = None
     keep_high_precision: List[str] = field(default_factory=list)
     skip_quantize: List[str] = field(default_factory=list)
     force_quantize: List[str] = field(default_factory=list)
     analysis_only: bool = False
 
     def __post_init__(self) -> None:
+        from xqt.contracts.module import coerce_composite_precision_gemm_spec
+
         self.composite_gemm = coerce_composite_precision_gemm_spec(self.composite_gemm)
 
 
@@ -631,9 +631,6 @@ __all__ = [
     "AnalysisStructuredConfig",
     "BenchmarkConfig",
     "ComponentConfig",
-    "CompositePrecisionBranchSpec",
-    "CompositePrecisionGemmSpec",
-    "CompositePrecisionPartitionSpec",
     "CuTileKernelConfig",
     "CutlassKernelConfig",
     "CuteDSLKernelConfig",

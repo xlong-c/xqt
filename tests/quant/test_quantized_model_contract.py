@@ -129,5 +129,61 @@ def test_execution_policy_payload_serializes_mixed_precision_policy() -> None:
             {"module": "proj", "precision": "w8a8"},
             {"module": "fc2", "precision": "bf16"},
         ],
+        "required_capabilities": [],
+        "preferred_engines": [],
         "metadata": {"runtime_strategy": "mixed_precision_linear"},
     }
+
+
+def test_quantized_model_infer_handoff_excludes_method_identity() -> None:
+    model = torch.nn.Linear(2, 2)
+    from xqt.contracts import ComputeConfig
+
+    config = ComputeConfig.from_modules(
+        module_names=["proj"],
+        compute_contract="int8_mma",
+        precision="w8a8",
+        required_capabilities=["int8_mma"],
+        preferred_engines=["tilelang"],
+    )
+    result = QuantizedModel(
+        model=model,
+        backend="pytorch",
+        method="awq",
+        strategy="weight_only_int4",
+        quantized_modules=["proj"],
+        compute_config=config,
+    )
+    handoff = result.infer_handoff()
+    assert handoff["model"] is model
+    assert handoff["compute_config"]["modules"][0]["compute_contract"] == "int8_mma"
+    assert "required_engine" not in handoff["compute_config"]
+    assert "method" not in handoff
+    assert "backend" not in handoff
+    serialized = result.to_dict()
+    assert serialized["compute_config"]["modules"][0]["required_capabilities"] == [
+        "int8_mma"
+    ]
+
+
+def test_compute_config_ignores_required_engine_primary_key() -> None:
+    from xqt.contracts import ComputeConfig
+
+    config = ComputeConfig.from_mapping(
+        {
+            "schema_version": "1.0",
+            "required_engine": "tilelang",
+            "modules": [
+                {
+                    "name": "fc",
+                    "compute_contract": "int8_mma",
+                    "required_capabilities": ["int8_mma"],
+                    "required_engine": "ptx_sm89",
+                }
+            ],
+        }
+    )
+    assert config is not None
+    assert "required_engine" not in config.to_dict()
+    assert "required_engine" not in config.modules[0].to_dict()
+    assert "ignored_forbidden_engine_keys" in config.metadata

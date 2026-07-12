@@ -117,11 +117,18 @@ class RuntimeArtifactPayload:
 
 @dataclass(kw_only=True)
 class RuntimePlanPayload(RuntimeArtifactPayload):
-    """Type-safe payload describing an operator-optimized runtime plan."""
+    """Type-safe payload describing an operator-optimized runtime plan.
 
-    engine: str
-    target_count: int
+    ``required_capabilities`` is the Infer-facing primary constraint.
+    ``engine`` is a materialize *result* (or ``"unresolved"``), not a hard
+    required_engine schema key on the quant→infer handoff.
+    """
+
+    engine: str = "unresolved"
+    target_count: int = 0
     targets: list[dict[str, Any]] = field(default_factory=list)
+    required_capabilities: list[str] = field(default_factory=list)
+    preferred_engines: list[str] = field(default_factory=list)
     backend: str | None = None
     requested_mode: str | None = None
     actual_mode: str | None = None
@@ -140,9 +147,11 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
         *,
         stage_name: str,
         source_model_stage: str,
-        engine: str,
-        target_count: int,
+        engine: str = "unresolved",
+        target_count: int = 0,
         targets: list[dict[str, Any]] | None = None,
+        required_capabilities: list[str] | None = None,
+        preferred_engines: list[str] | None = None,
         backend: str | None = None,
         requested_mode: str | None = None,
         actual_mode: str | None = None,
@@ -163,9 +172,17 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
             source_model_stage=source_model_stage,
             artifacts=dict(artifacts or {}),
         )
-        self.engine = engine
+        self.engine = str(engine) if engine is not None else "unresolved"
         self.target_count = target_count
         self.targets = [dict(target) for target in (targets or [])]
+        self.required_capabilities = [
+            str(item) for item in (required_capabilities or []) if str(item)
+        ]
+        self.preferred_engines = [
+            str(item).strip().lower()
+            for item in (preferred_engines or [])
+            if str(item).strip()
+        ]
         self.backend = backend
         self.requested_mode = requested_mode
         self.actual_mode = actual_mode
@@ -211,7 +228,20 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
                 else None
             )
         )
-        backend = str(metrics.get("backend") or metrics.get("runtime") or engines[0] if engines else "unknown")
+        backend_value = metrics.get("backend") or metrics.get("runtime")
+        if backend_value is None and engines:
+            backend_value = engines[0]
+        backend = str(backend_value or "unknown")
+        raw_caps = metrics.get("required_capabilities", [])
+        if not isinstance(raw_caps, list):
+            raw_caps = []
+        required_capabilities = [str(item) for item in raw_caps if str(item)]
+        raw_pref = metrics.get("preferred_engines", [])
+        if not isinstance(raw_pref, list):
+            raw_pref = []
+        preferred_engines = [
+            str(item).strip().lower() for item in raw_pref if str(item).strip()
+        ]
         runtime_plan = _resolve_runtime_plan_fields(
             metrics,
             module_contract=resolved_contract,
@@ -220,9 +250,11 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
         return cls(
             stage_name=stage_name,
             source_model_stage=source_model_stage,
-            engine=engines[0] if engines else "unknown",
+            engine=engines[0] if engines else "unresolved",
             target_count=len(target_dicts),
             targets=target_dicts,
+            required_capabilities=required_capabilities,
+            preferred_engines=preferred_engines,
             backend=(str(runtime_plan.get("backend")) if runtime_plan is not None else None),
             requested_mode=(
                 str(runtime_plan.get("requested_mode"))
@@ -286,6 +318,8 @@ class RuntimePlanPayload(RuntimeArtifactPayload):
             "engine": self.engine,
             "target_count": self.target_count,
             "targets": [dict(target) for target in self.targets],
+            "required_capabilities": list(self.required_capabilities),
+            "preferred_engines": list(self.preferred_engines),
         }
         if self.composite_precision:
             payload.update(
@@ -517,12 +551,19 @@ class ExportBundlePayload(RuntimeArtifactPayload):
 
 @dataclass(kw_only=True)
 class ExecutionPolicyPayload(RuntimeArtifactPayload):
-    """Type-safe payload describing one execution policy derived from a quant artifact."""
+    """Type-safe payload describing one execution policy derived from a quant artifact.
+
+    Carries precision overrides and optional required_capabilities for Infer.
+    Does not use required_engine as a primary field.
+    """
 
     policy_kind: str
     runtime: str
     module_count: int
     precision_overrides: list[dict[str, Any]] = field(default_factory=list)
+    required_capabilities: list[str] = field(default_factory=list)
+    preferred_engines: list[str] = field(default_factory=list)
+    compute_config: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     module_contract: dict[str, Any] | None = None
 
@@ -535,6 +576,9 @@ class ExecutionPolicyPayload(RuntimeArtifactPayload):
         runtime: str,
         module_count: int,
         precision_overrides: list[dict[str, Any]] | None = None,
+        required_capabilities: list[str] | None = None,
+        preferred_engines: list[str] | None = None,
+        compute_config: dict[str, Any] | None = None,
         artifacts: dict[str, str] | None = None,
         metadata: dict[str, Any] | None = None,
         module_contract: dict[str, Any] | None = None,
@@ -551,6 +595,17 @@ class ExecutionPolicyPayload(RuntimeArtifactPayload):
         self.precision_overrides = [
             dict(item) for item in (precision_overrides or [])
         ]
+        self.required_capabilities = [
+            str(item) for item in (required_capabilities or []) if str(item)
+        ]
+        self.preferred_engines = [
+            str(item).strip().lower()
+            for item in (preferred_engines or [])
+            if str(item).strip()
+        ]
+        self.compute_config = (
+            dict(compute_config) if isinstance(compute_config, Mapping) else None
+        )
         self.metadata = dict(metadata or {})
         self.module_contract = (
             dict(module_contract) if module_contract is not None else None
@@ -563,8 +618,12 @@ class ExecutionPolicyPayload(RuntimeArtifactPayload):
             "runtime": self.runtime,
             "module_count": self.module_count,
             "precision_overrides": _json_safe_contract_value(self.precision_overrides),
+            "required_capabilities": list(self.required_capabilities),
+            "preferred_engines": list(self.preferred_engines),
             "metadata": _json_safe_contract_value(self.metadata),
         }
+        if self.compute_config is not None:
+            payload["compute_config"] = _json_safe_contract_value(self.compute_config)
         if self.module_contract is not None:
             payload["module_contract"] = _json_safe_contract_value(self.module_contract)
         return payload
