@@ -15,6 +15,8 @@ from .tilelang.gemm import (
     dequant_gemm_epilogue_tilelang,
     fp4_packed_dequant_gemm_epilogue_reference,
     fp4_packed_dequant_gemm_epilogue_tilelang,
+    mxfp4_packed_dequant_gemm_epilogue_reference,
+    mxfp4_packed_dequant_gemm_epilogue_tilelang,
     nvfp4_packed_dequant_gemm_epilogue_reference,
     nvfp4_packed_dequant_gemm_epilogue_tilelang,
 )
@@ -50,6 +52,8 @@ __all__ = [
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",
+    "mxfp4_packed_dequant_gemm_epilogue_reference",
+    "mxfp4_packed_dequant_gemm_epilogue_tilelang",
     "nvfp4_packed_dequant_gemm_epilogue_reference",
     "nvfp4_packed_dequant_gemm_epilogue_tilelang",
     "pack_mxfp",
