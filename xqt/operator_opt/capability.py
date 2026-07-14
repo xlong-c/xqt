@@ -115,11 +115,11 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
         requires_cuda=True,
         notes=(
             "Built-in executor ships limited CUDA-only Triton fused kernels.",
-            "Current built-in execution covers standalone float16/bfloat16 RMSNorm and the xqt.nn.FeedForward Triton runtime composition, both with eager reference fallback metadata.",
+            "Current built-in execution covers standalone float16/bfloat16 RMSNorm, the xqt.nn.FeedForward Triton runtime composition, and packed low-bit dequant GEMM wrappers for INT4/MXFP/NVFP4, all with eager reference fallback metadata.",
         ),
         limitations=(
-            "Current built-in materialization is limited to rmsnorm and xqt.nn.FeedForward patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
-            "Current CUDA execution assumes float16/bfloat16 kernels. RMSNorm supports last-hidden-dimension and model-side channel-first wrappers; FeedForward composes existing GEMM and pointwise kernels rather than claiming a single FFN megakernel.",
+            "Current built-in materialization is limited to rmsnorm, xqt.nn.FeedForward, and low-bit linear dequant GEMM patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
+            "Current low-bit Triton execution is a composed runtime: packed weights are unpacked and dequantized on device before dispatching to Triton dense GEMM, rather than a single fused tensor-core kernel.",
         ),
     ),
     "tilelang": OperatorOptimizationEngineCapability(
@@ -132,7 +132,7 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
         notes=(
             "Built-in executor ships operator-family routing for attention, conv, direct half linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
             "Ada-class GPUs can use native runtime fastpaths under the TileLang engine for attention, conv, direct half linear, direct half norm, and one-time-dequantized dense Linear paths.",
-            "Packed FP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future Blackwell-class FP4 extensions.",
+            "Packed FP4/MXFP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future low-bit fused GEMM extensions.",
         ),
         limitations=(
             "Current built-in execution is limited to the attention, conv, linear, norm, and dequant_gemm_epilogue operator families/patterns.",

@@ -141,6 +141,7 @@ def build_tilelang_candidate_model(
     if patterns in (
         ["dequant_gemm_epilogue"],
         ["fp4_packed_dequant_gemm_epilogue"],
+        ["mxfp4_packed_dequant_gemm_epilogue"],
         ["nvfp4_packed_dequant_gemm_epilogue"],
     ):
         return _build_tilelang_dequant_candidate(target_model, target, settings)

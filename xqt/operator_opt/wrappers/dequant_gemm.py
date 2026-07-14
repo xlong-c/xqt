@@ -50,10 +50,20 @@ class _TileLangDequantGemmWrapper(nn.Module):
         self._cached_nvfp4_bridge: NVFP4LinearBridge | None = None
         self._preferred_patterns_config = self._preferred_patterns()
         self._dense_linear_bridge = getattr(self.module, "tilelang_dense_linear_args", None)
+        self._packed_mxfp_bridge = getattr(
+            self.module,
+            "tilelang_packed_mxfp_dequant_gemm_args",
+            None,
+        )
         self._packed_nvfp4_bridge = getattr(self.module, "tilelang_packed_nvfp4_dequant_gemm_args", None)
         self._packed_fp4_bridge = getattr(self.module, "tilelang_packed_dequant_gemm_args", None)
         self._dense_fp4_bridge = getattr(self.module, "tilelang_dequant_gemm_args", None)
-        if self._packed_nvfp4_bridge is None and self._dense_fp4_bridge is None and self._packed_fp4_bridge is None:
+        if (
+            self._packed_mxfp_bridge is None
+            and self._packed_nvfp4_bridge is None
+            and self._dense_fp4_bridge is None
+            and self._packed_fp4_bridge is None
+        ):
             inferred_bridge = bridge_module_to_nvfp4_linear_shared(self.module)
             if inferred_bridge is not None:
                 self._cached_nvfp4_bridge = inferred_bridge
@@ -140,6 +150,21 @@ class _TileLangDequantGemmWrapper(nn.Module):
         self.last_weight_representation = "packed_nvfp4_e2m1_plus_group_scale"
         return bridge.tilelang_packed_nvfp4_dequant_gemm_args(dtype=x.dtype, device=x.device)
 
+    def _resolve_packed_mxfp_args(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, int, int] | None:
+        if not callable(self._packed_mxfp_bridge):
+            return None
+        mx_precision = int(getattr(self.module, "mx_precision", 4))
+        if mx_precision != 4:
+            raise XQTBackendError(
+                "TileLang packed MXFP dequant GEMM path currently supports MXFP4 only"
+            )
+        self.last_weight_source = "mxfp_weight_only_linear_packed_bridge"
+        self.last_weight_representation = "packed_mxfp4_plus_block_scale"
+        return self._packed_mxfp_bridge(dtype=x.dtype, device=x.device)
+
     @staticmethod
     def _apply_activation(output: torch.Tensor, activation: str | None) -> torch.Tensor:
         if activation is None:
@@ -161,6 +186,7 @@ class _TileLangDequantGemmWrapper(nn.Module):
     def _prefer_dense_linear_fastpath(self, x: torch.Tensor) -> bool:
         if (
             callable(self._dense_linear_bridge)
+            and self._packed_mxfp_bridge is None
             and self._packed_nvfp4_bridge is None
             and self._packed_fp4_bridge is None
             and self._dense_fp4_bridge is None
@@ -184,7 +210,11 @@ class _TileLangDequantGemmWrapper(nn.Module):
         return target_arch == "sm_89"
 
     def _resolved_nvfp4_bridge(self) -> NVFP4LinearBridge | None:
-        if callable(self._packed_fp4_bridge) or callable(self._dense_fp4_bridge):
+        if (
+            callable(self._packed_fp4_bridge)
+            or callable(self._dense_fp4_bridge)
+            or callable(self._packed_mxfp_bridge)
+        ):
             return None
         if self._cached_nvfp4_bridge is not None:
             return self._cached_nvfp4_bridge
@@ -310,6 +340,21 @@ class _TileLangDequantGemmWrapper(nn.Module):
             )
             self.last_consumes_packed_weight = True
             self.last_fastpath = "packed_fp4_fused_tilelang_kernel"
+        elif callable(self._packed_mxfp_bridge):
+            packed_mxfp_args = self._resolve_packed_mxfp_args(x)
+            if packed_mxfp_args is None:
+                raise XQTBackendError(
+                    "TileLang packed MXFP dequant GEMM target requires an MXFP4 packed bridge"
+                )
+            packed_weight, scale, bias, activation, input_features, group_size = packed_mxfp_args
+            qweight = packed_weight
+            kernel_pattern = "mxfp4_packed_dequant_gemm_epilogue"
+            extra_kwargs = {
+                "input_features": int(input_features),
+                "group_size": int(group_size),
+            }
+            self.last_consumes_packed_weight = True
+            self.last_fastpath = "packed_mxfp4_fused_tilelang_kernel"
         elif callable(self._dense_fp4_bridge):
             qweight, scale, bias, activation = self._dense_fp4_bridge(
                 dtype=x.dtype,
@@ -387,9 +432,17 @@ class _TileLangDequantGemmWrapper(nn.Module):
             if kernel_pattern == "dense_linear_epilogue"
             else
             "tilelang_fused_gemm_kernel"
-            if uses_cuda and kernel_pattern in {"fp4_packed_dequant_gemm_epilogue", "nvfp4_packed_dequant_gemm_epilogue"}
+            if uses_cuda and kernel_pattern in {
+                "fp4_packed_dequant_gemm_epilogue",
+                "mxfp4_packed_dequant_gemm_epilogue",
+                "nvfp4_packed_dequant_gemm_epilogue",
+            }
             else "eager_reference_fallback"
-            if kernel_pattern in {"fp4_packed_dequant_gemm_epilogue", "nvfp4_packed_dequant_gemm_epilogue"}
+            if kernel_pattern in {
+                "fp4_packed_dequant_gemm_epilogue",
+                "mxfp4_packed_dequant_gemm_epilogue",
+                "nvfp4_packed_dequant_gemm_epilogue",
+            }
             else None
         )
         self.last_execution_reason = (
@@ -466,11 +519,13 @@ class _TileLangDequantGemmWrapper(nn.Module):
                     "dense_linear_epilogue",
                     "dequant_gemm_epilogue",
                     "fp4_packed_dequant_gemm_epilogue",
+                    "mxfp4_packed_dequant_gemm_epilogue",
                     "nvfp4_packed_dequant_gemm_epilogue",
                 ],
                 "operator_families": ["linear", "conv", "attention"],
                 "supports_fp4_weight_only_linear_bridge": True,
                 "supports_packed_fp4_bridge": True,
+                "supports_packed_mxfp_bridge": True,
                 "supports_packed_nvfp4_bridge": True,
             },
             "kernel_pattern": self.last_kernel_pattern,
@@ -543,6 +598,7 @@ def _has_explicit_xqt_dequant_linear_bridge(module: nn.Module) -> bool:
     return bool(
         callable(getattr(module, "tilelang_packed_dequant_gemm_args", None))
         or callable(getattr(module, "tilelang_dequant_gemm_args", None))
+        or callable(getattr(module, "tilelang_packed_mxfp_dequant_gemm_args", None))
         or (
             hasattr(module, "mx_precision")
             and callable(getattr(module, "tilelang_dense_linear_args", None))
@@ -571,11 +627,13 @@ def _native_dense_metadata(
                 "dense_linear_epilogue",
                 "dequant_gemm_epilogue",
                 "fp4_packed_dequant_gemm_epilogue",
+                "mxfp4_packed_dequant_gemm_epilogue",
                 "nvfp4_packed_dequant_gemm_epilogue",
             ],
             "operator_families": ["linear", "conv", "attention"],
             "supports_fp4_weight_only_linear_bridge": True,
             "supports_packed_fp4_bridge": True,
+            "supports_packed_mxfp_bridge": True,
             "supports_packed_nvfp4_bridge": True,
         },
         "kernel_pattern": "dense_linear_epilogue",
@@ -596,6 +654,7 @@ def _is_dequant_linear_target(module: nn.Module) -> bool:
     return bool(
         infer_nvfp4_tensor_layout(module) is not None
         or callable(getattr(module, "tilelang_dense_linear_args", None))
+        or callable(getattr(module, "tilelang_packed_mxfp_dequant_gemm_args", None))
         or callable(getattr(module, "tilelang_packed_nvfp4_dequant_gemm_args", None))
         or callable(getattr(module, "tilelang_packed_dequant_gemm_args", None))
         or callable(getattr(module, "tilelang_dequant_gemm_args", None))

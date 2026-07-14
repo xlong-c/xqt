@@ -25,6 +25,20 @@ def test_resolve_engine_preferred_is_hint_not_hard_requirement() -> None:
     assert "torch" not in result.candidates or result.engine != "torch"
 
 
+def test_resolve_engine_fp4_mma_prefers_supported_engine() -> None:
+    from xqt.runtime.engine_resolve import resolve_engine
+
+    result = resolve_engine(
+        required_capabilities=["fp4_mma"],
+        preferred_engines=["triton"],
+        fallback="torch",
+    )
+
+    assert result.engine == "triton"
+    assert "fp4_mma" in result.required_capabilities
+    assert "triton" in result.candidates
+
+
 def test_int8_mma_quantizer_import_does_not_load_tilelang_kernels() -> None:
     banned = [
         "xqt.operator_opt.kernels.tilelang.int8_mma",

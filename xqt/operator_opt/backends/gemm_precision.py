@@ -132,12 +132,42 @@ _TILELANG_PACKED_FAMILIES: dict[str, GemmKernelFamilySpec] = {
     "fp4": GemmKernelFamilySpec(
         family="packed_weight_gemm",
         mma="fp4",
-        engines={"tilelang": "fp4_packed_dequant_gemm_epilogue"},
+        engines={
+            "tilelang": "fp4_packed_dequant_gemm_epilogue",
+            "triton": "gemm_int4_dequant",
+        },
+        engine_pattern_aliases={
+            "triton": {
+                "fp4_packed_dequant_gemm_epilogue": "gemm_int4_dequant",
+            },
+        },
+    ),
+    "mxfp4": GemmKernelFamilySpec(
+        family="packed_weight_gemm",
+        mma="mxfp4",
+        engines={
+            "tilelang": "mxfp4_packed_dequant_gemm_epilogue",
+            "triton": "gemm_mxfp4",
+        },
+        engine_kwargs={"triton": {"mx_precision": 4}},
+        engine_pattern_aliases={
+            "triton": {
+                "mxfp4_packed_dequant_gemm_epilogue": "gemm_mxfp4",
+            },
+        },
     ),
     "nvfp4": GemmKernelFamilySpec(
         family="packed_weight_gemm",
         mma="nvfp4",
-        engines={"tilelang": "nvfp4_packed_dequant_gemm_epilogue"},
+        engines={
+            "tilelang": "nvfp4_packed_dequant_gemm_epilogue",
+            "triton": "gemm_nvfp4_packed_dequant",
+        },
+        engine_pattern_aliases={
+            "triton": {
+                "nvfp4_packed_dequant_gemm_epilogue": "gemm_nvfp4_packed_dequant",
+            },
+        },
     ),
 }
 
@@ -200,6 +230,10 @@ _GEMM_VARIANT_DISPATCH_TABLE: dict[str, GemmVariantDispatchSpec] = {
     "fp4_packed_dequant_gemm_epilogue": GemmVariantDispatchSpec(
         op="gemm",
         precision="fp4",
+    ),
+    "mxfp4_packed_dequant_gemm_epilogue": GemmVariantDispatchSpec(
+        op="gemm",
+        precision="mxfp4",
     ),
     "gemm_nvfp4_packed_dequant": GemmVariantDispatchSpec(op="gemm", precision="nvfp4"),
     "nvfp4_packed_dequant_gemm_epilogue": GemmVariantDispatchSpec(
@@ -1874,6 +1908,7 @@ def _gemm_tilelang(
             )
         case (
             "fp4_packed_dequant_gemm_epilogue"
+            | "mxfp4_packed_dequant_gemm_epilogue"
             | "nvfp4_packed_dequant_gemm_epilogue"
         ):
             return _tilelang_packed_dispatch(

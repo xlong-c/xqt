@@ -37,6 +37,8 @@ from ..kernels.triton.gemm import (
     gemm_int4_dequant_triton,
     gemm_int8_reference,
     gemm_int8_triton,
+    gemm_nvfp4_packed_dequant_reference,
+    gemm_nvfp4_packed_dequant_triton,
     gemm_reference,
 )
 from ..kernels.triton.mxfp_gemm import (
@@ -139,6 +141,12 @@ TRITON_KERNEL_REGISTRY: dict[str, TritonKernelSpec] = {
         reference=gemm_int4_dequant_reference,
         kernel=gemm_int4_dequant_triton,
         metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_int4_dequant"]),
+    ),
+    "gemm_nvfp4_packed_dequant": TritonKernelSpec(
+        pattern="gemm_nvfp4_packed_dequant",
+        reference=gemm_nvfp4_packed_dequant_reference,
+        kernel=gemm_nvfp4_packed_dequant_triton,
+        metadata=dict(TRITON_GEMM_KERNEL_METADATA["gemm_nvfp4_packed_dequant"]),
     ),
     "gemm_mxfp8": TritonKernelSpec(
         pattern="gemm_mxfp8",

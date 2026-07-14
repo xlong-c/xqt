@@ -28,6 +28,7 @@ from xqt.operator_opt.backends.triton import get_triton_kernel_spec
 from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
 from xqt.contracts import PrecisionPolicy
 from xqt.operator_opt.kernels.tilelang.gemm import (
+    mxfp4_packed_dequant_gemm_epilogue_reference,
     nvfp4_packed_dequant_gemm_epilogue_reference,
 )
 from xqt.operator_opt.kernels.triton.gemm import (
@@ -331,6 +332,34 @@ class TestUnifiedGEMMInterface:
             input_features=64,
             group_size=16,
             weight_global_scale=global_scale,
+        )
+        assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3)
+
+    def test_tilelang_mxfp4_reference_path(self) -> None:
+        a = torch.randn(64, 64, dtype=torch.float32)
+        packed = torch.full((64, 32), 0x21, dtype=torch.uint8)
+        scale = torch.ones(64, 2, 1, dtype=torch.float32) * 0.125
+        bias = torch.randn(64, dtype=torch.float32)
+
+        output = gemm_with_precision(
+            a,
+            packed,
+            bias,
+            precision="mxfp4",
+            engine="tilelang",
+            transpose_b=True,
+            b_scale=scale,
+            group_size=32,
+            input_features=64,
+        )
+
+        expected = mxfp4_packed_dequant_gemm_epilogue_reference(
+            a,
+            packed,
+            scale,
+            bias,
+            input_features=64,
+            group_size=32,
         )
         assert torch.allclose(output, expected, rtol=1e-3, atol=1e-3)
 
@@ -899,6 +928,13 @@ def test_tilelang_registry_exposes_int8_linear_families() -> None:
         fused.metadata["fusion_status"]
         == "tilelang_static_activation_quant_dequant_output_epilogue"
     )
+
+
+def test_tilelang_registry_exposes_mxfp4_packed_gemm_family() -> None:
+    spec = get_tilelang_kernel_spec("mxfp4_packed_dequant_gemm_epilogue")
+
+    assert spec.metadata["weight_encoding"] == "packed_mxfp4_signed_int4"
+    assert "mxfp4" in spec.pattern
 
 
 def test_gemm_with_precision_tilelang_bf16_uses_marlin_registry(

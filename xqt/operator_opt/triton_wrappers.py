@@ -11,6 +11,10 @@ from torch import nn
 
 from xqt.core.errors import XQTBackendError
 
+from .triton_dequant_wrappers import (
+    _TritonDequantGemmWrapper,
+    build_triton_dequant_candidate_model,
+)
 from .backends.triton import run_triton_kernel
 from .types import OperatorOptimizationTargetPlan
 
@@ -237,11 +241,22 @@ def build_triton_candidate_model(
     patterns = target.patterns or ["rmsnorm"]
     settings = dict(target.options)
     settings["preferred_patterns"] = list(patterns)
+    dequant_patterns = {
+        "gemm_int4_dequant",
+        "gemm_mxfp8",
+        "gemm_mxfp6",
+        "gemm_mxfp4",
+        "gemm_nvfp4_packed_dequant",
+        "fp4_packed_dequant_gemm_epilogue",
+        "nvfp4_packed_dequant_gemm_epilogue",
+    }
     if patterns == ["feedforward"]:
         return _build_triton_feedforward_candidate(target_model, target)
+    if set(patterns).issubset(dequant_patterns):
+        return build_triton_dequant_candidate_model(target_model, target)
     if patterns != ["rmsnorm"]:
         raise XQTBackendError(
-            "built-in Triton executor currently supports only rmsnorm and feedforward patterns"
+            "built-in Triton executor currently supports rmsnorm, feedforward, and low-bit dequant GEMM patterns"
         )
     if supports_triton_rmsnorm(target_model):
         return _TritonRMSNormWrapper(
@@ -323,11 +338,13 @@ def triton_execution_metadata(model: nn.Module) -> dict[str, Any]:
         }
     if isinstance(model, _TritonRMSNormWrapper):
         return model.execution_metadata()
+    if isinstance(model, _TritonDequantGemmWrapper):
+        return model.execution_metadata()
     norm = getattr(model, "norm", None)
     if isinstance(norm, _TritonRMSNormWrapper):
         return norm.execution_metadata()
     for module in model.modules():
-        if isinstance(module, _TritonRMSNormWrapper):
+        if isinstance(module, (_TritonRMSNormWrapper, _TritonDequantGemmWrapper)):
             return module.execution_metadata()
     return {
         "execution_mode": "unknown",

@@ -26,7 +26,13 @@ _CONTRACT_PATTERNS: dict[str, frozenset[str]] = {
             "dense_linear_epilogue",
             "dequant_gemm_epilogue",
             "fp4_packed_dequant_gemm_epilogue",
+            "mxfp4_packed_dequant_gemm_epilogue",
             "nvfp4_packed_dequant_gemm_epilogue",
+            "gemm_int4_dequant",
+            "gemm_mxfp8",
+            "gemm_mxfp6",
+            "gemm_mxfp4",
+            "gemm_nvfp4_packed_dequant",
         }
     ),
     "conv2d": frozenset({"conv"}),
