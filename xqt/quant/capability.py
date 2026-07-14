@@ -45,6 +45,9 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     "int8_mma": QuantizationNature.TRUE,
     "tilelang_int8_mma": QuantizationNature.TRUE,
     "w4_storage_int8_mma": QuantizationNature.TRUE,
+    # dynamic fp4: dynamic activation packing, packed weight storage, dequant before gemm
+    "nvfp4_dynamic": QuantizationNature.PSEUDO,
+    "mxfp4_dynamic": QuantizationNature.PSEUDO,
     # onnxruntime QDQ INT8: runs QDQ ops on CPU integer backend → TRUE if backend hardware supports native int8 mma
     "static_qdq_int8": QuantizationNature.PSEUDO,
     "static_int8": QuantizationNature.PSEUDO,
@@ -248,6 +251,8 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
             "svd_fp4",
             "svd_int4",
             "dynamic_int8_mma",
+            "nvfp4_dynamic",
+            "mxfp4_dynamic",
             "tilelang_int8_mma",
             "w4_storage_int8_mma",
             "fp4_weight_only",
@@ -265,6 +270,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
             "PyTorch quant backend hosts algorithm methods (awq/gptq/svd) and storage/compute strategies.",
             "awq/gptq/svd are quant methods, not operator engines; TileLang is only an operator engine.",
             "dynamic_int8_mma uses W8A8 int8 inputs with int32 MMA accumulation.",
+            "nvfp4_dynamic and mxfp4_dynamic use dynamic FP4 activation packing with packed FP4 weights.",
             "w4_storage_int8_mma keeps packed W4 weights and retargets compute to INT8 MMA.",
             "Packed FP4 modules may expose operator bridge hooks for later TileLang dequant GEMM materialize.",
         ),
@@ -361,6 +367,8 @@ def describe_quant_backend_capability(
             "fp4_weight_only",
             "dynamic_int8_mma",
             "int8_mma",
+            "nvfp4_dynamic",
+            "mxfp4_dynamic",
             "tilelang_int8_mma",
             "w4_storage_int8_mma",
         }:
@@ -376,6 +384,8 @@ def describe_quant_backend_capability(
         if normalized_strategy in {
             "dynamic_int8_mma",
             "int8_mma",
+            "nvfp4_dynamic",
+            "mxfp4_dynamic",
             "tilelang_int8_mma",
             "w4_storage_int8_mma",
             "fp4_weight_only",

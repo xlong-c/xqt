@@ -389,6 +389,16 @@ class AWQGPTQWeightOnlyLinear(nn.Module):
             bias = self.bias.to(device=device, dtype=dtype)
         return packed_weight, scale, bias, None, self.input_features, self.group_size
 
+    def triton_packed_dequant_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, int, int]:
+        """Expose packed INT4 inputs for Triton operator wrappers."""
+
+        return self.tilelang_packed_dequant_gemm_args(dtype=dtype, device=device)
+
     def dense_weight(
         self,
         *,

@@ -272,6 +272,49 @@ class MXFPWeightOnlyLinear(nn.Module):
             None,
         )
 
+    def tilelang_packed_mxfp_dequant_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, int, int]:
+        """Expose packed MXFP4 inputs for TileLang operator wrappers."""
+
+        if self.mx_precision != 4:
+            raise ValueError(
+                "TileLang packed MXFP dequant GEMM path currently supports MXFP4 only"
+            )
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=device, dtype=dtype)
+        return (
+            self.packed_weight.to(device=device),
+            self.weight_scale.to(device=device, dtype=dtype).unsqueeze(-1),
+            bias,
+            None,
+            self.input_features,
+            self.block_size,
+        )
+
+    def triton_mxfp_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, int, int]:
+        """Expose packed MXFP inputs for Triton operator wrappers."""
+
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=device, dtype=dtype)
+        return (
+            self.packed_weight.to(device=device),
+            self.weight_scale.to(device=device, dtype=torch.float32),
+            bias,
+            self.block_size,
+            self.mx_precision,
+        )
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         weight = self.dense_weight(dtype=inputs.dtype, device=inputs.device)
         bias = self.dense_bias(dtype=inputs.dtype, device=inputs.device)

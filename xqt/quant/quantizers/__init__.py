@@ -37,6 +37,13 @@ from .mxfp_weight_only import (
     MXFPWeightOnlyLinear,
     quantize_with_mxfp_weight_only,
 )
+from .fp4_dynamic import (
+    FP4DynamicLinear,
+    FP4DynamicQuantizationResult,
+    quantize_with_dynamic_fp4,
+    quantize_with_mxfp4_dynamic,
+    quantize_with_nvfp4_dynamic,
+)
 from .svd import LowRankBranch, SVDQuantLinear, SVDQuantResult, quantize_with_svd
 
 __all__ = [
@@ -46,6 +53,8 @@ __all__ = [
     "ConvRot4BitQuantizationResult",
     "ConvRotMixedPrecisionLinear",
     "FakeQDQSurrogateResult",
+    "FP4DynamicLinear",
+    "FP4DynamicQuantizationResult",
     "Int8MmaLinear",
     "Int8MmaQuantizationResult",
     "LowRankBranch",
@@ -65,8 +74,11 @@ __all__ = [
     "quantize_with_awq_fp4",
     "quantize_with_awq_weight_only",
     "quantize_with_convrot_4bit",
+    "quantize_with_dynamic_fp4",
     "quantize_with_int8_mma",
+    "quantize_with_mxfp4_dynamic",
     "quantize_with_mxfp_weight_only",
+    "quantize_with_nvfp4_dynamic",
     "quantize_with_fp4_weight_only",
     "quantize_with_gptq_fp4",
     "quantize_with_gptq_weight_only",

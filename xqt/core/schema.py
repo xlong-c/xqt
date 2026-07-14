@@ -54,6 +54,8 @@ CUTE_DSL_PASS_CONFIG_KEYS = (
 CANONICAL_QUANT_STRATEGIES = (
     "dynamic_int8",
     "dynamic_int8_mma",
+    "nvfp4_dynamic",
+    "mxfp4_dynamic",
     "tilelang_int8_mma",
     "weight_only_int8",
     "weight_only_int4",
@@ -75,6 +77,10 @@ QUANT_STRATEGY_ALIASES = {
     "int8_mma": "dynamic_int8_mma",
     "dynamic_int8_mma": "dynamic_int8_mma",
     "int8_dynamic_mma": "dynamic_int8_mma",
+    "nvfp4_dynamic": "nvfp4_dynamic",
+    "dynamic_nvfp4": "nvfp4_dynamic",
+    "mxfp4_dynamic": "mxfp4_dynamic",
+    "dynamic_mxfp4": "mxfp4_dynamic",
     "tilelang_int8_mma": "tilelang_int8_mma",
     "int8_weight_only": "weight_only_int8",
     "weight_only_int8": "weight_only_int8",
@@ -126,6 +132,10 @@ def normalize_quant_strategy(
             raw = "svd_int4"
         elif dtype == "fp4" and scheme in {"", "weight_only", "weight-only"}:
             raw = "fp4_weight_only"
+        elif dtype == "nvfp4" and scheme in {"", "dynamic"}:
+            raw = "nvfp4_dynamic"
+        elif dtype == "mxfp4" and scheme in {"", "dynamic"}:
+            raw = "mxfp4_dynamic"
         elif dtype.startswith("mxfp") and scheme in {"", "weight_only", "weight-only"}:
             raw = "mxfp_weight_only"
         elif dtype == "int4" and scheme in {"", "weight_only", "weight-only"}:

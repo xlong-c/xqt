@@ -42,6 +42,11 @@ from xqt.quant.quantizers.mxfp_weight_only import (
     execute_mxfp_weight_only_component,
     quantize_with_mxfp_weight_only,
 )
+from xqt.quant.quantizers.fp4_dynamic import (
+    execute_dynamic_fp4_component,
+    quantize_with_mxfp4_dynamic,
+    quantize_with_nvfp4_dynamic,
+)
 from xqt.quant.selection import selection_policy_metadata
 from xqt.quant.quantizers.svd import execute_svdquant_component, quantize_with_svd
 from xqt.quant.types import (
@@ -174,6 +179,32 @@ def execute_quantization_plan(
             continue
         if (
             component.backend == "pytorch"
+            and component.strategy == "nvfp4_dynamic"
+        ):
+            current_model, report = execute_dynamic_fp4_component(
+                context,
+                current_model,
+                component,
+                fp4_format="nvfp4",
+                quantize_fn=quantize_with_nvfp4_dynamic,
+            )
+            reports.append(report)
+            continue
+        if (
+            component.backend == "pytorch"
+            and component.strategy == "mxfp4_dynamic"
+        ):
+            current_model, report = execute_dynamic_fp4_component(
+                context,
+                current_model,
+                component,
+                fp4_format="mxfp4",
+                quantize_fn=quantize_with_mxfp4_dynamic,
+            )
+            reports.append(report)
+            continue
+        if (
+            component.backend == "pytorch"
             and component.strategy in {"dynamic_int8_mma", "tilelang_int8_mma", "int8_mma"}
         ):
             current_model, report = execute_int8_mma_component(
@@ -261,7 +292,9 @@ __all__ = [
     "quantize_with_fp4_weight_only",
     "quantize_with_gptq_weight_only",
     "quantize_with_int8_mma",
+    "quantize_with_mxfp4_dynamic",
     "quantize_with_mxfp_weight_only",
+    "quantize_with_nvfp4_dynamic",
     "quantize_with_svd",
     "quantize_with_torchao",
     "quantize_with_w4_storage_int8_mma",

@@ -269,6 +269,19 @@ class NVFP4LinearBridge(nn.Module):
             weight_global_scale,
         )
 
+    def triton_packed_nvfp4_dequant_gemm_args(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, int, int, torch.Tensor | None]:
+        """Expose packed NVFP4 tensors for Triton wrappers."""
+
+        return self.tilelang_packed_nvfp4_dequant_gemm_args(
+            dtype=dtype,
+            device=device,
+        )
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         weight = self.dense_weight(dtype=inputs.dtype, device=inputs.device)
         bias = self.dense_bias(dtype=inputs.dtype, device=inputs.device)

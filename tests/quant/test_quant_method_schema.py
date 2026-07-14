@@ -4,7 +4,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from xqt.core.errors import XQTConfigError
-from xqt.core.schema import QuantConfig
+from xqt.core.schema import QuantConfig, normalize_quant_strategy
 from xqt.quant.capability import describe_quant_backend_capability
 from xqt.quant.plan import build_quantization_plan
 from xqt.workflows import load_optimization_config
@@ -86,6 +86,16 @@ def test_legacy_strategy_alias_is_canonicalized_in_plan() -> None:
     plan = build_quantization_plan(quant_config)
 
     assert plan.components[0].strategy == "weight_only_int4"
+
+
+def test_dynamic_fp4_strategy_can_be_inferred_from_policy() -> None:
+    assert normalize_quant_strategy("nvfp4_dynamic") == "nvfp4_dynamic"
+    assert normalize_quant_strategy(None, {"dtype": "nvfp4", "scheme": "dynamic"}) == (
+        "nvfp4_dynamic"
+    )
+    assert normalize_quant_strategy(None, {"dtype": "mxfp4", "scheme": "dynamic"}) == (
+        "mxfp4_dynamic"
+    )
 
 
 def test_quant_config_requires_explicit_backend_when_enabled() -> None:
@@ -201,6 +211,28 @@ def test_pytorch_gptq_int8_capability_is_executable() -> None:
 
     assert capability.status == "available"
     assert capability.maturity == "executable"
+
+
+def test_pytorch_dynamic_fp4_capabilities_are_executable() -> None:
+    nvfp4 = describe_quant_backend_capability(
+        "pytorch",
+        method="nvfp4_dynamic",
+        strategy="nvfp4_dynamic",
+        policy={"dtype": "nvfp4", "scheme": "dynamic"},
+    )
+    mxfp4 = describe_quant_backend_capability(
+        "pytorch",
+        method="mxfp4_dynamic",
+        strategy="mxfp4_dynamic",
+        policy={"dtype": "mxfp4", "scheme": "dynamic"},
+    )
+
+    assert nvfp4.status == "available"
+    assert nvfp4.maturity == "executable"
+    assert nvfp4.nature.value == "pseudo"
+    assert mxfp4.status == "available"
+    assert mxfp4.maturity == "executable"
+    assert mxfp4.nature.value == "pseudo"
 
 
 def test_tilelang_is_rejected_as_quant_backend() -> None:
