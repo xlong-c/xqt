@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
+from xqt.quant.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
 
 
 import triton
@@ -42,6 +44,112 @@ def _tl_dtype_from_torch(dtype: torch.dtype) -> tl.dtype:
     raise XQTBackendError(f"unsupported Triton dtype mapping: {dtype}")
 
 
+@triton.jit
+def _dequant_int4_weight_kernel(
+    packed_ptr,
+    scale_ptr,
+    zero_ptr,
+    out_ptr,
+    rows,
+    cols,
+    stride_packed_row,
+    stride_scale_row,
+    stride_scale_group,
+    stride_zero_row,
+    stride_zero_group,
+    stride_out_row,
+    stride_out_col,
+    has_zero: tl.constexpr,
+    group_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    total = rows * cols
+    mask = offsets < total
+    row = offsets // cols
+    col = offsets % cols
+
+    packed_col = col // 2
+    packed = tl.load(
+        packed_ptr + row * stride_packed_row + packed_col,
+        mask=mask,
+        other=0,
+    ).to(tl.int32)
+    low = packed & 0x0F
+    high = (packed >> 4) & 0x0F
+    nibble = tl.where((col & 1) == 0, low, high)
+    signed = tl.where(nibble > 7, nibble - 16, nibble).to(tl.float32)
+
+    group = col // group_size
+    scale = tl.load(
+        scale_ptr + row * stride_scale_row + group * stride_scale_group,
+        mask=mask,
+        other=1.0,
+    ).to(tl.float32)
+    value = signed * scale
+    if has_zero:
+        zero = tl.load(
+            zero_ptr + row * stride_zero_row + group * stride_zero_group,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        value = value - zero
+    tl.store(
+        out_ptr + row * stride_out_row + col * stride_out_col,
+        value.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
+@triton.jit
+def _dequant_nvfp4_weight_kernel(
+    packed_ptr,
+    scale_ptr,
+    codebook_ptr,
+    out_ptr,
+    rows,
+    cols,
+    stride_packed_row,
+    stride_scale_row,
+    stride_scale_group,
+    stride_out_row,
+    stride_out_col,
+    group_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    total = rows * cols
+    mask = offsets < total
+    row = offsets // cols
+    col = offsets % cols
+
+    packed_col = col // 2
+    packed = tl.load(
+        packed_ptr + row * stride_packed_row + packed_col,
+        mask=mask,
+        other=0,
+    ).to(tl.int32)
+    low = packed & 0x0F
+    high = (packed >> 4) & 0x0F
+    code_idx = tl.where((col & 1) == 0, low, high)
+    code = tl.load(codebook_ptr + code_idx, mask=mask, other=0.0).to(tl.float32)
+
+    group = col // group_size
+    scale = tl.load(
+        scale_ptr + row * stride_scale_row + group * stride_scale_group,
+        mask=mask,
+        other=1.0,
+    ).to(tl.float32)
+    value = code * scale
+    tl.store(
+        out_ptr + row * stride_out_row + col * stride_out_col,
+        value.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
 # ============================================================================
 # Reference Implementations
 # ============================================================================
@@ -74,6 +182,40 @@ def gemm_reference(
         return output
     else:
         raise ValueError(f"unsupported activation: {activation}")
+
+
+def _dense_triton_output_dtype(a: torch.Tensor) -> torch.dtype:
+    if a.dtype in {torch.float16, torch.bfloat16, torch.float32}:
+        return a.dtype
+    return torch.float16
+
+
+def _run_dense_triton_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    activation: str | None,
+    transpose_b: bool,
+) -> torch.Tensor:
+    output_dtype = _dense_triton_output_dtype(a)
+    if output_dtype == torch.bfloat16:
+        return gemm_bf16_triton(
+            a,
+            b,
+            bias,
+            activation=activation,
+            transpose_b=transpose_b,
+            output_dtype=output_dtype,
+        )
+    return gemm_fp16_triton(
+        a,
+        b,
+        bias,
+        activation=activation,
+        transpose_b=transpose_b,
+        output_dtype=output_dtype,
+    )
 
 
 def gemm_int8_reference(
@@ -148,19 +290,143 @@ def gemm_int4_dequant_reference(
 
     # Dequantize with per-group scaling
     b_fp = b_int4.to(a.dtype)
+    scale_tensor = b_scale
+    if scale_tensor.ndim == 3 and scale_tensor.shape[2] == 1:
+        scale_tensor = scale_tensor.squeeze(-1)
+    zero_tensor = b_zero
+    if zero_tensor is not None and zero_tensor.ndim == 3 and zero_tensor.shape[2] == 1:
+        zero_tensor = zero_tensor.squeeze(-1)
     num_groups = (k + group_size - 1) // group_size
 
     for g in range(num_groups):
         start = g * group_size
         end = min(start + group_size, k)
-        scale = b_scale[:, g:g+1] if b_scale.dim() > 1 else b_scale[g:g+1]
+        scale = (
+            scale_tensor[:, g : g + 1]
+            if scale_tensor.dim() > 1
+            else scale_tensor[g : g + 1]
+        )
         b_fp[:, start:end] = b_fp[:, start:end] * scale
 
-        if b_zero is not None:
-            zero = b_zero[:, g:g+1] if b_zero.dim() > 1 else b_zero[g:g+1]
+        if zero_tensor is not None:
+            zero = (
+                zero_tensor[:, g : g + 1]
+                if zero_tensor.dim() > 1
+                else zero_tensor[g : g + 1]
+            )
             b_fp[:, start:end] = b_fp[:, start:end] - zero
 
     return gemm_reference(a, b_fp, bias, activation=activation, transpose_b=True)
+
+
+def dequantize_int4_weight_triton(
+    b_packed: torch.Tensor,
+    b_scale: torch.Tensor,
+    *,
+    group_size: int,
+    cols: int,
+    b_zero: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Decode packed INT4 weights into a dense CUDA tensor using Triton."""
+
+    _require_triton()
+    _require_cuda_tensors(b_packed)
+    scale = b_scale
+    if scale.ndim == 3 and scale.shape[2] == 1:
+        scale = scale.squeeze(-1)
+    if scale.ndim == 1:
+        scale = scale.reshape(1, -1).expand(int(b_packed.shape[0]), -1)
+    if scale.ndim != 2:
+        raise XQTBackendError("INT4 Triton dequant expects scale to be 1D or 2D")
+    zero = b_zero
+    if zero is not None:
+        if zero.ndim == 3 and zero.shape[2] == 1:
+            zero = zero.squeeze(-1)
+        if zero.ndim == 1:
+            zero = zero.reshape(1, -1).expand(int(b_packed.shape[0]), -1)
+        if zero.ndim != 2:
+            raise XQTBackendError("INT4 Triton dequant expects zero to be 1D or 2D")
+        zero = zero.to(device=b_packed.device, dtype=scale.dtype)
+    rows = int(b_packed.shape[0])
+    output = torch.empty((rows, int(cols)), device=b_packed.device, dtype=output_dtype)
+    total = rows * int(cols)
+    grid = lambda meta: (triton.cdiv(total, meta["BLOCK_SIZE"]),)
+    _dequant_int4_weight_kernel[grid](
+        b_packed,
+        scale.to(device=b_packed.device),
+        zero if zero is not None else b_packed,
+        output,
+        rows,
+        int(cols),
+        b_packed.stride(0),
+        scale.stride(0),
+        scale.stride(1),
+        0 if zero is None else zero.stride(0),
+        0 if zero is None else zero.stride(1),
+        output.stride(0),
+        output.stride(1),
+        has_zero=zero is not None,
+        group_size=int(group_size),
+        BLOCK_SIZE=256,
+        num_warps=4,
+    )
+    return output
+
+
+def _nvfp4_codebook_tensor(device: torch.device) -> torch.Tensor:
+    return torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        device=device,
+        dtype=torch.float32,
+    )
+
+
+def dequantize_nvfp4_weight_triton(
+    b_packed: torch.Tensor,
+    b_scale: torch.Tensor,
+    *,
+    cols: int,
+    group_size: int,
+    weight_global_scale: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Decode packed NVFP4 weights into a dense CUDA tensor using Triton."""
+
+    _require_triton()
+    _require_cuda_tensors(b_packed)
+    scale = b_scale
+    if scale.ndim == 3 and scale.shape[2] == 1:
+        scale = scale.squeeze(-1)
+    if scale.ndim == 1:
+        scale = scale.reshape(1, -1).expand(int(b_packed.shape[0]), -1)
+    if scale.ndim != 2:
+        raise XQTBackendError("NVFP4 Triton dequant expects scale to be 1D or 2D")
+    scale = scale.to(device=b_packed.device, dtype=torch.float32)
+    if weight_global_scale is not None:
+        scale = scale / weight_global_scale.to(device=b_packed.device, dtype=torch.float32).reshape(1, 1)
+    rows = int(b_packed.shape[0])
+    output = torch.empty((rows, int(cols)), device=b_packed.device, dtype=output_dtype)
+    codebook = _nvfp4_codebook_tensor(b_packed.device)
+    total = rows * int(cols)
+    grid = lambda meta: (triton.cdiv(total, meta["BLOCK_SIZE"]),)
+    _dequant_nvfp4_weight_kernel[grid](
+        b_packed,
+        scale,
+        codebook,
+        output,
+        rows,
+        int(cols),
+        b_packed.stride(0),
+        scale.stride(0),
+        scale.stride(1),
+        output.stride(0),
+        output.stride(1),
+        group_size=int(group_size),
+        BLOCK_SIZE=256,
+        num_warps=4,
+    )
+    return output
 
 
 # ============================================================================
@@ -518,11 +784,190 @@ def gemm_int4_dequant_triton(
     """INT4 weight-only dequant GEMM using Triton."""
     _require_triton()
     _require_cuda_tensors(a, b_packed)
+    if a.ndim != 2 or b_packed.ndim != 2:
+        raise XQTBackendError("gemm_int4_dequant expects 2D GEMM inputs")
 
-    # Fallback to reference
-    return gemm_int4_dequant_reference(
-        a, b_packed, b_scale, b_zero, bias,
-        group_size=group_size,
+    packed = b_packed.to(torch.uint8)
+    padded_k = int(packed.shape[1]) * 2
+    low = packed & 0x0F
+    high = (packed >> 4) & 0x0F
+    unpacked = torch.stack((low, high), dim=-1).reshape(packed.shape[0], -1)
+    signed = torch.where(
+        unpacked > 7,
+        unpacked.to(torch.int16) - 16,
+        unpacked.to(torch.int16),
+    ).to(torch.float32)
+    groups = int(padded_k) // int(group_size)
+    scale = b_scale.to(device=a.device, dtype=torch.float32)
+    if scale.ndim == 3 and scale.shape[2] == 1:
+        scale = scale.squeeze(-1)
+    if scale.ndim == 1:
+        scale = scale.reshape(1, -1).expand(signed.shape[0], -1)
+    if scale.shape != (signed.shape[0], groups):
+        raise XQTBackendError(
+            "gemm_int4_dequant expects b_scale to match [out_features, k/group_size]"
+        )
+    compute_dtype = torch.bfloat16 if a.dtype == torch.bfloat16 else torch.float16
+    dense_weight = dequantize_int4_weight_triton(
+        packed,
+        scale,
+        group_size=int(group_size),
+        cols=int(a.shape[1]),
+        b_zero=b_zero,
+        output_dtype=compute_dtype,
+    )
+    return _run_dense_triton_gemm(
+        a.to(compute_dtype) if a.dtype not in {torch.float16, torch.bfloat16} else a,
+        dense_weight,
+        None if bias is None else bias.to(device=a.device, dtype=_dense_triton_output_dtype(a)),
+        activation=activation,
+        transpose_b=True,
+    )
+
+
+def gemm_nvfp4_packed_dequant_reference(
+    a: torch.Tensor,
+    b_packed: torch.Tensor,
+    b_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    group_size: int,
+    weight_global_scale: torch.Tensor | None = None,
+    activation: str | None = None,
+) -> torch.Tensor:
+    """Reference NVFP4 packed dequant GEMM."""
+
+    weight_codes = unpack_nvfp4e2m1(
+        b_packed.to(device=a.device),
+        input_features=int(input_features),
+    )
+    scale = b_scale.to(device=a.device, dtype=torch.float32)
+    if weight_global_scale is not None:
+        denom = weight_global_scale.to(device=a.device, dtype=torch.float32)
+        scale = scale / (
+            denom.reshape(1, 1)
+            if scale.ndim == 2
+            else denom.reshape(1, 1, 1)
+        )
+    expanded_scale = expand_group_scale(
+        scale,
+        group_size=int(group_size),
+        input_features=int(input_features),
+    ).to(device=a.device, dtype=weight_codes.dtype)
+    weight = weight_codes * expanded_scale
+    return gemm_reference(
+        a,
+        weight.to(dtype=a.dtype, device=a.device),
+        bias,
+        activation=activation,
+        transpose_b=True,
+    )
+
+
+def gemm_nvfp4_packed_dequant_triton(
+    a: torch.Tensor,
+    b_packed: torch.Tensor,
+    b_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    group_size: int,
+    weight_global_scale: torch.Tensor | None = None,
+    activation: str | None = None,
+) -> torch.Tensor:
+    """Packed NVFP4 dequant GEMM composed with Triton dense GEMM."""
+
+    _require_triton()
+    _require_cuda_tensors(a, b_packed, b_scale)
+    compute_dtype = torch.bfloat16 if a.dtype == torch.bfloat16 else torch.float16
+    dense_weight = dequantize_nvfp4_weight_triton(
+        b_packed.to(device=a.device),
+        b_scale.to(device=a.device),
+        cols=int(input_features),
+        group_size=int(group_size),
+        weight_global_scale=weight_global_scale,
+        output_dtype=compute_dtype,
+    )
+    return _run_dense_triton_gemm(
+        a.to(compute_dtype) if a.dtype not in {torch.float16, torch.bfloat16} else a,
+        dense_weight,
+        None if bias is None else bias.to(device=a.device, dtype=_dense_triton_output_dtype(a)),
+        activation=activation,
+        transpose_b=True,
+    )
+
+
+def gemm_nvfp4_packed_activation_reference(
+    a_packed: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_packed: torch.Tensor,
+    b_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    group_size: int,
+    activation_global_scale: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
+    activation: str | None = None,
+    output_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reference NVFP4 GEMM that consumes packed activation and packed weight."""
+
+    activation_dense = dequantize_nvfp4_codes(
+        a_packed,
+        a_scale,
+        input_features=int(input_features),
+        group_size=int(group_size),
+        global_scale=activation_global_scale,
+        output_dtype=output_dtype,
+    )
+    return gemm_nvfp4_packed_dequant_reference(
+        activation_dense,
+        b_packed,
+        b_scale,
+        bias,
+        input_features=int(input_features),
+        group_size=int(group_size),
+        weight_global_scale=weight_global_scale,
+        activation=activation,
+    )
+
+
+def gemm_nvfp4_packed_activation_triton(
+    a_packed: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_packed: torch.Tensor,
+    b_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    group_size: int,
+    activation_global_scale: torch.Tensor | None = None,
+    weight_global_scale: torch.Tensor | None = None,
+    activation: str | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Composed Triton runtime that consumes packed NVFP4 activation and weight."""
+
+    _require_triton()
+    _require_cuda_tensors(a_packed, a_scale, b_packed, b_scale)
+    activation_dense = dequantize_nvfp4_weight_triton(
+        a_packed.to(device=b_packed.device),
+        a_scale.to(device=b_packed.device),
+        cols=int(input_features),
+        group_size=int(group_size),
+        weight_global_scale=activation_global_scale,
+        output_dtype=output_dtype,
+    )
+    return gemm_nvfp4_packed_dequant_triton(
+        activation_dense,
+        b_packed,
+        b_scale,
+        bias,
+        input_features=int(input_features),
+        group_size=int(group_size),
+        weight_global_scale=weight_global_scale,
         activation=activation,
     )
 
@@ -595,13 +1040,28 @@ TRITON_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "baseline": "unpack + dequant + torch.matmul",
         "usage": "INT4 weight-only quantization with per-group scaling.",
         "hardware": "CUDA SM70+",
-        "note": "Currently uses reference fallback, fused kernel TBD",
+        "note": "Composed runtime: device-side unpack/dequant followed by Triton dense GEMM.",
+    },
+    "gemm_nvfp4_packed_dequant": {
+        "kernel_name": "gemm_nvfp4_packed_dequant",
+        "precision": "nvfp4",
+        "quantization_mode": "NVFP4 packed weight-only",
+        "supports_group_quant": True,
+        "group_size": 16,
+        "supports_bias": True,
+        "supports_activation": True,
+        "baseline": "unpack_nvfp4e2m1 + expand_group_scale + torch.matmul",
+        "usage": "Packed NVFP4 weight-only quantization with per-group FP8 scale.",
+        "hardware": "CUDA SM70+",
+        "note": "Composed runtime: device-side NVFP4 decode/dequant followed by Triton dense GEMM.",
     },
 }
 
 
 __all__ = [
     "TRITON_GEMM_KERNEL_METADATA",
+    "dequantize_int4_weight_triton",
+    "dequantize_nvfp4_weight_triton",
     "gemm_reference",
     "gemm_int8_reference",
     "gemm_fp8_reference",
@@ -611,4 +1071,8 @@ __all__ = [
     "gemm_int8_triton",
     "gemm_fp8_triton",
     "gemm_int4_dequant_triton",
+    "gemm_nvfp4_packed_activation_reference",
+    "gemm_nvfp4_packed_activation_triton",
+    "gemm_nvfp4_packed_dequant_reference",
+    "gemm_nvfp4_packed_dequant_triton",
 ]

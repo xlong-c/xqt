@@ -19,19 +19,34 @@ from .pointwise import (
 )
 from .gemm import (
     TRITON_GEMM_KERNEL_METADATA,
+    dequantize_int4_weight_triton,
+    dequantize_nvfp4_weight_triton,
     gemm_bf16_triton,
     gemm_fp16_triton,
     gemm_fp8_triton,
     gemm_int4_dequant_triton,
     gemm_int8_triton,
+    gemm_nvfp4_packed_activation_reference,
+    gemm_nvfp4_packed_activation_triton,
+    gemm_nvfp4_packed_dequant_reference,
+    gemm_nvfp4_packed_dequant_triton,
     gemm_reference,
 )
 from .mxfp_gemm import (
     MXFP_GEMM_KERNEL_METADATA,
+    dequantize_mxfp_weight_triton,
+    gemm_mxfp_packed_activation_reference,
+    gemm_mxfp_packed_activation_triton,
     gemm_mxfp_reference,
     gemm_mxfp_triton,
     pack_mxfp,
     unpack_mxfp,
+)
+from .fp4_quant import (
+    scaled_mxfp4_quant_reference,
+    scaled_mxfp4_quant_triton,
+    scaled_nvfp4_quant_reference,
+    scaled_nvfp4_quant_triton,
 )
 from .linear import (
     TRITON_LINEAR_KERNEL_METADATA,
@@ -48,6 +63,9 @@ __all__ = [
     "TRITON_GEMM_KERNEL_METADATA",
     "TRITON_LINEAR_KERNEL_METADATA",
     "MXFP_GEMM_KERNEL_METADATA",
+    "dequantize_int4_weight_triton",
+    "dequantize_mxfp_weight_triton",
+    "dequantize_nvfp4_weight_triton",
     "fused_bias_gelu_reference",
     "fused_bias_gelu_triton",
     "fused_channel_first_l2norm_reference",
@@ -67,6 +85,12 @@ __all__ = [
     "gemm_fp8_triton",
     "gemm_int4_dequant_triton",
     "gemm_int8_triton",
+    "gemm_mxfp_packed_activation_reference",
+    "gemm_mxfp_packed_activation_triton",
+    "gemm_nvfp4_packed_activation_reference",
+    "gemm_nvfp4_packed_activation_triton",
+    "gemm_nvfp4_packed_dequant_reference",
+    "gemm_nvfp4_packed_dequant_triton",
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",
@@ -77,5 +101,9 @@ __all__ = [
     "linear_int8_triton",
     "linear_reference",
     "pack_mxfp",
+    "scaled_mxfp4_quant_reference",
+    "scaled_mxfp4_quant_triton",
+    "scaled_nvfp4_quant_reference",
+    "scaled_nvfp4_quant_triton",
     "unpack_mxfp",
 ]

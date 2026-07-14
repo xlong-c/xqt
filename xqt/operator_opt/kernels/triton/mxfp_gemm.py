@@ -8,10 +8,17 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
 
 
 import triton
 import triton.language as tl
+
+from .gemm import (
+    _dense_triton_output_dtype,
+    _run_dense_triton_gemm,
+    dequantize_nvfp4_weight_triton,
+)
 
 
 
@@ -132,18 +139,24 @@ def unpack_mxfp(
     else:
         raise ValueError(f"Unsupported precision: {precision}")
 
-    # Reshape to blocks
-    num_blocks = scales.numel()
-    mantissas = mantissas.reshape(num_blocks, block_size)
+    scale_tensor = scales.to(torch.float32)
+    if scale_tensor.ndim == 1:
+        num_blocks = scale_tensor.numel()
+        mantissas = mantissas.reshape(num_blocks, block_size)
+        dequantized = mantissas * scale_tensor.unsqueeze(1)
+        output = dequantized.flatten()
+        if original_numel is not None and output.numel() > original_numel:
+            output = output[:original_numel]
+        return output
 
-    # Dequantize: value = mantissa * scale
-    dequantized = mantissas * scales.unsqueeze(1)
-
-    # Flatten and unpad
-    output = dequantized.flatten()
-    if original_numel is not None and output.numel() > original_numel:
-        output = output[:original_numel]
-
+    if scale_tensor.ndim != 2:
+        raise ValueError("MXFP scales must be 1D or 2D")
+    rows, groups = scale_tensor.shape
+    mantissas = mantissas.reshape(rows, groups, block_size)
+    dequantized = mantissas * scale_tensor.unsqueeze(-1)
+    output = dequantized.reshape(rows, groups * block_size)
+    if original_numel is not None and output.shape[1] > original_numel:
+        output = output[:, :original_numel]
     return output
 
 
@@ -176,6 +189,61 @@ def _unpack_nibbles(packed: torch.Tensor) -> torch.Tensor:
     return unpacked
 
 
+@triton.jit
+def _dequant_mxfp_weight_kernel(
+    packed_ptr,
+    scale_ptr,
+    out_ptr,
+    rows,
+    cols,
+    stride_packed_row,
+    stride_scale_row,
+    stride_scale_group,
+    stride_out_row,
+    stride_out_col,
+    mx_precision: tl.constexpr,
+    block_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    total = rows * cols
+    mask = offsets < total
+    row = offsets // cols
+    col = offsets % cols
+    group = col // block_size
+
+    if mx_precision == 4:
+        packed_col = col // 2
+        packed = tl.load(
+            packed_ptr + row * stride_packed_row + packed_col,
+            mask=mask,
+            other=0,
+        ).to(tl.int32)
+        low = packed & 0x0F
+        high = (packed >> 4) & 0x0F
+        mantissa = tl.where((col & 1) == 0, low, high)
+        mantissa = tl.where(mantissa >= 8, mantissa - 16, mantissa).to(tl.float32)
+    else:
+        mantissa = tl.load(
+            packed_ptr + row * stride_packed_row + col,
+            mask=mask,
+            other=0,
+        ).to(tl.float32)
+
+    scale = tl.load(
+        scale_ptr + row * stride_scale_row + group * stride_scale_group,
+        mask=mask,
+        other=1.0,
+    ).to(tl.float32)
+    value = mantissa * scale
+    tl.store(
+        out_ptr + row * stride_out_row + col * stride_out_col,
+        value.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
 # ============================================================================
 # Reference Implementation
 # ============================================================================
@@ -193,18 +261,23 @@ def gemm_mxfp_reference(
     transpose_b: bool = True,
 ) -> torch.Tensor:
     """Reference MXFP GEMM implementation."""
-    # Unpack MXFP weights
-    M, K = a.shape
+    _, K = a.shape
     if transpose_b:
-        N = b_scales.numel() * block_size // K  # Approximate
-        original_numel = N * K
+        b_fp = unpack_mxfp(
+            b_packed,
+            b_scales,
+            mx_precision,
+            block_size,
+            K,
+        )
+        if b_fp.ndim != 2:
+            raise ValueError("MXFP transpose_b path expects 2D packed weights")
+        b_fp = b_fp.to(dtype=a.dtype, device=a.device).t()
     else:
-        original_numel = None
-
-    b_fp = unpack_mxfp(b_packed, b_scales, mx_precision, block_size, original_numel)
-
-    if transpose_b:
-        b_fp = b_fp.reshape(-1, K).t()
+        b_fp = unpack_mxfp(b_packed, b_scales, mx_precision, block_size, None).to(
+            dtype=a.dtype,
+            device=a.device,
+        )
 
     # Standard GEMM
     output = torch.matmul(a, b_fp)
@@ -222,6 +295,47 @@ def gemm_mxfp_reference(
         return output
     else:
         raise ValueError(f"unsupported activation: {activation}")
+
+
+def dequantize_mxfp_weight_triton(
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    precision: int,
+    block_size: int,
+    cols: int,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Decode packed MXFP weights into a dense CUDA tensor using Triton."""
+
+    _require_triton()
+    _require_cuda_tensors(packed, scales)
+    scale_tensor = scales.to(device=packed.device, dtype=torch.float32)
+    if scale_tensor.ndim == 1:
+        scale_tensor = scale_tensor.reshape(1, -1).expand(int(packed.shape[0]), -1)
+    if scale_tensor.ndim != 2:
+        raise ValueError("MXFP Triton dequant expects scales to be 1D or 2D")
+    rows = int(packed.shape[0])
+    output = torch.empty((rows, int(cols)), device=packed.device, dtype=output_dtype)
+    total = rows * int(cols)
+    grid = lambda meta: (triton.cdiv(total, meta["BLOCK_SIZE"]),)
+    _dequant_mxfp_weight_kernel[grid](
+        packed,
+        scale_tensor,
+        output,
+        rows,
+        int(cols),
+        packed.stride(0),
+        scale_tensor.stride(0),
+        scale_tensor.stride(1),
+        output.stride(0),
+        output.stride(1),
+        mx_precision=int(precision),
+        block_size=int(block_size),
+        BLOCK_SIZE=256,
+        num_warps=4,
+    )
+    return output
 
 
 # ============================================================================
@@ -310,22 +424,97 @@ def gemm_mxfp_triton(
     activation: str | None = None,
     transpose_b: bool = True,
 ) -> torch.Tensor:
-    """MXFP GEMM using Triton.
-
-    Note: Current implementation falls back to reference.
-    Full fused kernel requires bit-packing/unpacking in Triton.
-    """
+    """MXFP GEMM using Triton dense GEMM after device-side unpack/dequant."""
     _require_triton()
     _require_cuda_tensors(a, b_packed, b_scales)
-
-    # Fallback to reference for now
-    # Full Triton kernel with fused dequant requires more complex bit manipulation
-    return gemm_mxfp_reference(
-        a, b_packed, b_scales, bias,
-        mx_precision=mx_precision,
+    compute_dtype = torch.bfloat16 if a.dtype == torch.bfloat16 else torch.float16
+    dense_weight = dequantize_mxfp_weight_triton(
+        b_packed,
+        b_scales,
+        precision=mx_precision,
         block_size=block_size,
+        cols=int(a.shape[1]),
+        output_dtype=compute_dtype,
+    )
+    return _run_dense_triton_gemm(
+        a.to(compute_dtype) if a.dtype not in {torch.float16, torch.bfloat16} else a,
+        dense_weight,
+        None if bias is None else bias.to(device=a.device, dtype=_dense_triton_output_dtype(a)),
         activation=activation,
         transpose_b=transpose_b,
+    )
+
+
+def gemm_mxfp_packed_activation_reference(
+    a_packed: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_packed: torch.Tensor,
+    b_scales: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    block_size: int = 32,
+    mx_precision: int = 4,
+    activation: str | None = None,
+    output_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reference MXFP4 GEMM that consumes packed activation and packed weight."""
+
+    del mx_precision
+    activation_dense = dequantize_nvfp4_codes(
+        a_packed,
+        a_scale,
+        input_features=int(input_features),
+        group_size=int(block_size),
+        global_scale=None,
+        output_dtype=output_dtype,
+    )
+    return gemm_mxfp_reference(
+        activation_dense,
+        b_packed,
+        b_scales,
+        bias,
+        mx_precision=4,
+        block_size=int(block_size),
+        activation=activation,
+        transpose_b=True,
+    )
+
+
+def gemm_mxfp_packed_activation_triton(
+    a_packed: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_packed: torch.Tensor,
+    b_scales: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    input_features: int,
+    block_size: int = 32,
+    mx_precision: int = 4,
+    activation: str | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Composed Triton runtime that consumes packed MXFP4 activation and weight."""
+
+    _require_triton()
+    _require_cuda_tensors(a_packed, a_scale, b_packed, b_scales)
+    activation_dense = dequantize_nvfp4_weight_triton(
+        a_packed.to(device=b_packed.device),
+        a_scale.to(device=b_packed.device),
+        cols=int(input_features),
+        group_size=int(block_size),
+        weight_global_scale=None,
+        output_dtype=output_dtype,
+    )
+    return gemm_mxfp_triton(
+        activation_dense,
+        b_packed,
+        b_scales,
+        bias,
+        mx_precision=int(mx_precision),
+        block_size=int(block_size),
+        activation=activation,
+        transpose_b=True,
     )
 
 
@@ -342,7 +531,7 @@ MXFP_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "baseline": "unpack + torch.matmul",
         "usage": "MXFP8 quantized GEMM with microscaling shared exponents",
         "hardware": "CUDA SM120+ (Blackwell) native, SM70+ emulated",
-        "note": "Currently uses reference fallback, fused kernel TBD",
+        "note": "Composed runtime: device-side unpack/dequant followed by Triton dense GEMM.",
     },
     "gemm_mxfp6": {
         "kernel_name": "gemm_mxfp6",
@@ -352,7 +541,7 @@ MXFP_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "baseline": "unpack + torch.matmul",
         "usage": "MXFP6 higher compression with acceptable precision",
         "hardware": "CUDA SM120+ (Blackwell) native, SM70+ emulated",
-        "note": "Currently uses reference fallback, fused kernel TBD",
+        "note": "Composed runtime: device-side unpack/dequant followed by Triton dense GEMM.",
     },
     "gemm_mxfp4": {
         "kernel_name": "gemm_mxfp4",
@@ -362,13 +551,16 @@ MXFP_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "baseline": "unpack + torch.matmul",
         "usage": "MXFP4 maximum compression, lower precision",
         "hardware": "CUDA SM120+ (Blackwell) native, SM70+ emulated",
-        "note": "Currently uses reference fallback, fused kernel TBD",
+        "note": "Composed runtime: device-side unpack/dequant followed by Triton dense GEMM.",
     },
 }
 
 
 __all__ = [
     "MXFP_GEMM_KERNEL_METADATA",
+    "dequantize_mxfp_weight_triton",
+    "gemm_mxfp_packed_activation_reference",
+    "gemm_mxfp_packed_activation_triton",
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "pack_mxfp",
