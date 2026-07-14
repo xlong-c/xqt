@@ -1,5 +1,9 @@
 import torch
 
+from examples.mlp_w4_int8_mma_acceptance import (
+    _select_best_path,
+    weight_retarget_error,
+)
 from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear, quantize_with_fp4_weight_only
 from xqt.quant.quantizers.w4_storage_int8_mma import (
     W4StorageInt8MmaLinear,
@@ -119,3 +123,56 @@ def test_w4_storage_release_int8_compute_view_keeps_packed_storage() -> None:
     output = module(torch.randn(2, 16))
     assert output.shape == (2, 32)
     assert module._compute is not None
+
+
+def test_w4_storage_weight_retarget_error_compares_fp4_to_int8_view() -> None:
+    model = _TinyLinearModel().eval()
+    fp4 = quantize_with_fp4_weight_only(
+        model,
+        policy={"include_module_types": ["Linear"], "exclude_name_patterns": [], "group_size": 8},
+        inplace=False,
+    )
+    result = quantize_with_w4_storage_int8_mma(
+        fp4.model,
+        policy={"include_module_types": ["Linear"], "exclude_name_patterns": []},
+        engine="torch_int_mm",
+        inplace=False,
+        source="fp4_weight_only",
+    )
+
+    error = weight_retarget_error(fp4.model, result.model, chunk_rows=5)
+    aggregate = error["aggregate"]
+
+    assert aggregate["layers"] == 1
+    assert aggregate["numel"] == 16 * 32
+    assert aggregate["max_abs"] >= 0.0
+    assert aggregate["mean_abs"] < 1e-3
+    assert "fc" in error["per_layer"]
+
+
+def test_w4_storage_benchmark_best_path_prefers_fastest_passing_candidate() -> None:
+    candidates = [
+        {
+            "name": "too_slow",
+            "status": "ok",
+            "latency_ms": 2.0,
+            "gates": {"overall": True},
+        },
+        {
+            "name": "fast_but_failed_gate",
+            "status": "ok",
+            "latency_ms": 0.5,
+            "gates": {"overall": False},
+        },
+        {
+            "name": "fastest_passing",
+            "status": "ok",
+            "latency_ms": 1.0,
+            "gates": {"overall": True},
+        },
+    ]
+
+    best = _select_best_path(candidates)
+
+    assert best is not None
+    assert best["name"] == "fastest_passing"

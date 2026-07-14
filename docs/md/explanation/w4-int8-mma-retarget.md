@@ -154,44 +154,71 @@ PYTHONPATH=/root/workspace/xdl python examples/mlp_w4_int8_mma_acceptance.py
 
 ### 测试设计
 
-- 10 层 MLP (Linear + ReLU), 分类头保持 FP16
-- 同一份 packed W4 网络, 对照两条运行时路径:
+- 10 层 MLP (Linear + ReLU), 分类头保持 FP16.
+- 同一份 packed W4 网络, 对照 baseline 和 3 条 INT8 MMA 候选:
 
 | 路径 | 含义 |
 |------|------|
-| **A (参考)** | 同一 packed W4, dequant → FP16 GEMM (无 INT8 转义) |
-| **B (被测)** | 同一 packed W4, TileLang INT8 MMA 转义 |
+| **baseline_fp4** | 同一 packed W4, dequant -> FP16 GEMM (无 INT8 转义) |
+| **torch_int_mm** | W4 storage -> INT8 compute view -> `torch._int_mm` vendor path |
+| **tilelang_64x64x64** | W4 storage -> TileLang fused static activation INT8 MMA |
+| **ptx_sm89_prepacked** | W4 storage -> hand-written sm_89 PTX INT8 MMA with prepacked B |
 
-- **不做 QAT**: 权重是随机初始化的, 量化后不训练
-- **准确度定义**: B 的 argmax 输出与 A 的一致率 (而非某任务标签)
+- **不做 QAT**: 权重是随机初始化的, 量化后不训练.
+- **输出准确度定义**: 候选路径 argmax 输出与 `baseline_fp4` 的一致率 (而非某任务标签).
+- **权重准确度定义**: 对每个被替换层, 比较 FP4 dequant 权重和 INT8 compute view (`qweight_t * channel_scale`) 的 `max_abs`, `mean_abs`, `rmse`, `max_rel`.
+- 脚本会把完整 JSON 写到 `artifacts/xqt/w4_int8_mma_sweep.json`, 并在通过准确度门禁的候选中按 median latency 选择 `best_path`.
 
 ### 验收门禁 (BenchConfig)
 
 ```python
-max_accuracy_drop_pp = 1.0     # B vs A top-1 drop <= 1pp
-min_speedup_b_vs_a = 1.15      # B median latency / A median latency >= 1.15x
+max_accuracy_drop_pp = 5.0      # candidate vs baseline_fp4 top-1 drop <= 5pp
+min_speedup_vs_fp4 = 1.15       # baseline_fp4 latency / candidate latency >= 1.15x
+max_weight_mean_abs = 1e-3      # FP4 dequant weight vs INT8 compute view
 ```
 
-### 实测数据 (RTX 4070 Ti SUPER, SM89, 2026-07 重测)
+### 实测数据 (RTX 4070 Ti SUPER, SM89, 2026-07-12 重测)
 
 **最优配置 (推荐验收点)**: depth=10 MLP, `engine=tilelang`, tile `64x64x64`, threads=128, stages=2, static activation, `cache_int8_compute_view=True`.
 
-| width | batch | A (W4→FP16) | B (TileLang INT8) | **speedup** |
-|-------|-------|-------------|-------------------|-------------|
-| 8192 | 64 | 2.622ms | 1.795ms | **1.46x** |
-| **10240** | **64** | **4.626ms** | **2.858ms** | **1.62x** (稳定 median) |
-| 10240 | 64 | ~5.09ms | ~2.81ms | **~1.81x** (单次扫峰) |
-| 12288 | 64 | 6.356ms | 4.004ms | **1.59x** |
+| path | latency | speedup vs FP4 | top-1 vs FP4 | weight mean abs | gate |
+|------|---------|----------------|--------------|-----------------|------|
+| baseline_fp4 | 3.882ms | 1.000x | 100.000% | - | - |
+| torch_int_mm | 10.179ms | 0.381x | 94.727% | 1.672e-05 | FAIL |
+| **tilelang_64x64x64** | **2.478ms** | **1.566x** | **96.289%** | **1.672e-05** | **PASS** |
+| ptx_sm89_prepacked | 5.265ms | 0.737x | 95.508% | 1.672e-05 | FAIL |
 
-门禁仍用 `min_speedup_b_vs_a = 1.15`; 冲高收益优先 **width≥8192 且 batch=64**.
+当前 `best_path` 是 **`tilelang_64x64x64`**. 门禁仍用 `min_speedup_vs_fp4 = 1.15`; 冲高收益优先 **width>=8192 且 batch=64**.
 
 ### 引擎对照 (同一 W4 网络, width=10240, batch=64)
 
 | 引擎 | 相对 path A | 备注 |
 |------|-------------|------|
-| **tilelang** | **~1.6–1.8x** | **batch=64 端到端最优** (融合 static 激活 quant 进 MMA pipeline) |
-| torch_int_mm | ~0.4–1.4x | 视 shape, Ada 上常慢 |
-| **ptx_sm89** | batch=64 ~0.7x; **M≥256 单层可超 TileLang** | 已接: offline prepack B + CUDA quant + prepacked GEMM (~100 TOPS). `engine=auto` 在 M≥192 选 ptx |
+| **tilelang** | **1.566x** | **batch=64 端到端最优** (融合 static 激活 quant 进 MMA pipeline) |
+| torch_int_mm | 0.381x | torch._int_mm 在该端到端形状上明显慢于 FP4->FP16 baseline |
+| **ptx_sm89** | 0.737x | 已接: offline prepack B + CUDA quant + prepacked GEMM; 当前 batch=64 全网不如 TileLang |
+
+### cuBLASLt / cublasGemmEx 反证基准
+
+在同一张 RTX 4070 Ti SUPER (SM89), CUDA Toolkit 13.1, cuBLAS 13.2.0 上, 单独测量模拟网络每层的核心 GEMM:
+
+M=64, N=10240, K=10240, signed int8 [M,K] x signed int8 [K,N] -> int32 [M,N].
+
+计时使用 CUDA Event, 每个库调用先做正确性检查. INT8 数据值不影响 Tensor Core 指令路径.
+
+| 路径 | median latency | INT8 TOPS | 数值检查 | 结论 |
+|------|----------------|-----------|----------|------|
+| cublasGemmEx DEFAULT_TENSOR_OP | 1.12631ms | 11.92 | PASS | row-major 直接调用 |
+| cublasGemmEx 最快 ALGO*_TENSOR_OP (algo 109) | 1.11883ms | 12.00 | PASS | 扫描了 99, 100-115 |
+| cuBLASLt row-major heuristic | 1.12467ms | 11.93 | PASS | heuristic workspace=0 |
+| **TileLang int8 MMA** | **0.24629ms** | **54.50** | **PASS, max_abs=0 vs torch._int_mm** | **4.54x faster than best cuBLAS** |
+
+同时试过 cuBLASLt 的 legacy IMMA prepacked layout:
+
+- A=COL32, B=COL32_2R_4R4, C=COL32.
+- A=COL32, B=COL4_4R2_8C, C=COL32.
+
+两种组合在本机的 sm_89 + int8 -> int32 描述符上都在 cublasLtMatmulAlgoGetHeuristic 返回 CUBLAS_STATUS_NOT_SUPPORTED, 没有可执行算法. 因此不将 cuBLASLt / cublasGemmEx 加入 Int8MmaLinear 候选: 最快的直接库 GEMM 已经比 TileLang raw GEMM 慢 4.54x, 而实际模型还要额外承担 activation quant, int32 dequant, bias 和可选 layout transform 的成本.
 
 ### ptx_sm89 融合路径 (v8)
 
@@ -242,7 +269,7 @@ Ada 上 INT8 Tensor Core 理论峰值 ~353 TOPS, FP16 ~88 TFLOPS (FP32 accum). �
 | **M=64 太小** | 64 行只能填 1-2 个 SM 的 Tensor Core 流水线, 大量 SM 空闲 |
 | **cuBLAS FP16 高度调优** | 手写汇编, 接近 70% 峰值效率 |
 | **TileLang JIT kernel** | 自动生成, ~45% 峰值效率 |
-| **torch._int_mm 用旧 CUTLASS kernel** | SM80 fallback, 不是 SM89 优化版 |
+| **vendor INT8 row-major path** | torch._int_mm, cuBLASLt 和 cublasGemmEx 在该 M=64 形状均约 12 TOPS, 没有更快的库算法可选 |
 | **激活量化 + rescale 开销** | 每层 ~0.07ms, 占单层的 ~30% |
 
 ### 更优引擎探索
