@@ -55,7 +55,7 @@ Infer 只消费: 已量化模型 + 可选计算配置; 不回流量化, 不强�
 | 禁止名 | 原因 | 正确写法 |
 | --- | --- | --- |
 | `tilelang` | 是 operator **engine**, 不是 quant backend | quant: `backend=pytorch` + method/strategy; operator: `engine=tilelang` |
-| `svdquant` | 是 quant **method**, 不是 quant backend | `backend=pytorch` + `method=svd` + `strategy=svd_fp4\|svd_int4` |
+| `svdquant` | 是 quant **method**, 不是 quant backend | `backend=pytorch` + `method=svd` + `strategy=svd_fp4\|svd_int4\|svd_fp4_int8_mma\|svd_int4_int8_mma` |
 | `awq` / `gptq` 作 backend | 是 method | `backend=pytorch` + `method=awq\|gptq` |
 
 代码会拒绝上述错误 backend (见 `xqt/quant/capability.py`, `xqt/quant/execution/executor.py`).

@@ -21,7 +21,8 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 | `RuntimeHandlePayload` | executable runtime handle typed payload; materialized deploy stage 使用该 payload, 可生产 ONNX Runtime `InferenceSession` 或非 dry-run TensorRT runtime session. |
 | `StageComparison` | session 内 stage-to-stage 结构化比较结果. |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪. |
-| `ModelPackageManifest` / `load_model_package()` | 推理侧文件加载标准, 当前最小闭环为 `manifest.json + runtime/config.json`; 可选 `runtime/compute.json` (compute_config). |
+| `ModelPackageManifest` / `load_model_package()` | 推理侧文件包加载标准, 当前最小闭环为 `manifest.json + runtime/config.json`; 可选 `runtime/compute.json` (compute_config). |
+| `write_quant_pair` / `load_quant_pair` | 扁平 Infer 交付: `model.pt` + `quant.json` (`artifact_type=xqt_quant_sidecar`). `quant.json` 是 compute_config + lineage sidecar, 不是 quant recipe; 加载不跑 quantizer. |
 | `MetricRecord` | 结构化指标记录. |
 | `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 engine,status,maturity,runtime,artifact_kind 和硬件/校准/导出要求. |
 | `XQTReadinessReport` / `assess_xqt_readiness()` | readiness 汇总入口,输出场景状态,capability matrix 和 reporting schema. |
@@ -38,7 +39,7 @@ XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQ
 - `xqt.runtime.HybridInferenceEngine` 只消费已量化模型与 execution policy / compute_config, 做模块级 / 通道级混合精度推理调度; 不跑 quantizer / calibration / sensitivity.
 - `xqt.runtime.engine_resolve` 按 `required_capabilities` (+ 可选 preferred_engines hint) 解析 operator engine; 不是 quant method 选择.
 - Operator engine 只管算子实现 / 融合 / MMA lowering. AWQ / GPTQ / SVD 是 quant **method**, 不是 engine methods.
-- `ArtifactManifest` 只用于 workflow / experiment 追踪, 不是 file-based inference 的加载契约. 推理侧标准入口是 `xqt.runtime` 下的模型包 `manifest.json`.
+- `ArtifactManifest` 只用于 workflow / experiment 追踪, 不是 file-based inference 的加载契约. 推理侧文件入口二选一: (1) 模型包 `manifest.json` (`load_model_package`); (2) 扁平 `model.pt` + `quant.json` (`load_quant_pair` / `load_quant_pair_into_model`). 二者都只消费已量化存储 + 可选 `compute_config`, 不解析 quant recipe YAML.
 - 通道级混合精度: 部分 channel 走 16-bit (或更高), 其余走 4-bit. Quant 侧选 outlier channel 并写入 mask; Runtime 侧 dual-path reference 前向 (`channel_hybrid_linear_reference`), 后续可替换为真实 kernel.
 
 - `backend`: 外部 quant/export/runtime 选择, 例如 `torchao`, `pytorch`, `onnxruntime_qdq`, `tensorrt`, `openvino`. Quant recipe 继续使用 `quant.params.backend`. **`tilelang` / `svdquant` 不是 quant backend**; AWQ/GPTQ/SVD 写 `backend=pytorch` + `method=awq|gptq|svd`.

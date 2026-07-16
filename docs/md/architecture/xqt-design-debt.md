@@ -41,6 +41,7 @@
 | [DEBT-002](#debt-002-quant-capability-把算法方法与-mma-计算契约-engine-缠在一起) | quant capability 把 AWQ/GPTQ/SVD 与 MMA/engine 缠在一起 | planned | high |
 | [DEBT-003](#debt-003-量化与推理未严格解耦-推理应只消费模型--计算配置) | 量化与推理未严格解耦; 推理应只消费模型 + 计算配置 | done | high |
 | [DEBT-004](#debt-004-gemm-selector-fp4nvfp4-goal-感知尚未落地) | gemm selector `goal` 对 fp4/nvfp4 尚无差异化 | open | medium |
+| [DEBT-005](#debt-005-svdquant-应走-composite-add-混合精度而非特例-runtime) | SVDQuant 应走 composite_add 混合精度而非特例 runtime | planned | high |
 
 ---
 
@@ -343,6 +344,56 @@ InferRuntime:
 - `xqt/quant/quantizers/int8_mma.py`
 
 ---
+
+
+
+---
+
+## DEBT-005: SVDQuant 应走 composite_add 混合精度而非特例 runtime
+
+**状态**: planned (部分落地)  
+**提出**: 2026-07-15  
+**优先级**: high (quant/infer 解耦 + 混合精度主路径)
+
+### 现象
+
+SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义上是 additive mixed-precision / dual-branch GEMM.  
+此前实现把存储, 计算契约, INT8 MMA engine 绑在 `SVDQuantInt8MmaLinear` 特例里, 未走 composite / hybrid handoff.
+
+### 已落地 (方案 C 第一刀)
+
+| 项 | 位置 |
+| --- | --- |
+| dual-branch `ModuleComputeSpec.branches` + `combine` | `xqt/contracts/compute.py` |
+| contract `composite_add` | 同上 `SUPPORTED_COMPUTE_CONTRACTS` |
+| quant 默认先写 `SVDQuantLinear` 存储壳 + `compute_config` | `xqt/quant/quantizers/svd.py` |
+| `materialize_compute` 绑 residual INT8 | `SVDQuantLinear.materialize_compute` |
+| Infer materialize 入口 | `xqt/runtime/composite_materialize.py`, `HybridInferenceEngine.from_quantized_model` |
+| 默认仍可 eager materialize (`materialize_compute=True`) | quant policy 可关, 由 Infer 再绑 |
+
+### 已落地 (方案 C 第二刀)
+
+| 项 | 位置 |
+| --- | --- |
+| `Int8MmaLinear` | `xqt/runtime/modules/int8_mma_linear.py` |
+| `W4StorageInt8MmaLinear` | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
+| `SVDQuantLinear` / `SVDQuantInt8MmaLinear` / `LowRankBranch` | `xqt/runtime/modules/svd_composite.py` |
+| packing helpers | `xqt/runtime/modules/packing_int4.py` |
+| quantizers 仅 re-export 算法入口 + 兼容类名 | `xqt/quant/quantizers/{int8_mma,w4_storage_int8_mma,svd}.py` |
+| `runtime/*` 静态无 `quant.quantizers` import | 扫描通过 |
+
+### 仍待做
+
+1. `strategy=svd_*` 完全降级为兼容别名; 主键只剩 method×storage×compute.
+2. composite_add fused 内核 (FUSE_DOWN/UP) 与 `CompositePrecisionGemmSpec` partition 模型统一文档词表 (additive vs k-group).
+3. hunyuan helper / recipes 文档改成 composite 口径.
+4. ~~切断 `operator_opt` → `xqt.quant.bridges`~~ 已迁到 `xqt.runtime.bridges.nvfp4`; quant.bridges 仅兼容 re-export. `tilelang_validation` 内对 FP4 quantizer 的 import 保持 lazy (仅 validation fixture).
+
+### 相关
+
+- DEBT-002, DEBT-003
+- [xqt-infer-handoff.md](xqt-infer-handoff.md)
+- [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md)
 
 ## 追加模板
 

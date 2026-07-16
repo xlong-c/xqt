@@ -99,9 +99,31 @@
 | Hybrid policy | `ExecutionPolicyPayload.required_capabilities` + 可选 `compute_config` |
 | Operator plan | `RuntimePlanPayload.required_capabilities`; `engine` 为 materialize **结果**, 可 `unresolved` |
 | 模型包 | `runtime/compute.json` (可选 entrypoint); `runtime/config.json` 仍可含 ORT providers |
+| 扁平 quant pair | `model.pt` + `quant.json` (`artifact_type=xqt_quant_sidecar`); API: `write_quant_pair` / `load_quant_pair` / `load_quant_pair_into_model` |
 | Module 内嵌 | `_xqt_module_contract` 继续承载 module contract; compute_config 可从 modules 投影 |
 
 ---
+
+
+### 3.4 Dual-branch / composite_add (SVD 等)
+
+Additive 混合精度 (low-rank + quantized residual) 使用:
+
+```json
+{
+  "name": "proj",
+  "compute_contract": "composite_add",
+  "combine": "add",
+  "preferred_mode": "split",
+  "branches": [
+    {"name": "low_rank", "compute_contract": "fp16_mma", "precision": "source_precision"},
+    {"name": "quant_residual", "compute_contract": "w4_storage_int8_mma", "precision": "w8a8"}
+  ],
+  "storage": {"kind": "svd_low_rank_plus_residual", "rank": 32}
+}
+```
+
+Quant method (`svd`) 只在 quant report. Infer 通过 `materialize_composite_compute` 绑 residual 计算路径.
 
 ## 4. 三轴 (DEBT-002) 与交接面关系
 
@@ -169,6 +191,25 @@ quant capability 表 (`backend → methods` 含 awq/gptq) 仍是债; 已删除 q
 | `compute_config` | 可选写入 `runtime/compute.json` + entrypoints |
 | 不解析 | quant recipe YAML |
 
+### 5.7 扁平 quant pair (`weights` + `quant.json`)
+
+研究/PyTorch 交付可用两文件形态, 语义与 model package 的 Infer 侧一致:
+
+```text
+outdir/
+  model.pt      # torch state_dict; 已含 packed/quant 存储
+  quant.json    # xqt_quant_sidecar: weights 索引 + compute_config + lineage
+```
+
+| 裁决 | 说明 |
+| --- | --- |
+| 权重 | 唯一大 artifact; loader 只 `load_state_dict`, 不 re-quantize |
+| `quant.json` | Infer sidecar: `weights` + 可选 `compute_config` + 可选 `lineage` |
+| `lineage` | backend/method/strategy 只放这里; runner 不按 method 分支 |
+| 调用方 | 必须提供匹配 state_dict 的 **已量化 module 壳** (`load_quant_pair_into_model`) |
+| API | `xqt.runtime.write_quant_pair` / `load_quant_pair` / `load_quant_pair_into_model` |
+| 与 package | package 仍是 export/ORT 主路径; pair 是 PyTorch 扁平交付, 不替代 `manifest.json` |
+
 ---
 
 ## 6. Resolve 伪代码
@@ -213,4 +254,5 @@ def resolve_engine(required_capabilities, preferred_engines=None, device=...):
 - [ ] int8_mma quantizer 模块 import 不强制加载 tilelang/cute
 - [ ] RuntimePlan / ExecutionPolicy 可序列化 capabilities
 - [ ] 模型包可选 `runtime/compute.json`
+- [ ] 扁平 `model.pt` + `quant.json` 可 roundtrip 到 `infer_handoff()` 形状
 - [ ] 文档口径与代码一致, DEBT-003 主线 done 或 planned 带落地范围

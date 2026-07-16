@@ -27,6 +27,7 @@
 - `engine` (operator): XQT 内部 kernel / lowering, 例如 Triton, TileLang, CUTLASS, CuTe DSL
 - `backend` (export/deploy): 外部 runtime, 例如 TensorRT, ONNX Runtime, OpenVINO
 - `compute_config`: quant→infer 可选计算配置 (精度 + required_capabilities)
+- **离线静态权重** (文档优先轴): 权重量化在 quant stage 完成并固化; 写 recipe 时先写这一侧, 再写激活是未量化 / 运行时动态 / 校准静态. 细则见 [xqt-quant.md](xqt-quant.md#2-写量化时的默认表述-离线静态权重优先)
 - `semantic replacement`: Python 层以 `Linear`, `Conv`, `Norm`, `Attention`, `FeedForward`, `TransformerBlock` 为单位替换模型语义块
 - `wrapper/materialize`: 夹在 facade 和 kernel 之间的边界翻译层, 负责 candidate module, fallback 和 execution metadata
 
@@ -103,6 +104,7 @@ XQT 做 quant / operator / export 路由时, 不要先问 "哪种位宽最好", 
 - 不要把 `triton` / `tilelang` / `cute_dsl` / `custom_cuda` 写成和 TensorRT / ONNX Runtime 并列的外部 backend; 它们是 XQT 内部 **engine**
 - 不要把 `awq` / `gptq` / `svd` 当成 engine 或 quant backend; 它们是 quant **method**, 配置写 `backend=pytorch` + `method=...`
 - 不要写 `quant.params.backend=tilelang` 或 `=svdquant` (已禁止)
+- 不要用一句"动态量化 / 静态量化"概括整条 quant 路径; 先写 **离线静态权重**, 再写激活时机 (见 [xqt-quant.md](xqt-quant.md#2-写量化时的默认表述-离线静态权重优先))
 - 不要把 1~8 的长期指导写成全部完成; 当前只是配置单轨化主路径完成, God module 拆分, contract 层和能力面收敛仍未完成
 - 不要在 recipe 里声明 dataset 来源
 
