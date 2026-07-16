@@ -52,137 +52,94 @@ CUTE_DSL_PASS_CONFIG_KEYS = (
     "CUTE_DSL_ENABLE_PERSISTENT_CACHE",
 )
 CANONICAL_QUANT_STRATEGIES = (
-    "dynamic_int8",
-    "dynamic_int8_mma",
-    "nvfp4_dynamic",
-    "mxfp4_dynamic",
-    "tilelang_int8_mma",
-    "weight_only_int8",
-    "weight_only_int4",
-    "static_qdq_int8",
-    "fp8_dynamic",
-    "fp4_weight_only",
-    "mxfp_weight_only",
-    "svd_fp4",
-    "svd_int4",
-    "w4_storage_int8_mma",
-    "convrot_w4a4",
+    "w4a16_int4",
+    "w8a16_int8",
+    "w4a16_fp4",
+    "w4a16_nvfp4",
+    "w4a16_mxfp4",
+    "w8a16_mxfp8",
+    "w8a16_fp8_e4m3",
+    "w8a16_fp8_e5m2",
+    "w8a8_int8",
+    "w8a8_fp8_e4m3",
+    "w8a8_fp8_e5m2",
+    "w4a4_int4",
+    "w4a4_fp4",
+    "w4a4_nvfp4",
+    "w4a4_mxfp4",
 )
-OPTIONAL_QUANT_STRATEGIES = ("fp8_weight_only",)
+OPTIONAL_QUANT_STRATEGIES: tuple[str, ...] = ()
 SUPPORTED_QUANT_STRATEGIES = CANONICAL_QUANT_STRATEGIES + OPTIONAL_QUANT_STRATEGIES
-QUANT_STRATEGY_ALIASES = {
-    "int8_dynamic_activation_int8_weight": "dynamic_int8",
-    "int8_dynamic": "dynamic_int8",
-    "int8": "dynamic_int8",
-    "int8_mma": "dynamic_int8_mma",
-    "dynamic_int8_mma": "dynamic_int8_mma",
-    "int8_dynamic_mma": "dynamic_int8_mma",
-    "nvfp4_dynamic": "nvfp4_dynamic",
-    "dynamic_nvfp4": "nvfp4_dynamic",
-    "mxfp4_dynamic": "mxfp4_dynamic",
-    "dynamic_mxfp4": "mxfp4_dynamic",
-    "tilelang_int8_mma": "tilelang_int8_mma",
-    "int8_weight_only": "weight_only_int8",
-    "weight_only_int8": "weight_only_int8",
-    "int4_weight_only": "weight_only_int4",
-    "weight_only_int4": "weight_only_int4",
-    "int4": "weight_only_int4",
-    "static_int8": "static_qdq_int8",
-    "qdq_int8": "static_qdq_int8",
-    "static_qdq_int8": "static_qdq_int8",
-    "float8_dynamic_activation_float8_weight": "fp8_dynamic",
-    "float8_dynamic": "fp8_dynamic",
-    "fp8": "fp8_dynamic",
-    "fp4": "fp4_weight_only",
-    "weight_only_fp4": "fp4_weight_only",
-    "mxfp": "mxfp_weight_only",
-    "weight_only_mxfp": "mxfp_weight_only",
-    "mxfp_weight_only": "mxfp_weight_only",
-    "svdquant_fp4": "svd_fp4",
-    "svdquant_int4": "svd_int4",
-    "svd_fp4": "svd_fp4",
-    "svd_int4": "svd_int4",
-    "svdquant": "svd_fp4",
-    "w4_storage_int8_mma": "w4_storage_int8_mma",
-    "w4_int8_mma": "w4_storage_int8_mma",
-    "retarget_w4_to_w8a8": "w4_storage_int8_mma",
-    "fp4_to_int8_mma": "w4_storage_int8_mma",
-    "convrot_w4a4": "convrot_w4a4",
-    "convrot_4bit": "convrot_w4a4",
-    "convrot": "convrot_w4a4",
-}
+
+CANONICAL_QUANT_COMPUTES = (
+    "dequant_fp16",
+    "w8a8_int8_mma",
+    "fp8_mma",
+    "qdq_static",
+    "qdq_dynamic",
+    "dequant_gemm",
+)
+SUPPORTED_QUANT_COMPUTES = CANONICAL_QUANT_COMPUTES
+
+CANONICAL_QUANT_METHODS = (
+    "none",
+    "awq",
+    "gptq",
+    "svd",
+    "convrot",
+    "turboquant",
+)
+SUPPORTED_QUANT_METHODS = CANONICAL_QUANT_METHODS
 
 
 def normalize_quant_strategy(
     strategy: Any | None,
     policy: Mapping[str, Any] | None = None,
 ) -> str | None:
-    """Return the canonical quantization strategy inferred from strategy or policy."""
-
-    policy = policy or {}
-    raw = strategy
-    if raw is None:
-        raw = policy.get("strategy")
-    if raw is None:
-        dtype = str(policy.get("dtype") or "").lower()
-        scheme = str(policy.get("scheme") or "").lower()
-        if dtype == "fp4" and scheme in {"svd", "svdquant"}:
-            raw = "svd_fp4"
-        elif dtype == "int4" and scheme in {"svd", "svdquant"}:
-            raw = "svd_int4"
-        elif dtype == "fp4" and scheme in {"", "weight_only", "weight-only"}:
-            raw = "fp4_weight_only"
-        elif dtype == "nvfp4" and scheme in {"", "dynamic"}:
-            raw = "nvfp4_dynamic"
-        elif dtype == "mxfp4" and scheme in {"", "dynamic"}:
-            raw = "mxfp4_dynamic"
-        elif dtype.startswith("mxfp") and scheme in {"", "weight_only", "weight-only"}:
-            raw = "mxfp_weight_only"
-        elif dtype == "int4" and scheme in {"", "weight_only", "weight-only"}:
-            raw = "weight_only_int4"
-        elif dtype == "int8" and scheme in {"weight_only", "weight-only"}:
-            raw = "weight_only_int8"
-        elif dtype == "int8" and scheme in {"dynamic_mma", "mma", "w8a8_mma"}:
-            engine = str(policy.get("engine") or "").lower()
-            raw = "tilelang_int8_mma" if engine == "tilelang" else "dynamic_int8_mma"
-        elif dtype == "int8" and scheme in {
-            "w4_storage_int8_mma",
-            "w4_int8_mma",
-            "retarget_w4_to_w8a8",
-            "fp4_to_int8_mma",
-        }:
-            raw = "w4_storage_int8_mma"
-        elif dtype in {"fp4", "int4"} and scheme in {
-            "w4_storage_int8_mma",
-            "w4_int8_mma",
-            "retarget_w4_to_w8a8",
-            "fp4_to_int8_mma",
-            "int8_mma",
-        }:
-            raw = "w4_storage_int8_mma"
-        elif dtype == "int4" and scheme in {
-            "convrot",
-            "convrot_4bit",
-            "convrot_w4a4",
-        }:
-            raw = "convrot_w4a4"
-        elif dtype == "int8" and scheme in {"", "dynamic"}:
-            raw = "dynamic_int8"
-        elif dtype in {"fp8", "float8"} and scheme in {"", "dynamic"}:
-            raw = "fp8_dynamic"
-    if raw is None:
+    del policy
+    if strategy is None:
         return None
-    text = str(raw).strip()
+    text = str(strategy).strip()
     if not text:
         return None
-    return QUANT_STRATEGY_ALIASES.get(text, text)
+    return text
+
+
+def normalize_quant_compute(
+    compute: Any | None,
+    policy: Mapping[str, Any] | None = None,
+) -> str | None:
+    del policy
+    if compute is None:
+        return None
+    text = str(compute).strip()
+    if not text:
+        return None
+    return text
+
+
+def normalize_quant_method(method: Any | None) -> str | None:
+    if method is None:
+        return None
+    text = str(method).strip().lower()
+    if not text:
+        return None
+    return text
 
 
 def is_supported_quant_strategy(strategy: Any | None) -> bool:
-    """Return whether a strategy name is part of the supported XQT vocabulary."""
-
     normalized = normalize_quant_strategy(strategy)
     return normalized in SUPPORTED_QUANT_STRATEGIES
+
+
+def is_supported_quant_compute(compute: Any | None) -> bool:
+    normalized = normalize_quant_compute(compute)
+    return normalized is None or normalized in SUPPORTED_QUANT_COMPUTES
+
+
+def is_supported_quant_method(method: Any | None) -> bool:
+    normalized = normalize_quant_method(method)
+    return normalized is None or normalized in SUPPORTED_QUANT_METHODS
 
 
 def require_supported_quant_strategy(
@@ -191,14 +148,48 @@ def require_supported_quant_strategy(
     location: str,
     policy: Mapping[str, Any] | None = None,
 ) -> str:
-    """Normalize a strategy or raise a clear configuration error."""
-
     normalized = normalize_quant_strategy(strategy, policy)
     if normalized is None:
         allowed = ", ".join(CANONICAL_QUANT_STRATEGIES)
         raise ValueError(f"{location} must specify one of: {allowed}")
     if normalized not in SUPPORTED_QUANT_STRATEGIES:
         allowed = ", ".join(SUPPORTED_QUANT_STRATEGIES)
+        raise ValueError(f"{location} must be one of: {allowed}")
+    return normalized
+
+
+def require_supported_quant_compute(
+    compute: Any | None,
+    *,
+    location: str,
+    allow_none: bool = True,
+) -> str | None:
+    normalized = normalize_quant_compute(compute)
+    if normalized is None:
+        if allow_none:
+            return None
+        allowed = ", ".join(CANONICAL_QUANT_COMPUTES)
+        raise ValueError(f"{location} must specify one of: {allowed}")
+    if normalized not in SUPPORTED_QUANT_COMPUTES:
+        allowed = ", ".join(SUPPORTED_QUANT_COMPUTES)
+        raise ValueError(f"{location} must be one of: {allowed}")
+    return normalized
+
+
+def require_supported_quant_method(
+    method: Any | None,
+    *,
+    location: str,
+    allow_none: bool = True,
+) -> str | None:
+    normalized = normalize_quant_method(method)
+    if normalized is None:
+        if allow_none:
+            return None
+        allowed = ", ".join(CANONICAL_QUANT_METHODS)
+        raise ValueError(f"{location} must specify one of: {allowed}")
+    if normalized not in SUPPORTED_QUANT_METHODS:
+        allowed = ", ".join(SUPPORTED_QUANT_METHODS)
         raise ValueError(f"{location} must be one of: {allowed}")
     return normalized
 
@@ -240,6 +231,7 @@ class QuantConfig:
     backend: str = "torchao"
     method: Optional[str] = None
     strategy: Optional[str] = None
+    compute: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
     composite_gemm: Any | None = None
     keep_high_precision: List[str] = field(default_factory=list)
@@ -264,6 +256,7 @@ class QuantComponentPolicyConfig:
     backend: Optional[str] = None
     method: Optional[str] = None
     strategy: Optional[str] = None
+    compute: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
     composite_gemm: Any | None = None
     keep_high_precision: List[str] = field(default_factory=list)
