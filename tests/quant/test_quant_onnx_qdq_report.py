@@ -44,8 +44,9 @@ def _base_config(tmp_path: Path) -> dict[str, Any]:
             "quant": {
                 "enabled": True,
                 "backend": "onnxruntime_qdq",
-                "method": "static_qdq_int8",
-                "strategy": "static_qdq_int8",
+                "method": "none",
+                "strategy": "w8a8_int8",
+                "compute": "qdq_static",
                 "policy": {
                     "onnx_path": str(tmp_path / "source.onnx"),
                     "input_names": ["input"],
@@ -135,7 +136,7 @@ def test_onnx_qdq_report_includes_calibration_and_quantized_ops(
 
     report = execution.reports[0]
     assert report.backend == "onnxruntime_qdq"
-    assert report.strategy == "static_qdq_int8"
+    assert report.strategy == "w8a8_int8"
     assert report.algorithm_executable is True
     assert report.method_semantics == "onnxruntime_static_qdq_graph_quantization"
     assert report.calibration_samples == 2

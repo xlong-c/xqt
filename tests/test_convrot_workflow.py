@@ -28,7 +28,7 @@ def test_convrot_w4a4_workflow_runs_via_optimize_model() -> None:
     ]
     quant_stage = result.stages[0]
     assert quant_stage.accepted is True
-    assert quant_stage.metrics["strategy"] == "convrot_w4a4"
+    assert quant_stage.metrics["strategy"] == "w4a4_int4"
     assert quant_stage.metrics["metadata"]["execution_state"] == "convrot_4bit"
     assert quant_stage.metrics["quantized_modules"] == ["linear", "proj"]
     assert quant_stage.metrics["metadata"]["recommended_high_precision_modules"] == [

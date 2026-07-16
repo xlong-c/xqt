@@ -91,7 +91,7 @@ def _base_config() -> dict:
                 "enabled": True,
                 "backend": "pytorch",
                 "method": "awq",
-                "strategy": "fp4_weight_only",
+                "strategy": "w4a16_fp4",
                 "policy": {
                     "dtype": "fp4",
                     "scheme": "weight_only",
@@ -117,9 +117,9 @@ def test_pytorch_fp4_weight_only_executes_weight_only_linear_rewrite() -> None:
     assert len(execution.reports) == 1
     report = execution.reports[0]
     assert report.backend == "pytorch"
-    assert report.strategy == "fp4_weight_only"
+    assert report.strategy == "w4a16_fp4"
     assert report.metadata["executed"] is True
-    assert report.metadata["execution_state"] == "fp4_weight_only"
+    assert report.metadata["execution_state"] == "w4a16_fp4"
     assert report.metadata["group_size"] == 128
     assert report.algorithm_executable is False
     assert report.method_semantics == "awq_label_only_groupwise_fp4_weight_only_storage_quantization"
@@ -265,7 +265,8 @@ def test_run_quant_stage_accepts_typed_stage_spec() -> None:
         QuantStageSpec(
             backend="pytorch",
             method="awq",
-            strategy="fp4_weight_only",
+            strategy="w4a16_fp4",
+            compute="dequant_fp16",
             policy={
                 "dtype": "fp4",
                 "scheme": "weight_only",
@@ -318,8 +319,9 @@ def test_fake_qdq_surrogate_accepts_explicit_quant_stage_spec() -> None:
         context,
         QuantStageSpec(
             backend="onnxruntime_qdq",
-            method="static_qdq_int8",
-            strategy="static_qdq_int8",
+            method=None,
+            strategy="w8a8_int8",
+            compute="qdq_static",
             policy={
                 "dtype": "int8",
                 "scheme": "static",
@@ -346,8 +348,9 @@ def test_fake_qdq_surrogate_prefers_context_runtime_quant_config() -> None:
     context.quant_config = QuantConfig(
         enabled=True,
         backend="onnxruntime_qdq",
-        method="static_qdq_int8",
-        strategy="static_qdq_int8",
+            method=None,
+            strategy="w8a8_int8",
+            compute="qdq_static",
         policy={
             "dtype": "int8",
             "scheme": "static",
@@ -481,8 +484,9 @@ def test_torchao_report_includes_calibration_summary_when_inputs_provided(
 ) -> None:
     config_dict = _base_config()
     config_dict["compression"]["quant"]["backend"] = "torchao"
-    config_dict["compression"]["quant"]["method"] = "dynamic_int8"
-    config_dict["compression"]["quant"]["strategy"] = "dynamic_int8"
+    config_dict["compression"]["quant"]["method"] = "none"
+    config_dict["compression"]["quant"]["strategy"] = "w8a8_int8"
+    config_dict["compression"]["quant"]["compute"] = "qdq_dynamic"
     config_dict["compression"]["quant"]["policy"] = {
         "dtype": "int8",
         "scheme": "dynamic",
@@ -509,7 +513,7 @@ def test_torchao_report_includes_calibration_summary_when_inputs_provided(
         "xqt.quant.execution.executor.quantize_with_torchao",
         lambda model, **kwargs: TorchAOQuantizationResult(
             model=model,
-            strategy="dynamic_int8",
+            strategy="w8a8_int8",
             quantized_modules=["fc1", "fc2"],
             metadata={"policy": kwargs.get("policy", {})},
         ),

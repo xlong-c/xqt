@@ -47,7 +47,9 @@ def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
     stage = session.quant(
         name="int8_mma",
         backend="pytorch",
-        strategy="dynamic_int8_mma",
+        method=None,
+        strategy="w8a8_int8",
+        compute="w8a8_int8_mma",
         policy={
             "dtype": "int8",
             "scheme": "dynamic_mma",
@@ -63,7 +65,7 @@ def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
     assert stage.metrics["nature"] == "true"
     assert stage.metrics["algorithm_executable"] is True
     assert stage.metrics["method_semantics"] == "true_w8a8_int8_mma_runtime_quantization"
-    assert stage.metrics["metadata"]["execution_state"] == "dynamic_int8_mma"
+    assert stage.metrics["metadata"]["execution_state"] == "w8a8_int8"
     assert stage.metrics["metadata"]["algorithm_executable"] is True
     assert stage.metrics["quantized_modules"] == ["fc"]
 

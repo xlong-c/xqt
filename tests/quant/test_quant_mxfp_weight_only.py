@@ -63,7 +63,8 @@ def _base_config() -> dict:
                 "enabled": True,
                 "backend": "pytorch",
                 "method": "awq",
-                "strategy": "mxfp_weight_only",
+                "strategy": "w4a16_mxfp4",
+                "compute": "dequant_fp16",
                 "policy": {
                     "dtype": "mxfp",
                     "scheme": "weight_only",
@@ -91,9 +92,9 @@ def test_pytorch_mxfp_weight_only_executes_weight_only_linear_rewrite() -> None:
     assert len(execution.reports) == 1
     report = execution.reports[0]
     assert report.backend == "pytorch"
-    assert report.strategy == "mxfp_weight_only"
+    assert report.strategy == "w4a16_mxfp4"
     assert report.metadata["executed"] is True
-    assert report.metadata["execution_state"] == "mxfp_weight_only"
+    assert report.metadata["execution_state"] == "w4a16_mxfp4"
     assert report.metadata["mx_precision"] == 8
     assert report.metadata["block_size"] == 4
     assert "fc1" in report.quantized_modules

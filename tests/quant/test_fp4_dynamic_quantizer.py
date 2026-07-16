@@ -196,7 +196,9 @@ def test_session_quant_nvfp4_dynamic_replaces_linear(tmp_path) -> None:
     stage = session.quant(
         name="nvfp4_dynamic",
         backend="pytorch",
-        strategy="nvfp4_dynamic",
+        method=None,
+        strategy="w4a4_nvfp4",
+        compute="dequant_gemm",
         policy={
             "dtype": "nvfp4",
             "scheme": "dynamic",
@@ -209,7 +211,7 @@ def test_session_quant_nvfp4_dynamic_replaces_linear(tmp_path) -> None:
     assert stage.accepted is True
     assert isinstance(session.model.fc, FP4DynamicLinear)
     assert output.shape == (4, 32)
-    assert stage.metrics["metadata"]["execution_state"] == "nvfp4_dynamic"
+    assert stage.metrics["metadata"]["execution_state"] == "w4a4_nvfp4"
     assert stage.metrics["metadata"]["algorithm_executable"] is True
 
 
@@ -226,7 +228,9 @@ def test_session_quant_mxfp4_dynamic_replaces_linear(tmp_path) -> None:
     stage = session.quant(
         name="mxfp4_dynamic",
         backend="pytorch",
-        strategy="mxfp4_dynamic",
+        method=None,
+        strategy="w4a4_mxfp4",
+        compute="dequant_gemm",
         policy={
             "dtype": "mxfp4",
             "scheme": "dynamic",
@@ -239,7 +243,7 @@ def test_session_quant_mxfp4_dynamic_replaces_linear(tmp_path) -> None:
     assert stage.accepted is True
     assert isinstance(session.model.fc, FP4DynamicLinear)
     assert output.shape == (4, 32)
-    assert stage.metrics["metadata"]["execution_state"] == "mxfp4_dynamic"
+    assert stage.metrics["metadata"]["execution_state"] == "w4a4_mxfp4"
     assert stage.metrics["metadata"]["algorithm_executable"] is True
 
 
@@ -258,7 +262,9 @@ def test_session_quant_nvfp4_dynamic_cuda_tilelang_executes_runtime_fastpath(tmp
     stage = session.quant(
         name="nvfp4_dynamic_cuda_tilelang",
         backend="pytorch",
-        strategy="nvfp4_dynamic",
+        method=None,
+        strategy="w4a4_nvfp4",
+        compute="dequant_gemm",
         policy={
             "dtype": "nvfp4",
             "scheme": "dynamic",
@@ -296,7 +302,9 @@ def test_session_quant_mxfp4_dynamic_cuda_triton_executes_runtime_fastpath(tmp_p
     stage = session.quant(
         name="mxfp4_dynamic_cuda_triton",
         backend="pytorch",
-        strategy="mxfp4_dynamic",
+        method=None,
+        strategy="w4a4_mxfp4",
+        compute="dequant_gemm",
         policy={
             "dtype": "mxfp4",
             "scheme": "dynamic",

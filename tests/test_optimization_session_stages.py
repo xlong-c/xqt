@@ -71,7 +71,7 @@ def test_quant_and_operator_create_stage_lineage(tmp_path: Path) -> None:
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -107,7 +107,7 @@ def test_quant_and_operator_create_stage_lineage(tmp_path: Path) -> None:
     assert isinstance(quantized.payload.value.model, _TinyLinear)
     assert quantized.payload.value.backend == "pytorch"
     assert quantized.payload.value.method == "awq"
-    assert quantized.payload.value.strategy == "fp4_weight_only"
+    assert quantized.payload.value.strategy == "w4a16_fp4"
     assert (
         quantized.payload.metadata["quantized_model"]["artifact_kind"]
         == "quantized_model"
@@ -141,7 +141,7 @@ def test_quantized_model_payload_is_contract_reexport() -> None:
         model=torch.nn.Linear(2, 2),
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         calibration_summary={"samples": 4},
         components=[{"target": "weight"}],
         artifacts={"checkpoint": "quantized.pt"},
@@ -154,7 +154,7 @@ def test_quantized_model_payload_is_contract_reexport() -> None:
         "model_type": "torch.nn.modules.linear.Linear",
         "backend": "pytorch",
         "method": "awq",
-        "strategy": "fp4_weight_only",
+        "strategy": "w4a16_fp4",
         "quantized_module_count": 0,
         "quantized_modules": [],
         "metadata": {},
@@ -217,7 +217,7 @@ def test_quant_stage_without_explicit_from_stage_uses_baseline_as_parent(
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -264,7 +264,7 @@ def test_session_quant_routes_through_run_quant_stage(
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -276,7 +276,7 @@ def test_session_quant_routes_through_run_quant_stage(
     assert result.accepted is True
     assert captured == {
         "backend": "pytorch",
-        "strategy": "fp4_weight_only",
+        "strategy": "w4a16_fp4",
     }
     assert session.session_stages[-1].name == "fp4_quant"
 
@@ -381,7 +381,7 @@ def test_workflow_result_writes_session_stages(tmp_path: Path) -> None:
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -420,7 +420,7 @@ def test_runtime_plan_payload_serializes_as_plain_mapping(tmp_path: Path) -> Non
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -997,7 +997,7 @@ def test_stage_created_by_tracks_transform_metadata(tmp_path: Path) -> None:
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -1071,7 +1071,7 @@ def test_benchmark_stage_uses_observation_payload_and_keeps_best_stage(
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -1136,7 +1136,7 @@ def test_stage_payload_dispatch_uses_specialized_and_default_builders(
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",
@@ -1214,7 +1214,7 @@ def test_session_stage_compare_helper_is_payload_capability_and_artifact_aware(
         name="fp4_quant",
         backend="pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
         policy={
             "dtype": "fp4",
             "scheme": "weight_only",

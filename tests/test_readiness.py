@@ -19,7 +19,8 @@ def test_fp4_weight_only_capability_is_pseudo_quantization() -> None:
     capability = describe_quant_backend_capability(
         "pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
+        compute="dequant_fp16",
         policy={"dtype": "fp4", "scheme": "weight_only"},
     )
 

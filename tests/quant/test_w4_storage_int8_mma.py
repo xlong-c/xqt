@@ -84,7 +84,9 @@ def test_session_quant_w4_storage_int8_mma_replaces_linear(tmp_path) -> None:
     stage = session.quant(
         name="w4_int8",
         backend="pytorch",
-        strategy="w4_storage_int8_mma",
+        method=None,
+        strategy="w4a16_int4",
+        compute="w8a8_int8_mma",
         policy={
             "dtype": "int8",
             "scheme": "w4_storage_int8_mma",
@@ -101,7 +103,7 @@ def test_session_quant_w4_storage_int8_mma_replaces_linear(tmp_path) -> None:
     assert stage.metrics["nature"] == "true"
     assert stage.metrics["algorithm_executable"] is True
     assert stage.metrics["method_semantics"] == "w4_storage_int8_mma_compute_retarget"
-    assert stage.metrics["metadata"]["execution_state"] == "w4_storage_int8_mma"
+    assert stage.metrics["metadata"]["execution_state"] == "w4a16_int4"
     assert stage.metrics["quantized_modules"] == ["fc"]
 
 

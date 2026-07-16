@@ -172,7 +172,9 @@ def test_session_quant_convrot_w4a4_replaces_linear(tmp_path) -> None:
     stage = session.quant(
         name="convrot",
         backend="pytorch",
-        strategy="convrot_w4a4",
+        method="convrot",
+        strategy="w4a4_int4",
+        compute="dequant_fp16",
         policy={
             "dtype": "int4",
             "scheme": "convrot_w4a4",
@@ -187,7 +189,7 @@ def test_session_quant_convrot_w4a4_replaces_linear(tmp_path) -> None:
     assert stage.accepted is True
     assert isinstance(session.model.fc, ConvRotMixedPrecisionLinear)
     assert output.shape == (4, 32)
-    assert stage.metrics["strategy"] == "convrot_w4a4"
+    assert stage.metrics["strategy"] == "w4a4_int4"
     assert stage.metrics["algorithm_executable"] is True
     assert stage.metrics["metadata"]["execution_state"] == "convrot_4bit"
     assert stage.metrics["metadata"]["recommended_high_precision_modules"] == ["fc"]

@@ -30,7 +30,8 @@ def _base_config() -> dict:
                 "enabled": True,
                 "backend": "pytorch",
                 "method": "awq",
-                "strategy": "weight_only_int4",
+                "strategy": "w4a16_int4",
+                "compute": "dequant_fp16",
                 "policy": {
                     "bits": 4,
                     "group_size": 128,
@@ -74,28 +75,15 @@ def test_quant_method_is_distinct_from_backend() -> None:
     component = plan.components[0]
     assert component.backend == "pytorch"
     assert component.method == "awq"
-    assert component.strategy == "weight_only_int4"
-    assert "weight_only_int4" in plan.metadata["canonical_strategies"]
-
-
-def test_legacy_strategy_alias_is_canonicalized_in_plan() -> None:
-    config_dict = _base_config()
-    config_dict["compression"]["quant"]["strategy"] = "int4_weight_only"
-    quant_config = _quant_config(config_dict)
-
-    plan = build_quantization_plan(quant_config)
-
-    assert plan.components[0].strategy == "weight_only_int4"
+    assert component.strategy == "w4a16_int4"
+    assert component.compute == "dequant_fp16"
+    assert "w4a16_int4" in plan.metadata["canonical_strategies"]
 
 
 def test_dynamic_fp4_strategy_can_be_inferred_from_policy() -> None:
-    assert normalize_quant_strategy("nvfp4_dynamic") == "nvfp4_dynamic"
-    assert normalize_quant_strategy(None, {"dtype": "nvfp4", "scheme": "dynamic"}) == (
-        "nvfp4_dynamic"
-    )
-    assert normalize_quant_strategy(None, {"dtype": "mxfp4", "scheme": "dynamic"}) == (
-        "mxfp4_dynamic"
-    )
+    assert normalize_quant_strategy("w4a4_nvfp4") == "w4a4_nvfp4"
+    assert normalize_quant_strategy(None, {"dtype": "nvfp4", "scheme": "dynamic"}) is None
+    assert normalize_quant_strategy(None, {"dtype": "mxfp4", "scheme": "dynamic"}) is None
 
 
 def test_quant_config_requires_explicit_backend_when_enabled() -> None:
@@ -188,7 +176,8 @@ def test_pytorch_awq_fp4_capability_is_quant_method_not_operator_engine() -> Non
     capability = describe_quant_backend_capability(
         "pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
+        compute="dequant_fp16",
         policy={"dtype": "fp4"},
     )
 
@@ -205,7 +194,8 @@ def test_pytorch_gptq_int8_capability_is_executable() -> None:
     capability = describe_quant_backend_capability(
         "pytorch",
         method="gptq",
-        strategy="weight_only_int8",
+        strategy="w8a16_int8",
+        compute="dequant_fp16",
         policy={"dtype": "int8", "bits": 8},
     )
 
@@ -216,14 +206,16 @@ def test_pytorch_gptq_int8_capability_is_executable() -> None:
 def test_pytorch_dynamic_fp4_capabilities_are_executable() -> None:
     nvfp4 = describe_quant_backend_capability(
         "pytorch",
-        method="nvfp4_dynamic",
-        strategy="nvfp4_dynamic",
+        method=None,
+        strategy="w4a4_nvfp4",
+        compute="dequant_gemm",
         policy={"dtype": "nvfp4", "scheme": "dynamic"},
     )
     mxfp4 = describe_quant_backend_capability(
         "pytorch",
-        method="mxfp4_dynamic",
-        strategy="mxfp4_dynamic",
+        method=None,
+        strategy="w4a4_mxfp4",
+        compute="dequant_gemm",
         policy={"dtype": "mxfp4", "scheme": "dynamic"},
     )
 
@@ -264,14 +256,15 @@ def test_removed_placeholder_quantizer_modules_are_not_importable() -> None:
 
 def test_svdquant_is_rejected_as_quant_backend() -> None:
     with pytest.raises(ValueError, match="quant method"):
-        describe_quant_backend_capability("svdquant", method="svd_fp4")
+        describe_quant_backend_capability("svdquant", method="svd")
 
 
 def test_pytorch_hosts_svd_as_quant_method() -> None:
     capability = describe_quant_backend_capability(
         "pytorch",
         method="svd",
-        strategy="svd_int4",
+        strategy="w4a16_int4",
+        compute="dequant_fp16",
     )
     assert "svd" in capability.methods
     assert capability.backend == "pytorch"

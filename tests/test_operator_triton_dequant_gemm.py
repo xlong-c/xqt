@@ -287,7 +287,8 @@ def test_triton_mxfp_operator_stage_reports_packed_metadata_on_cpu() -> None:
         name="mxfp_quant",
         backend="pytorch",
         method="awq",
-        strategy="mxfp_weight_only",
+        strategy="w4a16_mxfp4",
+        compute="dequant_fp16",
         policy={
             "dtype": "mxfp",
             "scheme": "weight_only",

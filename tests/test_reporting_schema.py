@@ -13,8 +13,9 @@ from xqt.workflows import optimize_model
 def test_optimization_capability_projection_uses_shared_fields() -> None:
     quant = describe_quant_backend_capability(
         "onnxruntime_qdq",
-        method="static_qdq_int8",
-        strategy="static_qdq_int8",
+        method="none",
+        strategy="w8a8_int8",
+        compute="qdq_static",
     ).to_dict()["optimization_capability"]
     operator = describe_operator_engine_capability("cute_dsl").to_dict()[
         "optimization_capability"
