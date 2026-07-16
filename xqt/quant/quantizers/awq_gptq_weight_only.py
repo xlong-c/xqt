@@ -48,7 +48,7 @@ class AWQGPTQWeightOnlyQuantizationResult(QuantizedModel):
     """Result returned by algorithmic AWQ/GPTQ weight-only quantization."""
 
     backend: str = "pytorch"
-    strategy: str = "weight_only_int4"
+    strategy: str = "w4a16_int4"
 
 
 def _bits_from_strategy_policy(
@@ -56,9 +56,9 @@ def _bits_from_strategy_policy(
     policy: Mapping[str, Any],
 ) -> int:
     normalized = normalize_quant_strategy(strategy, policy)
-    if normalized == "weight_only_int8":
+    if "int8" in str(normalized):
         return 8
-    if normalized == "weight_only_int4":
+    if "int4" in str(normalized):
         return 4
     bits = int(policy.get("bits", 4) or 4)
     if bits not in {4, 8}:

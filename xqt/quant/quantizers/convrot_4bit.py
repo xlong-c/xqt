@@ -251,7 +251,9 @@ class ConvRot4BitQuantizationResult(QuantizedModel):
     """Result returned by the ConvRot-inspired 4-bit helper."""
 
     backend: str = "pytorch"
-    strategy: str = "convrot_w4a4"
+    method: str | None = "convrot"
+    strategy: str = "w4a4_int4"
+    compute: str = "dequant_fp16"
 
 
 class ConvRotMixedPrecisionLinear(nn.Module):

@@ -38,6 +38,10 @@ from xqt.quant.quantizers.convrot_4bit import (
     execute_convrot_4bit_component,
     quantize_with_convrot_4bit,
 )
+from xqt.quant.quantizers.turboquant import (
+    execute_turboquant_component,
+    quantize_with_turboquant,
+)
 from xqt.quant.quantizers.mxfp_weight_only import (
     execute_mxfp_weight_only_component,
     quantize_with_mxfp_weight_only,
@@ -125,7 +129,7 @@ def execute_quantization_plan(
             raise ValueError(
                 f"Quantization component '{component.name}' uses backend 'svdquant', "
                 "but svdquant is a quant method, not a quant backend. "
-                "Use backend='pytorch' with method='svd' and strategy='svd_fp4'/'svd_int4'."
+                "Use backend='pytorch' with method='svd' and an SVD strategy."
             )
         if _component_requires_model(component) and current_model is None:
             raise ValueError(
@@ -141,10 +145,58 @@ def execute_quantization_plan(
             )
             reports.append(report)
             continue
+        method = (component.method or "none").lower()
+        strategy = component.strategy or ""
+        compute = component.compute or "dequant_fp16"
+
+        if component.backend == "pytorch" and method == "svd":
+            current_model, report = execute_svdquant_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_svd,
+            )
+            reports.append(report)
+            continue
+        if component.backend == "pytorch" and method == "convrot":
+            current_model, report = execute_convrot_4bit_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_convrot_4bit,
+            )
+            reports.append(report)
+            continue
+        if component.backend == "pytorch" and method == "turboquant":
+            current_model, report = execute_turboquant_component(
+                context,
+                current_model,
+                component,
+                quantize_fn=quantize_with_turboquant,
+            )
+            reports.append(report)
+            continue
         if (
             component.backend == "pytorch"
-            and component.strategy == "fp4_weight_only"
+            and method in {"awq", "gptq"}
+            and strategy in {"w4a16_int4", "w8a16_int8", "w4a16_fp4"}
         ):
+            if strategy == "w4a16_fp4":
+                current_model, report = execute_fp4_weight_only_component(
+                    context,
+                    current_model,
+                    component,
+                    quantize_fn=quantize_with_fp4_weight_only,
+                )
+            else:
+                current_model, report = execute_awq_gptq_weight_only_component(
+                    context,
+                    current_model,
+                    component,
+                )
+            reports.append(report)
+            continue
+        if component.backend == "pytorch" and strategy == "w4a16_fp4":
             current_model, report = execute_fp4_weight_only_component(
                 context,
                 current_model,
@@ -153,22 +205,10 @@ def execute_quantization_plan(
             )
             reports.append(report)
             continue
-        if (
-            component.backend == "pytorch"
-            and component.method in {"awq", "gptq"}
-            and component.strategy in {"weight_only_int4", "weight_only_int8"}
-        ):
-            current_model, report = execute_awq_gptq_weight_only_component(
-                context,
-                current_model,
-                component,
-            )
-            reports.append(report)
-            continue
-        if (
-            component.backend == "pytorch"
-            and component.strategy == "mxfp_weight_only"
-        ):
+        if component.backend == "pytorch" and strategy in {
+            "w4a16_mxfp4",
+            "w8a16_mxfp8",
+        }:
             current_model, report = execute_mxfp_weight_only_component(
                 context,
                 current_model,
@@ -177,10 +217,7 @@ def execute_quantization_plan(
             )
             reports.append(report)
             continue
-        if (
-            component.backend == "pytorch"
-            and component.strategy == "nvfp4_dynamic"
-        ):
+        if component.backend == "pytorch" and strategy == "w4a4_nvfp4":
             current_model, report = execute_dynamic_fp4_component(
                 context,
                 current_model,
@@ -190,10 +227,7 @@ def execute_quantization_plan(
             )
             reports.append(report)
             continue
-        if (
-            component.backend == "pytorch"
-            and component.strategy == "mxfp4_dynamic"
-        ):
+        if component.backend == "pytorch" and strategy == "w4a4_mxfp4":
             current_model, report = execute_dynamic_fp4_component(
                 context,
                 current_model,
@@ -205,7 +239,8 @@ def execute_quantization_plan(
             continue
         if (
             component.backend == "pytorch"
-            and component.strategy in {"dynamic_int8_mma", "tilelang_int8_mma", "int8_mma"}
+            and strategy == "w8a8_int8"
+            and compute == "w8a8_int8_mma"
         ):
             current_model, report = execute_int8_mma_component(
                 context,
@@ -217,37 +252,15 @@ def execute_quantization_plan(
             continue
         if (
             component.backend == "pytorch"
-            and component.strategy == "w4_storage_int8_mma"
+            and strategy in {"w4a16_int4", "w4a16_fp4"}
+            and compute == "w8a8_int8_mma"
+            and method == "none"
         ):
             current_model, report = execute_w4_storage_int8_mma_component(
                 context,
                 current_model,
                 component,
                 quantize_fn=quantize_with_w4_storage_int8_mma,
-            )
-            reports.append(report)
-            continue
-        if (
-            component.backend == "pytorch"
-            and component.strategy == "convrot_w4a4"
-        ):
-            current_model, report = execute_convrot_4bit_component(
-                context,
-                current_model,
-                component,
-                quantize_fn=quantize_with_convrot_4bit,
-            )
-            reports.append(report)
-            continue
-        if component.backend == "pytorch" and (
-            component.strategy in {"svd_fp4", "svd_int4"}
-            or (component.method or "").lower() in {"svd", "svdquant", "svd_fp4", "svd_int4"}
-        ):
-            current_model, report = execute_svdquant_component(
-                context,
-                current_model,
-                component,
-                quantize_fn=quantize_with_svd,
             )
             reports.append(report)
             continue
@@ -263,7 +276,7 @@ def execute_quantization_plan(
             artifacts.update(component_artifacts)
             reports.append(report)
             continue
-        if component.backend == "pytorch" and component.method in {"awq", "gptq"}:
+        if component.backend == "pytorch" and method in {"awq", "gptq"}:
             current_model, report, component_artifacts = execute_planned_method_component(
                 current_model,
                 component,
@@ -275,7 +288,10 @@ def execute_quantization_plan(
             raise NotImplementedError(
                 f"Quantization backend '{component.backend}' is planned but not executable yet"
             )
-        raise ValueError(f"Unsupported quantization backend: {component.backend}")
+        raise ValueError(
+            f"Unsupported quantization route: backend={component.backend!r} "
+            f"method={method!r} strategy={strategy!r} compute={compute!r}"
+        )
     return QuantizationExecutionResult(
         model=current_model,
         reports=reports,
@@ -297,6 +313,7 @@ __all__ = [
     "quantize_with_nvfp4_dynamic",
     "quantize_with_svd",
     "quantize_with_torchao",
+    "quantize_with_turboquant",
     "quantize_with_w4_storage_int8_mma",
     "summarize_quantization_reports",
 ]

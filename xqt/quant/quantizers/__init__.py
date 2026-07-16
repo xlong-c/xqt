@@ -44,7 +44,21 @@ from .fp4_dynamic import (
     quantize_with_mxfp4_dynamic,
     quantize_with_nvfp4_dynamic,
 )
-from .svd import LowRankBranch, SVDQuantLinear, SVDQuantResult, quantize_with_svd
+from .svd import (
+    LowRankBranch,
+    SVDQuantInt8MmaLinear,
+    SVDQuantLinear,
+    SVDQuantResult,
+    quantize_with_svd,
+)
+from .turboquant import (
+    TurboQuantCodec,
+    TurboQuantEncoding,
+    TurboQuantQuantizationResult,
+    TurboQuantWeightOnlyLinear,
+    execute_turboquant_component,
+    quantize_with_turboquant,
+)
 
 __all__ = [
     "FP4QuantizationResult",
@@ -65,7 +79,14 @@ __all__ = [
     "FP4WeightOnlyLinear",
     "MXFPWeightOnlyLinear",
     "SVDQuantLinear",
+    "SVDQuantInt8MmaLinear",
     "SVDQuantResult",
+    "TurboQuantCodec",
+    "TurboQuantEncoding",
+    "TurboQuantQuantizationResult",
+    "TurboQuantWeightOnlyLinear",
+    "execute_turboquant_component",
+    "quantize_with_turboquant",
     "W4StorageInt8MmaLinear",
     "W4StorageInt8MmaQuantizationResult",
     "build_regular_hadamard_matrix",

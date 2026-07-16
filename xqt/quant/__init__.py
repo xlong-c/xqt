@@ -97,9 +97,18 @@ from .bridges.nvfp4 import (
 )
 from .quantizers.svd import (
     LowRankBranch,
+    SVDQuantInt8MmaLinear,
     SVDQuantLinear,
     SVDQuantResult,
     quantize_with_svd,
+)
+from .quantizers.turboquant import (
+    TurboQuantCodec,
+    TurboQuantEncoding,
+    TurboQuantQuantizationResult,
+    TurboQuantWeightOnlyLinear,
+    execute_turboquant_component,
+    quantize_with_turboquant,
 )
 
 __all__ = [
@@ -112,6 +121,12 @@ __all__ = [
     "IterableCalibrationDataReader",
     "ConvRot4BitQuantizationResult",
     "ConvRotMixedPrecisionLinear",
+    "TurboQuantCodec",
+    "TurboQuantEncoding",
+    "TurboQuantQuantizationResult",
+    "TurboQuantWeightOnlyLinear",
+    "execute_turboquant_component",
+    "quantize_with_turboquant",
     "CompositeQuantBranchArtifact",
     "CompositeQuantizationArtifact",
     "FP4DynamicLinear",
@@ -139,6 +154,7 @@ __all__ = [
     "FP4WeightOnlyLinear",
     "MXFPWeightOnlyLinear",
     "SVDQuantLinear",
+    "SVDQuantInt8MmaLinear",
     "SVDQuantResult",
     "TorchAOQuantizationResult",
     "W4StorageInt8MmaLinear",

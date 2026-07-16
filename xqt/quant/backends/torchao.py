@@ -56,15 +56,11 @@ def _get_strategy_factory(strategy: str) -> Callable[[], Any]:
     quantization = _import_torchao_quantization()
     normalized = normalize_quant_strategy(strategy)
     aliases = {
-        "dynamic_int8": "Int8DynamicActivationInt8WeightConfig",
-        "int8_dynamic_activation_int8_weight": "Int8DynamicActivationInt8WeightConfig",
-        "weight_only_int8": "Int8WeightOnlyConfig",
-        "int8_weight_only": "Int8WeightOnlyConfig",
-        "weight_only_int4": "Int4WeightOnlyConfig",
-        "int4_weight_only": "Int4WeightOnlyConfig",
-        "fp8_dynamic": "Float8DynamicActivationFloat8WeightConfig",
-        "float8_dynamic_activation_float8_weight": "Float8DynamicActivationFloat8WeightConfig",
-        "fp8_weight_only": "Float8WeightOnlyConfig",
+        "w8a8_int8": "Int8DynamicActivationInt8WeightConfig",
+        "w8a16_int8": "Int8WeightOnlyConfig",
+        "w4a16_int4": "Int4WeightOnlyConfig",
+        "w8a8_fp8_e4m3": "Float8DynamicActivationFloat8WeightConfig",
+        "w8a16_fp8_e4m3": "Float8WeightOnlyConfig",
     }
     attr_name = aliases.get(normalized or strategy)
     if attr_name is None:
@@ -117,9 +113,9 @@ def quantize_with_torchao(
     selected_strategy = strategy or str(getattr(quant_policy, "dtype", "int8"))
     if selected_strategy in {"int8", "int4", "fp8"}:
         selected_strategy = {
-            "int8": "dynamic_int8",
-            "int4": "weight_only_int4",
-            "fp8": "fp8_dynamic",
+            "int8": "w8a8_int8",
+            "int4": "w4a16_int4",
+            "fp8": "w8a8_fp8_e4m3",
         }[selected_strategy]
     selected_strategy = normalize_quant_strategy(selected_strategy, {
         "dtype": quant_policy.dtype,

@@ -1,37 +1,20 @@
-"""SVDQuant — low-rank branch + quantized residual for 4-bit inference.
-
-Reference:
-  SVDQuant: Absorbing Outliers by Low-Rank Components for 4-Bit Diffusion Models
-  (Li et al., NVIDIA/MIT, 2024) — https://arxiv.org/abs/2411.05007
-
-Architecture per Linear layer:
-
-  Input x ──┬── down_proj(x) ──┬── up_proj(residual) ── y_lora ──┐
-            │                  │                                      ├── y + bias
-            └── act_quantize → x_q ── W4A4 MMA + dequant ── y_main ─┘
-
-Where down_proj and act_quantize share the same input x (candidate for kernel fusion),
-and up_proj and 4-bit MMA share the same output accumulator (candidate for kernel fusion).
-
-Phase 1 (this file): pure-Python reference implementation — correctness baseline.
-Phase 2-3 (future): CuTe DSL kernels for TRUE INT4 MMA + SVDQuant fusion kernels.
-"""
-
+"""SVDQuant method: dual-branch storage quant (runtime modules in xqt.runtime.modules)."""
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from xqt.contracts import QuantizedModel
+from xqt.contracts import ComputeConfig, QuantizedModel
 from xqt.analysis.svd_analysis import (
     SVDQuantAnalysis,
     decompose_weight_svd,
 )
+from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.types import XQTContext
 
 from ..capability import _resolve_nature
@@ -46,13 +29,16 @@ from ..execution.selection import (
     module_selection_reason_metadata,
     selection_policy_metadata,
 )
-from .fp4_weight_only import (
-    _pack_int4,
-    _unpack_int4,
+from ..execution.reporting import optional_calibration_summary
+from xqt.runtime.modules import (
+    LowRankBranch,
+    SVDQuantInt8MmaLinear,
+    SVDQuantLinear,
+    W4StorageInt8MmaLinear,
 )
 from ..policy import QuantizationPolicy, should_quantize_module
 from ..strategy import normalize_quant_strategy
-from ..types import QuantizationComponentPlan, QuantizationReport
+from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
 
 
 # ── SVDQuant result dataclass ────────────────────────────────────────────
@@ -64,250 +50,143 @@ class SVDQuantResult(QuantizedModel):
 
     backend: str = "pytorch"
     method: str | None = "svd"
-    strategy: str = "svd_fp4"
+    strategy: str = "w4a16_fp4"
+    compute: str | None = "dequant_fp16"
     svd_analysis: Optional[SVDQuantAnalysis] = None
+
+
+_SUPPORTED_RESIDUAL_QUANT_DTYPES = frozenset({"fp4", "int4"})
+_SUPPORTED_RESIDUAL_COMPUTE = frozenset({"reference", "int8_mma"})
+
+
+def _quant_dtype_from_strategy(strategy: str | None, default: str = "fp4") -> str:
+    """Derive quant_dtype from canonical WxAy+format strategy."""
+    if strategy is None:
+        return default
+    text = strategy.lower()
+    if "fp4" in text:
+        return "fp4"
+    if "int4" in text:
+        return "int4"
+    if "int8" in text:
+        return "int8"
+    return default
+
+
+def _residual_compute_from_compute(compute: str | None) -> str:
+    """Derive residual_compute from canonical compute field."""
+    if compute == "w8a8_int8_mma":
+        return "int8_mma"
+    return "reference"
+
+
+def _model_device(model: nn.Module) -> torch.device:
+    parameter = next(model.parameters(), None)
+    if parameter is not None:
+        return parameter.device
+    buffer = next(model.buffers(), None)
+    return torch.device("cpu") if buffer is None else buffer.device
+
+
+def _move_calibration_batch(value: Any, device: torch.device) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device)
+    if isinstance(value, Mapping):
+        return {
+            key: _move_calibration_batch(item, device)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_move_calibration_batch(item, device) for item in value)
+    if isinstance(value, list):
+        return [_move_calibration_batch(item, device) for item in value]
+    return value
+
+
+def _call_model(model: nn.Module, inputs: Any) -> Any:
+    if isinstance(inputs, Mapping):
+        return model(**inputs)
+    if isinstance(inputs, tuple):
+        return model(*inputs)
+    if isinstance(inputs, list):
+        return model(*inputs)
+    return model(inputs)
+
+
+def _collect_static_activation_scales(
+    model: nn.Module,
+    *,
+    module_names: Iterable[str],
+    calibration_inputs: Iterable[Any] | None,
+    sample_limit: int | None,
+    eps: float,
+) -> dict[str, torch.Tensor]:
+    """Collect symmetric per-tensor activation scales for selected Linear modules."""
+
+    if calibration_inputs is None:
+        return {}
+    wanted = {str(name) for name in module_names}
+    if not wanted:
+        return {}
+    maxima: dict[str, torch.Tensor] = {}
+    handles: list[Any] = []
+
+    def make_hook(name: str) -> Any:
+        def hook(module: nn.Module, inputs: tuple[Any, ...], _: Any) -> None:
+            if not inputs or not isinstance(inputs[0], torch.Tensor):
+                return
+            activation = inputs[0].detach()
+            if activation.ndim == 0 or activation.shape[-1] != module.in_features:
+                return
+            current = activation.to(torch.float32).abs().amax()
+            previous = maxima.get(name)
+            maxima[name] = current if previous is None else torch.maximum(previous, current)
+
+        return hook
+
+    for name, module in model.named_modules():
+        if name in wanted and isinstance(module, nn.Linear):
+            handles.append(module.register_forward_hook(make_hook(name)))
+    if not handles:
+        return {}
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            expected_input_count = infer_model_input_count(model)
+            for index, batch in enumerate(calibration_inputs):
+                if sample_limit is not None and index >= int(sample_limit):
+                    break
+                inputs = extract_model_inputs(
+                    batch,
+                    expected_input_count=expected_input_count,
+                )
+                _call_model(
+                    model,
+                    _move_calibration_batch(inputs, _model_device(model)),
+                )
+    finally:
+        for handle in handles:
+            handle.remove()
+        model.train(was_training)
+    return {
+        name: (value / 127.0).clamp_min(float(eps)).detach().to("cpu")
+        for name, value in maxima.items()
+    }
 
 
 # ── Low-rank branch ──────────────────────────────────────────────────────
 
 
-class LowRankBranch(nn.Module):
-    """Two-layer low-rank branch that absorbs weight outliers.
-
-    W_lr = L2 @ L1, where:
-      L1: (r, in_features) — down-projection
-      L2: (out_features, r) — up-projection
-
-    Forward: y = L2(L1(x)) = x @ L1.T @ L2.T
-    """
-
-    def __init__(
-        self,
-        down_weight: torch.Tensor,
-        up_weight: torch.Tensor,
-    ) -> None:
-        super().__init__()
-        rank, in_features = down_weight.shape
-        out_features, rank2 = up_weight.shape
-        if rank != rank2:
-            raise ValueError(
-                f"Rank mismatch: down_proj rank={rank}, up_proj rank={rank2}"
-            )
-        self.down_proj = nn.Linear(in_features, rank, bias=False)
-        self.down_proj.weight.data = down_weight.detach().clone()
-        self.up_proj = nn.Linear(rank, out_features, bias=False)
-        self.up_proj.weight.data = up_weight.detach().clone()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute low-rank correction: L2(L1(x))."""
-        return self.up_proj(self.down_proj(x))
-
 
 # ── Packed INT4 residual weight helpers ──────────────────────────────────
 
 
-def _quantize_residual_int4(
-    weight_res: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Quantize residual weight to signed INT4 with per-group scales.
-
-    Returns (packed_weight, scale, padded_in_features).
-    """
-    out_features, in_features = weight_res.shape
-    normalized_group_size = max(1, min(group_size, in_features))
-    padded_in_features = (
-        (in_features + normalized_group_size - 1) // normalized_group_size
-    ) * normalized_group_size
-
-    # Pad to group_size boundary
-    weight_f32 = weight_res.detach().to(torch.float32)
-    if padded_in_features != in_features:
-        weight_f32 = F.pad(weight_f32, (0, padded_in_features - in_features))
-
-    # Per-group absmax quantization to [-8, 7]
-    grouped = weight_f32.reshape(out_features, -1, normalized_group_size)
-    max_abs = grouped.abs().amax(dim=2, keepdim=True)
-    scale = torch.where(
-        max_abs > 0, max_abs / 7.0, torch.ones_like(max_abs)
-    )  # shape: (out_features, num_groups, 1)
-    quantized = torch.clamp(
-        torch.round(grouped / (scale + 1e-12)), min=-8, max=7
-    ).to(torch.int8)
-    scale = scale.squeeze(-1)  # (out_features, num_groups)
-
-    packed = _pack_int4(quantized.reshape(out_features, padded_in_features))
-    return packed, scale.to(torch.float32), padded_in_features
-
-
-def _dequantize_residual_int4(
-    packed_weight: torch.Tensor,
-    scale: torch.Tensor,
-    input_features: int,
-    group_size: int,
-    padded_input_features: int,
-) -> torch.Tensor:
-    """Dequantize packed INT4 residual weight back to float."""
-    codes = _unpack_int4(packed_weight, padded_input_features)
-    grouped = codes.reshape(codes.shape[0], -1, group_size)  # (out, num_groups, gs)
-    scale_expanded = scale.unsqueeze(-1)  # (out, num_groups, 1)
-    dequantized = grouped * scale_expanded
-    return dequantized.reshape(codes.shape[0], padded_input_features)[
-        :, :input_features
-    ]
 
 
 # ── Combined SVDQuant Linear module ──────────────────────────────────────
 
 
-class SVDQuantLinear(nn.Module):
-    """SVDQuant Linear: low-rank FP16 branch + quantized INT4/FP4 residual.
-
-    Shapes:
-      - down_proj.weight: (r, in_features)       ← L1
-      - up_proj.weight:   (out_features, r)       ← L2
-      - packed_residual:  (out_features, padded_in // 2) — uint8 packed INT4
-      - residual_scale:   (out_features, num_groups)
-      - bias (optional):  (out_features,)
-
-    Forward (reference path):
-      x_q    = act_quantize(x)                    # simulated: pass-through in reference
-      y_main = dequant_gemm(x, packed_residual)   # dequant + fp16 matmul
-      y_lora = up_proj(down_proj(x))              # low-rank correction
-      return y_main + y_lora + bias
-    """
-
-    def __init__(
-        self,
-        down_weight: torch.Tensor,
-        up_weight: torch.Tensor,
-        packed_residual: torch.Tensor,
-        residual_scale: torch.Tensor,
-        *,
-        bias: torch.Tensor | None,
-        input_features: int,
-        output_features: int,
-        group_size: int,
-        padded_input_features: int,
-        quant_dtype: str = "int4",
-    ) -> None:
-        super().__init__()
-        self.input_features = int(input_features)
-        self.output_features = int(output_features)
-        self.group_size = int(group_size)
-        self.padded_input_features = int(padded_input_features)
-        self.quant_dtype = str(quant_dtype)
-
-        # Low-rank branch
-        self.down_proj = nn.Linear(input_features, down_weight.shape[0], bias=False)
-        self.down_proj.weight.data = down_weight.detach().clone()
-        self.up_proj = nn.Linear(up_weight.shape[0], output_features, bias=False)
-        self.up_proj.weight.data = up_weight.detach().clone()
-
-        # Quantized residual
-        self.register_buffer("packed_residual", packed_residual.to(torch.uint8))
-        self.register_buffer("residual_scale", residual_scale.to(torch.float32))
-        if bias is None:
-            self.register_buffer("bias", None)
-        else:
-            self.register_buffer("bias", bias.detach().clone().to(torch.float32))
-
-    @classmethod
-    def from_linear(
-        cls,
-        module: nn.Linear,
-        *,
-        rank: int,
-        group_size: int = 128,
-        quant_dtype: str = "int4",
-    ) -> "SVDQuantLinear":
-        """Build an SVDQuantLinear from a regular nn.Linear via SVD decomposition."""
-        weight = module.weight.detach()
-        weight_2d = weight.reshape(module.out_features, module.in_features)
-        if weight_2d.shape[0] != module.out_features:
-            weight_2d = weight_2d.reshape(module.out_features, -1)
-
-        # 1. SVD decomposition
-        decomp = decompose_weight_svd(weight_2d, rank=rank)
-
-        # 2. Extract low-rank components
-        L1, L2 = decomp.low_rank_components()  # L1: (r, in), L2: (out, r)
-
-        # 3. Compute residual and quantize
-        weight_res = decomp.residual_weight(weight_2d).to(torch.float32)
-        if quant_dtype == "int4":
-            packed_residual, residual_scale, padded_in = _quantize_residual_int4(
-                weight_res, group_size=group_size
-            )
-        else:
-            raise ValueError(
-                f"Unsupported quant_dtype '{quant_dtype}' for SVDQuant. "
-                f"Supported: int4"
-            )
-
-        bias = None if module.bias is None else module.bias.detach().to(torch.float32)
-
-        return cls(
-            down_weight=L1,
-            up_weight=L2,
-            packed_residual=packed_residual,
-            residual_scale=residual_scale,
-            bias=bias,
-            input_features=module.in_features,
-            output_features=module.out_features,
-            group_size=group_size,
-            padded_input_features=padded_in,
-            quant_dtype=quant_dtype,
-        )
-
-    def dequantize_residual(self) -> torch.Tensor:
-        """Dequantize the packed residual weight for reference computation."""
-        if self.quant_dtype == "int4":
-            packed = self.packed_residual
-            scale = self.residual_scale
-            if not isinstance(packed, torch.Tensor) or not isinstance(scale, torch.Tensor):
-                raise RuntimeError(
-                    "packed_residual and residual_scale must be tensors"
-                )
-            return _dequantize_residual_int4(
-                packed,
-                scale,
-                self.input_features,
-                self.group_size,
-                self.padded_input_features,
-            )
-        raise RuntimeError(f"Unsupported quant_dtype: {self.quant_dtype}")
-
-    def low_rank_weight(self) -> torch.Tensor:
-        """Reconstruct the low-rank branch weight W_lr = L2 @ L1."""
-        return self.up_proj.weight.data @ self.down_proj.weight.data
-
-    def full_weight_dequant(self) -> torch.Tensor:
-        """Reconstruct the full dequantized weight: W_lr + W_res_deq."""
-        return self.low_rank_weight() + self.dequantize_residual()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Reference forward pass.
-
-        Fusion opportunities (Phase 2-3):
-          - FUSE_DOWN: down_proj(x) + act_quantize(x) share input → single kernel
-          - FUSE_UP: up_proj(h) + dequant_gemm_epilogue share accumulator → single kernel
-        """
-        device = x.device
-        dtype = x.dtype
-
-        # Main path: dequant residual → fp16 GEMM ([FUSE_UP candidate: epilogue fusion])
-        weight_deq = self.dequantize_residual().to(device=device, dtype=dtype)
-        y_main = F.linear(x, weight_deq)
-
-        # Low-rank correction ([FUSE_DOWN candidate: input-sharing with act_quantize])
-        h = self.down_proj(x)  # (batch, r)
-        y_lora = self.up_proj(h)  # (batch, out)  [FUSE_UP candidate: add to accum]
-
-        y = y_main + y_lora
-        if self.bias is not None:
-            y = y + self.bias.to(device=device, dtype=dtype)
-        return y
 
 
 # ── Submodule replacement ─────────────────────────────────────────────────
@@ -354,26 +233,49 @@ def quantize_with_svd(
     *,
     policy: Optional[Mapping[str, Any] | QuantizationPolicy] = None,
     strategy: Optional[str] = None,
+    compute: Optional[str] = None,
     rank: int = 32,
     group_size: int = 128,
     quant_dtype: str = "int4",
+    residual_compute: str = "reference",
+    engine: str = "auto",
+    fallback_engine: str = "torch_int_mm",
+    block_m: int = 64,
+    block_n: int = 64,
+    block_k: int = 64,
+    threads: int = 128,
+    num_stages: int = 2,
+    activation_scale_mode: str = "dynamic",
+    activation_scales: Optional[Mapping[str, torch.Tensor | float]] = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    calibration_sample_limit: int | None = None,
+    activation_quant_block_size: int = 256,
+    eps: float = 1e-6,
+    cache_int8_compute_view: bool = True,
     inplace: bool = True,
     collect_analysis: bool = True,
 ) -> SVDQuantResult:
     """Apply SVDQuant to all qualifying Linear layers in a model.
 
     For each Linear layer:
-      1. SVD decompose weight → low-rank branch (L1, L2) + residual
+      1. SVD decompose weight -> low-rank branch (L1, L2) + residual
       2. Quantize residual to INT4/FP4 with per-group scales
       3. Replace module with SVDQuantLinear
 
     Args:
         model: PyTorch model to quantize.
         policy: Module selection policy (which layers to quantize).
-        strategy: Canonical strategy name ("svd_fp4" or "svd_int4").
-        rank: Low-rank branch rank (r). Typical: 16–64.
+        strategy: Canonical WxAy+format strategy (e.g. "w4a16_fp4", "w4a16_int4").
+            Determines storage quant_dtype.
+        compute: Compute kernel (e.g. "dequant_fp16", "w8a8_int8_mma").
+            Determines residual compute path.
+        rank: Low-rank branch rank (r). Typical: 16-64.
         group_size: Per-group quantization granularity.
-        quant_dtype: Residual quantization dtype ("int4").
+        quant_dtype: Residual quantization dtype ("fp4" or "int4").
+        residual_compute: "reference" or "int8_mma" for the residual branch.
+        engine: Preferred INT8 MMA engine when residual_compute is "int8_mma".
+        calibration_inputs: Representative model inputs for static INT8 activation
+            scale collection when activation_scale_mode is "static".
         inplace: If True, modify model in-place.
         collect_analysis: If True, collect SVD metrics for all layers.
 
@@ -388,21 +290,73 @@ def quantize_with_svd(
     policy_mapping = dict(policy) if isinstance(policy, Mapping) else {}
     configured_rank = int(policy_mapping.get("rank", rank))
     configured_group_size = int(policy_mapping.get("group_size", group_size) or group_size)
-    configured_quant_dtype = str(policy_mapping.get("quant_dtype", quant_dtype))
+    configured_quant_dtype = str(
+        policy_mapping.get("quant_dtype", quant_dtype)
+    ).lower()
 
-    selected_strategy = (
-        normalize_quant_strategy(strategy, policy_mapping)
-        or f"svd_{configured_quant_dtype}"
-    )
+    selected_strategy = normalize_quant_strategy(strategy, policy_mapping)
+    if selected_strategy is None:
+        selected_strategy = f"w4a16_{configured_quant_dtype}"
+    from xqt.quant.strategy import normalize_quant_compute
+
+    selected_compute = normalize_quant_compute(compute, policy_mapping)
+    if selected_compute is None and policy_mapping:
+        selected_compute = normalize_quant_compute(policy_mapping.get("compute"))
+    if selected_compute is None:
+        selected_compute = "dequant_fp16"
+
+    if "quant_dtype" not in policy_mapping and selected_strategy is not None:
+        configured_quant_dtype = _quant_dtype_from_strategy(
+            selected_strategy, configured_quant_dtype
+        )
+    if "residual_compute" in policy_mapping:
+        configured_residual_compute = str(policy_mapping["residual_compute"]).lower()
+    elif compute is not None or (
+        policy_mapping.get("compute") is not None
+    ):
+        configured_residual_compute = _residual_compute_from_compute(selected_compute)
+    else:
+        configured_residual_compute = str(residual_compute).lower()
+    if configured_quant_dtype not in _SUPPORTED_RESIDUAL_QUANT_DTYPES:
+        allowed = ", ".join(sorted(_SUPPORTED_RESIDUAL_QUANT_DTYPES))
+        raise ValueError(f"quant_dtype must be one of {allowed}")
+    if configured_residual_compute not in _SUPPORTED_RESIDUAL_COMPUTE:
+        allowed = ", ".join(sorted(_SUPPORTED_RESIDUAL_COMPUTE))
+        raise ValueError(f"residual_compute must be one of {allowed}")
 
     target_model = model if inplace else copy.deepcopy(model)
     quantized_modules: list[str] = []
     svd_analysis = SVDQuantAnalysis() if collect_analysis else None
+    static_scales = dict(activation_scales or {})
+    static_scale_modules = 0
+    dynamic_fallback_modules = 0
+    selected_module_names = [
+        name
+        for name, module in target_model.named_modules()
+        if name
+        and isinstance(module, nn.Linear)
+        and should_quantize_module(name, module, quant_policy)
+    ]
+    selected_module_name_set = set(selected_module_names)
+    calibrated_static_scales: dict[str, torch.Tensor] = {}
+    if (
+        configured_residual_compute == "int8_mma"
+        and activation_scale_mode == "static"
+        and calibration_inputs is not None
+    ):
+        calibrated_static_scales = _collect_static_activation_scales(
+            target_model,
+            module_names=selected_module_names,
+            calibration_inputs=calibration_inputs,
+            sample_limit=calibration_sample_limit,
+            eps=float(policy_mapping.get("eps", eps)),
+        )
+        for name, scale in calibrated_static_scales.items():
+            static_scales.setdefault(name, scale)
 
+    module_activation_hints: dict[str, dict[str, Any]] = {}
     for name, module in list(target_model.named_modules()):
-        if not name or not isinstance(module, nn.Linear):
-            continue
-        if not should_quantize_module(name, module, quant_policy):
+        if name not in selected_module_name_set or not isinstance(module, nn.Linear):
             continue
 
         svd_module = SVDQuantLinear.from_linear(
@@ -411,6 +365,23 @@ def quantize_with_svd(
             group_size=configured_group_size,
             quant_dtype=configured_quant_dtype,
         )
+        if configured_residual_compute == "int8_mma":
+            activation_scale = static_scales.get(name)
+            module_activation_scale_mode = activation_scale_mode
+            if activation_scale_mode == "static":
+                if activation_scale is None:
+                    module_activation_scale_mode = "dynamic"
+                    dynamic_fallback_modules += 1
+                else:
+                    static_scale_modules += 1
+            svd_module.set_activation_materialize_hint(
+                activation_scale_mode=module_activation_scale_mode,
+                activation_scale=activation_scale,
+            )
+            module_activation_hints[name] = {
+                "activation_scale_mode": module_activation_scale_mode,
+                "activation_scale": activation_scale,
+            }
 
         _replace_submodule(target_model, name, svd_module)
         quantized_modules.append(name)
@@ -427,25 +398,149 @@ def quantize_with_svd(
                 # Layer too small for SVD at this rank — skip analysis
                 pass
 
+    configured_engine = str(policy_mapping.get("engine", engine))
+    preferred_engines = (
+        [] if configured_engine in {"", "auto"} else [configured_engine]
+    )
+    residual_branch_contract = (
+        "w4_storage_int8_mma"
+        if configured_residual_compute == "int8_mma"
+        else "generic"
+    )
+    residual_caps = (
+        ["int8_mma", "w4_storage_int8_mma", "composite_split"]
+        if configured_residual_compute == "int8_mma"
+        else ["fp16_mma", "composite_split"]
+    )
+    branches = [
+        {
+            "name": "low_rank",
+            "compute_contract": "fp16_mma",
+            "precision": "source_precision",
+            "storage": {
+                "format": "dense_source_precision",
+                "kind": "low_rank_factors",
+            },
+            "required_capabilities": ["fp16_mma"],
+        },
+        {
+            "name": "quant_residual",
+            "compute_contract": residual_branch_contract,
+            "precision": (
+                "w8a8" if configured_residual_compute == "int8_mma" else "w4a16"
+            ),
+            "storage": {
+                "format": "packed_signed_int4_group_scale",
+                "quant_dtype": configured_quant_dtype,
+            },
+            "required_capabilities": list(residual_caps),
+            "preferred_engines": list(preferred_engines),
+        },
+    ]
+    compute_config = ComputeConfig.from_modules(
+        module_names=quantized_modules,
+        compute_contract="composite_add",
+        precision="w8a8" if configured_residual_compute == "int8_mma" else "w4a16",
+        required_capabilities=(
+            ["composite_add", "int8_mma", "fp16_mma"]
+            if configured_residual_compute == "int8_mma"
+            else ["composite_add", "fp16_mma"]
+        ),
+        preferred_engines=preferred_engines,
+        default_precision=(
+            "w8a8" if configured_residual_compute == "int8_mma" else "w4a16"
+        ),
+        storage={
+            "kind": "svd_low_rank_plus_residual",
+            "decomposition": "additive",
+            "rank": configured_rank,
+            "group_size": configured_group_size,
+            "quant_dtype": configured_quant_dtype,
+        },
+        branches=branches,
+        combine="add",
+        preferred_mode="split",
+        execution={"activation_scale_mode": activation_scale_mode},
+        metadata={
+            "residual_compute": configured_residual_compute,
+            "quant_dtype": configured_quant_dtype,
+            "fallback_engine": str(
+                policy_mapping.get("fallback_engine", fallback_engine)
+            ),
+            "activation_scale_mode": activation_scale_mode,
+            "block_m": int(policy_mapping.get("block_m", block_m)),
+            "block_n": int(policy_mapping.get("block_n", block_n)),
+            "block_k": int(policy_mapping.get("block_k", block_k)),
+            "threads": int(policy_mapping.get("threads", threads)),
+            "num_stages": int(policy_mapping.get("num_stages", num_stages)),
+            "activation_quant_block_size": int(
+                policy_mapping.get(
+                    "activation_quant_block_size", activation_quant_block_size
+                )
+            ),
+            "eps": float(policy_mapping.get("eps", eps)),
+            "cache_int8_compute_view": bool(
+                policy_mapping.get("cache_int8_compute_view", cache_int8_compute_view)
+            ),
+        },
+    )
+
+    if configured_residual_compute == "int8_mma" and bool(
+        policy_mapping.get("materialize_compute", True)
+    ):
+        from xqt.runtime.composite_materialize import materialize_composite_compute
+
+        for name in quantized_modules:
+            module = target_model.get_submodule(name)
+            hint = module_activation_hints.get(name, {})
+            if hasattr(module, "set_activation_materialize_hint"):
+                module.set_activation_materialize_hint(
+                    activation_scale_mode=str(
+                        hint.get("activation_scale_mode", activation_scale_mode)
+                    ),
+                    activation_scale=hint.get("activation_scale"),
+                )
+        target_model = materialize_composite_compute(
+            target_model,
+            compute_config,
+            inplace=True,
+        )
+
     return SVDQuantResult(
         model=target_model,
         backend="pytorch",
         method="svd",
         strategy=selected_strategy,
+        compute=selected_compute,
         quantized_modules=quantized_modules,
         svd_analysis=svd_analysis,
+        compute_config=compute_config,
         metadata={
-            "implementation": "svdquant_reference",
+            "implementation": (
+                "composite_add_svd_w4_residual_int8_mma"
+                if configured_residual_compute == "int8_mma"
+                else "composite_add_svd_storage"
+            ),
             "quant_method": "svd",
             "rank": configured_rank,
             "group_size": configured_group_size,
             "quant_dtype": configured_quant_dtype,
-            "low_rank_branch_dtype": "fp16",
+            "low_rank_branch_dtype": "source_precision",
+            "residual_compute": configured_residual_compute,
+            "residual_storage": "packed_signed_int4_group_scale",
+            "compute_contract": "composite_add",
+            "combine": "add",
+            "preferred_mode": "split",
             "fusion_status": "none",
             "fusion_note": (
-                "Reference path uses separate down_proj, dequant+GEMM, and up_proj. "
-                "CuTe DSL kernel fusion (FUSE_DOWN + FUSE_UP) pending Phase 2-3."
+                "Dual-branch composite_add: low-rank source-precision + quantized "
+                "residual. FUSE_DOWN/FUSE_UP kernels are not materialized."
             ),
+            "compute_config": compute_config.to_dict(),
+            "activation_scale_mode": activation_scale_mode,
+            "static_scale_module_count": static_scale_modules,
+            "dynamic_fallback_module_count": dynamic_fallback_modules,
+            "calibrated_static_scale_module_count": len(calibrated_static_scales),
             "policy": {
                 "dtype": quant_policy.dtype,
                 "scheme": quant_policy.scheme,
@@ -459,6 +554,8 @@ def quantize_with_svd(
                 "rank": configured_rank,
                 "group_size": configured_group_size,
                 "quant_dtype": configured_quant_dtype,
+                "residual_compute": configured_residual_compute,
+                "calibration_sample_limit": calibration_sample_limit,
             },
             "svd_analysis": svd_analysis.to_dict() if svd_analysis is not None else None,
         },
@@ -472,21 +569,51 @@ def execute_svdquant_component(
     *,
     quantize_fn: Any = quantize_with_svd,
 ) -> tuple[nn.Module, QuantizationReport]:
-    """Execute the SVDQuant reference quantizer for a component."""
+    """Execute the SVDQuant quantizer for a component."""
 
-    del context
     target_model = resolve_component_model(root_model, component.target_path)
     effective_policy = build_effective_selection_policy(component)
     configured_rank = int(effective_policy.get("rank", 32))
     configured_group_size = int(effective_policy.get("group_size", 128))
-    configured_quant_dtype = str(effective_policy.get("quant_dtype", "int4"))
+    strategy_name = str(component.strategy or effective_policy.get("strategy") or "")
+    configured_quant_dtype = str(
+        effective_policy.get("quant_dtype", _quant_dtype_from_strategy(strategy_name, "fp4"))
+    )
+    configured_residual_compute = str(
+        effective_policy.get(
+            "residual_compute",
+            _residual_compute_from_compute(component.compute),
+        )
+    )
     result = quantize_fn(
         target_model,
         policy=effective_policy,
         strategy=component.strategy or effective_policy.get("strategy"),
+        compute=component.compute,
         rank=configured_rank,
         group_size=configured_group_size,
         quant_dtype=configured_quant_dtype,
+        residual_compute=configured_residual_compute,
+        engine=str(effective_policy.get("engine", "auto")),
+        fallback_engine=str(effective_policy.get("fallback_engine", "torch_int_mm")),
+        block_m=int(effective_policy.get("block_m", 64)),
+        block_n=int(effective_policy.get("block_n", 64)),
+        block_k=int(effective_policy.get("block_k", 64)),
+        threads=int(effective_policy.get("threads", 128)),
+        num_stages=int(effective_policy.get("num_stages", 2)),
+        activation_scale_mode=str(
+            effective_policy.get("activation_scale_mode", "dynamic")
+        ),
+        activation_scales=effective_policy.get("activation_scales"),
+        calibration_inputs=context.calibration_inputs,
+        calibration_sample_limit=effective_policy.get("calibration_sample_limit"),
+        activation_quant_block_size=int(
+            effective_policy.get("activation_quant_block_size", 256)
+        ),
+        eps=float(effective_policy.get("eps", 1e-6)),
+        cache_int8_compute_view=bool(
+            effective_policy.get("cache_int8_compute_view", True)
+        ),
         inplace=True,
         collect_analysis=True,
     )
@@ -508,8 +635,23 @@ def execute_svdquant_component(
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
     )
-    nature = _resolve_nature(component.strategy, component.policy)
-    method_semantics = "svdquant_reference_low_rank_plus_quantized_residual"
+    calibration_samples, calibration_summary = optional_calibration_summary(
+        context,
+        component,
+    )
+    is_int8_mma = result.compute == "w8a8_int8_mma" or str(
+        result.metadata.get("residual_compute", "")
+    ) == "int8_mma"
+    nature = QuantizationNature.TRUE if is_int8_mma else _resolve_nature(
+        component.strategy,
+        component.policy,
+        compute=result.compute,
+    )
+    method_semantics = (
+        "svd_method_composite_add_low_rank_plus_w4_residual"
+        if is_int8_mma
+        else "svd_method_composite_add_reference"
+    )
     report = QuantizationReport(
         component_name=component.name,
         backend="pytorch",
@@ -520,6 +662,8 @@ def execute_svdquant_component(
         quantized_modules=quantized_modules,
         skipped_modules=skipped_modules,
         high_precision_modules=high_precision_modules,
+        calibration_samples=calibration_samples,
+        calibration_summary=calibration_summary,
         nature=nature,
         algorithm_executable=True,
         method_semantics=method_semantics,
@@ -533,7 +677,11 @@ def execute_svdquant_component(
             "selection_policy": selection_policy_metadata(component),
             "module_selection_reasons": module_selection_reasons,
             "executed": True,
-            "execution_state": "svdquant_reference",
+            "execution_state": (
+                "composite_add_materialized_int8_residual"
+                if is_int8_mma
+                else "composite_add_storage_shell"
+            ),
             "rank": configured_rank,
             "group_size": configured_group_size,
             "quant_dtype": configured_quant_dtype,
@@ -544,6 +692,7 @@ def execute_svdquant_component(
 
 __all__ = [
     "LowRankBranch",
+    "SVDQuantInt8MmaLinear",
     "SVDQuantLinear",
     "SVDQuantResult",
     "execute_svdquant_component",

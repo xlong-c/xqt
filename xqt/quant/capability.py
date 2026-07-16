@@ -2,8 +2,8 @@
 
 AWQ / GPTQ / SVD (SVDQuant) are quant *methods*, not operator engines.
 ``tilelang`` is an operator engine only. ``svdquant`` is not a quant backend
-name either — use ``backend='pytorch'`` with ``method='svd'`` / strategies
-``svd_fp4`` / ``svd_int4``.
+name either — use ``backend='pytorch'`` with ``method='svd'`` and WxAy
+``strategy`` plus optional ``compute``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any, Mapping, Optional
 
 from xqt.core.reporting import OptimizationCapability
 
-from .strategy import normalize_quant_strategy
+from .strategy import normalize_quant_compute, normalize_quant_method, normalize_quant_strategy
 from .types import QuantizationNature
 
 
@@ -23,45 +23,29 @@ from .types import QuantizationNature
 # UNKNOWN = not yet classified.
 # ───────────────────────────────────────────────────────────────────────────
 _STRATEGY_NATURE: dict[str, QuantizationNature] = {
-    # fp8 native MMA: W8A8, K=32
-    "fp8_dynamic": QuantizationNature.TRUE,
-    "float8_dynamic_activation_float8_weight": QuantizationNature.TRUE,
-    # fp8 weight-only: W8A16, dequant before mma, K=16
-    "fp8_weight_only": QuantizationNature.PSEUDO,
-    # int8 weight-only: W8A16, dequant before mma, K=16
-    "weight_only_int8": QuantizationNature.PSEUDO,
-    "int8_weight_only": QuantizationNature.PSEUDO,
-    # int4 weight-only: W4A16, dequant before mma, K=16
-    "weight_only_int4": QuantizationNature.PSEUDO,
-    "int4_weight_only": QuantizationNature.PSEUDO,
-    # fp4 weight-only: W4A16, packed storage with dequant before fp16 MMA
-    "fp4_weight_only": QuantizationNature.PSEUDO,
-    "mxfp_weight_only": QuantizationNature.PSEUDO,
-    # dynamic int8: observer-based quantize/dequantize, not native mma
-    "dynamic_int8": QuantizationNature.PSEUDO,
-    "int8_dynamic_activation_int8_weight": QuantizationNature.PSEUDO,
-    # dynamic W8A8 INT8 MMA: activation and weight both feed native int8 tensor cores
-    "dynamic_int8_mma": QuantizationNature.TRUE,
-    "int8_mma": QuantizationNature.TRUE,
-    "tilelang_int8_mma": QuantizationNature.TRUE,
-    "w4_storage_int8_mma": QuantizationNature.TRUE,
-    # dynamic fp4: dynamic activation packing, packed weight storage, dequant before gemm
-    "nvfp4_dynamic": QuantizationNature.PSEUDO,
-    "mxfp4_dynamic": QuantizationNature.PSEUDO,
-    # onnxruntime QDQ INT8: runs QDQ ops on CPU integer backend → TRUE if backend hardware supports native int8 mma
-    "static_qdq_int8": QuantizationNature.PSEUDO,
-    "static_int8": QuantizationNature.PSEUDO,
-    # awq / gptq: weight-only packing, dequant to fp16 before compute
-    "awq": QuantizationNature.PSEUDO,
-    "gptq": QuantizationNature.PSEUDO,
-    # svdquant: low-rank fp16 branch + quantized residual
-    # PSEUDO in Phase 1 (dequant to fp16 before MMA).
-    # Upgraded to TRUE in Phase 2-3 when CuTe W4A4 MMA + SVDQuant fusion kernels ship.
-    "svd_fp4": QuantizationNature.PSEUDO,
-    "svd_int4": QuantizationNature.PSEUDO,
-    "svdquant_fp4": QuantizationNature.PSEUDO,
-    "svdquant_int4": QuantizationNature.PSEUDO,
+    "w4a16_int4": QuantizationNature.PSEUDO,
+    "w8a16_int8": QuantizationNature.PSEUDO,
+    "w4a16_fp4": QuantizationNature.PSEUDO,
+    "w4a16_nvfp4": QuantizationNature.PSEUDO,
+    "w4a16_mxfp4": QuantizationNature.PSEUDO,
+    "w8a16_mxfp8": QuantizationNature.PSEUDO,
+    "w8a16_fp8_e4m3": QuantizationNature.PSEUDO,
+    "w8a16_fp8_e5m2": QuantizationNature.PSEUDO,
+    "w8a8_int8": QuantizationNature.PSEUDO,
+    "w8a8_fp8_e4m3": QuantizationNature.TRUE,
+    "w8a8_fp8_e5m2": QuantizationNature.TRUE,
+    "w4a4_int4": QuantizationNature.TRUE,
+    "w4a4_fp4": QuantizationNature.PSEUDO,
+    "w4a4_nvfp4": QuantizationNature.PSEUDO,
+    "w4a4_mxfp4": QuantizationNature.PSEUDO,
 }
+
+_COMPUTE_TRUE_NATURE = frozenset(
+    {
+        "w8a8_int8_mma",
+        "fp8_mma",
+    }
+)
 
 _DEFAULT_NATURE = QuantizationNature.UNKNOWN
 
@@ -69,8 +53,9 @@ _DEFAULT_NATURE = QuantizationNature.UNKNOWN
 def _resolve_nature(
     strategy: Optional[str],
     policy: Mapping[str, Any] | None,
+    *,
+    compute: Optional[str] = None,
 ) -> QuantizationNature:
-    """Resolve quantization nature from strategy name or policy metadata."""
     if policy is not None:
         explicit = policy.get("nature")
         if isinstance(explicit, str):
@@ -78,6 +63,11 @@ def _resolve_nature(
                 return QuantizationNature(explicit)
             except ValueError:
                 pass
+    normalized_compute = normalize_quant_compute(compute) if compute else None
+    if normalized_compute is None and policy is not None:
+        normalized_compute = normalize_quant_compute(policy.get("compute"))
+    if normalized_compute in _COMPUTE_TRUE_NATURE:
+        return QuantizationNature.TRUE
     if strategy is not None:
         normalized = normalize_quant_strategy(strategy, policy)
         if normalized is not None:
@@ -184,11 +174,14 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         runtime="pytorch",
         artifact_kind="pytorch_model",
         methods=(
-            "dynamic_int8",
-            "fp8_dynamic",
-            "fp8_weight_only",
-            "weight_only_int4",
-            "weight_only_int8",
+            "none",
+            "w8a8_int8",
+            "w8a8_fp8_e4m3",
+            "w8a8_fp8_e5m2",
+            "w8a16_fp8_e4m3",
+            "w8a16_fp8_e5m2",
+            "w4a16_int4",
+            "w8a16_int8",
         ),
         model_families=(
             "linear_heavy",
@@ -215,7 +208,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         maturity="executable",
         runtime="onnxruntime",
         artifact_kind="onnx_qdq",
-        methods=("static_qdq_int8",),
+        methods=("none", "w8a8_int8",),
         model_families=(
             "cnn",
             "resnet",
@@ -244,22 +237,27 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         runtime="pytorch",
         artifact_kind="pytorch_model",
         methods=(
+            "none",
             "awq",
             "gptq",
             "svd",
-            "svdquant",
-            "svd_fp4",
-            "svd_int4",
-            "dynamic_int8_mma",
-            "nvfp4_dynamic",
-            "mxfp4_dynamic",
-            "tilelang_int8_mma",
-            "w4_storage_int8_mma",
-            "fp4_weight_only",
-            "weight_only_int4",
-            "weight_only_int8",
-            "mxfp_weight_only",
-            "convrot_w4a4",
+            "convrot",
+            "turboquant",
+            "w4a16_int4",
+            "w8a16_int8",
+            "w4a16_fp4",
+            "w4a16_nvfp4",
+            "w4a16_mxfp4",
+            "w8a16_mxfp8",
+            "w8a16_fp8_e4m3",
+            "w8a16_fp8_e5m2",
+            "w8a8_int8",
+            "w8a8_fp8_e4m3",
+            "w8a8_fp8_e5m2",
+            "w4a4_int4",
+            "w4a4_fp4",
+            "w4a4_nvfp4",
+            "w4a4_mxfp4",
         ),
         model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
         primary_module_types=("Linear",),
@@ -267,18 +265,15 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         preferred_devices=("cuda", "cpu"),
         requires_calibration=True,
         notes=(
-            "PyTorch quant backend hosts algorithm methods (awq/gptq/svd) and storage/compute strategies.",
-            "awq/gptq/svd are quant methods, not operator engines; TileLang is only an operator engine.",
-            "dynamic_int8_mma uses W8A8 int8 inputs with int32 MMA accumulation.",
-            "nvfp4_dynamic and mxfp4_dynamic use dynamic FP4 activation packing with packed FP4 weights.",
-            "w4_storage_int8_mma keeps packed W4 weights and retargets compute to INT8 MMA.",
-            "Packed FP4 modules may expose operator bridge hooks for later TileLang dequant GEMM materialize.",
+            "PyTorch quant backend uses method x strategy(WxAy+format) x compute.",
+            "awq/gptq/svd/convrot/turboquant are quant methods, not operator engines.",
+            "TileLang is only an operator engine; never a quant backend.",
+            "compute=w8a8_int8_mma retargets packed W4 residual or W8A8 paths to INT8 MMA.",
         ),
         limitations=(
-            "Executable AWQ/GPTQ coverage currently targets FP4, INT4, and INT8 weight-only Linear replacement.",
-            "Methods need representative calibration inputs to report algorithm-level execution.",
-            "w4_storage_int8_mma is compute retarget, not bit-exact native FP4 MMA.",
-            "Do not set quant.params.backend=tilelang; use backend=pytorch and operator stage engine=tilelang.",
+            "Executable AWQ/GPTQ coverage currently targets W4/W8 weight-only Linear replacement.",
+            "Methods need representative calibration inputs for algorithm-level execution.",
+            "W4 storage + INT8 MMA is compute retarget, not bit-exact native FP4 MMA.",
         ),
     ),
     "bitsandbytes": QuantBackendCapability(
@@ -287,7 +282,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         maturity="planned",
         runtime="transformers",
         artifact_kind="hf_runtime_model",
-        methods=("weight_only_int4", "weight_only_int8"),
+        methods=("none", "w4a16_int4", "w8a16_int8"),
         model_families=("llm", "vlm", "linear_heavy"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
@@ -315,10 +310,9 @@ def describe_quant_backend_capability(
     *,
     method: Optional[str] = None,
     strategy: Optional[str] = None,
+    compute: Optional[str] = None,
     policy: Mapping[str, Any] | None = None,
 ) -> QuantBackendCapability:
-    """Return a capability description for a quantization backend and method."""
-
     try:
         base = _BASE_CAPABILITIES[backend]
     except KeyError as exc:
@@ -328,22 +322,23 @@ def describe_quant_backend_capability(
         if backend_key == "tilelang":
             hint = (
                 " tilelang is an operator engine, not a quant backend; "
-                "use backend='pytorch' with method='awq'/'gptq' (or storage strategy), "
+                "use backend='pytorch' with method/strategy/compute, "
                 "then operator stage engine='tilelang'."
             )
         elif backend_key == "svdquant":
             hint = (
                 " svdquant is a quant method, not a quant backend; "
-                "use backend='pytorch' with method='svd' (or method='svdquant') "
-                "and strategy='svd_fp4'/'svd_int4'."
+                "use backend='pytorch' with method='svd' and strategy='w4a16_*'."
             )
         raise ValueError(
             f"Unsupported quantization backend: {backend}. Known: {allowed}.{hint}"
         ) from exc
 
-    selected_method = method or (str(policy.get("method")) if policy and policy.get("method") else None)
+    selected_method = method or (
+        str(policy.get("method")) if policy and policy.get("method") else None
+    )
     if selected_method is not None:
-        selected_method = normalize_quant_strategy(selected_method) or selected_method
+        selected_method = normalize_quant_method(selected_method)
     if selected_method is not None and selected_method not in base.methods:
         allowed = ", ".join(base.methods) if base.methods else "<none>"
         raise ValueError(
@@ -351,52 +346,55 @@ def describe_quant_backend_capability(
             f"'{backend}'. Known methods: {allowed}"
         )
 
+    normalized_strategy = normalize_quant_strategy(strategy, policy)
+    normalized_compute = normalize_quant_compute(compute) if compute else None
+    if normalized_compute is None and policy is not None:
+        normalized_compute = normalize_quant_compute(policy.get("compute"))
+
     requires_cuda = base.requires_cuda or _strategy_requires_cuda(strategy, policy)
-    resolved_nature = _resolve_nature(strategy, policy)
+    resolved_nature = _resolve_nature(
+        strategy,
+        policy,
+        compute=normalized_compute,
+    )
     notes = list(base.notes)
     maturity = base.maturity
     if backend == "torchao" and requires_cuda:
         notes.append("Configured strategy requires CUDA-capable hardware.")
     if selected_method is not None:
         notes.append(f"Configured quantization method: {selected_method}.")
-    if backend == "pytorch" and selected_method in {"awq", "gptq"}:
-        normalized_strategy = normalize_quant_strategy(strategy, policy)
-        if normalized_strategy in {
-            "weight_only_int4",
-            "weight_only_int8",
-            "fp4_weight_only",
-            "dynamic_int8_mma",
-            "int8_mma",
-            "nvfp4_dynamic",
-            "mxfp4_dynamic",
-            "tilelang_int8_mma",
-            "w4_storage_int8_mma",
-        }:
-            maturity = "executable"
-    if backend == "pytorch" and selected_method in {"svd", "svdquant", "svd_fp4", "svd_int4"}:
-        maturity = "reference_guarded"
-        notes.append(
-            "SVDQuant is a quant method on the pytorch backend "
-            "(low-rank FP16 branch + quantized residual; Phase 1 reference path)."
-        )
     if backend == "pytorch":
-        normalized_strategy = normalize_quant_strategy(strategy, policy)
-        if normalized_strategy in {
-            "dynamic_int8_mma",
-            "int8_mma",
-            "nvfp4_dynamic",
-            "mxfp4_dynamic",
-            "tilelang_int8_mma",
-            "w4_storage_int8_mma",
-            "fp4_weight_only",
-            "weight_only_int4",
-            "weight_only_int8",
-            "mxfp_weight_only",
-            "convrot_w4a4",
+        if selected_method == "svd":
+            if normalized_compute == "w8a8_int8_mma":
+                maturity = "executable"
+                notes.append(
+                    "SVDQuant keeps packed 4-bit residual storage and executes "
+                    "residual through W8A8 INT8 MMA; low-rank branch stays source "
+                    "precision."
+                )
+            else:
+                maturity = "reference_guarded"
+                notes.append(
+                    "SVDQuant reference path: low-rank source-precision branch + "
+                    "quantized residual dequantized before GEMM."
+                )
+        elif selected_method in {"awq", "gptq", "convrot", "turboquant"}:
+            maturity = "executable"
+        elif normalized_compute in {"w8a8_int8_mma", "fp8_mma"}:
+            maturity = "executable"
+        elif normalized_strategy in {
+            "w4a16_int4",
+            "w8a16_int8",
+            "w4a16_fp4",
+            "w4a16_nvfp4",
+            "w4a16_mxfp4",
+            "w8a16_mxfp8",
+            "w4a4_int4",
+            "w4a4_nvfp4",
+            "w4a4_mxfp4",
+            "w8a8_int8",
         }:
             maturity = "executable"
-        if normalized_strategy in {"svd_fp4", "svd_int4"}:
-            maturity = "reference_guarded"
     if resolved_nature == QuantizationNature.PSEUDO:
         notes.append(
             "PSEUDO quantization: storage compression only. "

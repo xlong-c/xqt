@@ -63,7 +63,7 @@ class NVFP4QuantizationResult(QuantizedModel):
     """Result returned by the NVFP4 weight-only quantization backend."""
 
     backend: str = "pytorch"
-    strategy: str = "nvfp4_weight_only"
+    strategy: str = "w4a16_nvfp4"
 
 
 def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:

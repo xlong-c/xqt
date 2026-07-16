@@ -189,6 +189,7 @@ class QuantizationComponentPlan:
     target_path: Optional[str] = None
     method: Optional[str] = None
     strategy: Optional[str] = None
+    compute: Optional[str] = None
     policy: dict[str, Any] = field(default_factory=dict)
     composite_gemm: CompositePrecisionGemmSpec | None = None
     keep_high_precision: list[str] = field(default_factory=list)
@@ -206,6 +207,7 @@ class QuantizationComponentPlan:
             "target_path": self.target_path,
             "method": self.method,
             "strategy": self.strategy,
+            "compute": self.compute,
             "policy": dict(self.policy),
             "keep_high_precision": list(self.keep_high_precision),
             "skip_quantize": list(self.skip_quantize),

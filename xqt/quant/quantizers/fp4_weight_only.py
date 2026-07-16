@@ -50,7 +50,8 @@ class FP4QuantizationResult(QuantizedModel):
     """Result returned by the FP4 weight-only quantization backend."""
 
     backend: str = "pytorch"
-    strategy: str = "fp4_weight_only"
+    strategy: str = "w4a16_fp4"
+    method: str | None = None
 
 
 @dataclass(frozen=True)
@@ -604,7 +605,7 @@ def quantize_with_fp4_weight_only(
                 "scheme": getattr(quant_policy, "scheme", "weight_only"),
             },
         )
-        or "fp4_weight_only"
+        or "w4a16_fp4"
     )
     target_model = model if inplace else copy.deepcopy(model)
     quantized_modules: list[str] = []
@@ -750,7 +751,7 @@ def _quantize_with_calibrated_fp4(
                 "scheme": getattr(quant_policy, "scheme", "weight_only"),
             },
         )
-        or "fp4_weight_only"
+        or "w4a16_fp4"
     )
     return FP4QuantizationResult(
         model=target_model,
@@ -880,7 +881,7 @@ def execute_fp4_weight_only_component(
             "selection_policy": selection_policy_metadata(component),
             "module_selection_reasons": module_selection_reasons,
             "executed": True,
-            "execution_state": "fp4_weight_only",
+            "execution_state": "w4a16_fp4",
         },
     )
     return updated_model, report

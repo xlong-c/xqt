@@ -10,7 +10,12 @@ from xqt.core.schema import QuantComponentPolicyConfig, QuantConfig
 from xqt.workflows.stage_specs import QuantStageSpec
 
 from .capability import describe_quant_backend_capability
-from .strategy import CANONICAL_QUANT_STRATEGIES, normalize_quant_strategy
+from .strategy import (
+    CANONICAL_QUANT_STRATEGIES,
+    require_supported_quant_compute,
+    require_supported_quant_method,
+    require_supported_quant_strategy,
+)
 from .types import QuantizationComponentPlan, QuantizationExecutionPlan
 
 
@@ -71,7 +76,19 @@ def _merge_component_plan(
 ) -> QuantizationComponentPlan:
     if component_config is None:
         policy = dict(quant_config.policy)
-        strategy = normalize_quant_strategy(quant_config.strategy, policy)
+        strategy = require_supported_quant_strategy(
+            quant_config.strategy,
+            location="quant.strategy",
+            policy=policy,
+        )
+        method = require_supported_quant_method(
+            quant_config.method,
+            location="quant.method",
+        )
+        compute = require_supported_quant_compute(
+            quant_config.compute,
+            location="quant.compute",
+        )
         keep_high_precision = list(quant_config.keep_high_precision)
         skip_quantize = list(quant_config.skip_quantize)
         force_quantize = list(quant_config.force_quantize)
@@ -85,8 +102,9 @@ def _merge_component_plan(
         return QuantizationComponentPlan(
             name="model",
             backend=quant_config.backend,
-            method=quant_config.method,
-            strategy=str(strategy) if strategy is not None else None,
+            method=method,
+            strategy=strategy,
+            compute=compute,
             policy=policy,
             composite_gemm=quant_config.composite_gemm,
             keep_high_precision=keep_high_precision,
@@ -96,9 +114,20 @@ def _merge_component_plan(
 
     merged_policy = dict(quant_config.policy)
     merged_policy.update(component_config.policy)
-    strategy = normalize_quant_strategy(
+    strategy = require_supported_quant_strategy(
         component_config.strategy or quant_config.strategy,
-        merged_policy,
+        location=f"quant.component_policies[{component_config.name}].strategy",
+        policy=merged_policy,
+    )
+    method = require_supported_quant_method(
+        component_config.method or quant_config.method,
+        location=f"quant.component_policies[{component_config.name}].method",
+    )
+    compute = require_supported_quant_compute(
+        component_config.compute
+        if component_config.compute is not None
+        else quant_config.compute,
+        location=f"quant.component_policies[{component_config.name}].compute",
     )
     keep_high_precision = _ordered_unique(
         [*quant_config.keep_high_precision, *component_config.keep_high_precision]
@@ -120,8 +149,9 @@ def _merge_component_plan(
         name=component_config.name,
         backend=component_config.backend or quant_config.backend,
         target_path=component_config.target,
-        method=component_config.method or quant_config.method,
-        strategy=str(strategy) if strategy is not None else None,
+        method=method,
+        strategy=strategy,
+        compute=compute,
         policy=merged_policy,
         composite_gemm=component_config.composite_gemm or quant_config.composite_gemm,
         keep_high_precision=keep_high_precision,
@@ -137,13 +167,14 @@ def _validate_quant_config_for_plan(quant_config: QuantConfig) -> None:
     has_selector = (
         quant_config.method is not None
         or quant_config.strategy is not None
+        or quant_config.compute is not None
         or bool(quant_config.policy)
         or bool(quant_config.component_policies)
     )
     if not has_selector:
         raise ValueError(
-            "quant must specify method, strategy, policy, or component_policies "
-            "when enabled=true"
+            "quant must specify method, strategy, compute, policy, or "
+            "component_policies when enabled=true"
         )
     if quant_config.component_policies:
         quant_config.component_policies = [
@@ -159,6 +190,11 @@ def _validate_quant_config_for_plan(quant_config: QuantConfig) -> None:
                 component_config.backend or quant_config.backend,
                 method=component_config.method or quant_config.method,
                 strategy=component_config.strategy or quant_config.strategy,
+                compute=(
+                    component_config.compute
+                    if component_config.compute is not None
+                    else quant_config.compute
+                ),
                 policy=component_policy,
             )
         return
@@ -166,6 +202,7 @@ def _validate_quant_config_for_plan(quant_config: QuantConfig) -> None:
         quant_config.backend,
         method=quant_config.method,
         strategy=quant_config.strategy,
+        compute=quant_config.compute,
         policy=quant_config.policy,
     )
 
@@ -183,6 +220,7 @@ def build_quantization_plan(
             backend=quant_config.backend,
             method=quant_config.method,
             strategy=quant_config.strategy,
+            compute=quant_config.compute,
             policy=dict(quant_config.policy),
             composite_gemm=quant_config.composite_gemm,
             keep_high_precision=list(quant_config.keep_high_precision),

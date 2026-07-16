@@ -258,7 +258,7 @@ class FP4DynamicQuantizationResult(QuantizedModel):
     """Result returned by the dynamic FP4 runtime quantization helpers."""
 
     backend: str = "pytorch"
-    strategy: str = "nvfp4_dynamic"
+    strategy: str = "w4a4_nvfp4"
 
 
 class FP4DynamicLinear(nn.Module):
@@ -710,7 +710,7 @@ class FP4DynamicLinear(nn.Module):
 
 
 def _dynamic_fp4_strategy_for_format(fp4_format: str) -> str:
-    return "nvfp4_dynamic" if _normalize_fp4_format(fp4_format) == "nvfp4" else "mxfp4_dynamic"
+    return "w4a4_nvfp4" if _normalize_fp4_format(fp4_format) == "nvfp4" else "w4a4_mxfp4"
 
 
 def quantize_with_dynamic_fp4(

@@ -4,23 +4,45 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-import numpy as np
+import torch
 
 from xqt.core.inputs import extract_model_inputs
-from xqt.export.input_utils import build_onnx_feed, default_input_names
+from xqt.export.input_utils import default_input_names, split_example_input
 
 
-def _as_numpy_record(
+def _as_tensor_record(
     batch: Any,
     *,
     input_names: Optional[Sequence[str]] = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, torch.Tensor]:
     inputs = extract_model_inputs(
         batch,
         expected_input_count=len(input_names) if input_names is not None else None,
     )
     resolved_input_names = list(input_names or default_input_names(inputs))
-    return build_onnx_feed(inputs, input_names=resolved_input_names)
+    normalized = split_example_input(inputs)
+    if normalized.kwargs:
+        missing = [name for name in resolved_input_names if name not in normalized.kwargs]
+        if missing:
+            raise ValueError(
+                "calibration input_names are missing from mapping input: "
+                f"{missing}"
+            )
+        values = {
+            name: normalized.kwargs[name]
+            for name in resolved_input_names
+        }
+    else:
+        if len(normalized.args) != len(resolved_input_names):
+            raise ValueError("calibration input arity must match input_names")
+        values = dict(zip(resolved_input_names, normalized.args))
+    invalid = [name for name, value in values.items() if not isinstance(value, torch.Tensor)]
+    if invalid:
+        raise TypeError(
+            "calibration inputs must be torch.Tensor values: "
+            f"{', '.join(sorted(invalid))}"
+        )
+    return {name: value.detach() for name, value in values.items()}
 
 
 def build_calibration_summary(
@@ -34,7 +56,7 @@ def build_calibration_summary(
     """Summarize calibration batches into a backend-agnostic metadata payload."""
 
     records = [
-        _as_numpy_record(batch, input_names=input_names)
+        _as_tensor_record(batch, input_names=input_names)
         for index, batch in enumerate(calibration_data)
         if sample_limit is None or index < sample_limit
     ]
@@ -46,7 +68,7 @@ def build_calibration_summary(
     for record in records:
         for name, value in record.items():
             shapes.setdefault(name, []).append(list(value.shape))
-            dtypes.setdefault(name, []).append(str(value.dtype))
+            dtypes.setdefault(name, []).append(str(value.dtype).removeprefix("torch."))
     return {
         "input_names": resolved_input_names,
         "sample_count": len(records),

@@ -49,7 +49,7 @@ class MXFPQuantizationResult(QuantizedModel):
     """Result returned by the MXFP weight-only quantization backend."""
 
     backend: str = "pytorch"
-    strategy: str = "mxfp_weight_only"
+    strategy: str = "w4a16_mxfp4"
 
 
 def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
@@ -469,7 +469,7 @@ def execute_mxfp_weight_only_component(
             "selection_policy": selection_policy_metadata(component),
             "module_selection_reasons": module_selection_reasons,
             "executed": True,
-            "execution_state": "mxfp_weight_only",
+            "execution_state": "w4a16_mxfp4",
         },
     )
     return updated_model, report
