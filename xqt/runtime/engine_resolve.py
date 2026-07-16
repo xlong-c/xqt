@@ -30,7 +30,7 @@ _ENGINE_PROVIDES: dict[str, frozenset[str]] = {
         }
     ),
     "torch_int_mm": frozenset({"int8_mma", "true_int8_mma"}),
-    "torch": frozenset({"generic", "fp16_mma"}),
+    "torch": frozenset({"generic", "fp16_mma", "fp8_mma"}),
     "triton": frozenset({"generic", "fp16_mma", "fp4_mma", "dequant_gemm_epilogue"}),
     "cutlass": frozenset({"int8_mma", "fp4_mma", "int4_mma", "fp16_mma"}),
     "cute_dsl": frozenset({"int8_mma", "fp4_mma"}),

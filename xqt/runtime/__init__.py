@@ -45,6 +45,38 @@ from .policy import (
 # ---------------------------------------------------------------------------
 
 from .engine import HybridInferenceEngine, HybridInferenceResult
+from .composite_branch import (
+    CompositeBranchModule,
+    MaterializerFunc,
+    SupportsStaticActivationCalibration,
+    get_materializer,
+    register_materializer,
+    replace_submodule,
+)
+from .composite_combine import (
+    AddCombine,
+    CombineStrategy,
+    ConcatCombine,
+    SelectCombine,
+    SUPPORTED_COMBINE_STRATEGIES,
+    get_combine_strategy,
+)
+from .composite_materialize import materialize_composite_compute
+from .composite_inference import (
+    calibrate_static_activation_scales,
+    fuse_composite_modules,
+    materialize_svd_for_inference,
+    override_composite_execution,
+)
+from .modules import (
+    Fp8MmaLinear,
+    Int8MmaLinear,
+    LowRankBranch,
+    SVDQuantFp8Linear,
+    SVDQuantInt8MmaLinear,
+    SVDQuantLinear,
+    W4StorageInt8MmaLinear,
+)
 from .engine_resolve import (
     EngineResolveResult,
     resolve_engine,
@@ -64,6 +96,18 @@ from .package import (
     create_inference_runner,
     load_model_package,
     write_model_package,
+)
+from .quant_pair import (
+    DEFAULT_SIDECAR_NAME,
+    DEFAULT_WEIGHTS_NAME,
+    QUANT_SIDECAR_ARTIFACT_TYPE,
+    QUANT_SIDECAR_SCHEMA_VERSION,
+    LoadedQuantPair,
+    QuantPairManifest,
+    load_quant_pair,
+    load_quant_pair_into_model,
+    write_quant_pair,
+    write_quant_pair_from_quantized,
 )
 
 __all__ = [
@@ -89,8 +133,32 @@ __all__ = [
     "EngineResolveResult",
     "HybridInferenceEngine",
     "HybridInferenceResult",
+    "materialize_composite_compute",
+    "calibrate_static_activation_scales",
+    "fuse_composite_modules",
+    "materialize_svd_for_inference",
+    "override_composite_execution",
+    "W4StorageInt8MmaLinear",
+    "SVDQuantLinear",
+    "SVDQuantFp8Linear",
+    "SVDQuantInt8MmaLinear",
+    "LowRankBranch",
+    "Fp8MmaLinear",
+    "Int8MmaLinear",
     "resolve_engine",
     "resolve_int8_mma_engine",
+    # composite branch protocol + registry
+    "AddCombine",
+    "CombineStrategy",
+    "CompositeBranchModule",
+    "ConcatCombine",
+    "SelectCombine",
+    "SUPPORTED_COMBINE_STRATEGIES",
+    "SupportsStaticActivationCalibration",
+    "get_combine_strategy",
+    "get_materializer",
+    "register_materializer",
+    "replace_submodule",
     # package
     "LoadedModelPackage",
     "MODEL_PACKAGE_ARTIFACT_TYPE",
@@ -100,4 +168,14 @@ __all__ = [
     "create_inference_runner",
     "load_model_package",
     "write_model_package",
+    "DEFAULT_SIDECAR_NAME",
+    "DEFAULT_WEIGHTS_NAME",
+    "LoadedQuantPair",
+    "QUANT_SIDECAR_ARTIFACT_TYPE",
+    "QUANT_SIDECAR_SCHEMA_VERSION",
+    "QuantPairManifest",
+    "load_quant_pair",
+    "load_quant_pair_into_model",
+    "write_quant_pair",
+    "write_quant_pair_from_quantized",
 ]

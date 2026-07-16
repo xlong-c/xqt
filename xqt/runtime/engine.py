@@ -108,8 +108,17 @@ class HybridInferenceEngine:
                 },
                 module_count=len(list(quantized.quantized_modules)),
             )
+            model = quantized.model
+            if parsed is not None:
+                from .composite_materialize import materialize_composite_compute
+
+                model = materialize_composite_compute(
+                    model,
+                    parsed,
+                    inplace=True,
+                )
             return cls(
-                quantized.model,
+                model,
                 default_precision=default_precision,
                 runtime=runtime,
                 policy=policy,
