@@ -135,7 +135,7 @@ def select_gemm_engine(
     ``gemm_precision.gemm_with_precision`` can actually execute today. Real,
     hardware-validated engines that exist elsewhere in XQT but are not wired
     into ``gemm_with_precision`` yet (for example ``ptx_sm89``, see
-    ``xqt.quant.quantizers.int8_mma.Int8MmaLinear``) are still surfaced in
+    ``xqt.runtime.modules.int8_mma_linear.Int8MmaLinear``) are still surfaced in
     ``candidates`` with ``dispatchable_by_gemm_with_precision=False`` so
     callers know they exist without this function claiming
     ``gemm_with_precision`` can reach them.
@@ -267,7 +267,7 @@ def select_gemm_engine(
                     "hand-written Ada sm_89 PTX INT8 tensor-core kernel "
                     "(xqt/operator_opt/kernels/cute/int8mma_binding.py), "
                     "already used by "
-                    "xqt.quant.quantizers.int8_mma.Int8MmaLinear with a real "
+                    "xqt.runtime.modules.int8_mma_linear.Int8MmaLinear with a real "
                     "m_rows>=192 auto heuristic and RTX 4070 Ti SUPER "
                     "measurements, but not reachable through "
                     "gemm_with_precision: it needs a prepacked-B caching "

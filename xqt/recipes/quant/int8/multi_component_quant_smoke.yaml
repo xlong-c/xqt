@@ -21,12 +21,12 @@ stages:
   kind: quant
   params:
     backend: torchao
-    strategy: dynamic_int8
+    strategy: w8a8_int8
     component_policies:
     - name: vision_encoder
       target: vision_encoder
       backend: onnxruntime_qdq
-      strategy: static_qdq_int8
+      strategy: w8a8_int8
       policy:
         input_names:
         - input
@@ -40,7 +40,7 @@ stages:
     - name: decoder
       target: decoder
       backend: torchao
-      strategy: dynamic_int8
+      strategy: w8a8_int8
       skip_quantize: []
       force_quantize:
       - decoder

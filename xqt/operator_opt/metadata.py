@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
-from xqt.quant.capability import describe_quant_backend_capability
 
 from .backends.cutile import (
     CuTileCompileSettings,
@@ -63,11 +62,24 @@ def quant_runtime_guard(
         first_component.get("runtime") if isinstance(first_component, Mapping) else ""
     ) or str(quant_metrics.get("runtime") or "")
     if backend == "onnxruntime_qdq" or runtime == "onnxruntime":
-        return "quantized runtime artifact is onnxruntime_qdq and cannot be rewritten as a PyTorch custom kernel"
-    if backend and describe_quant_backend_capability(backend).runtime != "pytorch":
-        capability = describe_quant_backend_capability(backend)
         return (
-            f"quantized runtime '{capability.runtime}' is not a PyTorch module runtime "
+            "quantized runtime artifact is onnxruntime_qdq and cannot be rewritten "
+            "as a PyTorch custom kernel"
+        )
+    # Known non-PyTorch quant runtimes (avoid importing quant.capability here).
+    non_pytorch_runtimes = {
+        "onnxruntime_qdq": "onnxruntime",
+        "bitsandbytes": "bitsandbytes",
+    }
+    if backend in non_pytorch_runtimes:
+        runtime_name = non_pytorch_runtimes[backend]
+        return (
+            f"quantized runtime '{runtime_name}' is not a PyTorch module runtime "
+            "for operator optimization replacement"
+        )
+    if runtime and runtime not in {"", "pytorch", "torch"}:
+        return (
+            f"quantized runtime '{runtime}' is not a PyTorch module runtime "
             "for operator optimization replacement"
         )
     del plan

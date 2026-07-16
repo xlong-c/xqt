@@ -23,7 +23,7 @@ stages:
   kind: quant
   params:
     backend: torchao
-    strategy: fp8_dynamic
+    strategy: w8a8_fp8_e4m3
     skip_quantize:
     - head
     - norm
@@ -31,7 +31,7 @@ stages:
     - head
     - norm
     policy:
-      strategy: fp8_dynamic
+      strategy: w8a8_fp8_e4m3
       include_module_types:
       - Linear
       exclude_name_patterns:

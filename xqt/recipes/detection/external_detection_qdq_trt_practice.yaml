@@ -11,7 +11,7 @@ stages:
   save_model: false
   params:
     backend: onnxruntime_qdq
-    strategy: static_qdq_int8
+    strategy: w8a8_int8
     policy:
       onnx_path: /tmp/xqt-external-detection.onnx
       output_path: artifacts/xqt/detection/external_detection_qdq_trt_practice/quant/external_detection_qdq.onnx

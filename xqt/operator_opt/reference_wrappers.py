@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
-from xqt.quant.bridges.nvfp4 import (
+from xqt.runtime.bridges.nvfp4 import (
     NVFP4LinearBridge,
     bridge_module_to_nvfp4_linear,
     bridge_module_to_nvfp4_linear_shared,

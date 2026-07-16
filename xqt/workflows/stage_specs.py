@@ -123,6 +123,7 @@ class QuantStageSpec:
     backend: str = MISSING
     method: Optional[str] = None
     strategy: Optional[str] = None
+    compute: Optional[str] = None
     policy: Dict[str, Any] = field(default_factory=dict)
     composite_gemm: Any | None = None
     keep_high_precision: List[str] = field(default_factory=list)

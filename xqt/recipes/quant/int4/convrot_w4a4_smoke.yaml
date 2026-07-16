@@ -21,7 +21,9 @@ stages:
     kind: quant
     params:
       backend: pytorch
-      strategy: convrot_w4a4
+      method: convrot
+      strategy: w4a4_int4
+      compute: dequant_fp16
       policy:
         dtype: int4
         scheme: convrot_w4a4

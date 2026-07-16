@@ -23,7 +23,7 @@ stages:
   kind: quant
   params:
     backend: onnxruntime_qdq
-    strategy: static_qdq_int8
+    strategy: w8a8_int8
     policy:
       input_names:
       - input

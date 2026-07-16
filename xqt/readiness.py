@@ -287,34 +287,40 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
     quantization = [
         describe_quant_backend_capability(
             "torchao",
-            method="dynamic_int8",
-            strategy="dynamic_int8",
+            method=None,
+            strategy="w8a8_int8",
+            compute="qdq_dynamic",
         ).to_optimization_capability(),
         describe_quant_backend_capability(
             "torchao",
-            method="weight_only_int4",
-            strategy="weight_only_int4",
+            method=None,
+            strategy="w4a16_int4",
+            compute="dequant_fp16",
         ).to_optimization_capability(),
         describe_quant_backend_capability(
             "torchao",
-            method="fp8_dynamic",
-            strategy="fp8_dynamic",
+            method=None,
+            strategy="w8a8_fp8_e4m3",
+            compute="fp8_mma",
         ).to_optimization_capability(),
         describe_quant_backend_capability(
             "pytorch",
             method="awq",
-            strategy="fp4_weight_only",
+            strategy="w4a16_fp4",
+            compute="dequant_fp16",
             policy={"dtype": "fp4", "scheme": "weight_only"},
         ).to_optimization_capability(),
         describe_quant_backend_capability(
             "onnxruntime_qdq",
-            method="static_qdq_int8",
-            strategy="static_qdq_int8",
+            method=None,
+            strategy="w8a8_int8",
+            compute="qdq_static",
         ).to_optimization_capability(),
         describe_quant_backend_capability(
             "bitsandbytes",
-            method="weight_only_int4",
-            strategy="weight_only_int4",
+            method=None,
+            strategy="w4a16_int4",
+            compute="dequant_fp16",
         ).to_optimization_capability(),
     ]
     operator = [
@@ -409,7 +415,8 @@ def _fp4_tilelang_readiness(
     quant_capability = describe_quant_backend_capability(
         "pytorch",
         method="awq",
-        strategy="fp4_weight_only",
+        strategy="w4a16_fp4",
+        compute="dequant_fp16",
         policy={"dtype": "fp4", "scheme": "weight_only"},
     )
     operator_capability = describe_operator_engine_capability("tilelang")
@@ -421,7 +428,7 @@ def _fp4_tilelang_readiness(
         "nvcc_available": _nvcc_available(),
     }
     evidence = [
-        "pytorch + fp4_weight_only is classified as PSEUDO weight-only quantization",
+        "pytorch + w4a16_fp4 is classified as PSEUDO weight-only quantization",
         "FP4WeightOnlyLinear stores packed signed int4 codes plus per-group scale",
         "TileLang registry includes packed FP4 fused unpack/dequant/GEMM/bias/activation entry",
     ]

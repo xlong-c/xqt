@@ -22,7 +22,7 @@ stages:
   kind: quant
   params:
     backend: torchao
-    strategy: dynamic_int8
+    strategy: w8a8_int8
     policy:
       include_module_types:
       - Linear

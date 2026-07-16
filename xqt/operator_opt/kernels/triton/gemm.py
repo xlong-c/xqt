@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
-from xqt.quant.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
+from xqt.runtime.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
 
 
 import triton

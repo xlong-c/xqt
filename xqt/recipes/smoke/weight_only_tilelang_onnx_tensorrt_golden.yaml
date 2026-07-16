@@ -24,7 +24,7 @@ stages:
     params:
       backend: pytorch
       method: awq
-      strategy: fp4_weight_only
+      strategy: w4a16_fp4
       policy:
         dtype: fp4
         scheme: weight_only
