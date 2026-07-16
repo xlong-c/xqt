@@ -60,6 +60,17 @@ _WAN21_VAE_EXPORTS = {
     "warmup_wan21_vae_runner",
 }
 
+_HUNYUAN_OCR_EXPORTS = {
+    "HUNYUAN_OCR_DFLASH_SUBFOLDER",
+    "HUNYUAN_OCR_REPO_ID",
+    "HUNYUAN_OCR_SVD_FP4_INT8_MMA_STRATEGY",
+    "HunyuanOCRSVDQuantResult",
+    "load_hunyuan_ocr",
+    "load_hunyuan_ocr_dflash",
+    "optimize_hunyuan_ocr_svd_fp4_int8_mma",
+    "optimize_hunyuan_ocr_dflash_svd_fp4_int8_mma",
+}
+
 
 def __getattr__(name: str) -> object:
     if name in _FLUX2_KLEIN_NVFP4_EXPORTS:
@@ -70,6 +81,10 @@ def __getattr__(name: str) -> object:
         from . import wan21_vae
 
         return getattr(wan21_vae, name)
+    if name in _HUNYUAN_OCR_EXPORTS:
+        from . import hunyuan_ocr
+
+        return getattr(hunyuan_ocr, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -83,6 +98,10 @@ __all__ = [
     "Flux2KleinNVFP4CudaGraphTransformerResult",
     "Flux2KleinNVFP4PairedBenchmarkResult",
     "Flux2KleinNVFP4TargetSummary",
+    "HUNYUAN_OCR_REPO_ID",
+    "HUNYUAN_OCR_DFLASH_SUBFOLDER",
+    "HUNYUAN_OCR_SVD_FP4_INT8_MMA_STRATEGY",
+    "HunyuanOCRSVDQuantResult",
     "ModuleOutputCapture",
     "SmokeDetectionModule",
     "benchmark_flux2_klein_nvfp4_transformer_paired",
@@ -97,12 +116,16 @@ __all__ = [
     "flux2_klein_nvfp4_single_file_url",
     "load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
     "load_flux2_klein_bf16_pipeline",
+    "load_hunyuan_ocr",
+    "load_hunyuan_ocr_dflash",
     "load_flux2_klein_bf16_transformer",
     "load_flux2_klein_nvfp4_pipeline",
     "load_flux2_klein_nvfp4_transformer",
     "materialize_flux2_klein_nvfp4_engine",
     "normalize_flux2_klein_nvfp4_engine",
     "optimize_flux2_klein_nvfp4_transformer",
+    "optimize_hunyuan_ocr_svd_fp4_int8_mma",
+    "optimize_hunyuan_ocr_dflash_svd_fp4_int8_mma",
     "quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
     "quantize_flux2_klein_bf16_transformer_to_convrot_4bit",
     "run_flux2_klein_bf16_convrot_4bit_inference",
