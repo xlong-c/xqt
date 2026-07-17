@@ -39,6 +39,11 @@ def test_quantize_with_w4_storage_int8_mma_from_linear_on_cpu() -> None:
     assert result.metadata["quantization_nature"] == "true"
     assert result.metadata["storage_encoding"] == "packed_signed_int4_group_scale"
     assert result.metadata["compute_encoding"] == "w8a8_int8_mma"
+    description = result.metadata["precision_description"]
+    assert description["quantization_time"]["weight"] == (
+        "offline packed signed INT4 with group scales"
+    )
+    assert description["runtime"]["small_batch_float_fallback"]["enabled"] is False
     assert result.model.fc.packed_weight.dtype == torch.uint8
     assert result.model.fc.storage_nbytes() < 16 * 32 * 4
 
@@ -69,6 +74,9 @@ def test_w4_storage_int8_mma_retargets_existing_fp4_weight_only() -> None:
     assert metadata["retarget"] == "w4_storage_int8_mma"
     assert metadata["storage_dtype"] == "packed_signed_int4"
     assert metadata["compute_dtype"] == "int8"
+    assert metadata["runtime_precision"]["execution_kind"] == "w8a8_int8_reference"
+    assert metadata["runtime_precision"]["int8_operands_executed"] is True
+    assert metadata["runtime_precision"]["float_fallback_taken"] is False
 
 
 def test_session_quant_w4_storage_int8_mma_replaces_linear(tmp_path) -> None:

@@ -10,14 +10,14 @@
 
 ## 背景
 
-在非 FP4 原生 GPU (SM < 100, 如 Ada SM89) 上部署已量化的 W4A4/FP4 模型时, 若直接走 "dequant → FP16 GEMM" (PSEUDO 量化), 显存有压缩但算力仍落在 FP16 水平, 没有吃到低精度 MMA 加速.
+在非 FP4 原生 GPU (SM < 100, 如 Ada SM89) 上部署已量化的 W4A4/FP4 模型时, 若直接走 "dequant -> FP16 GEMM" (PSEUDO 量化), 低比特 storage 不等于原生低比特 MMA. 该路径可能改变显存和带宽, 但不应据此承诺特定算力收益.
 
-XQT 新增的 `w4_storage_int8_mma` 策略将同一份 packed W4 权重在运行时重定标为 per-channel INT8, 然后通过 INT8 Tensor Core (~2-4x FP16 峰值吞吐) 执行 W8A8 GEMM, 从而在非原生 FP4 设备上获得比退化到 FP16 更好的算力利用.
+XQT 的 `w4_storage_int8_mma` 策略将同一份 packed W4 权重在运行时重定标为 per-channel INT8, 再请求 W8A8 INT8 MMA. 只有实际 engine, device 和 shape 满足条件并在 per-forward metadata 中报告 `native_mma_executed=true` 时, 才能说该 forward 使用了原生 INT8 MMA.
 
 核心契约:
 
 - **W4 存储不膨胀**: HBM 中仍是 packed signed int4 码 + group scale
-- **计算走 INT8 Tensor Core**: 运行时 dequant 后 re-encode 为 per-channel int8
+- **计算请求 W8A8 INT8 MMA**: 运行时 dequant 后 re-encode 为 per-channel int8; 是否原生执行由 runtime metadata 证明
 - **不做 QAT**: 这是 offline pack + runtime retarget, 不涉及训练
 
 ---
@@ -28,9 +28,9 @@ XQT 新增的 `w4_storage_int8_mma` 策略将同一份 packed W4 权重在运行
 
 | 策略 | nature | 存储 | 计算 | 适用场景 |
 |------|--------|------|------|---------|
-| `fp4_weight_only` | **PSEUDO** | packed int4 | dequant → FP16 GEMM | 只压缩显存, 不算力加速 |
-| `dynamic_int8_mma` | **TRUE** | per-channel int8 | W8A8 INT8 Tensor Core | 原生 INT8 模型 |
-| **`w4_storage_int8_mma`** | **TRUE** | packed int4 (**同上**) | dequant → int8 → W8A8 INT8 Tensor Core | **非 FP4 设备上的算力转义** |
+| `fp4_weight_only` | **PSEUDO** | packed int4 | dequant -> floating-point compute | 低比特 storage, 不承诺原生低比特 MMA |
+| `dynamic_int8_mma` | **TRUE contract** | per-channel int8 | W8A8 INT8 operands; native MMA must be observed per forward | 原生 INT8 模型 |
+| **`w4_storage_int8_mma`** | **TRUE contract** | packed int4 (**同上**) | dequant -> int8 -> W8A8 INT8 operands; native MMA must be observed per forward | **非 FP4 设备上的算力转义** |
 
 ### 关键区别
 
@@ -38,6 +38,16 @@ XQT 新增的 `w4_storage_int8_mma` 策略将同一份 packed W4 权重在运行
 - 前者的 forward 是 unpack → dequant → `F.linear(fp16)`
 - 后者的 forward 是 unpack → dequant → per-channel int8 re-encode → `Int8MmaLinear(int8)`
 - 两者都可以从同一份 FP4WeightOnlyLinear 转换而来, 不需重新量化
+
+### 量化时与运行时必须分开读
+
+`W4StorageInt8MmaLinear` 的 W4 storage 是量化时固定的. 每次 forward 的 activation 才会被编码为 INT8, 并由内部 `Int8MmaLinear` 执行. 因此本路径不是 W4A4 runtime:
+
+- state_dict/HBM: packed W4 + group scale.
+- runtime operands: W8 compute view + A8.
+- runtime truth: `module.execution_metadata()["runtime_precision"]` 中的 `int8_operands_executed`, `native_mma_executed` 和 `float_fallback_taken`.
+- 默认 `quantize_with_w4_storage_int8_mma()` 构造 `min_int8_rows=0`, 所以**未配置** `input_rows < min_int8_rows` 的小 batch 浮点回退. 若调用方后来直接重建内部模块并启用该阈值, metadata 会把状态写为 `taken` 或 `not_taken`.
+- engine 不可用时可能改走 INT8 reference path. 这保留 W8/A8 operands, 但不等于 native MMA 已执行.
 
 ---
 
@@ -58,10 +68,11 @@ xqt/operator_opt/kernels/tilelang/
 ```
 forward(inputs):
   1. _ensure_compute_view():
-     packed W4 → dequant (float) → per-channel int8 (qweight_t + channel_scale)
-     → 构建 Int8MmaLinear(engine=tilelang|torch_int_mm)
+     packed W4 -> dequant (float) -> per-channel int8 (qweight_t + channel_scale)
+     -> 构建 Int8MmaLinear(engine=tilelang|torch_int_mm)
   2. compute(inputs):
-     激活量化 (int8) + INT8 MMA + rescale → output
+     激活量化 (int8) + selected INT8 path + rescale -> output
+     # metadata distinguishes native MMA, INT8 reference, and float fallback
 
 release_int8_compute_view():
   丢弃 Int8MmaLinear, 只保留 W4 存储 (显存不膨胀)
@@ -69,11 +80,11 @@ release_int8_compute_view():
 
 ### 支持的引擎
 
-| 引擎 | 加速比 (vs torch._int_mm) | 状态 |
+| 引擎 | 运行时定位 | 状态 |
 |------|--------------------------|------|
-| `torch_int_mm` | 基准 | PyTorch 内置, 但 Ada 上 dispatch 旧 CUTLASS kernel |
-| `tilelang` | ~1.35-1.47x | JIT 编译 warp 级 INT8 MMA, 小 batch 融合路径仍强 |
-| `ptx_sm89` | 大矩阵 ~60 TOPS 级 | 手写 Ada sm_89 PTX (cp.async + m16n8k32), 见 `xqt/operator_opt/kernels/cute/` |
+| `torch_int_mm` | PyTorch INT8 path | 真实 operands 和 native MMA 状态以 metadata 为准 |
+| `tilelang` | TileLang INT8 MMA candidate | 需要 CUDA 和 block alignment; 不满足时按 fallback policy 处理 |
+| `ptx_sm89` | Ada SM89 PTX candidate | 需要 sm_89, shared library 和适合的 shape; 不满足时不宣称该路径已运行 |
 
 ---
 

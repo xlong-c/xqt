@@ -1,4 +1,4 @@
-"""W4 storage + INT8 MMA quant algorithm (runtime module in xqt.runtime.modules)."""
+"""W4 storage to requested W8A8 INT8 MMA compute retarget quantizer."""
 from __future__ import annotations
 
 import copy
@@ -156,7 +156,7 @@ def quantize_with_w4_storage_int8_mma(
     cache_int8_compute_view: bool = True,
     source: str = "auto",
 ) -> W4StorageInt8MmaQuantizationResult:
-    """Replace Linear / FP4 weight-only modules with W4 storage + INT8 MMA compute."""
+    """Replace Linear / FP4 weight-only modules with W4 storage and W8A8 retarget."""
 
     if str(source) not in _SOURCE_KINDS:
         raise ValueError("source must be one of auto, linear, fp4_weight_only")
@@ -258,11 +258,35 @@ def quantize_with_w4_storage_int8_mma(
         metadata={
             "implementation": "w4_storage_int8_mma_linear",
             "quantization_nature": "true",
+            "quantization_nature_scope": "requested_compute_contract_not_runtime_observation",
             "method_semantics": "w4_storage_int8_mma_compute_retarget",
             "storage_encoding": "packed_signed_int4_group_scale",
             "compute_encoding": "w8a8_int8_mma",
             "activation_encoding": f"{activation_scale_mode}_signed_int8_per_tensor",
             "accumulation": "int32",
+            "precision_description": {
+                "quantization_time": {
+                    "weight": "offline packed signed INT4 with group scales",
+                    "activation": (
+                        "not stored as an activation artifact; each forward uses "
+                        f"{activation_scale_mode} signed INT8 per-tensor encoding"
+                    ),
+                },
+                "runtime": {
+                    "weight_retarget": (
+                        "dequantize packed W4 then re-encode a per-output-channel "
+                        "INT8 compute view"
+                    ),
+                    "requested_compute": "W8A8 INT8 MMA with INT32 accumulation",
+                    "actual_execution_source": "W4StorageInt8MmaLinear.execution_metadata.runtime_precision",
+                    "native_mma": "only true when the delegated per-forward metadata reports it",
+                    "small_batch_float_fallback": {
+                        "enabled": False,
+                        "condition": "input_rows < min_int8_rows",
+                        "note": "quantize_with_w4_storage_int8_mma constructs min_int8_rows=0",
+                    },
+                },
+            },
             "engine": engine,
             "fallback_engine": fallback_engine,
             "group_size": configured_group_size,

@@ -22,6 +22,7 @@ _OUTPUT_DTYPES = {torch.float16, torch.bfloat16, torch.float32}
 def _tilelang_int8_api():
     """Lazy import TileLang INT8 kernels (not at quantizer module import time)."""
     from xqt.operator_opt.kernels.tilelang.int8_mma import (
+        int8_linear_static_activation_m1_tilelang,
         int8_linear_static_activation_tilelang,
         int8_linear_tilelang,
         int8_mma_reference,
@@ -32,6 +33,7 @@ def _tilelang_int8_api():
     return {
         "int8_linear_tilelang": int8_linear_tilelang,
         "int8_linear_static_activation_tilelang": int8_linear_static_activation_tilelang,
+        "int8_linear_static_activation_m1_tilelang": int8_linear_static_activation_m1_tilelang,
         "int8_mma_reference": int8_mma_reference,
         "pad_rows_to_block": pad_rows_to_block,
         "static_activation_quantize_tilelang": static_activation_quantize_tilelang,
@@ -44,7 +46,7 @@ def _target_arch_from_device(device: torch.device) -> str | None:
     return f"sm_{major}{minor}"
 
 class Int8MmaLinear(nn.Module):
-    """Linear replacement backed by true W8A8 INT8 MMA."""
+    """W8A8 INT8 Linear replacement that records the realized runtime path."""
 
     quant_max: float = 127.0
 
@@ -216,6 +218,68 @@ class Int8MmaLinear(nn.Module):
             "output_features": self.output_features,
         }
         return output.to(self.output_dtype)
+
+    def _runtime_precision_summary(self) -> dict[str, Any]:
+        """Describe the operands and fallback state of the most recent forward."""
+
+        execution = self.last_execution
+        engine = str(execution.get("engine", "not_run"))
+        float_fallback = engine == "bf16_fallback"
+        native_mma = bool(execution.get("true_int8_mma", False))
+        int8_operands = (
+            not float_fallback
+            and execution.get("activation_dtype") == "int8"
+            and execution.get("weight_dtype") == "int8"
+        )
+        if engine == "not_run":
+            execution_kind = "not_run"
+        elif float_fallback:
+            execution_kind = "floating_point_fallback"
+        elif native_mma:
+            execution_kind = "native_w8a8_int8_mma"
+        elif int8_operands:
+            execution_kind = "w8a8_int8_reference"
+        else:
+            execution_kind = "unclassified"
+
+        small_batch_status = (
+            "disabled"
+            if self.min_int8_rows == 0
+            else "taken"
+            if float_fallback
+            else "not_taken"
+        )
+        engine_error_fallback_taken = str(execution.get("reason", "")).startswith(
+            "int8_mma_fallback:"
+        )
+        engine_error_fallback_status = (
+            "disabled"
+            if self.fallback_engine != "torch_int_mm"
+            else "taken"
+            if engine_error_fallback_taken
+            else "not_taken"
+        )
+        return {
+            "requested": "w8a8_int8_mma",
+            "weight_storage": "signed_int8_per_output_channel",
+            "activation_encoding": "signed_int8_per_tensor",
+            "execution_kind": execution_kind,
+            "int8_operands_executed": int8_operands,
+            "native_mma_executed": native_mma,
+            "float_fallback_taken": float_fallback,
+            "float_fallback_reason": execution.get("reason") if float_fallback else None,
+            "small_batch_float_fallback": {
+                "enabled": self.min_int8_rows > 0,
+                "condition": "input_rows < min_int8_rows",
+                "min_int8_rows": self.min_int8_rows,
+                "status": small_batch_status,
+            },
+            "engine_error_int8_fallback": {
+                "enabled": self.fallback_engine == "torch_int_mm",
+                "condition": "selected non-reference INT8 engine raises or fails its runtime check",
+                "status": engine_error_fallback_status,
+            },
+        }
 
     @staticmethod
     def activation_scale_from_inputs(inputs: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -412,6 +476,51 @@ class Int8MmaLinear(nn.Module):
             return False, "input_features is not block_k aligned"
         return True, "ok"
 
+    def _run_m1_int8_gemv(
+        self,
+        flat_inputs: torch.Tensor,
+        activation_scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, str]:
+        """True M=1 INT8 GEMV: prefer PTX DP4A, fall back to float-domain products."""
+
+        if (
+            flat_inputs.is_cuda
+            and flat_inputs.dtype == torch.float16
+            and self.qweight_t.is_cuda
+        ):
+            try:
+                from xqt.operator_opt.kernels.cute.int8mma_binding import (
+                    int8_gemv_m1_fused_static_ptx_sm89,
+                    int8mma_available,
+                )
+
+                if int8mma_available():
+                    prepacked = self._ensure_ptx_prepacked_b()
+                    output = int8_gemv_m1_fused_static_ptx_sm89(
+                        flat_inputs,
+                        self.qweight_t,
+                        activation_scale,
+                        self.weight_scale,
+                        self.bias,
+                        output_dtype=output_dtype,
+                        prepacked_b=prepacked,
+                    )
+                    return output, "ptx_sm89_m1_dp4a_gemv"
+            except Exception:
+                pass
+        api = _tilelang_int8_api()
+        output = api["int8_linear_static_activation_m1_tilelang"](
+            flat_inputs,
+            self.qweight_t,
+            activation_scale,
+            self.weight_scale,
+            self.bias,
+            output_dtype=output_dtype,
+            target_arch=_target_arch_from_device(flat_inputs.device),
+        )
+        return output, "torch_m1_int8_products"
+
     def _run_tilelang_static_fused(
         self,
         flat_inputs: torch.Tensor,
@@ -419,6 +528,14 @@ class Int8MmaLinear(nn.Module):
         output_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, int, str]:
         api = _tilelang_int8_api()
+        target_arch = _target_arch_from_device(flat_inputs.device)
+        if int(flat_inputs.shape[0]) == 1:
+            output, backend = self._run_m1_int8_gemv(
+                flat_inputs,
+                activation_scale,
+                output_dtype,
+            )
+            return output, 1, backend
         padded, original_rows = api["pad_rows_to_block"](flat_inputs, self.block_m)
         target_arch = _target_arch_from_device(padded.device)
         output = api["int8_linear_static_activation_tilelang"](
@@ -536,21 +653,41 @@ class Int8MmaLinear(nn.Module):
                         activation_scale,
                         self.output_dtype,
                     )
+                    is_m1 = int(flat_inputs.shape[0]) == 1 and int(padded_rows) == 1
+                    quant_engine = (
+                        str(target_arch)
+                        if is_m1
+                        else "tilelang_fused_static"
+                    )
                     self.last_execution = {
-                        "engine": used_engine,
-                        "reason": reason,
+                        "engine": (
+                            "ptx_sm89"
+                            if is_m1 and str(target_arch).startswith("ptx")
+                            else used_engine
+                        ),
+                        "reason": (
+                            "true_int8_m1_dp4a_gemv"
+                            if is_m1 and str(target_arch).startswith("ptx")
+                            else "true_int8_m1_static_gemv"
+                            if is_m1
+                            else reason
+                        ),
                         "true_int8_mma": True,
                         "activation_dtype": "int8",
                         "weight_dtype": "int8",
                         "accumulation_dtype": "int32",
                         "activation_scale_mode": self.activation_scale_mode,
-                        "activation_quant_engine": "tilelang_fused_static",
+                        "activation_quant_engine": quant_engine,
                         "fused_static_status": "used",
                         "input_rows": int(flat_inputs.shape[0]),
                         "padded_rows": padded_rows,
                         "input_features": self.input_features,
                         "output_features": self.output_features,
-                        "target_arch": target_arch,
+                        "target_arch": (
+                            "sm_89"
+                            if is_m1
+                            else target_arch
+                        ),
                     }
                     output = output.to(self.output_dtype)
                     return output.reshape(*original_shape, self.output_features)
@@ -641,6 +778,8 @@ class Int8MmaLinear(nn.Module):
         return output.reshape(*original_shape, self.output_features)
 
     def execution_metadata(self) -> dict[str, Any]:
-        return dict(self.last_execution)
+        metadata = dict(self.last_execution)
+        metadata["runtime_precision"] = self._runtime_precision_summary()
+        return metadata
 
 __all__ = ["Int8MmaLinear"]

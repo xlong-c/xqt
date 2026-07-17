@@ -820,11 +820,35 @@ def quantize_with_convrot_4bit(
         quantized_modules=quantized_modules,
         metadata={
             "implementation": "convrot_groupwise_regular_hadamard_w4a4",
+            "quantization_nature": "pseudo",
+            "quantization_nature_scope": "current_xqt_runtime_implementation",
             "weight_encoding": "packed_signed_int4",
             "activation_encoding": "symmetric_int4_reference",
             "activation_scale_mode": activation_scale_mode,
             "default_compute_precision": default_compute_precision,
             "supported_compute_precisions": sorted(SUPPORTED_COMPUTE_PRECISIONS),
+            "precision_description": {
+                "quantization_time": {
+                    "weight": "offline rotated and packed signed INT4 with group scales",
+                    "activation": (
+                        "not stored as an activation artifact; runtime uses "
+                        f"{activation_scale_mode} symmetric INT4 when compute_precision=w4a4"
+                    ),
+                },
+                "runtime": {
+                    "w4a4": (
+                        "W4 and A4 are quantized then dequantized into F.linear; "
+                        "this is not native W4A4 MMA"
+                    ),
+                    "w4a16": "packed W4 is dequantized; activation stays in the input float dtype",
+                    "bf16": "uses the retained floating-point reference weight",
+                    "w8a8": "delegates to Int8MmaLinear; inspect its runtime_precision metadata",
+                    "precision_change": (
+                        "there is no automatic precision fallback in this module; "
+                        "only an explicit execution policy or channel-hybrid override changes compute_precision"
+                    ),
+                },
+            },
             "group_size": configured_group_size,
             "rot_size": configured_rot_size,
             "channel_hybrid_ratio": float(channel_hybrid_ratio),

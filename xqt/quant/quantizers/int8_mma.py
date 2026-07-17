@@ -1,4 +1,4 @@
-"""True W8A8 INT8 MMA quantization algorithm (runtime module in xqt.runtime.modules)."""
+"""W8A8 INT8 MMA contract quantizer with per-forward runtime observation."""
 from __future__ import annotations
 
 import copy
@@ -140,7 +140,7 @@ def quantize_with_int8_mma(
     activation_quant_block_size: int = 256,
     eps: float = 1e-6,
 ) -> Int8MmaQuantizationResult:
-    """Replace Linear modules with true W8A8 INT8 MMA runtime modules."""
+    """Replace Linear modules with a requested W8A8 INT8 MMA runtime contract."""
 
     quant_policy = (
         policy
@@ -232,9 +232,29 @@ def quantize_with_int8_mma(
         metadata={
             "implementation": "dynamic_w8a8_int8_mma_linear",
             "quantization_nature": "true",
+            "quantization_nature_scope": "requested_compute_contract_not_runtime_observation",
             "activation_encoding": f"{activation_scale_mode}_signed_int8_per_tensor",
             "weight_encoding": "signed_int8_per_output_channel",
             "accumulation": "int32",
+            "precision_description": {
+                "quantization_time": {
+                    "weight": "offline static signed INT8 per output channel",
+                    "activation": (
+                        "not stored as an activation artifact; each forward uses "
+                        f"{activation_scale_mode} signed INT8 per-tensor encoding"
+                    ),
+                },
+                "runtime": {
+                    "requested_compute": "W8A8 INT8 MMA with INT32 accumulation",
+                    "actual_execution_source": "Int8MmaLinear.execution_metadata.runtime_precision",
+                    "native_mma": "only true when the per-forward metadata reports it",
+                    "small_batch_float_fallback": {
+                        "enabled": False,
+                        "condition": "input_rows < min_int8_rows",
+                        "note": "quantize_with_int8_mma constructs min_int8_rows=0",
+                    },
+                },
+            },
             "engine_preference": normalize_engine_name(engine),
             "preferred_engines": preferred_hint,
             "fallback_engine": fallback_engine,
@@ -271,7 +291,7 @@ def execute_int8_mma_component(
     *,
     quantize_fn: Any = quantize_with_int8_mma,
 ) -> tuple[nn.Module, QuantizationReport]:
-    """Execute the true W8A8 INT8 MMA quantizer for a component."""
+    """Execute the W8A8 INT8 MMA contract quantizer for a component."""
 
     target_model = resolve_component_model(root_model, component.target_path)
     effective_policy = build_effective_selection_policy(component)
@@ -311,7 +331,7 @@ def execute_int8_mma_component(
         context,
         component,
     )
-    method_semantics = "true_w8a8_int8_mma_runtime_quantization"
+    method_semantics = "w8a8_int8_mma_runtime_quantization_contract"
     report = QuantizationReport(
         component_name=component.name,
         backend=result.backend,

@@ -429,6 +429,63 @@ def _validate_prune_stage_spec(spec: PruneStageSpec) -> None:
 
 
 def _validate_operator_stage_spec(spec: OperatorStageSpec) -> None:
+    for index, target in enumerate(spec.targets):
+        location = f"operator.params.targets.{index}"
+        if target.candidate_kind not in {"single_kernel", "block_kernel"}:
+            raise XQTConfigError(
+                f"{location}.candidate_kind must be single_kernel or block_kernel"
+            )
+        if target.candidate_kind == "single_kernel" and target.block_kernel is not None:
+            raise XQTConfigError(
+                f"{location}.block_kernel requires candidate_kind=block_kernel"
+            )
+        if (
+            target.candidate_kind == "single_kernel"
+            and target.block_kernel_engine is not None
+        ):
+            raise XQTConfigError(
+                f"{location}.block_kernel_engine requires candidate_kind=block_kernel"
+            )
+        benchmark_target = (
+            target.benchmark_target
+            if target.benchmark_target is not None
+            else target.target
+        )
+        if (
+            target.candidate_kind == "block_kernel"
+            and benchmark_target != target.target
+        ):
+            raise XQTConfigError(
+                f"{location}.benchmark_target must equal target for block_kernel"
+            )
+        engine = target.engine or spec.default_engine
+        if (
+            target.candidate_kind == "block_kernel"
+            and engine != "torch_compile"
+            and target.block_kernel is None
+        ):
+            raise XQTConfigError(
+                f"{location}.block_kernel is required for manual block_kernel targets"
+            )
+        if target.block_kernel_engine is not None and not (
+            target.candidate_kind == "block_kernel"
+            and engine == "torch_compile"
+            and target.block_kernel is not None
+        ):
+            raise XQTConfigError(
+                f"{location}.block_kernel_engine is only valid for torch_compile "
+                "block_kernel targets with a manual block_kernel fallback"
+            )
+        if (
+            target.candidate_kind == "block_kernel"
+            and engine == "torch_compile"
+            and target.block_kernel is not None
+            and target.block_kernel_engine is None
+        ):
+            raise XQTConfigError(
+                f"{location}.block_kernel_engine is required when block_kernel "
+                "is used as a torch_compile fallback"
+            )
     if spec.benchmark is not None:
         _validate_benchmark_stage_spec(
             spec.benchmark,

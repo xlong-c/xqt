@@ -55,6 +55,26 @@ def _load_lib(so_path: str | None = None) -> Any:
     lib.int8mma_version.restype = ctypes.c_char_p
     lib.int8mma_smem_bytes.argtypes = []
     lib.int8mma_smem_bytes.restype = ctypes.c_int
+    gemv_names = (
+        "int8_gemv_m1_run",
+        "int8_gemv_m1_run_prepacked_b",
+        "int8_gemv_m1_run_fused_static",
+        "int8_gemv_m1_run_fused_static_prepacked_b",
+    )
+    for name in gemv_names:
+        if not hasattr(lib, name):
+            continue
+        fn = getattr(lib, name)
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        fn.restype = ctypes.c_int
     return lib
 
 
@@ -195,10 +215,159 @@ def int8_linear_fused_static_ptx_sm89(
     return out
 
 
+def _device_activation_scale(
+    activation_scale: torch.Tensor | float,
+    device: torch.device,
+) -> torch.Tensor:
+    if isinstance(activation_scale, torch.Tensor):
+        scale = activation_scale.detach().to(device=device, dtype=torch.float32).reshape(1)
+    else:
+        value = float(activation_scale)
+        if value <= 0.0:
+            raise XQTBackendError("activation_scale must be positive")
+        scale = torch.tensor([value], device=device, dtype=torch.float32)
+    return scale.contiguous()
+
+
+def int8_gemv_m1_ptx_sm89(
+    qactivation: torch.Tensor,
+    qweight_t: torch.Tensor,
+    activation_scale: torch.Tensor | float,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    output_dtype: torch.dtype = torch.float16,
+    prepacked_b: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """True M=1 INT8 GEMV via DP4A (no MMA tile padding)."""
+
+    if not qactivation.is_cuda or not qweight_t.is_cuda:
+        raise XQTBackendError("ptx_sm89 INT8 GEMV requires CUDA tensors")
+    if qactivation.dtype != torch.int8 or qweight_t.dtype != torch.int8:
+        raise XQTBackendError("ptx_sm89 INT8 GEMV expects int8 inputs")
+    if qactivation.ndim != 2 or qweight_t.ndim != 2:
+        raise XQTBackendError("ptx_sm89 INT8 GEMV expects 2D tensors")
+    if int(qactivation.shape[0]) != 1:
+        raise XQTBackendError("ptx_sm89 INT8 GEMV requires M=1")
+    if qactivation.shape[1] != qweight_t.shape[0]:
+        raise XQTBackendError("ptx_sm89 INT8 GEMV requires A.shape[1] == B.shape[0]")
+
+    k = int(qactivation.shape[1])
+    n = int(qweight_t.shape[1])
+    sa = _device_activation_scale(activation_scale, qactivation.device)
+    sw = weight_scale.detach().to(device=qactivation.device, dtype=torch.float32).contiguous()
+    if sw.numel() != n:
+        raise XQTBackendError("weight_scale must have N elements")
+
+    a = qactivation.contiguous()
+    c_half = torch.empty(1, n, device=qactivation.device, dtype=torch.float16)
+    lib = _load_lib()
+    if prepacked_b is not None:
+        if prepacked_b.shape != (n, k) or prepacked_b.dtype != torch.int8:
+            raise XQTBackendError(
+                f"prepacked_b must be int8 [N,K]=[{n},{k}], got "
+                f"{prepacked_b.dtype} {tuple(prepacked_b.shape)}"
+            )
+        if not hasattr(lib, "int8_gemv_m1_run_prepacked_b"):
+            raise XQTBackendError("int8_gemv_m1_run_prepacked_b missing; rebuild SO")
+        err = lib.int8_gemv_m1_run_prepacked_b(
+            a.data_ptr(),
+            prepacked_b.contiguous().data_ptr(),
+            c_half.data_ptr(),
+            sa.data_ptr(),
+            sw.data_ptr(),
+            n,
+            k,
+        )
+    else:
+        if not hasattr(lib, "int8_gemv_m1_run"):
+            raise XQTBackendError("int8_gemv_m1_run missing; rebuild SO")
+        err = lib.int8_gemv_m1_run(
+            a.data_ptr(),
+            qweight_t.contiguous().data_ptr(),
+            c_half.data_ptr(),
+            sa.data_ptr(),
+            sw.data_ptr(),
+            n,
+            k,
+        )
+    if err != 0:
+        raise XQTBackendError(f"int8_gemv_m1_run failed with cuda error code {err}")
+    out = c_half if output_dtype == torch.float16 else c_half.to(output_dtype)
+    if bias is not None:
+        out = out + bias.to(device=out.device, dtype=out.dtype)
+    return out
+
+
+def int8_gemv_m1_fused_static_ptx_sm89(
+    activations: torch.Tensor,
+    qweight_t: torch.Tensor,
+    activation_scale: torch.Tensor | float,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    output_dtype: torch.dtype = torch.float16,
+    prepacked_b: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fused static quant + M=1 INT8 GEMV. activations: half [1,K]."""
+
+    if not activations.is_cuda or not qweight_t.is_cuda:
+        raise XQTBackendError("ptx_sm89 fused GEMV requires CUDA tensors")
+    if activations.dtype != torch.float16:
+        raise XQTBackendError("ptx_sm89 fused GEMV expects float16 activations")
+    if qweight_t.dtype != torch.int8 or activations.ndim != 2 or qweight_t.ndim != 2:
+        raise XQTBackendError("ptx_sm89 fused GEMV expects half[1,K] x int8[K,N]")
+    if int(activations.shape[0]) != 1:
+        raise XQTBackendError("ptx_sm89 fused GEMV requires M=1")
+    if activations.shape[1] != qweight_t.shape[0]:
+        raise XQTBackendError("ptx_sm89 fused GEMV requires A.shape[1] == B.shape[0]")
+
+    k = int(activations.shape[1])
+    n = int(qweight_t.shape[1])
+    sa = _device_activation_scale(activation_scale, activations.device)
+    sw = weight_scale.detach().to(device=activations.device, dtype=torch.float32).contiguous()
+    if sw.numel() != n:
+        raise XQTBackendError("weight_scale must have N elements")
+
+    x = activations.contiguous()
+    c_half = torch.empty(1, n, device=activations.device, dtype=torch.float16)
+    lib = _load_lib()
+    if prepacked_b is None:
+        prepacked_b = prepack_qweight_t_for_ptx_sm89(qweight_t)
+    if prepacked_b.shape != (n, k) or prepacked_b.dtype != torch.int8:
+        raise XQTBackendError(
+            f"prepacked_b must be int8 [N,K]=[{n},{k}], got "
+            f"{prepacked_b.dtype} {tuple(prepacked_b.shape)}"
+        )
+    if not hasattr(lib, "int8_gemv_m1_run_fused_static_prepacked_b"):
+        raise XQTBackendError(
+            "int8_gemv_m1_run_fused_static_prepacked_b missing; rebuild SO"
+        )
+    err = lib.int8_gemv_m1_run_fused_static_prepacked_b(
+        x.data_ptr(),
+        prepacked_b.contiguous().data_ptr(),
+        c_half.data_ptr(),
+        sa.data_ptr(),
+        sw.data_ptr(),
+        n,
+        k,
+    )
+    if err != 0:
+        raise XQTBackendError(
+            f"int8_gemv_m1_run_fused_static_prepacked_b failed with cuda error code {err}"
+        )
+    out = c_half if output_dtype == torch.float16 else c_half.to(output_dtype)
+    if bias is not None:
+        out = out + bias.to(device=out.device, dtype=out.dtype)
+    return out
+
+
 __all__ = [
     "int8mma_available",
     "int8mma_version",
     "int8_linear_ptx_sm89",
     "int8_linear_fused_static_ptx_sm89",
+    "int8_gemv_m1_ptx_sm89",
+    "int8_gemv_m1_fused_static_ptx_sm89",
     "prepack_qweight_t_for_ptx_sm89",
 ]

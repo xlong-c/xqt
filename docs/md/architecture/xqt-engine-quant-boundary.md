@@ -87,6 +87,7 @@ Infer 只消费: 已量化模型 + 可选计算配置; 不回流量化, 不强�
 - 标定, 打包, 模块替换, quant report / lineage.
 - 可选写出 `compute_config` (精度 + `required_capabilities` + 可选 `preferred_engines` hint).
 - 算法身份 (`method`) 留在 quant 报告; **不是** Infer 构造必选.
+- 写 `W?A?` 时必须分开说明量化时 storage, forward 时 activation encoding, 实际 compute path 和 fallback 条件. `compute_contract` / `nature` 是声明, 不得替代 per-forward execution metadata.
 
 ### 4.2 不负责
 

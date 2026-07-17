@@ -91,18 +91,25 @@ CANONICAL_QUANT_METHODS = (
 )
 SUPPORTED_QUANT_METHODS = CANONICAL_QUANT_METHODS
 
+_QUANT_STRATEGY_ALIASES = {
+    "fp4_weight_only": "w4a16_fp4",
+    "weight_only_int4": "w4a16_int4",
+}
+
 
 def normalize_quant_strategy(
     strategy: Any | None,
     policy: Mapping[str, Any] | None = None,
 ) -> str | None:
-    del policy
     if strategy is None:
         return None
-    text = str(strategy).strip()
+    text = str(strategy).strip().lower()
     if not text:
         return None
-    return text
+    if text == "mxfp_weight_only":
+        precision = int((policy or {}).get("precision", 4))
+        return "w8a16_mxfp8" if precision == 8 else "w4a16_mxfp4"
+    return _QUANT_STRATEGY_ALIASES.get(text, text)
 
 
 def normalize_quant_compute(
@@ -346,10 +353,14 @@ class CuteDSLKernelConfig:
 
 @dataclass
 class OperatorOptimizationTargetConfig:
-    """One operator optimization target entry."""
+    """One runtime candidate replacement and block-level benchmark target."""
 
     name: str = ""
     target: Optional[str] = None
+    candidate_kind: str = "single_kernel"
+    benchmark_target: Optional[str] = None
+    block_kernel: Optional[str] = None
+    block_kernel_engine: Optional[str] = None
     engine: Optional[str] = None
     mode: Optional[str] = None
     fullgraph: bool = False

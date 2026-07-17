@@ -63,12 +63,17 @@ _WAN21_VAE_EXPORTS = {
 _HUNYUAN_OCR_EXPORTS = {
     "HUNYUAN_OCR_DFLASH_SUBFOLDER",
     "HUNYUAN_OCR_REPO_ID",
-    "HUNYUAN_OCR_SVD_FP4_INT8_MMA_STRATEGY",
-    "HunyuanOCRSVDQuantResult",
+    "HUNYUAN_OCR_SVD_INT4_STRATEGY",
+    "HunyuanOCRBlockOptimization",
+    "HunyuanOCRInt4QuantResult",
+    "HunyuanOcrTileLangCudaGraphRunner",
+    "HunyuanOcrTileLangDecodeBlock",
+    "HunyuanOcrTileLangDecodeSpec",
+    "benchmark_hunyuan_ocr_tilelang_decode_graph",
     "load_hunyuan_ocr",
     "load_hunyuan_ocr_dflash",
-    "optimize_hunyuan_ocr_svd_fp4_int8_mma",
-    "optimize_hunyuan_ocr_dflash_svd_fp4_int8_mma",
+    "optimize_hunyuan_ocr_svd_int4_blocks",
+    "optimize_hunyuan_ocr_dflash_svd_int4_blocks",
 }
 
 
@@ -82,6 +87,12 @@ def __getattr__(name: str) -> object:
 
         return getattr(wan21_vae, name)
     if name in _HUNYUAN_OCR_EXPORTS:
+        if name.startswith("HunyuanOcrTileLang") or name == (
+            "benchmark_hunyuan_ocr_tilelang_decode_graph"
+        ):
+            from . import hunyuan_ocr_tilelang
+
+            return getattr(hunyuan_ocr_tilelang, name)
         from . import hunyuan_ocr
 
         return getattr(hunyuan_ocr, name)
@@ -100,8 +111,13 @@ __all__ = [
     "Flux2KleinNVFP4TargetSummary",
     "HUNYUAN_OCR_REPO_ID",
     "HUNYUAN_OCR_DFLASH_SUBFOLDER",
-    "HUNYUAN_OCR_SVD_FP4_INT8_MMA_STRATEGY",
-    "HunyuanOCRSVDQuantResult",
+    "HUNYUAN_OCR_SVD_INT4_STRATEGY",
+    "HunyuanOCRBlockOptimization",
+    "HunyuanOCRInt4QuantResult",
+    "HunyuanOcrTileLangCudaGraphRunner",
+    "HunyuanOcrTileLangDecodeBlock",
+    "HunyuanOcrTileLangDecodeSpec",
+    "benchmark_hunyuan_ocr_tilelang_decode_graph",
     "ModuleOutputCapture",
     "SmokeDetectionModule",
     "benchmark_flux2_klein_nvfp4_transformer_paired",
@@ -124,8 +140,8 @@ __all__ = [
     "materialize_flux2_klein_nvfp4_engine",
     "normalize_flux2_klein_nvfp4_engine",
     "optimize_flux2_klein_nvfp4_transformer",
-    "optimize_hunyuan_ocr_svd_fp4_int8_mma",
-    "optimize_hunyuan_ocr_dflash_svd_fp4_int8_mma",
+    "optimize_hunyuan_ocr_svd_int4_blocks",
+    "optimize_hunyuan_ocr_dflash_svd_int4_blocks",
     "quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
     "quantize_flux2_klein_bf16_transformer_to_convrot_4bit",
     "run_flux2_klein_bf16_convrot_4bit_inference",

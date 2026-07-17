@@ -6,6 +6,10 @@ from .advisor import (
     build_profiling_plan,
     recommend_precision_strategy,
 )
+from .block_kernels import (
+    available_block_kernel_builders,
+    register_block_kernel_builder,
+)
 from .capability import (
     OperatorOptimizationEngineCapability,
     describe_operator_engine_capability,
@@ -97,6 +101,7 @@ __all__ = [
     "ProfilingPlan",
     "build_operator_optimization_plan",
     "build_profiling_plan",
+    "available_block_kernel_builders",
     "build_cutile_artifact_metadata",
     "cutile_available",
     "build_cutlass_artifact_metadata",
@@ -132,6 +137,7 @@ __all__ = [
     "materialize_operator_candidate_models",
     "materialize_module",
     "recommend_precision_strategy",
+    "register_block_kernel_builder",
     "run_tilelang_kernel",
     "run_triton_kernel",
     "run_cutile_kernel",

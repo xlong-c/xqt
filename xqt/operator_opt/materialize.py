@@ -9,6 +9,7 @@ from torch import nn
 
 from xqt.core.errors import XQTBackendError
 
+from .block_kernels import build_block_kernel_candidate
 from .compile_backend import compile_with_torch
 from .reference_wrappers import build_reference_guarded_linear_candidate_model
 from .tilelang_wrappers import build_tilelang_candidate_model
@@ -42,6 +43,7 @@ _CONTRACT_PATTERNS: dict[str, frozenset[str]] = {
     "transformer_block": frozenset({"attention", "feedforward"}),
 }
 
+
 def _resolve_component_model(
     model: nn.Module,
     target_path: Optional[str],
@@ -73,6 +75,8 @@ def _materialize_target(
 ) -> tuple[nn.Module, float | None]:
     if target.engine == "torch_compile":
         return compile_with_torch(target_model, target)
+    if target.candidate_kind == "block_kernel":
+        return build_block_kernel_candidate(target_model, target), None
     if target.engine == "tilelang":
         return build_tilelang_candidate_model(target_model, target), None
     if target.engine == "triton":

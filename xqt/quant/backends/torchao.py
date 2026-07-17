@@ -194,7 +194,6 @@ def execute_torchao_component(
         component,
     )
     nature = _resolve_nature(component.strategy, component.policy)
-    compute_speedup = 1.0 if nature == QuantizationNature.TRUE else None
     algorithm_executable = True
     method_semantics = "torchao_executable_quantization"
     report = QuantizationReport(
@@ -212,9 +211,15 @@ def execute_torchao_component(
         nature=nature,
         algorithm_executable=algorithm_executable,
         method_semantics=method_semantics,
-        compute_speedup_expected=compute_speedup,
+        compute_speedup_expected=None,
         metadata={
             **dict(result.metadata),
+            "quantization_nature_scope": "configured_torchao_route_not_runtime_observation",
+            "runtime_precision_note": (
+                "XQT delegates kernel selection to torchao and PyTorch. The selected "
+                "strategy describes the configured W/A route, not a per-forward native "
+                "MMA or speedup guarantee."
+            ),
             "analysis_only": component.analysis_only,
             "algorithm_executable": algorithm_executable,
             "method_semantics": method_semantics,

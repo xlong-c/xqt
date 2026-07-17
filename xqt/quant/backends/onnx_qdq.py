@@ -352,6 +352,12 @@ def execute_onnx_qdq_component(
         method_semantics=method_semantics,
         metadata={
             **metadata,
+            "quantization_nature_scope": "qdq_graph_contract_not_runtime_observation",
+            "runtime_precision_note": (
+                "Q and DQ nodes encode the graph-level W/A contract. The ONNX Runtime "
+                "execution provider decides whether it fuses or lowers them to a native "
+                "integer kernel; this report does not claim that result."
+            ),
             "path": str(result.path),
             "checksum": result.checksum,
             "analysis_only": component.analysis_only,

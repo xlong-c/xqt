@@ -580,3 +580,222 @@ extern "C" int int8mma_quantize_static_half(void const* x_half, void* q_int8, fl
       static_cast<const half*>(x_half), static_cast<int8_t*>(q_int8), inv, n);
   return static_cast<int>(cudaGetLastError());
 }
+
+// ---------------------------------------------------------------------------
+// True M=1 INT8 GEMV (no MMA tile pad).
+// A: int8 [1,K] or fused half [1,K]; B math layout: int8 [K,N]; C: half [1,N]
+// ---------------------------------------------------------------------------
+
+// One thread per output column; shared A; DP4A over K using prepacked B[N,K].
+static constexpr int GEMV_THREADS = 256;
+
+__device__ __forceinline__ int dp4a_s8(int a, int b, int c) {
+#if __CUDA_ARCH__ >= 610
+  return __dp4a(a, b, c);
+#else
+  char4 aa = *reinterpret_cast<char4*>(&a);
+  char4 bb = *reinterpret_cast<char4*>(&b);
+  return c + int(aa.x) * int(bb.x) + int(aa.y) * int(bb.y) + int(aa.z) * int(bb.z) +
+         int(aa.w) * int(bb.w);
+#endif
+}
+
+__global__ void __launch_bounds__(GEMV_THREADS)
+int8_gemv_m1_math_kernel(const int8_t* __restrict__ A, const int8_t* __restrict__ B,
+                         half* __restrict__ C, const float* __restrict__ sa,
+                         const float* __restrict__ sw, int N, int K) {
+  const int col = blockIdx.x * GEMV_THREADS + threadIdx.x;
+  extern __shared__ __align__(16) int8_t a_smem[];
+  const int k_pad = (K + 15) & ~15;
+  for (int i = threadIdx.x; i < k_pad; i += GEMV_THREADS) {
+    a_smem[i] = (i < K) ? A[i] : 0;
+  }
+  __syncthreads();
+  if (col >= N) return;
+  const float scale_a = sa[0];
+  int acc = 0;
+  const int8_t* b_col = B + col;
+  for (int k0 = 0; k0 < K; k0 += 4) {
+    int a_pack = *reinterpret_cast<const int*>(a_smem + k0);
+    int b_pack = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      int kk = k0 + i;
+      int8_t bv = (kk < K) ? b_col[static_cast<int64_t>(kk) * N] : 0;
+      b_pack |= (static_cast<uint32_t>(static_cast<uint8_t>(bv)) << (8 * i));
+    }
+    acc = dp4a_s8(a_pack, b_pack, acc);
+  }
+  C[col] = __float2half(static_cast<float>(acc) * scale_a * sw[col]);
+}
+
+__global__ void __launch_bounds__(GEMV_THREADS)
+int8_gemv_m1_fused_static_kernel(const half* __restrict__ X, const int8_t* __restrict__ B,
+                                 half* __restrict__ C, const float* __restrict__ sa,
+                                 const float* __restrict__ sw, int N, int K) {
+  const int col = blockIdx.x * GEMV_THREADS + threadIdx.x;
+  extern __shared__ __align__(16) int8_t a_smem[];
+  const int k_pad = (K + 15) & ~15;
+  const float scale_a = sa[0];
+  const float inv_sa = 1.0f / scale_a;
+  for (int i = threadIdx.x; i < k_pad; i += GEMV_THREADS) {
+    if (i < K) {
+      float f = __half2float(X[i]) * inv_sa;
+      int q = __float2int_rn(f);
+      q = q < -127 ? -127 : (q > 127 ? 127 : q);
+      a_smem[i] = static_cast<int8_t>(q);
+    } else {
+      a_smem[i] = 0;
+    }
+  }
+  __syncthreads();
+  if (col >= N) return;
+  int acc = 0;
+  const int8_t* b_col = B + col;
+  for (int k0 = 0; k0 < K; k0 += 4) {
+    int a_pack = *reinterpret_cast<const int*>(a_smem + k0);
+    int b_pack = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      int kk = k0 + i;
+      int8_t bv = (kk < K) ? b_col[static_cast<int64_t>(kk) * N] : 0;
+      b_pack |= (static_cast<uint32_t>(static_cast<uint8_t>(bv)) << (8 * i));
+    }
+    acc = dp4a_s8(a_pack, b_pack, acc);
+  }
+  C[col] = __float2half(static_cast<float>(acc) * scale_a * sw[col]);
+}
+
+__global__ void __launch_bounds__(GEMV_THREADS)
+int8_gemv_m1_prepacked_kernel(const int8_t* __restrict__ A, const int8_t* __restrict__ B_nk,
+                              half* __restrict__ C, const float* __restrict__ sa,
+                              const float* __restrict__ sw, int N, int K) {
+  const int col = blockIdx.x * GEMV_THREADS + threadIdx.x;
+  extern __shared__ __align__(16) int8_t a_smem[];
+  const int k_pad = (K + 15) & ~15;
+  for (int i = threadIdx.x; i < k_pad; i += GEMV_THREADS) {
+    a_smem[i] = (i < K) ? A[i] : 0;
+  }
+  __syncthreads();
+  if (col >= N) return;
+  const float scale_a = sa[0];
+  int acc = 0;
+  const int8_t* brow = B_nk + static_cast<int64_t>(col) * K;
+  int k0 = 0;
+  for (; k0 + 16 <= K; k0 += 16) {
+    const int* ap = reinterpret_cast<const int*>(a_smem + k0);
+    const int* bp = reinterpret_cast<const int*>(brow + k0);
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+      acc = dp4a_s8(ap[t], bp[t], acc);
+    }
+  }
+  for (; k0 < K; k0 += 4) {
+    int a_pack = *reinterpret_cast<const int*>(a_smem + k0);
+    int b_pack = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      int kk = k0 + i;
+      int8_t bv = (kk < K) ? brow[kk] : 0;
+      b_pack |= (static_cast<uint32_t>(static_cast<uint8_t>(bv)) << (8 * i));
+    }
+    acc = dp4a_s8(a_pack, b_pack, acc);
+  }
+  C[col] = __float2half(static_cast<float>(acc) * scale_a * sw[col]);
+}
+
+__global__ void __launch_bounds__(GEMV_THREADS)
+int8_gemv_m1_fused_static_prepacked_kernel(const half* __restrict__ X,
+                                           const int8_t* __restrict__ B_nk, half* __restrict__ C,
+                                           const float* __restrict__ sa,
+                                           const float* __restrict__ sw, int N, int K) {
+  const int col = blockIdx.x * GEMV_THREADS + threadIdx.x;
+  extern __shared__ __align__(16) int8_t a_smem[];
+  const int k_pad = (K + 15) & ~15;
+  const float scale_a = sa[0];
+  const float inv_sa = 1.0f / scale_a;
+  for (int i = threadIdx.x; i < k_pad; i += GEMV_THREADS) {
+    if (i < K) {
+      float f = __half2float(X[i]) * inv_sa;
+      int q = __float2int_rn(f);
+      q = q < -127 ? -127 : (q > 127 ? 127 : q);
+      a_smem[i] = static_cast<int8_t>(q);
+    } else {
+      a_smem[i] = 0;
+    }
+  }
+  __syncthreads();
+  if (col >= N) return;
+  int acc = 0;
+  const int8_t* brow = B_nk + static_cast<int64_t>(col) * K;
+  int k0 = 0;
+  for (; k0 + 16 <= K; k0 += 16) {
+    const int* ap = reinterpret_cast<const int*>(a_smem + k0);
+    const int* bp = reinterpret_cast<const int*>(brow + k0);
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+      acc = dp4a_s8(ap[t], bp[t], acc);
+    }
+  }
+  for (; k0 < K; k0 += 4) {
+    int a_pack = *reinterpret_cast<const int*>(a_smem + k0);
+    int b_pack = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      int kk = k0 + i;
+      int8_t bv = (kk < K) ? brow[kk] : 0;
+      b_pack |= (static_cast<uint32_t>(static_cast<uint8_t>(bv)) << (8 * i));
+    }
+    acc = dp4a_s8(a_pack, b_pack, acc);
+  }
+  C[col] = __float2half(static_cast<float>(acc) * scale_a * sw[col]);
+}
+
+extern "C" int int8_gemv_m1_run(void const* a_int8, void const* b_kn, void* c_half,
+                                float const* sa, float const* sw, int N, int K) {
+  if (!a_int8 || !b_kn || !c_half || !sa || !sw || N <= 0 || K <= 0)
+    return static_cast<int>(cudaErrorInvalidValue);
+  int k_pad = (K + 15) & ~15;
+  dim3 grid((N + GEMV_THREADS - 1) / GEMV_THREADS);
+  int8_gemv_m1_math_kernel<<<grid, GEMV_THREADS, k_pad>>>(
+      static_cast<const int8_t*>(a_int8), static_cast<const int8_t*>(b_kn),
+      static_cast<half*>(c_half), sa, sw, N, K);
+  return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int int8_gemv_m1_run_prepacked_b(void const* a_int8, void const* b_nk, void* c_half,
+                                            float const* sa, float const* sw, int N, int K) {
+  if (!a_int8 || !b_nk || !c_half || !sa || !sw || N <= 0 || K <= 0)
+    return static_cast<int>(cudaErrorInvalidValue);
+  int k_pad = (K + 15) & ~15;
+  dim3 grid((N + GEMV_THREADS - 1) / GEMV_THREADS);
+  int8_gemv_m1_prepacked_kernel<<<grid, GEMV_THREADS, k_pad>>>(
+      static_cast<const int8_t*>(a_int8), static_cast<const int8_t*>(b_nk),
+      static_cast<half*>(c_half), sa, sw, N, K);
+  return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int int8_gemv_m1_run_fused_static(void const* x_half, void const* b_kn, void* c_half,
+                                             float const* sa, float const* sw, int N, int K) {
+  if (!x_half || !b_kn || !c_half || !sa || !sw || N <= 0 || K <= 0)
+    return static_cast<int>(cudaErrorInvalidValue);
+  int k_pad = (K + 15) & ~15;
+  dim3 grid((N + GEMV_THREADS - 1) / GEMV_THREADS);
+  int8_gemv_m1_fused_static_kernel<<<grid, GEMV_THREADS, k_pad>>>(
+      static_cast<const half*>(x_half), static_cast<const int8_t*>(b_kn),
+      static_cast<half*>(c_half), sa, sw, N, K);
+  return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int int8_gemv_m1_run_fused_static_prepacked_b(void const* x_half, void const* b_nk,
+                                                         void* c_half, float const* sa,
+                                                         float const* sw, int N, int K) {
+  if (!x_half || !b_nk || !c_half || !sa || !sw || N <= 0 || K <= 0)
+    return static_cast<int>(cudaErrorInvalidValue);
+  int k_pad = (K + 15) & ~15;
+  dim3 grid((N + GEMV_THREADS - 1) / GEMV_THREADS);
+  int8_gemv_m1_fused_static_prepacked_kernel<<<grid, GEMV_THREADS, k_pad>>>(
+      static_cast<const half*>(x_half), static_cast<const int8_t*>(b_nk),
+      static_cast<half*>(c_half), sa, sw, N, K);
+  return static_cast<int>(cudaGetLastError());
+}

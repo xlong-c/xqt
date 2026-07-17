@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from xqt.analysis import (
+    build_layer_analysis_payload,
     layer_statistics_rows,
     records_to_rows,
     write_csv_report,
@@ -399,7 +400,11 @@ def run_prune_stage(context: XQTContext, spec: PruneStageSpec) -> XQTContext:
 def run_quant_stage(context: XQTContext, spec: QuantStageSpec) -> XQTContext:
     """Run a quant stage from a typed stage spec."""
 
-    return _run_quant_with_resolved_config(context, spec)
+    return _run_quant_with_resolved_config(
+        context,
+        spec,
+        build_layer_analysis_payload_fn=build_layer_analysis_payload,
+    )
 
 
 def run_operator_stage(

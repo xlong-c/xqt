@@ -25,6 +25,17 @@ def summarize_operator_optimization_reports(
         "targets": items,
         "engines": ordered_unique(report.engine for report in reports),
         "runtimes": ordered_unique(report.runtime for report in reports),
+        "candidate_kinds": ordered_unique(
+            report.candidate_kind for report in reports
+        ),
+        "candidate_layers": ordered_unique(
+            str(report.metadata.get("candidate_layer"))
+            for report in reports
+            if report.metadata.get("candidate_layer") is not None
+        ),
+        "benchmark_targets": ordered_unique(
+            report.benchmark_target_path for report in reports
+        ),
         "fallback_policies": ordered_unique(report.fallback_policy for report in reports),
         "fallback_reasons": ordered_unique(
             report.skip_reason for report in reports if report.skip_reason

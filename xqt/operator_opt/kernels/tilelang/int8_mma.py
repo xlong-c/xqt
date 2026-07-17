@@ -874,6 +874,64 @@ def pad_rows_to_block(x: torch.Tensor, block_m: int) -> tuple[torch.Tensor, int]
     return F.pad(x, (0, 0, 0, padded_rows - rows), value=0), rows
 
 
+def int8_linear_static_activation_m1_tilelang(
+    inputs: torch.Tensor,
+    b: torch.Tensor,
+    activation_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    output_dtype: torch.dtype,
+    block_n: int = 128,
+    block_k: int = 128,
+    threads: int = 256,
+    target_arch: str | None = None,
+) -> torch.Tensor:
+    """Run no-pad M=1 static-activation INT8 Linear (decode GEMV).
+
+    TileLang sm_89 MMA cannot legally use block_m=1. This path keeps exact W8A8
+    quantize-matmul-dequant semantics without row padding, using float32 products
+    of int8 codes (CUDA has no int32 GEMM for M=1).
+    """
+
+    del block_n, block_k, threads, target_arch
+    tensors = (inputs, b, activation_scale, weight_scale) if bias is None else (
+        inputs,
+        b,
+        activation_scale,
+        weight_scale,
+        bias,
+    )
+    require_cuda_tensors(*tensors)
+    if inputs.ndim != 2 or b.ndim != 2:
+        raise XQTBackendError("M=1 INT8 Linear expects 2D tensors")
+    if int(inputs.shape[0]) != 1:
+        raise XQTBackendError("M=1 INT8 Linear requires exactly one input row")
+    if inputs.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        raise XQTBackendError("M=1 INT8 Linear expects fp16, bf16, or fp32 activations")
+    if b.dtype != torch.int8:
+        raise XQTBackendError("M=1 INT8 Linear expects int8 weights")
+    if inputs.shape[1] != b.shape[0]:
+        raise XQTBackendError("M=1 INT8 Linear requires inputs.shape[1] == b.shape[0]")
+    n = int(b.shape[1])
+    if activation_scale.numel() != 1:
+        raise XQTBackendError("activation_scale must contain one scalar")
+    if weight_scale.shape != (n,):
+        raise XQTBackendError("weight_scale must be shaped [out_features]")
+    if bias is not None and bias.shape != (n,):
+        raise XQTBackendError("bias must be shaped [out_features]")
+
+    act = activation_scale.reshape(()).to(device=inputs.device, dtype=torch.float32)
+    q_act = torch.round(inputs.to(torch.float32) / act).clamp(-127, 127)
+    acc = torch.mm(q_act, b.to(torch.float32))
+    out = acc * act * weight_scale.to(device=inputs.device, dtype=torch.float32).reshape(
+        1, -1
+    )
+    if bias is not None:
+        out = out + bias.to(device=inputs.device, dtype=torch.float32).reshape(1, -1)
+    return out.to(dtype=output_dtype)
+
+
 TILELANG_INT8_MMA_KERNEL_METADATA: dict[str, dict[str, Any]] = {
     "int8_mma": {
         "kernel_name": "int8_mma",
@@ -923,6 +981,21 @@ TILELANG_INT8_MMA_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "quantization_nature": "true_with_fused_activation_quant",
         "fusion_status": "tilelang_static_activation_quant_dequant_output_epilogue",
     },
+    "int8_linear_static_activation_m1": {
+        "kernel_name": "int8_linear_static_activation_m1",
+        "block_m": 1,
+        "block_n": 0,
+        "block_k": 0,
+        "threads": 0,
+        "baseline": "padded INT8 MMA",
+        "usage": "No-pad M=1 decode GEMV with static activation quant (float32 products of int8).",
+        "supported_precisions": ["int8"],
+        "activation_encoding": "static_scaled_fp16_bf16_fp32_to_int8",
+        "weight_encoding": "signed_int8_transposed",
+        "accumulation": "float32_int8_products",
+        "quantization_nature": "true_with_fused_activation_quant",
+        "fusion_status": "torch_m1_static_activation_quant_dequant",
+    },
 }
 
 
@@ -933,6 +1006,7 @@ __all__ = [
     "build_tilelang_int8_mma_kernel",
     "build_tilelang_static_activation_quant_kernel",
     "int8_linear_reference",
+    "int8_linear_static_activation_m1_tilelang",
     "int8_linear_static_activation_reference",
     "int8_linear_static_activation_tilelang",
     "int8_linear_tilelang",

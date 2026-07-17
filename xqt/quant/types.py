@@ -14,18 +14,21 @@ from xqt.contracts.module import (
 
 
 class QuantizationNature(str, enum.Enum):
-    """Whether a quantization strategy reduces compute FLOPs or only saves memory bandwidth.
+    """Static classification of a quantization route's requested compute contract.
 
-    ``TRUE`` : native low-precision tensor core MMA (e.g. W8A8 fp8 mma m16n8k32,
-    W8A8 int8 mma m16n8k32). K dimension doubles relative to fp16, per-clock
-    math throughput increases -- should measure *compute* speedup.
+    This enum describes the route selected at quantization time. It is not proof
+    that a particular forward used a native low-precision kernel. Runtime records
+    must report the selected engine, operands, and any fallback separately.
 
-    ``PSEUDO`` : weight storage in low precision, dequantized to fp16/bf16 before
-    compute (e.g. fp8_weight_only, weight_only_int4, W8A16). K dimension stays at
-    16 (fp16 mma), per-clock math throughput unchanged -- can measure *memory
-    bandwidth* savings but zero compute speedup.
+    ``TRUE``: the configured compute contract requests native low-precision MMA,
+    such as W8A8 INT8 MMA. Hardware, shape, and engine availability still decide
+    whether a forward realizes that contract.
 
-    ``UNKNOWN`` : the backend or strategy has not been classified yet.
+    ``PSEUDO``: the route's current XQT implementation executes a dequantized or
+    reference floating-point compute path. It can still change memory traffic or
+    benefit from fusion; it does not imply a zero measured speedup.
+
+    ``UNKNOWN``: the strategy or backend alone does not determine runtime compute.
     """
 
     TRUE = "true"

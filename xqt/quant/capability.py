@@ -18,9 +18,11 @@ from .types import QuantizationNature
 
 
 # ── strategy → nature mapping ─────────────────────────────────────────────
-# TRUE  = native low-precision MMA (W8A8, K=32), compute speedup expected.
-# PSEUDO = storage-only compression, dequant to fp16 before MMA (W8A16, K=16).
-# UNKNOWN = not yet classified.
+# TRUE  = requested native low-precision MMA compute contract.
+# PSEUDO = current XQT route uses dequantized/reference floating-point compute.
+# UNKNOWN = strategy/storage alone cannot establish the runtime compute path.
+# This is a quantization-time classification. Per-forward runtime metadata is the
+# evidence for selected operands, native MMA, and fallback behavior.
 # ───────────────────────────────────────────────────────────────────────────
 _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     "w4a16_int4": QuantizationNature.PSEUDO,
@@ -31,10 +33,10 @@ _STRATEGY_NATURE: dict[str, QuantizationNature] = {
     "w8a16_mxfp8": QuantizationNature.PSEUDO,
     "w8a16_fp8_e4m3": QuantizationNature.PSEUDO,
     "w8a16_fp8_e5m2": QuantizationNature.PSEUDO,
-    "w8a8_int8": QuantizationNature.PSEUDO,
-    "w8a8_fp8_e4m3": QuantizationNature.TRUE,
-    "w8a8_fp8_e5m2": QuantizationNature.TRUE,
-    "w4a4_int4": QuantizationNature.TRUE,
+    "w8a8_int8": QuantizationNature.UNKNOWN,
+    "w8a8_fp8_e4m3": QuantizationNature.UNKNOWN,
+    "w8a8_fp8_e5m2": QuantizationNature.UNKNOWN,
+    "w4a4_int4": QuantizationNature.PSEUDO,
     "w4a4_fp4": QuantizationNature.PSEUDO,
     "w4a4_nvfp4": QuantizationNature.PSEUDO,
     "w4a4_mxfp4": QuantizationNature.PSEUDO,
@@ -397,14 +399,15 @@ def describe_quant_backend_capability(
             maturity = "executable"
     if resolved_nature == QuantizationNature.PSEUDO:
         notes.append(
-            "PSEUDO quantization: storage compression only. "
-            "Weights dequantized to fp16 before MMA (K=16). "
-            "Expect memory bandwidth savings, zero compute speedup."
+            "PSEUDO quantization: this XQT route currently uses dequantized or "
+            "reference floating-point compute rather than native low-precision MMA. "
+            "Do not infer a measured speedup or a specific dequant dtype from this label."
         )
     elif resolved_nature == QuantizationNature.TRUE:
         notes.append(
-            "TRUE quantization: native low-precision MMA (K=32). "
-            "Expect compute speedup proportional to element packing density."
+            "TRUE quantization: the configured compute contract requests native "
+            "low-precision MMA. Confirm selected operands, engine, and fallback "
+            "status from per-forward runtime metadata before claiming it executed."
         )
     return replace(
         base,

@@ -338,7 +338,7 @@ class SVDQuantInt8MmaLinear(nn.Module):
 
     The low-rank branch remains at the source module precision. The residual is
     stored as groupwise packed signed 4-bit values (``quant_dtype`` is ``fp4`` or
-    ``int4``) and re-targeted to the existing W8A8 INT8 MMA runtime. This is not
+    ``int4``) and re-targeted to the existing W8A8 INT8 MMA runtime contract. This is not
     native FP4/INT4 MMA.
     """
 

@@ -32,6 +32,15 @@ def test_quantize_with_int8_mma_replaces_linear_on_cpu() -> None:
     assert result.quantized_modules == ["fc"]
     assert output.shape == (4, 32)
     assert result.metadata["quantization_nature"] == "true"
+    description = result.metadata["precision_description"]
+    assert description["quantization_time"]["weight"] == (
+        "offline static signed INT8 per output channel"
+    )
+    assert description["runtime"]["small_batch_float_fallback"] == {
+        "enabled": False,
+        "condition": "input_rows < min_int8_rows",
+        "note": "quantize_with_int8_mma constructs min_int8_rows=0",
+    }
 
 
 def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
@@ -64,7 +73,9 @@ def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
     assert output.shape == (4, 32)
     assert stage.metrics["nature"] == "true"
     assert stage.metrics["algorithm_executable"] is True
-    assert stage.metrics["method_semantics"] == "true_w8a8_int8_mma_runtime_quantization"
+    assert stage.metrics["method_semantics"] == (
+        "w8a8_int8_mma_runtime_quantization_contract"
+    )
     assert stage.metrics["metadata"]["execution_state"] == "w8a8_int8"
     assert stage.metrics["metadata"]["algorithm_executable"] is True
     assert stage.metrics["quantized_modules"] == ["fc"]
@@ -82,6 +93,49 @@ def test_int8_mma_linear_cpu_metadata_reports_reference_not_true_mma() -> None:
     assert metadata["activation_dtype"] == "int8"
     assert metadata["weight_dtype"] == "int8"
     assert metadata["activation_scale_mode"] == "dynamic"
+    assert metadata["runtime_precision"] == {
+        "requested": "w8a8_int8_mma",
+        "weight_storage": "signed_int8_per_output_channel",
+        "activation_encoding": "signed_int8_per_tensor",
+        "execution_kind": "w8a8_int8_reference",
+        "int8_operands_executed": True,
+        "native_mma_executed": False,
+        "float_fallback_taken": False,
+        "float_fallback_reason": None,
+        "small_batch_float_fallback": {
+            "enabled": False,
+            "condition": "input_rows < min_int8_rows",
+            "min_int8_rows": 0,
+            "status": "disabled",
+        },
+        "engine_error_int8_fallback": {
+            "enabled": True,
+            "condition": "selected non-reference INT8 engine raises or fails its runtime check",
+            "status": "not_taken",
+        },
+    }
+
+
+def test_int8_mma_linear_reports_taken_small_batch_float_fallback() -> None:
+    source = torch.nn.Linear(16, 32, bias=False).eval()
+    qlinear = Int8MmaLinear.from_linear(
+        source,
+        engine="torch_int_mm",
+        min_int8_rows=4,
+    ).eval()
+
+    _ = qlinear(torch.randn(3, 16))
+    metadata = qlinear.execution_metadata()
+
+    assert metadata["engine"] == "bf16_fallback"
+    assert metadata["runtime_precision"]["execution_kind"] == "floating_point_fallback"
+    assert metadata["runtime_precision"]["int8_operands_executed"] is False
+    assert metadata["runtime_precision"]["native_mma_executed"] is False
+    assert metadata["runtime_precision"]["float_fallback_taken"] is True
+    assert metadata["runtime_precision"]["float_fallback_reason"] == (
+        "rows_below_min_int8_rows"
+    )
+    assert metadata["runtime_precision"]["small_batch_float_fallback"]["status"] == "taken"
 
 
 def test_int8_mma_linear_static_activation_scale_cpu() -> None:

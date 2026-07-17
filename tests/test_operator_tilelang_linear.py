@@ -124,7 +124,10 @@ def test_tilelang_linear_operator_stage_uses_reference_fallback_on_cpu() -> None
     assert target["metadata"]["kernel_kind"] == "reference_fallback"
     assert target["metadata"]["operator_family"] == "linear"
     assert target["metadata"]["selected_fastpath"] == "eager_reference_fallback"
-    assert target["metadata"]["candidate_materialization"] == "target_only_benchmark_no_root_deepcopy"
+    assert (
+        target["metadata"]["candidate_materialization"]
+        == "root_candidate_deepcopy_block_benchmark"
+    )
     assert target["metadata"]["settings"]["preferred_patterns"] == ["linear"]
 
 

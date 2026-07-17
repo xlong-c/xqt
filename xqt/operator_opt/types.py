@@ -10,11 +10,16 @@ from torch import nn
 
 @dataclass
 class OperatorOptimizationTargetPlan:
-    """Resolved operator optimization plan for one model or submodule target."""
+    """Resolved runtime candidate with an explicit replacement and benchmark scope."""
 
     name: str
     engine: str
     target_path: Optional[str] = None
+    candidate_kind: str = "single_kernel"
+    benchmark_target_path: Optional[str] = None
+    block_kernel: Optional[str] = None
+    block_kernel_engine: Optional[str] = None
+    fallback_for: Optional[str] = None
     mode: Optional[str] = None
     fullgraph: bool = False
     dynamic: Optional[bool] = None
@@ -34,6 +39,11 @@ class OperatorOptimizationTargetPlan:
             "name": self.name,
             "engine": self.engine,
             "target_path": self.target_path,
+            "candidate_kind": self.candidate_kind,
+            "benchmark_target_path": self.benchmark_target_path,
+            "block_kernel": self.block_kernel,
+            "block_kernel_engine": self.block_kernel_engine,
+            "fallback_for": self.fallback_for,
             "mode": self.mode,
             "fullgraph": self.fullgraph,
             "dynamic": self.dynamic,
@@ -70,7 +80,7 @@ class OperatorOptimizationExecutionPlan:
 
 @dataclass
 class OperatorOptimizationReport:
-    """Unified engine-agnostic operator optimization result for one target."""
+    """Unified runtime result measured at the configured block boundary."""
 
     target_name: str
     module_path: Optional[str]
@@ -79,6 +89,8 @@ class OperatorOptimizationReport:
     applied: bool
     fallback: str
     fallback_policy: str
+    candidate_kind: str = "single_kernel"
+    benchmark_target_path: Optional[str] = None
     skip_reason: Optional[str] = None
     compile_time_ms: Optional[float] = None
     latency_before: Optional[dict[str, Any]] = None
@@ -101,6 +113,8 @@ class OperatorOptimizationReport:
             "applied": self.applied,
             "fallback": self.fallback,
             "fallback_policy": self.fallback_policy,
+            "candidate_kind": self.candidate_kind,
+            "benchmark_target_path": self.benchmark_target_path,
             "skip_reason": self.skip_reason,
             "compile_time_ms": self.compile_time_ms,
             "latency_before": dict(self.latency_before or {}),
@@ -118,7 +132,6 @@ class OperatorOptimizationReport:
         if isinstance(module_contract, dict):
             payload["module_contract"] = dict(module_contract)
         return payload
-
 
 
 @dataclass

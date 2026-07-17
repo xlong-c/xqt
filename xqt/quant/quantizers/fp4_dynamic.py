@@ -503,9 +503,17 @@ class FP4DynamicLinear(nn.Module):
                 output = api["nvfp4_packed_activation_tilelang"](
                     packed_activation,
                     activation_scale,
-                    self.tilelang_packed_weight,
-                    self.tilelang_weight_scale,
-                    None if self.bias is None else self.bias.to(device=packed_activation.device),
+                    self.tilelang_packed_weight.to(device=packed_activation.device),
+                    self.tilelang_weight_scale.to(
+                        device=packed_activation.device,
+                        dtype=activation_scale.dtype,
+                    ),
+                    None
+                    if self.bias is None
+                    else self.bias.to(
+                        device=packed_activation.device,
+                        dtype=activation_scale.dtype,
+                    ),
                     input_features=self.input_features,
                     group_size=self.group_size,
                     activation_global_scale=activation_global_scale,
@@ -781,12 +789,31 @@ def quantize_with_dynamic_fp4(
         metadata={
             "implementation": f"{format_name}_dynamic_activation_fp4_linear",
             "quantization_nature": "pseudo",
+            "quantization_nature_scope": "current_xqt_runtime_implementation",
             "activation_encoding": f"dynamic_{format_name}_packed_fp4",
             "weight_encoding": (
                 "packed_nvfp4_e2m1_plus_fp8_scale"
                 if format_name == "nvfp4"
                 else "packed_mxfp4_int4_plus_block_scale"
             ),
+            "precision_description": {
+                "quantization_time": {
+                    "weight": f"offline packed {format_name} weight with scales",
+                    "activation": "not stored; quantized to packed FP4 for every forward",
+                },
+                "runtime": {
+                    "operand_contract": "packed W4A4 FP4 inputs and weights",
+                    "compute": (
+                        "current XQT path is PSEUDO: packed dequant or reference "
+                        "GEMM, not a claimed native FP4 MMA result"
+                    ),
+                    "actual_execution_source": "FP4DynamicLinear.execution_metadata",
+                    "engine_fallback": (
+                        "auto or an unavailable requested engine tries its ordered "
+                        "runtime candidates; runtime_fallbacks records each taken fallback"
+                    ),
+                },
+            },
             "engine_preference": str(engine),
             "preferred_engines": preferred_engines,
             "compute_config": compute_config.to_dict(),

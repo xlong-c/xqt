@@ -136,7 +136,7 @@ result = engine(...)  # HybridInferenceResult: output + precision_map + channel_
 | `w4a16` | 4-bit 权重 + 16-bit 激活意图 |
 | `bf16` | BF16 计算意图 |
 
-`normalize_compute_precision()` 负责规范化. **意图 ≠ 硬件一定跑原生 MMA**; 具体模块 (如 ConvRot) 如何解释 precision 以模块实现为准.
+`normalize_compute_precision()` 负责规范化. **意图 ≠ 硬件一定跑原生 MMA**; 具体模块 (如 ConvRot) 如何解释 precision 以模块实现为准. 对 `Int8MmaLinear`, `execution_metadata()["runtime_precision"]` 明确区分 W8A8 reference, native INT8 MMA, 和小 batch 浮点回退; `min_int8_rows=0` 时小 batch浮点回退状态为 `disabled`, 不应虚构该条件.
 
 ### 2.4 Channel hybrid
 

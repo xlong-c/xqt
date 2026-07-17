@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from torch import nn
@@ -34,6 +34,9 @@ def _build_quant_layer_analysis_summary(
     *,
     analysis_config: AnalysisConfig | None = None,
     output_diff: OutputDiffConfig | None = None,
+    build_layer_analysis_payload_fn: Callable[..., dict[str, Any]] = (
+        build_layer_analysis_payload
+    ),
 ) -> dict[str, object]:
     """Return layer diff and sensitivity summary for a quantized PyTorch model."""
 
@@ -57,7 +60,7 @@ def _build_quant_layer_analysis_summary(
         device,
     )
     try:
-        payload = build_layer_analysis_payload(
+        payload = build_layer_analysis_payload_fn(
             reference_model,
             candidate_model,
             example_input,
@@ -119,6 +122,10 @@ def _build_quant_layer_analysis_summary(
 def _run_quant_with_resolved_config(
     context: XQTContext,
     resolved_quant: QuantConfig | QuantStageSpec,
+    *,
+    build_layer_analysis_payload_fn: Callable[..., dict[str, Any]] = (
+        build_layer_analysis_payload
+    ),
 ) -> XQTContext:
     context.quant_config = _quant_runtime_config(resolved_quant)
     enabled = resolved_quant.enabled if isinstance(resolved_quant, QuantConfig) else True
@@ -134,7 +141,10 @@ def _run_quant_with_resolved_config(
     context.model = execution.model
     context.artifacts.update(execution.artifacts)
     quant_metrics = summarize_quantization_reports(execution.reports)
-    quant_metrics["layer_analysis"] = _build_quant_layer_analysis_summary(context)
+    quant_metrics["layer_analysis"] = _build_quant_layer_analysis_summary(
+        context,
+        build_layer_analysis_payload_fn=build_layer_analysis_payload_fn,
+    )
     context.metrics["quant"] = quant_metrics
     if context.manifest is not None:
         layer_analysis = quant_metrics["layer_analysis"]

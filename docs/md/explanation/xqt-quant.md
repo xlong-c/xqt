@@ -44,6 +44,15 @@ Infer:  model + compute_config; 不跑 quantizer
 
 文档, 注释, report 文案和配置说明里, **先写权重侧, 再写激活侧**. 不要用单独一句"动态量化 / 静态量化"概括整条 recipe.
 
+`W?A?` 不是一次量化阶段可独立证明的性能结论. 每次描述必须分开写:
+
+1. 量化时的权重存储.
+2. 激活是在量化阶段固化, 还是每次 forward 生成.
+3. 运行时真实使用的 operands 和 compute path.
+4. 会触发浮点或 reference 路径的条件. 没有该条件时也必须明确写为"未配置"或"不存在自动回退".
+
+`QuantizationReport.nature` 和 result metadata 中的 `quantization_nature` 只分类**已请求的 compute contract 或当前实现路线**. 它们不是某次 forward 已使用原生 MMA 的证据. 需要逐层查看 `execution_metadata()` 中的 engine, operands, `native_mma_executed` 和 fallback 状态.
+
 ### 2.1 默认拆轴
 
 | 轴 | 默认事实 (XQT 主路径) | 文档应优先写 |
@@ -79,7 +88,19 @@ AWQ 是静态量化              # 更准确: 离线静态 weight-only; 激活�
 | `dynamic_int8_mma`, `fp8_dynamic`, 动态 FP4 Linear | 离线静态 (或预打包) | **运行时动态** 激活 quant |
 | `static_qdq_int8`, `onnxruntime_qdq` | 离线静态 | **校准静态** 激活 scale 进图 |
 
-### 2.3 写作检查
+### 2.3 W/A 的量化时与运行时事实表
+
+| 路径 | 量化时 | 运行时 | 条件和不得省略的说明 |
+| --- | --- | --- | --- |
+| `weight_only_int4/8`, `fp4_weight_only`, AWQ/GPTQ weight-only | W4/W8 离线静态打包 | A 保持输入浮点 dtype. 当前 XQT 路线是 dequant/reference floating-point compute | 这不是 W4A4 或 W8A8. A 从未承诺低比特, 因而不存在"A 退化"的条件 |
+| `dynamic_int8_mma` | W8 离线静态. A 不写入 artifact | 每个 forward 将 A 编码为 INT8. `Int8MmaLinear.execution_metadata()["runtime_precision"]` 报告实际路径 | `quantize_with_int8_mma()` 创建 `min_int8_rows=0`, 因而**未配置**小 batch 浮点回退. 直接构造模块且 `min_int8_rows > 0` 时, `input_rows < min_int8_rows` 才会走浮点回退. engine 不可用时可走 INT8 reference, 不等于已使用原生 MMA |
+| `w4_storage_int8_mma` | HBM/state_dict 保持 W4 + group scale | forward 将 W4 解码并重编码为 W8 compute view, A 同时编码为 INT8 | 是 W4 storage -> W8A8 compute retarget, 不是 native W4A4/FP4 MMA. 同样默认**未配置**小 batch 浮点回退; 实际 W8A8/native MMA 状态来自 delegated `runtime_precision` |
+| `convrot_w4a4` | 旋转后 W4 离线静态打包. A 不写入 artifact | `compute_precision=w4a4` 时 A4 和 W4 均会量化再解码到 `F.linear`; 当前为 PSEUDO 路径 | 不得称 native W4A4 MMA. 模块不存在自动 precision fallback; 只有显式 execution policy 或 channel-hybrid override 会改为 `w4a16`, `w8a8` 或 `bf16` |
+| `w4a4_nvfp4`, `w4a4_mxfp4` | W4 FP4 离线打包. A 不写入 artifact | 每个 forward 打包 A4 FP4 并消费 packed W4 | 当前实现分类为 PSEUDO, 不宣称 native FP4 MMA. `FP4DynamicLinear.execution_metadata()` 会记录 engine candidates 和实际 taken fallback |
+| `static_qdq_int8` / `onnxruntime_qdq` | W/A scale 由校准写入 QDQ graph | provider 决定 Q/DQ 是否融合或 lower 到整数 kernel | QDQ graph 只说明图契约, 不证明某 provider 已跑原生 W8A8. 需要 provider profiling 或 runtime report |
+| torchao `w8a8_*` / FP8 dynamic | XQT 将 W/A config 交给 torchao | torchao 和 PyTorch 决定实际 module 和 kernel | XQT 没有该外部模块的逐 forward execution metadata. 只能描述已配置 W/A route, 不得写成已验证的 native MMA 或 speedup |
+
+### 2.4 写作检查
 
 - 先写"离线静态权重 ...", 再补激活.
 - 提到校准数据时, 写清校准服务 **权重** 还是 **激活 scale**, 还是两者都有.
@@ -158,7 +179,7 @@ params:
 | | | `svd_fp4_int8_mma` / `svd_int4_int8_mma` (W4 residual + W8A8 MMA) |
 
 TRUE / PSEUDO nature: `xqt/quant/capability.py` `_STRATEGY_NATURE`.  
-PSEUDO = 存储压缩, 计算前 dequant; TRUE = 期望原生低精度 MMA 路径.
+TRUE = 已请求原生低精度 MMA contract; PSEUDO = 当前 XQT 路线是 dequant/reference floating-point compute; UNKNOWN = strategy/storage 单独不足以判定运行时 compute. 三者都不是单次 forward 的执行证明.
 
 名字里带 `dynamic` 的 strategy, 通常指 **激活或 runtime scale 动态**, 不表示权重是在线量化.
 
@@ -172,6 +193,7 @@ PSEUDO = 存储压缩, 计算前 dequant; TRUE = 期望原生低精度 MMA 路�
 - `backend=tilelang` / `backend=svdquant` **直接失败**.
 - 产出 `QuantizedModel` / report; 可选 `compute_config` (如 int8_mma 路径).
 - 权重量化结果写入 model / buffer; 动态激活 quant 发生在 runtime module forward, 不在 quant stage 写死激活 scale (QDQ 静态路径除外).
+- 量化 report 必须同时保留量化时 `precision_description` 和运行时观察入口. `Int8MmaLinear` 的 `runtime_precision` 会显式报告 `native_mma_executed`, `int8_operands_executed`, `float_fallback_taken` 及小 batch 回退状态.
 
 ---
 
@@ -203,6 +225,8 @@ runtime / package / export
 - 认为 strategy 字符串丛林已经是最终三轴 API.
 - 用一句"动态量化"概括 SVDQuant / dynamic MMA (应先写 **离线静态权重**, 再写运行时动态激活).
 - 把 AWQ/GPTQ 的校准数据说成"静态激活 scale 已进图" (主路径是 weight-only; 校准服务权重).
+- 把 `nature=TRUE` 或 `compute_contract=w8a8_int8_mma` 写成"运行时已使用 native MMA". 必须先看 per-forward metadata.
+- 把 `w4a4` 名称写成当前必然执行 W4A4 MMA. 对 ConvRot 和动态 FP4 路径必须写出当前的 PSEUDO/reference 路径和 fallback 条件.
 
 ---
 

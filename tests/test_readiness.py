@@ -28,6 +28,25 @@ def test_fp4_weight_only_capability_is_pseudo_quantization() -> None:
     assert any("PSEUDO quantization" in note for note in capability.notes)
 
 
+def test_w8a8_strategy_requires_compute_contract_for_true_nature() -> None:
+    strategy_only = describe_quant_backend_capability(
+        "pytorch",
+        strategy="w8a8_int8",
+    )
+    int8_mma_contract = describe_quant_backend_capability(
+        "pytorch",
+        strategy="w8a8_int8",
+        compute="w8a8_int8_mma",
+    )
+
+    assert strategy_only.nature.value == "unknown"
+    assert int8_mma_contract.nature.value == "true"
+    assert any(
+        "configured compute contract requests native" in note
+        for note in int8_mma_contract.notes
+    )
+
+
 def test_assess_xqt_readiness_default_report_is_structured() -> None:
     report = assess_xqt_readiness()
     scenarios = _scenarios(report)

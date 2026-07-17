@@ -9,7 +9,6 @@ from typing import Any
 import torch
 
 from xqt.analysis.compare import compare_tensors
-from xqt.core.errors import XQTBackendError
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import BenchmarkConfig
 from xqt.core.types import XQTContext
@@ -27,7 +26,6 @@ from ._benchmark import (
     _tilelang_inner_iterations,
 )
 from .capability import describe_operator_engine_capability
-from .compile_backend import compile_with_torch
 from .execution_support import (
     call_module_no_grad,
     effective_validation_thresholds,
@@ -36,8 +34,8 @@ from .execution_support import (
     shape_signature,
 )
 from .materialize import (
-    _replace_component_model,
     _resolve_component_model,
+    materialize_operator_candidate_model,
 )
 from .metadata import (
     artifact_paths_from_engine_metadata,
@@ -48,14 +46,12 @@ from .metadata import (
     scan_candidate_report,
     torch_compile_explain_report,
 )
-from .reference_wrappers import build_reference_guarded_linear_candidate_model
-from .tilelang_wrappers import build_tilelang_candidate_model
-from .triton_wrappers import build_triton_candidate_model
 from .patterns import scan_export_candidates, scan_fx_candidates
 from .types import (
     OperatorOptimizationExecutionPlan,
     OperatorOptimizationExecutionResult,
     OperatorOptimizationReport,
+    OperatorOptimizationTargetPlan,
 )
 
 
@@ -95,6 +91,14 @@ def _runtime_fallback_reason(execution_detail: dict[str, Any]) -> str | None:
     if isinstance(reason, str) and reason:
         return reason
     return "operator engine executed the configured reference fallback"
+
+
+def _candidate_layer(target: OperatorOptimizationTargetPlan) -> str:
+    if target.candidate_kind == "block_kernel":
+        if target.engine == "torch_compile" and target.block_kernel is None:
+            return "automatic_block_graph"
+        return "manual_block_kernel"
+    return "single_kernel"
 
 
 def execute_operator_optimization_plan(
@@ -141,14 +145,24 @@ def execute_operator_optimization_plan(
         ),
     }
     artifacts["operator_optimization_candidates"] = candidate_reports
+    target_applied: dict[str, bool] = {}
 
     for target in plan.targets:
+        if target.fallback_for is not None and target_applied.get(target.fallback_for):
+            continue
         capability = describe_operator_engine_capability(target.engine)
         fallback_policy = _normalize_fallback_policy(target.fallback_policy)
-        target_model = _resolve_component_model(current_model, target.target_path)
+        replacement_target = _resolve_component_model(
+            current_model,
+            target.target_path,
+        )
+        benchmark_target = _resolve_component_model(
+            current_model,
+            target.benchmark_target_path,
+        )
         module_inputs = root_inputs
-        if target.target_path:
-            expected_input_count = infer_model_input_count(target_model)
+        if target.benchmark_target_path:
+            expected_input_count = infer_model_input_count(benchmark_target)
             module_inputs = move_to_device(
                 extract_model_inputs(
                     root_batch,
@@ -156,11 +170,23 @@ def execute_operator_optimization_plan(
                 ),
                 target_device,
             )
-        device, dtype = infer_module_device_dtype(target_model, module_inputs)
+        device, dtype = infer_module_device_dtype(benchmark_target, module_inputs)
         engine_metadata = build_engine_metadata(target, dtype=dtype)
         artifact_paths = artifact_paths_from_engine_metadata(engine_metadata)
+        candidate_scope_metadata = {
+            "candidate_kind": target.candidate_kind,
+            "candidate_layer": _candidate_layer(target),
+            "replacement_scope": target.candidate_kind,
+            "optimization_basis": "block",
+            "replacement_target_path": target.target_path,
+            "benchmark_target_path": target.benchmark_target_path,
+            "benchmark_scope": "block",
+            "block_kernel": target.block_kernel,
+            "block_kernel_engine": target.block_kernel_engine,
+            "fallback_for": target.fallback_for,
+        }
         compile_explain = (
-            torch_compile_explain_report(target_model, module_inputs)
+            torch_compile_explain_report(benchmark_target, module_inputs)
             if target.engine == "torch_compile"
             else {
                 "status": "not_applicable",
@@ -174,7 +200,11 @@ def execute_operator_optimization_plan(
         )
 
         skip_reason = quant_runtime_guard(context, target)
-        if skip_reason is None and target.engine == "torch_compile" and not capability.available:
+        if (
+            skip_reason is None
+            and target.engine == "torch_compile"
+            and not capability.available
+        ):
             skip_reason = "torch.compile is not available in the current PyTorch build"
         if skip_reason is None and target.engine in {"cutlass", "custom_cuda"}:
             if not torch.cuda.is_available():
@@ -208,16 +238,16 @@ def execute_operator_optimization_plan(
         }
 
         baseline_output = first_tensor_output(
-            call_module_no_grad(target_model, module_inputs)
+            call_module_no_grad(benchmark_target, module_inputs)
         )
         baseline_execution_detail: dict[str, Any] = {}
         if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
             baseline_execution_detail = operator_engine_execution_metadata(
-                target_model,
+                benchmark_target,
                 engine=target.engine,
             )
         latency_before, baseline_benchmark_strategy = _benchmark_callable_for_execution(
-            lambda: call_module_no_grad(target_model, module_inputs),
+            lambda: call_module_no_grad(benchmark_target, module_inputs),
             warmup=benchmark.warmup,
             iterations=benchmark.iterations,
             sync_cuda=benchmark.sync_cuda,
@@ -235,6 +265,8 @@ def execute_operator_optimization_plan(
                     applied=False,
                     fallback=target.fallback,
                     fallback_policy=fallback_policy,
+                    candidate_kind=target.candidate_kind,
+                    benchmark_target_path=target.benchmark_target_path,
                     skip_reason=fallback_reason,
                     compile_time_ms=None,
                     latency_before=latency_before,
@@ -260,31 +292,21 @@ def execute_operator_optimization_plan(
                         "mode": target.mode,
                         "patterns": list(target.patterns),
                         "capability": capability.to_dict(),
+                        **candidate_scope_metadata,
                         **engine_metadata,
                     },
                 )
             )
+            target_applied[target.name] = False
             continue
 
-        compiled_model = None
+        candidate_root = None
         compile_time_ms = None
         try:
-            if target.engine == "torch_compile":
-                compiled_model, compile_time_ms = compile_with_torch(target_model, target)
-            elif target.engine == "tilelang":
-                compiled_model = build_tilelang_candidate_model(target_model, target)
-            elif target.engine == "triton":
-                compiled_model = build_triton_candidate_model(target_model, target)
-            elif target.engine in {"cutile", "cute_dsl"}:
-                compiled_model = build_reference_guarded_linear_candidate_model(
-                    target_model,
-                    target,
-                    engine=target.engine,
-                )
-            else:
-                raise XQTBackendError(
-                    f"Operator optimization engine '{target.engine}' is not executable yet"
-                )
+            candidate_root, compile_time_ms = materialize_operator_candidate_model(
+                current_model,
+                target,
+            )
         except Exception as exc:
             reports.append(
                 OperatorOptimizationReport(
@@ -295,6 +317,8 @@ def execute_operator_optimization_plan(
                     applied=False,
                     fallback=target.fallback,
                     fallback_policy=fallback_policy,
+                    candidate_kind=target.candidate_kind,
+                    benchmark_target_path=target.benchmark_target_path,
                     skip_reason=_fallback_policy_reason(
                         str(exc),
                         fallback_policy=fallback_policy,
@@ -328,8 +352,12 @@ def execute_operator_optimization_plan(
                                 str(exc),
                                 fallback_policy=fallback_policy,
                             ),
-                            "graph_break_count": compile_explain.get("graph_break_count"),
-                            "graph_breaks": list(compile_explain.get("break_reasons", [])),
+                            "graph_break_count": compile_explain.get(
+                                "graph_break_count"
+                            ),
+                            "graph_breaks": list(
+                                compile_explain.get("break_reasons", [])
+                            ),
                             "compiled_regions": compile_explain.get("graph_count"),
                             "explain": compile_explain,
                         },
@@ -338,23 +366,32 @@ def execute_operator_optimization_plan(
                         "mode": target.mode,
                         "patterns": list(target.patterns),
                         "capability": capability.to_dict(),
+                        **candidate_scope_metadata,
                         **engine_metadata,
                     },
                 )
             )
+            target_applied[target.name] = False
             continue
 
-        candidate_target = compiled_model
+        candidate_target = _resolve_component_model(
+            candidate_root,
+            target.target_path,
+        )
+        candidate_block = _resolve_component_model(
+            candidate_root,
+            target.benchmark_target_path,
+        )
         optimized_output = first_tensor_output(
-            call_module_no_grad(candidate_target, module_inputs)
+            call_module_no_grad(candidate_block, module_inputs)
         )
         execution_detail: dict[str, Any] = {}
         if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
             execution_detail = operator_engine_execution_metadata(
-                candidate_target,
+                candidate_block,
                 engine=target.engine,
             )
-        identity_candidate = candidate_target is target_model
+        identity_candidate = candidate_target is replacement_target
         effective_thresholds = effective_validation_thresholds(
             target,
             baseline_output=baseline_output,
@@ -372,7 +409,9 @@ def execute_operator_optimization_plan(
         speedup_metric = "mean_ms"
         speedup_statistics: dict[str, float | None] = {}
         native_speedup_strategy = _native_runtime_speedup_strategy(execution_detail)
-        paired_steady_state_strategy = _paired_steady_state_speedup_strategy(execution_detail)
+        paired_steady_state_strategy = _paired_steady_state_speedup_strategy(
+            execution_detail
+        )
         if native_speedup_strategy is not None:
             if identity_candidate:
                 benchmark_strategy = "identity_native_baseline"
@@ -386,13 +425,15 @@ def execute_operator_optimization_plan(
                 speedup = 1.0
             else:
                 benchmark_strategy = native_speedup_strategy
-                paired_before, paired_after, paired_speedup_ratios = _benchmark_paired_callables(
-                    lambda: call_module_no_grad(target_model, module_inputs),
-                    lambda: call_module_no_grad(candidate_target, module_inputs),
-                    warmup=benchmark.warmup,
-                    iterations=benchmark.iterations,
-                    sync_cuda=benchmark.sync_cuda,
-                    device=benchmark_device,
+                paired_before, paired_after, paired_speedup_ratios = (
+                    _benchmark_paired_callables(
+                        lambda: call_module_no_grad(benchmark_target, module_inputs),
+                        lambda: call_module_no_grad(candidate_block, module_inputs),
+                        warmup=benchmark.warmup,
+                        iterations=benchmark.iterations,
+                        sync_cuda=benchmark.sync_cuda,
+                        device=benchmark_device,
+                    )
                 )
                 latency_before = paired_before.to_dict()
                 latency_after = paired_after.to_dict()
@@ -420,14 +461,16 @@ def execute_operator_optimization_plan(
         elif paired_steady_state_strategy is not None:
             benchmark_strategy = paired_steady_state_strategy
             inner_iterations = _tilelang_inner_iterations(execution_detail)
-            latency_before, latency_after, paired_speedup_ratios = _benchmark_paired_batched_callables(
-                lambda: call_module_no_grad(target_model, module_inputs),
-                lambda: call_module_no_grad(candidate_target, module_inputs),
-                warmup=benchmark.warmup,
-                iterations=benchmark.iterations,
-                sync_cuda=benchmark.sync_cuda,
-                device=benchmark_device,
-                inner_iterations=inner_iterations,
+            latency_before, latency_after, paired_speedup_ratios = (
+                _benchmark_paired_batched_callables(
+                    lambda: call_module_no_grad(benchmark_target, module_inputs),
+                    lambda: call_module_no_grad(candidate_block, module_inputs),
+                    warmup=benchmark.warmup,
+                    iterations=benchmark.iterations,
+                    sync_cuda=benchmark.sync_cuda,
+                    device=benchmark_device,
+                    inner_iterations=inner_iterations,
+                )
             )
             mean_before = float(latency_before["mean_ms"])
             mean_after = float(latency_after["mean_ms"])
@@ -447,7 +490,7 @@ def execute_operator_optimization_plan(
             speedup = speedup_statistics["mean_ms"]
         else:
             latency_after, benchmark_strategy = _benchmark_callable_for_execution(
-                lambda: call_module_no_grad(candidate_target, module_inputs),
+                lambda: call_module_no_grad(candidate_block, module_inputs),
                 warmup=benchmark.warmup,
                 iterations=benchmark.iterations,
                 sync_cuda=benchmark.sync_cuda,
@@ -467,7 +510,7 @@ def execute_operator_optimization_plan(
             }
         if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
             execution_detail = operator_engine_execution_metadata(
-                candidate_target,
+                candidate_block,
                 engine=target.engine,
             )
         effective_min_speedup = _effective_min_speedup(
@@ -497,14 +540,7 @@ def execute_operator_optimization_plan(
             applied = False
             skip_reason = runtime_fallback_reason
         if applied:
-            current_model = _replace_component_model(
-                current_model,
-                target.target_path,
-                compiled_model,
-            )
-        elif target.engine == "tilelang" and compiled_model is target_model:
-            if hasattr(compiled_model, "_xqt_tilelang_execution_metadata"):
-                delattr(compiled_model, "_xqt_tilelang_execution_metadata")
+            current_model = candidate_root
         fallback_reason = _fallback_policy_reason(
             skip_reason,
             fallback_policy=fallback_policy,
@@ -531,16 +567,24 @@ def execute_operator_optimization_plan(
             "min_speedup": target.min_speedup,
             "effective_min_speedup": effective_min_speedup,
             "benchmark_strategy": benchmark_strategy,
-            "candidate_materialization": "target_only_benchmark_no_root_deepcopy",
+            "candidate_materialization": "root_candidate_deepcopy_block_benchmark",
             "speedup_metric": speedup_metric,
             "speedup_statistics": speedup_statistics,
             "capability": capability.to_dict(),
+            **candidate_scope_metadata,
             **engine_metadata,
             **execution_detail,
         }
-        module_contract = getattr(compiled_model, "_xqt_module_contract", None)
+        module_contract = getattr(candidate_target, "_xqt_module_contract", None)
         if isinstance(module_contract, dict):
             report_metadata["module_contract"] = dict(module_contract)
+        block_kernel_metadata = getattr(
+            candidate_target,
+            "_xqt_block_kernel_metadata",
+            None,
+        )
+        if isinstance(block_kernel_metadata, dict):
+            report_metadata["block_kernel_metadata"] = dict(block_kernel_metadata)
         reports.append(
             OperatorOptimizationReport(
                 target_name=target.name,
@@ -550,6 +594,8 @@ def execute_operator_optimization_plan(
                 applied=applied,
                 fallback=target.fallback,
                 fallback_policy=fallback_policy,
+                candidate_kind=target.candidate_kind,
+                benchmark_target_path=target.benchmark_target_path,
                 skip_reason=fallback_reason,
                 compile_time_ms=compile_time_ms,
                 latency_before=latency_before,
@@ -564,6 +610,7 @@ def execute_operator_optimization_plan(
                 metadata=report_metadata,
             )
         )
+        target_applied[target.name] = applied
 
     manifest_path = Path(context.artifact_dir) / "operator_optimization.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)

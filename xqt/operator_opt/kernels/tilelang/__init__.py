@@ -78,6 +78,18 @@ from .fp4_quant import (
     scaled_nvfp4_quant_reference,
     scaled_nvfp4_quant_tilelang,
 )
+from .hunyuan_block import (
+    gqa_decode_attention_reference,
+    gqa_decode_attention_tilelang,
+    residual_add_reference,
+    residual_add_tilelang,
+    residual_rmsnorm_reference,
+    residual_rmsnorm_tilelang,
+    rmsnorm_reference,
+    rmsnorm_tilelang,
+    swiglu_reference,
+    swiglu_tilelang,
+)
 
 TILELANG_KERNEL_METADATA = {
     "attention": {
@@ -140,6 +152,8 @@ __all__ = [
     "nvfp4_packed_dequant_gemm_epilogue_tilelang",
     "fused_attention_forward_reference",
     "fused_attention_forward_tilelang",
+    "gqa_decode_attention_reference",
+    "gqa_decode_attention_tilelang",
     "half_linear_reference",
     "half_linear_tilelang",
     "int8_linear_mma_reference",
@@ -154,9 +168,17 @@ __all__ = [
     "pad_rows_to_block",
     "quantize_int4_weight",
     "quantize_int8_weight",
+    "residual_add_reference",
+    "residual_add_tilelang",
+    "residual_rmsnorm_reference",
+    "residual_rmsnorm_tilelang",
+    "rmsnorm_reference",
+    "rmsnorm_tilelang",
     "scaled_mxfp4_quant_reference",
     "scaled_mxfp4_quant_tilelang",
     "scaled_nvfp4_quant_reference",
     "scaled_nvfp4_quant_tilelang",
     "static_activation_quantize_tilelang",
+    "swiglu_reference",
+    "swiglu_tilelang",
 ]

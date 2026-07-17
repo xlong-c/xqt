@@ -70,7 +70,7 @@ def _float_weight_from_packed_w4(
     return dequantized.reshape(output_features, padded_input_features)[:, :input_features]
 
 class W4StorageInt8MmaLinear(nn.Module):
-    """Packed W4 storage Linear with INT8 MMA compute retarget."""
+    """Packed W4 storage Linear that delegates a requested W8A8 INT8 retarget."""
 
     def __init__(
         self,
