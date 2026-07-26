@@ -38,6 +38,10 @@ from xqt.quant.quantizers.convrot_4bit import (
     execute_convrot_4bit_component,
     quantize_with_convrot_4bit,
 )
+from xqt.quant.quantizers.convrot_int8 import (
+    execute_convrot_int8_component,
+    quantize_with_convrot_int8,
+)
 from xqt.quant.quantizers.turboquant import (
     execute_turboquant_component,
     quantize_with_turboquant,
@@ -159,12 +163,20 @@ def execute_quantization_plan(
             reports.append(report)
             continue
         if component.backend == "pytorch" and method == "convrot":
-            current_model, report = execute_convrot_4bit_component(
-                context,
-                current_model,
-                component,
-                quantize_fn=quantize_with_convrot_4bit,
-            )
+            if strategy in {"w8a8_int8", "convrot_w8a8"} or compute == "w8a8_int8_mma":
+                current_model, report = execute_convrot_int8_component(
+                    context,
+                    current_model,
+                    component,
+                    quantize_fn=quantize_with_convrot_int8,
+                )
+            else:
+                current_model, report = execute_convrot_4bit_component(
+                    context,
+                    current_model,
+                    component,
+                    quantize_fn=quantize_with_convrot_4bit,
+                )
             reports.append(report)
             continue
         if component.backend == "pytorch" and method == "turboquant":
@@ -304,6 +316,7 @@ __all__ = [
     "execute_quantization_plan",
     "quantize_with_awq_weight_only",
     "quantize_with_convrot_4bit",
+    "quantize_with_convrot_int8",
     "quantize_onnx_qdq_static",
     "quantize_with_fp4_weight_only",
     "quantize_with_gptq_weight_only",

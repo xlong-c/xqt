@@ -76,6 +76,19 @@ _HUNYUAN_OCR_EXPORTS = {
     "optimize_hunyuan_ocr_dflash_svd_int4_blocks",
 }
 
+_UNLIMITED_OCR_EXPORTS = {
+    "UNLIMITED_OCR_CONVROT_INT8_STRATEGY",
+    "UNLIMITED_OCR_REPO_ID",
+    "UnlimitedOcrConvRotCalibration",
+    "UnlimitedOcrConvRotInt8Result",
+    "calibrate_unlimited_ocr_convrot_activation_scales",
+    "force_unlimited_ocr_fp16_runtime",
+    "load_unlimited_ocr",
+    "quantize_unlimited_ocr_convrot_int8",
+    "select_unlimited_ocr_convrot_modules",
+    "unlimited_ocr_convrot_default_policy",
+}
+
 
 def __getattr__(name: str) -> object:
     if name in _FLUX2_KLEIN_NVFP4_EXPORTS:
@@ -96,6 +109,10 @@ def __getattr__(name: str) -> object:
         from . import hunyuan_ocr
 
         return getattr(hunyuan_ocr, name)
+    if name in _UNLIMITED_OCR_EXPORTS:
+        from . import unlimited_ocr
+
+        return getattr(unlimited_ocr, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -117,6 +134,10 @@ __all__ = [
     "HunyuanOcrTileLangCudaGraphRunner",
     "HunyuanOcrTileLangDecodeBlock",
     "HunyuanOcrTileLangDecodeSpec",
+    "UNLIMITED_OCR_CONVROT_INT8_STRATEGY",
+    "UNLIMITED_OCR_REPO_ID",
+    "UnlimitedOcrConvRotCalibration",
+    "UnlimitedOcrConvRotInt8Result",
     "benchmark_hunyuan_ocr_tilelang_decode_graph",
     "ModuleOutputCapture",
     "SmokeDetectionModule",
@@ -128,12 +149,15 @@ __all__ = [
     "collect_flux2_klein_nvfp4_engine_targets",
     "collect_flux2_klein_nvfp4_targets",
     "capture_module_outputs",
+    "calibrate_unlimited_ocr_convrot_activation_scales",
+    "force_unlimited_ocr_fp16_runtime",
     "collect_module_outputs",
     "flux2_klein_nvfp4_single_file_url",
     "load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
     "load_flux2_klein_bf16_pipeline",
     "load_hunyuan_ocr",
     "load_hunyuan_ocr_dflash",
+    "load_unlimited_ocr",
     "load_flux2_klein_bf16_transformer",
     "load_flux2_klein_nvfp4_pipeline",
     "load_flux2_klein_nvfp4_transformer",
@@ -144,8 +168,11 @@ __all__ = [
     "optimize_hunyuan_ocr_dflash_svd_int4_blocks",
     "quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
     "quantize_flux2_klein_bf16_transformer_to_convrot_4bit",
+    "quantize_unlimited_ocr_convrot_int8",
     "run_flux2_klein_bf16_convrot_4bit_inference",
     "run_flux2_klein_nvfp4_inference",
+    "select_unlimited_ocr_convrot_modules",
+    "unlimited_ocr_convrot_default_policy",
     "warmup_flux2_klein_nvfp4_transformer",
     "WAN21_VAE_OPTIMIZATION_KINDS",
     "WAN21_VAE_REPO_ID",

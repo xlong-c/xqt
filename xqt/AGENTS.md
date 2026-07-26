@@ -83,6 +83,7 @@ XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配
 - 顶层示例脚本涉及可选依赖时使用 lazy import,失败时抛出清楚的 XQT 异常或错误信息.
 - 新增 recipe 必须声明 `compression_axes` 和支持的硬件约束.
 - 所有量化/剪枝/导出后都必须能产出模型侧 report 或最小性能基准.
+- 每次落地可执行推理优化 (新 kernel,layout/prepack,fusion,auto route 或已验证的 tile/warp/pipeline 取舍) 时,必须同步更新 [docs/md/explanation/operator-optimization-records.md](../docs/md/explanation/operator-optimization-records.md). 记录目标,公平 baseline,测量方法,数值正确性,适用/回退边界,未采纳方案和可复用规则;没有证据的内容只能标为假设或待验证.
 
 ## Profiling 工具约定
 

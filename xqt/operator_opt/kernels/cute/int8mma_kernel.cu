@@ -4,27 +4,37 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cublasLt.h>
 #include <cstdint>
+#include <mutex>
+
+#include "cutlass/arch/arch.h"
+#include "cutlass/epilogue/thread/linear_combination.h"
+#include "cutlass/gemm/device/gemm.h"
+#include "cutlass/gemm/device/gemm_universal_with_broadcast.h"
 
 #ifndef INT8MMA_STAGES
 #define INT8MMA_STAGES 3
 #endif
 
-static constexpr int BM = 128;
+// Ada sm_89 tuning: 64x128x64 trades one M tile for 2x lower accumulator
+// pressure and allows two 3-stage CTAs to reside on one SM.
+static constexpr int BM = 64;
 static constexpr int BN = 128;
 static constexpr int BK = 64;
 static constexpr int STAGES = INT8MMA_STAGES;
-static constexpr int WARPS = 4;
+static constexpr int WARPS = 8;
 static constexpr int THREADS = WARPS * 32;
-static constexpr int WARP_M = 64;
-static constexpr int WARP_N = 64;
+static constexpr int WARP_M = 32;
+static constexpr int WARP_N = 32;
+static constexpr int WARP_COLS = BN / WARP_N;
 static constexpr int MMA_M = 16;
 static constexpr int MMA_N = 8;
 static constexpr int MMA_K = 32;
 static constexpr int WARP_TM = WARP_M / MMA_M;
 static constexpr int WARP_TN = WARP_N / MMA_N;
 static constexpr int WARP_TK = BK / MMA_K;
-static constexpr int A_LD = 128;
+static constexpr int A_LD = 64;
 // B smem for prepack path: transposed [BN][B_LD_K], K contiguous
 static constexpr int B_LD_K = 64;
 // B smem for math path: [BK][B_LD_N]
@@ -58,7 +68,7 @@ __device__ __forceinline__ void mma_s8s8s32_m16n8k32(int& d0, int& d1, int& d2, 
       : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 __device__ __forceinline__ int smem_offset_a(int row, int col) {
-  return row * A_LD + (col ^ ((row & 7) << 4));
+  return row * A_LD + (col ^ ((row & 3) << 4));
 }
 __device__ __forceinline__ int smem_offset_b_math(int row, int col) {
   return row * B_LD_N + (col ^ ((row & 7) << 4));
@@ -224,8 +234,8 @@ __global__ void __launch_bounds__(THREADS, 2) int8mma_kernel_t(
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
-  const int warp_m = (warp >> 1) * WARP_M;
-  const int warp_n = (warp & 1) * WARP_N;
+  const int warp_m = (warp / WARP_COLS) * WARP_M;
+  const int warp_n = (warp % WARP_COLS) * WARP_N;
 
   int acc[WARP_TM][WARP_TN][4];
 #pragma unroll
@@ -340,7 +350,268 @@ extern "C" int int8mma_smem_bytes() { return BYTES_TOTAL_MATH; }
 extern "C" int int8mma_smem_bytes_prepacked() { return BYTES_TOTAL_PRE; }
 
 extern "C" const char* int8mma_version() {
-  return "int8mma-ada-sm89-v8 math+prepack+fused_static_act stages=3 tile=128x128x64";
+  return "int8mma-ada-sm89-v12 manual+cutlass-int8-fused-scale-bias stages=3 tile=64x128x64 warps=8";
+}
+
+// CUTLASS owns the SM80+ IMMA mainloop, including ldmatrix fragment loads and
+// shared-memory swizzles. This candidate consumes the already cached B[N,K]
+// transpose as a column-major KxN matrix and applies a cached [N, 2] float
+// vector containing (activation_scale * weight_scale[n], bias[n]).
+struct alignas(8) CutlassScaleBias {
+  float scale;
+  float bias;
+
+  // cutlass::Array clears fragments with T(0), while CUDA's float2 does not
+  // provide an int constructor. The layout remains ABI-compatible with one
+  // contiguous torch.float32[N, 2] tensor.
+  CUTLASS_HOST_DEVICE constexpr CutlassScaleBias(float value = 0.0f)
+      : scale(value), bias(value) {}
+};
+
+class CutlassPerChannelScaleEpilogue {
+ public:
+  using ElementOutput = cutlass::half_t;
+  using ElementD = ElementOutput;
+  using ElementC = ElementOutput;
+  using ElementT = ElementOutput;
+  using ElementVector = CutlassScaleBias;
+  using ElementAccumulator = int32_t;
+  using ElementCompute = CutlassScaleBias;
+  static constexpr int kElementsPerAccess = 8;
+  static constexpr int kCount = kElementsPerAccess;
+  static constexpr bool kIsSingleSource = true;
+  static constexpr bool kStoreZ = true;
+  static constexpr bool kStoreT = false;
+  static constexpr bool kIsHeavy = false;
+
+  using FragmentAccumulator = cutlass::Array<ElementAccumulator, kElementsPerAccess>;
+  using FragmentCompute = cutlass::Array<ElementCompute, kElementsPerAccess>;
+  using FragmentZ = cutlass::Array<ElementOutput, kElementsPerAccess>;
+  using FragmentT = cutlass::Array<ElementT, kElementsPerAccess>;
+
+  struct Params {};
+
+  CUTLASS_HOST_DEVICE CutlassPerChannelScaleEpilogue(Params const&) {}
+  CUTLASS_HOST_DEVICE bool is_source_needed() const { return false; }
+  CUTLASS_HOST_DEVICE void set_k_partition(int, int) {}
+
+  CUTLASS_HOST_DEVICE void operator()(
+      FragmentZ& out, FragmentT&, const FragmentAccumulator& accum,
+      const FragmentCompute& output_scale) const {
+    cutlass::Array<float, kElementsPerAccess> values;
+#pragma unroll
+    for (int i = 0; i < kElementsPerAccess; ++i) {
+      values[i] = static_cast<float>(accum[i]) * output_scale[i].scale + output_scale[i].bias;
+    }
+    out = cutlass::NumericArrayConverter<ElementOutput, float, kElementsPerAccess>()(values);
+  }
+
+  CUTLASS_HOST_DEVICE void operator()(
+      FragmentZ& out, FragmentT& tensor, const FragmentAccumulator& accum,
+      const cutlass::Array<ElementOutput, kElementsPerAccess>&,
+      const FragmentCompute& output_scale) const {
+    (*this)(out, tensor, accum, output_scale);
+  }
+};
+
+using CutlassInt8Gemm128x256 = cutlass::gemm::device::GemmUniversalWithBroadcast<
+    int8_t, cutlass::layout::RowMajor,
+    int8_t, cutlass::layout::ColumnMajor,
+    cutlass::half_t, cutlass::layout::RowMajor,
+    int32_t, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<128, 256, 64>,
+    cutlass::gemm::GemmShape<64, 64, 64>,
+    cutlass::gemm::GemmShape<16, 8, 32>,
+    CutlassPerChannelScaleEpilogue,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    3, 16, 16, cutlass::arch::OpMultiplyAddSaturate>;
+
+using CutlassInt8Gemm64x128 = cutlass::gemm::device::GemmUniversalWithBroadcast<
+    int8_t, cutlass::layout::RowMajor,
+    int8_t, cutlass::layout::ColumnMajor,
+    cutlass::half_t, cutlass::layout::RowMajor,
+    int32_t, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<64, 128, 64>,
+    cutlass::gemm::GemmShape<32, 32, 64>,
+    cutlass::gemm::GemmShape<16, 8, 32>,
+    CutlassPerChannelScaleEpilogue,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    3, 16, 16, cutlass::arch::OpMultiplyAddSaturate>;
+
+template <typename Gemm>
+int run_cutlass_prepacked_b(
+    const void* a, const void* b_nk, void* c, const void* output_scale, int M, int N, int K) {
+  const auto* a_ptr = static_cast<const int8_t*>(a);
+  const auto* b_ptr = static_cast<const int8_t*>(b_nk);
+  auto* c_ptr = static_cast<cutlass::half_t*>(c);
+  Gemm gemm;
+  typename Gemm::Arguments args(
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      {M, N, K}, 1,
+      CutlassPerChannelScaleEpilogue::Params{},
+      a_ptr, b_ptr, c_ptr, c_ptr,
+      const_cast<void*>(output_scale), nullptr,
+      0, 0, 0, 0, 0, 0,
+      K, K, N, N, 0, 0);
+  cutlass::Status status = gemm.can_implement(args);
+  if (status != cutlass::Status::kSuccess) return static_cast<int>(cudaErrorNotSupported);
+  status = gemm.initialize(args);
+  if (status != cutlass::Status::kSuccess) return static_cast<int>(cudaErrorInvalidValue);
+  status = gemm();
+  return status == cutlass::Status::kSuccess ? static_cast<int>(cudaSuccess)
+                                              : static_cast<int>(cudaErrorLaunchFailure);
+}
+
+extern "C" int int8mma_run_cutlass_prepacked_b(
+    const void* a, const void* b_nk, void* c, const void* output_scale, int M, int N, int K) {
+  if (!a || !b_nk || !c || !output_scale || M <= 0 || N <= 0 || K <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  if ((N % CutlassPerChannelScaleEpilogue::kElementsPerAccess) != 0 || (K % 32) != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_prepacked_b<CutlassInt8Gemm128x256>(a, b_nk, c, output_scale, M, N, K);
+}
+
+extern "C" int int8mma_run_cutlass_64x128_prepacked_b(
+    const void* a, const void* b_nk, void* c, const void* output_scale, int M, int N, int K) {
+  if (!a || !b_nk || !c || !output_scale || M <= 0 || N <= 0 || K <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  if ((N % CutlassPerChannelScaleEpilogue::kElementsPerAccess) != 0 || (K % 32) != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_prepacked_b<CutlassInt8Gemm64x128>(a, b_nk, c, output_scale, M, N, K);
+}
+
+namespace {
+
+cublasLtHandle_t g_cublaslt_handle = nullptr;
+cublasStatus_t g_cublaslt_status = CUBLAS_STATUS_NOT_INITIALIZED;
+std::once_flag g_cublaslt_once;
+
+cublasStatus_t cublaslt_handle(cublasLtHandle_t* handle) {
+  std::call_once(g_cublaslt_once, []() {
+    g_cublaslt_status = cublasLtCreate(&g_cublaslt_handle);
+  });
+  if (g_cublaslt_status == CUBLAS_STATUS_SUCCESS) {
+    *handle = g_cublaslt_handle;
+  }
+  return g_cublaslt_status;
+}
+
+cublasStatus_t set_row_major(cublasLtMatrixLayout_t layout) {
+  const cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
+  return cublasLtMatrixLayoutSetAttribute(
+      layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+}
+
+}  // namespace
+
+// CuBLASLt supports the W8A8 Tensor Core product with an int32 output. The
+// scale/bias fp16 epilogue is launched separately below because this CUDA
+// version does not expose per-column float scaling for an int32 IMMA output.
+extern "C" int int8mma_run_cublaslt_i32(
+    const void* a, const void* b, void* d, int M, int N, int K,
+    void* workspace, size_t workspace_size, void* stream_ptr) {
+  if (!a || !b || !d || M <= 0 || N <= 0 || K <= 0) {
+    return static_cast<int>(CUBLAS_STATUS_INVALID_VALUE);
+  }
+
+  cublasLtHandle_t handle = nullptr;
+  cublasLtMatmulDesc_t operation = nullptr;
+  cublasLtMatrixLayout_t a_layout = nullptr;
+  cublasLtMatrixLayout_t b_layout = nullptr;
+  cublasLtMatrixLayout_t c_layout = nullptr;
+  cublasLtMatrixLayout_t d_layout = nullptr;
+  cublasLtMatmulPreference_t preference = nullptr;
+  cublasStatus_t status = cublaslt_handle(&handle);
+  if (status != CUBLAS_STATUS_SUCCESS) return static_cast<int>(status);
+
+  do {
+    status = cublasLtMatmulDescCreate(&operation, CUBLAS_COMPUTE_32I, CUDA_R_32I);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+
+    status = cublasLtMatrixLayoutCreate(&a_layout, CUDA_R_8I, M, K, K);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = set_row_major(a_layout);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = cublasLtMatrixLayoutCreate(&b_layout, CUDA_R_8I, K, N, N);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = set_row_major(b_layout);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = cublasLtMatrixLayoutCreate(&c_layout, CUDA_R_32I, M, N, N);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = set_row_major(c_layout);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = cublasLtMatrixLayoutCreate(&d_layout, CUDA_R_32I, M, N, N);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = set_row_major(d_layout);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+
+    status = cublasLtMatmulPreferenceCreate(&preference);
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+    status = cublasLtMatmulPreferenceSetAttribute(
+        preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+        &workspace_size, sizeof(workspace_size));
+    if (status != CUBLAS_STATUS_SUCCESS) break;
+
+    cublasLtMatmulHeuristicResult_t heuristic{};
+    int returned = 0;
+    status = cublasLtMatmulAlgoGetHeuristic(
+        handle, operation, a_layout, b_layout, c_layout, d_layout, preference,
+        1, &heuristic, &returned);
+    if (status != CUBLAS_STATUS_SUCCESS || returned == 0 ||
+        heuristic.state != CUBLAS_STATUS_SUCCESS) {
+      status = CUBLAS_STATUS_NOT_SUPPORTED;
+      break;
+    }
+
+    const int32_t alpha = 1;
+    const int32_t beta = 0;
+    status = cublasLtMatmul(
+        handle, operation, &alpha, a, a_layout, b, b_layout, &beta, d, c_layout,
+        d, d_layout, &heuristic.algo, workspace, workspace_size,
+        reinterpret_cast<cudaStream_t>(stream_ptr));
+  } while (false);
+
+  if (preference) cublasLtMatmulPreferenceDestroy(preference);
+  if (d_layout) cublasLtMatrixLayoutDestroy(d_layout);
+  if (c_layout) cublasLtMatrixLayoutDestroy(c_layout);
+  if (b_layout) cublasLtMatrixLayoutDestroy(b_layout);
+  if (a_layout) cublasLtMatrixLayoutDestroy(a_layout);
+  if (operation) cublasLtMatmulDescDestroy(operation);
+  return static_cast<int>(status);
+}
+
+__global__ void int8mma_dequant_i32_kernel(
+    const int32_t* __restrict__ accum, half* __restrict__ output,
+    const float* __restrict__ activation_scale,
+    const float* __restrict__ weight_scale, const half* __restrict__ bias,
+    int64_t total, int N) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) return;
+  const int col = static_cast<int>(index % N);
+  float value = static_cast<float>(accum[index]) * activation_scale[0] * weight_scale[col];
+  if (bias != nullptr) value += __half2float(bias[col]);
+  output[index] = __float2half_rn(value);
+}
+
+extern "C" int int8mma_dequant_i32(
+    const void* accum, void* output, const void* activation_scale, const void* weight_scale,
+    const void* bias, int M, int N) {
+  if (!accum || !output || !activation_scale || !weight_scale || M <= 0 || N <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const int64_t total = static_cast<int64_t>(M) * N;
+  constexpr int threads = 256;
+  const dim3 block(threads);
+  const dim3 grid(static_cast<unsigned int>((total + threads - 1) / threads));
+  int8mma_dequant_i32_kernel<<<grid, block>>>(
+      static_cast<const int32_t*>(accum), static_cast<half*>(output),
+      static_cast<const float*>(activation_scale),
+      static_cast<const float*>(weight_scale), static_cast<const half*>(bias), total, N);
+  return static_cast<int>(cudaGetLastError());
 }
 
 static int launch_impl(void const* a, void const* b, void* c, float sa, float const* sw, int M,
@@ -438,8 +709,8 @@ __global__ void __launch_bounds__(THREADS, 2) int8mma_fused_static_prepacked_ker
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
-  const int warp_m = (warp >> 1) * WARP_M;
-  const int warp_n = (warp & 1) * WARP_N;
+  const int warp_m = (warp / WARP_COLS) * WARP_M;
+  const int warp_n = (warp % WARP_COLS) * WARP_N;
   const float inv_sa = 1.0f / sa;
 
   int acc[WARP_TM][WARP_TN][4];

@@ -8,7 +8,7 @@ def test_resolve_int8_mma_auto_prefers_capability_order() -> None:
     from xqt.runtime.engine_resolve import resolve_int8_mma_engine
 
     result = resolve_int8_mma_engine("auto")
-    assert result.engine in {"ptx_sm89", "tilelang", "torch_int_mm"}
+    assert result.engine == "triton"
     assert "int8_mma" in result.required_capabilities
     assert result.candidates
 

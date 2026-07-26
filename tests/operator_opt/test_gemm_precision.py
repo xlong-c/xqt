@@ -34,6 +34,7 @@ from xqt.operator_opt.kernels.tilelang.gemm import (
 from xqt.operator_opt.kernels.triton.gemm import (
     gemm_bf16_triton,
     gemm_fp16_triton,
+    gemm_int8_triton,
     gemm_reference,
 )
 from xqt.operator_opt.kernels.triton.mxfp_gemm import pack_mxfp, unpack_mxfp
@@ -118,6 +119,32 @@ class TestTritonGEMMKernels:
         output = gemm_bf16_triton(a_bf16, b_bf16, bias_bf16, transpose_b=True)
         expected = torch.matmul(a_bf16, b_bf16.t()) + bias_bf16
         assert torch.allclose(output.float(), expected.float(), rtol=5e-2, atol=5e-2)
+
+    def test_int8_true_w8a8_basic(self):
+        torch.manual_seed(11)
+        a = torch.randint(-16, 16, (64, 128), device="cuda", dtype=torch.int8)
+        b = torch.randint(-16, 16, (128, 96), device="cuda", dtype=torch.int8)
+        a_scale = torch.tensor([0.02], device="cuda", dtype=torch.float32)
+        b_scale = torch.linspace(0.001, 0.003, 96, device="cuda")
+        bias = torch.randn(96, device="cuda", dtype=torch.float32) * 0.01
+
+        output = gemm_int8_triton(
+            a,
+            b,
+            a_scale,
+            b_scale,
+            bias,
+            transpose_b=False,
+            block_m=64,
+            block_n=128,
+            block_k=32,
+            output_dtype=torch.float16,
+        )
+        reference = torch._int_mm(a, b).to(torch.float32)
+        reference = reference * (a_scale.reshape(1) * b_scale.reshape(1, -1)) + bias
+
+        assert output.dtype == torch.float16
+        assert torch.allclose(output.float(), reference, rtol=1e-3, atol=1e-3)
 
 
 class TestMXFPPacking:

@@ -43,7 +43,7 @@ B[k+0][n], B[k+1][n], B[k+2][n], B[k+3][n]  -> 一个 uint32
 packed W4
   -> dequant / re-encode int8  [K,N]     (w4_storage_int8_mma)
   -> prepack int8:sm_89:b_nk   [N,K]     (本机制)
-  -> ptx_sm89 kernel (prepacked_b)
+  -> ptx_sm89 / cuda_sm89 kernel (prepacked_b)
 ```
 
 W4 仍可不膨胀; prepack 作用在 **int8 热视图** 上, 可与 `release_int8_compute_view` 同类生命周期管理.
@@ -69,14 +69,25 @@ packed = result.packed  # [N,K] int8 contiguous
 math = unpack_weight(packed, INT8_SM89_B_NK, math_shape=result.math_shape)
 ```
 
-`Int8MmaLinear(engine="ptx_sm89")` 在构造时自动 prepack 并缓存 `_qweight_prepacked_b`.
+`Int8MmaLinear(engine="ptx_sm89" | "cuda_sm89")` 在构造时自动 prepack 并缓存 `_qweight_prepacked_b`.
+`engine=auto` 在首次命中 `sm_89` CUDA fast path 时也会构建同一份缓存.
 
 Static 激活路径 (推荐):
 
-1. `int8mma_quantize_static_half` — half → int8
-2. `int8mma_run_prepacked_b` — 吃 prepack 权重
+1. `int8mma_quantize_static_half` - half → int8
+2. `int8mma_run_cutlass_64x128_prepacked_b` - `cuda_sm89` 吃 prepack 权重, 并在 epilogue 融合 per-channel scale + bias
 
-`engine=auto` 在 sm_89 上: **M≥192 用 ptx_sm89, 否则 tilelang** (小 M 融合 quant 更强).
+`engine=auto` 在 `sm_89`,FP16 output,`K % 32 == 0`,`N % 8 == 0`,静态 activation scale 且 `M >= 32` 时选 `cuda_sm89`; 其他形状或设备保留 Triton / TileLang / PTX / reference 后备.
+
+### Runtime 缓存与生命周期
+
+`qweight_t` 仍是模型/state_dict 中的数学布局 `[K,N]` INT8 权重. `[N,K]` prepack 是 runtime cache, 不作为第二份模型权重写入 state_dict. 这样模型交换与通用量化逻辑不依赖某个 MMA kernel 的物理布局.
+
+- 首次使用 CUDA `sm_89` fast path 时, `Int8MmaLinear._ensure_ptx_prepacked_b()` 做一次转置并缓存 `[N,K]` contiguous buffer.
+- 同层之后的 forward 直接复用该 buffer; 不在 GEMM kernel 内转置, 也不在每次 forward 重新 materialize.
+- `load_state_dict()` 原地更新 `qweight_t` 时会递增 Tensor version. cache 会检测 version 并重建, 不会把旧权重的 prepack 用到新权重.
+- `cuda_sm89` 的静态路径还缓存 `[N,2] float32` epilogue 向量: 第 0 列是 `activation_scale * weight_scale[n]`, 第 1 列是 `bias[n]`. `weight_scale`, bias 或静态 activation scale 更新后同样按 version 重建.
+- `execution_metadata()["prepacked_b"]` 表示该次 forward 是否实际复用了 prepack buffer.
 
 ---
 
@@ -84,7 +95,7 @@ Static 激活路径 (推荐):
 
 | layout key | 状态 | 说明 |
 |------------|------|------|
-| `int8:sm_89:b_nk` | **implemented** | `[K,N]->[N,K]`, Ada ptx_sm89 |
+| `int8:sm_89:b_nk` | **implemented** | `[K,N]->[N,K]`, Ada `ptx_sm89` / CUTLASS `cuda_sm89` |
 | `int4:sm_89:b_mma` | placeholder | W4 / int4 路径预留 |
 | `fp4:sm_89:b_mma` | placeholder | FP4 存 + INT8 算或未来 FP4 MMA |
 | `fp8:sm_89:b_mma` | placeholder | FP8 fragment + scale |
@@ -101,9 +112,9 @@ Static 激活路径 (推荐):
 |------|------|
 | `xqt/operator_opt/kernels/prepack/base.py` | 注册表, `prepack_weight` / `unpack_weight` |
 | `xqt/operator_opt/kernels/prepack/int8_sm89.py` | INT8 sm_89 B_NK |
-| `xqt/operator_opt/kernels/cute/int8mma_kernel.cu` | `int8mma_run` + `int8mma_run_prepacked_b` |
-| `xqt/operator_opt/kernels/cute/int8mma_binding.py` | ctypes + `prepack_qweight_t_for_ptx_sm89` |
-| `xqt/quant/quantizers/int8_mma.py` | `engine=ptx_sm89` 自动 prepack |
+| `xqt/operator_opt/kernels/cute/int8mma_kernel.cu` | PTX kernel + CUTLASS `int8mma_run_cutlass_64x128_prepacked_b` |
+| `xqt/operator_opt/kernels/cute/int8mma_binding.py` | ctypes + `prepack_qweight_t_for_ptx_sm89` + `int8_linear_cutlass_sm89` |
+| `xqt/runtime/modules/int8_mma_linear.py` | `ptx_sm89` / `cuda_sm89` 的 prepack cache, version invalidation, auto routing |
 | `tests/xqt/operator_opt/test_prepack_int8_sm89.py` | 单测 |
 
 ---

@@ -33,9 +33,13 @@ def build() -> Path:
         "arch=compute_89,code=sm_89",
         "-gencode",
         "arch=compute_89,code=compute_89",
+        "-I",
+        str(ROOT.parents[3] / "third_party" / "cutlass" / "include"),
         str(SRC),
         "-o",
         str(SO),
+        "-lcublasLt",
+        "-lcublas",
         "-lcudart",
     ]
     print("BUILD:", " ".join(cmd))
@@ -64,6 +68,17 @@ def load_lib(path: Path) -> ctypes.CDLL:
     if hasattr(lib, "int8mma_run_prepacked_b"):
         lib.int8mma_run_prepacked_b.argtypes = lib.int8mma_run.argtypes
         lib.int8mma_run_prepacked_b.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_run_cutlass_64x128_prepacked_b"):
+        lib.int8mma_run_cutlass_64x128_prepacked_b.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        lib.int8mma_run_cutlass_64x128_prepacked_b.restype = ctypes.c_int
     return lib
 
 
@@ -129,6 +144,41 @@ def check_prepacked(lib: ctypes.CDLL) -> None:
         raise AssertionError("prepacked correctness failed")
 
 
+def check_cutlass_fused_scale_bias(lib: ctypes.CDLL) -> None:
+    if not hasattr(lib, "int8mma_run_cutlass_64x128_prepacked_b"):
+        raise RuntimeError("CUTLASS fused scale/bias entry point is missing")
+    m, n, k = 256, 256, 256
+    a = torch.randint(-8, 8, (m, k), device="cuda", dtype=torch.int8)
+    b_kn = torch.randint(-8, 8, (k, n), device="cuda", dtype=torch.int8)
+    packed = b_kn.transpose(0, 1).contiguous()
+    activation_scale = torch.tensor(0.02, device="cuda", dtype=torch.float32)
+    weight_scale = torch.rand(n, device="cuda", dtype=torch.float32) * 0.01 + 0.001
+    bias = torch.randn(n, device="cuda", dtype=torch.float32)
+    scale_bias = torch.stack((activation_scale * weight_scale, bias), dim=1).contiguous()
+    c = torch.empty(m, n, device="cuda", dtype=torch.float16)
+    err = lib.int8mma_run_cutlass_64x128_prepacked_b(
+        a.data_ptr(),
+        packed.data_ptr(),
+        c.data_ptr(),
+        scale_bias.data_ptr(),
+        m,
+        n,
+        k,
+    )
+    torch.cuda.synchronize()
+    if err != 0:
+        raise RuntimeError(f"CUTLASS fused scale/bias failed err={err}")
+    reference = (
+        torch._int_mm(a, b_kn).float()
+        * (activation_scale * weight_scale).view(1, -1)
+        + bias.view(1, -1)
+    ).half()
+    max_abs = (c.float() - reference.float()).abs().max().item()
+    print(f"CHECK CUTLASS fused_scale_bias M={m} max_abs_diff={max_abs:.6g}")
+    if max_abs >= 2e-3:
+        raise AssertionError("CUTLASS fused scale/bias correctness failed")
+
+
 def bench(lib: ctypes.CDLL, M: int, N: int, K: int, warmup: int = 10, iters: int = 50) -> None:
     a = torch.randint(-8, 8, (M, K), device="cuda", dtype=torch.int8)
     b = torch.randint(-8, 8, (K, N), device="cuda", dtype=torch.int8)
@@ -174,6 +224,7 @@ def main() -> int:
     ]
     check_correct(lib, shapes)
     check_prepacked(lib)
+    check_cutlass_fused_scale_bias(lib)
     for M, N, K in [(1024, 1024, 1024), (2048, 2048, 2048), (4096, 4096, 4096)]:
         bench(lib, M, N, K)
     print("ALL OK")

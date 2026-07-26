@@ -821,6 +821,12 @@ Autotuning 不能只记录最快 latency. 至少记录:
 9. 如果 microbenchmark 快但 operator-stage 慢, 先查 wrapper, materialization, CUDA Graph 和 capture scope.
 10. 只有当证据证明是 kernel 问题时, 才继续 tile / warp / pipeline 调优.
 
+### 优化记录契约
+
+每次落地可执行的推理优化后,都要在 [operator-optimization-records.md](operator-optimization-records.md) 增加或更新一条记录. 适用范围包括新 kernel,layout/prepack 变更,fusion 拓扑,自动路由,或者已验证的 tile / warp / pipeline 取舍.
+
+记录必须把可迁移的结论和该机器上的测量分开写清楚,至少包含目标 shape/precision/GPU,公平 baseline,测量方法,实现变更,数值正确性,适用条件/回退,未采纳方案和可复用规则. 没有 profiler 或 benchmark 证据时,只能写假设或待验证项,不能写成性能事实.
+
 本文提到的高级机制, 例如 WGMMA, TMA, warp specialization, cluster, FP4 / NVFP4 packed GEMM, 在 XQT 中应作为 architecture-sensitive 的实验能力推进, 不应写成默认可用能力.
 
 ## 参考资料

@@ -115,10 +115,10 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
         requires_cuda=True,
         notes=(
             "Built-in executor ships limited CUDA-only Triton fused kernels.",
-            "Current built-in execution covers standalone float16/bfloat16 RMSNorm, the xqt.nn.FeedForward Triton runtime composition, and packed low-bit dequant GEMM wrappers for INT4/MXFP/NVFP4, all with eager reference fallback metadata.",
+            "Current built-in execution covers standalone float16/bfloat16 RMSNorm, the xqt.nn.FeedForward Triton runtime composition, true W8A8 INT8 GEMM, and packed low-bit dequant GEMM wrappers for INT4/MXFP/NVFP4, all with eager reference fallback metadata where applicable.",
         ),
         limitations=(
-            "Current built-in materialization is limited to rmsnorm, xqt.nn.FeedForward, and low-bit linear dequant GEMM patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
+            "Current built-in materialization is limited to rmsnorm, xqt.nn.FeedForward, true W8A8 INT8 Linear, and low-bit linear dequant GEMM patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
             "Current low-bit Triton execution is a composed runtime: packed weights are unpacked and dequantized on device before dispatching to Triton dense GEMM, rather than a single fused tensor-core kernel.",
         ),
     ),

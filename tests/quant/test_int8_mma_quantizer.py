@@ -159,6 +159,78 @@ def test_int8_mma_linear_static_activation_scale_cpu() -> None:
     assert metadata["activation_scale_mode"] == "static"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_int8_mma_auto_static_uses_fastpath_cuda() -> None:
+    source = torch.nn.Linear(128, 96, bias=True, dtype=torch.float16, device="cuda").eval()
+    qlinear = Int8MmaLinear.from_linear(
+        source,
+        engine="auto",
+        activation_scale_mode="static",
+        activation_scale=0.02,
+    ).eval()
+
+    output = qlinear(torch.randn(64, 128, device="cuda", dtype=torch.float16))
+    torch.cuda.synchronize()
+    metadata = qlinear.execution_metadata()
+
+    assert output.dtype == torch.float16
+    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+
+    expected_engine = (
+        "cuda_sm89"
+        if torch.cuda.get_device_capability() == (8, 9) and int8mma_available()
+        else "triton"
+    )
+    assert metadata["engine"] == expected_engine
+    assert metadata["runtime_precision"]["native_mma_executed"] is True
+    assert metadata["fused_static_status"] == (
+        "two_kernel_quant_then_cuda_gemm"
+        if expected_engine == "cuda_sm89"
+        else "two_kernel_quant_then_gemm"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_int8_mma_cuda_sm89_static_path_caches_fused_scale_bias() -> None:
+    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+
+    if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
+        pytest.skip("cuda_sm89 CUTLASS extension unavailable")
+
+    torch.manual_seed(41)
+    source = torch.nn.Linear(256, 256, bias=True, dtype=torch.float16, device="cuda").eval()
+    qlinear = Int8MmaLinear.from_linear(
+        source,
+        engine="cuda_sm89",
+        activation_scale_mode="static",
+        activation_scale=0.02,
+    ).eval()
+    inputs = torch.randn(64, 256, device="cuda", dtype=torch.float16).clamp(-2, 2)
+
+    output = qlinear(inputs)
+    cached = qlinear._cuda_sm89_scale_bias_cache
+    assert cached is not None
+    cached_ptr = cached.data_ptr()
+    output_again = qlinear(inputs)
+    torch.cuda.synchronize()
+    metadata = qlinear.execution_metadata()
+    qactivation = torch.round(inputs.float() / 0.02).clamp(-127, 127).to(torch.int8)
+    expected = (
+        torch._int_mm(qactivation, qlinear.qweight_t).float()
+        * (0.02 * qlinear.weight_scale).view(1, -1)
+        + qlinear.bias.view(1, -1)
+    ).half()
+
+    assert metadata["engine"] == "cuda_sm89"
+    assert metadata["activation_quant_engine"] == "tilelang_static"
+    assert metadata["fused_static_status"] == "two_kernel_quant_then_cuda_gemm"
+    assert metadata["prepacked_b"] is True
+    assert qlinear._cuda_sm89_scale_bias_cache is not None
+    assert qlinear._cuda_sm89_scale_bias_cache.data_ptr() == cached_ptr
+    assert (output.float() - expected.float()).abs().max().item() < 2e-3
+    assert torch.equal(output, output_again)
+
+
 def test_quantize_with_int8_mma_accepts_static_activation_scales() -> None:
     model = _TinyLinearModel().eval()
 

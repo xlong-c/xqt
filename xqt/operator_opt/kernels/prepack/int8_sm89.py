@@ -33,7 +33,7 @@ def prepack_int8_b_nk(weight_kn: torch.Tensor, **_kwargs: Any) -> PrepackResult:
             "math_layout": "K,N_row_major",
             "packed_layout": "N,K_row_major",
             "fragment_b": "contiguous_K_at_fixed_N",
-            "kernel": "ptx_sm89",
+            "kernel": "ptx_sm89_or_cuda_sm89",
         },
     )
 
@@ -64,14 +64,14 @@ def _register() -> None:
             layout_id=PrepackLayoutId("int8", "sm_89", "b_nk"),
             description=(
                 "INT8 B prepack for Ada sm_89: store weight as [N,K] so MMA B fragment "
-                "loads 4 consecutive K as one uint32 (ptx_sm89 kernel)"
+                "loads consecutive K for sm_89 INT8 MMA (ptx_sm89 / cuda_sm89)"
             ),
             status="implemented",
             math_shape_order="K,N",
             packed_shape_order="N,K",
             pack=prepack_int8_b_nk,
             unpack=unpack_int8_b_nk,
-            notes="Used by engine=ptx_sm89. Offline transpose of qweight_t.",
+            notes="Used by ptx_sm89 and cuda_sm89. Offline transpose of qweight_t.",
             metadata_defaults={"mma": "m16n8k32.s8"},
         )
     )

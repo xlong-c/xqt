@@ -32,6 +32,12 @@ from .convrot_4bit import (
     execute_convrot_4bit_component,
     quantize_with_convrot_4bit,
 )
+from .convrot_int8 import (
+    ConvRotInt8Linear,
+    ConvRotInt8QuantizationResult,
+    execute_convrot_int8_component,
+    quantize_with_convrot_int8,
+)
 from .mxfp_weight_only import (
     MXFPQuantizationResult,
     MXFPWeightOnlyLinear,
@@ -65,6 +71,8 @@ __all__ = [
     "AWQGPTQWeightOnlyLinear",
     "AWQGPTQWeightOnlyQuantizationResult",
     "ConvRot4BitQuantizationResult",
+    "ConvRotInt8Linear",
+    "ConvRotInt8QuantizationResult",
     "ConvRotMixedPrecisionLinear",
     "FakeQDQSurrogateResult",
     "FP4DynamicLinear",
@@ -92,9 +100,11 @@ __all__ = [
     "build_regular_hadamard_matrix",
     "build_fake_qdq_surrogate",
     "execute_convrot_4bit_component",
+    "execute_convrot_int8_component",
     "quantize_with_awq_fp4",
     "quantize_with_awq_weight_only",
     "quantize_with_convrot_4bit",
+    "quantize_with_convrot_int8",
     "quantize_with_dynamic_fp4",
     "quantize_with_int8_mma",
     "quantize_with_mxfp4_dynamic",

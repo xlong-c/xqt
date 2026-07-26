@@ -19,7 +19,12 @@ from xqt.runtime.engine_resolve import (
 from xqt.runtime.modules import Int8MmaLinear
 
 _PTX_SM89_ENGINES = frozenset({"ptx_sm89", "native_sm89"})
-_VALID_ENGINES = frozenset({"auto", "tilelang", "torch_int_mm"}) | _PTX_SM89_ENGINES
+_CUDA_SM89_ENGINES = frozenset({"cuda_sm89"})
+_VALID_ENGINES = (
+    frozenset({"auto", "triton", "tilelang", "torch_int_mm"})
+    | _PTX_SM89_ENGINES
+    | _CUDA_SM89_ENGINES
+)
 
 
 from ..execution.component import (

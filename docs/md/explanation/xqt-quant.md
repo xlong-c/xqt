@@ -95,7 +95,8 @@ AWQ 是静态量化              # 更准确: 离线静态 weight-only; 激活�
 | `weight_only_int4/8`, `fp4_weight_only`, AWQ/GPTQ weight-only | W4/W8 离线静态打包 | A 保持输入浮点 dtype. 当前 XQT 路线是 dequant/reference floating-point compute | 这不是 W4A4 或 W8A8. A 从未承诺低比特, 因而不存在"A 退化"的条件 |
 | `dynamic_int8_mma` | W8 离线静态. A 不写入 artifact | 每个 forward 将 A 编码为 INT8. `Int8MmaLinear.execution_metadata()["runtime_precision"]` 报告实际路径 | `quantize_with_int8_mma()` 创建 `min_int8_rows=0`, 因而**未配置**小 batch 浮点回退. 直接构造模块且 `min_int8_rows > 0` 时, `input_rows < min_int8_rows` 才会走浮点回退. engine 不可用时可走 INT8 reference, 不等于已使用原生 MMA |
 | `w4_storage_int8_mma` | HBM/state_dict 保持 W4 + group scale | forward 将 W4 解码并重编码为 W8 compute view, A 同时编码为 INT8 | 是 W4 storage -> W8A8 compute retarget, 不是 native W4A4/FP4 MMA. 同样默认**未配置**小 batch 浮点回退; 实际 W8A8/native MMA 状态来自 delegated `runtime_precision` |
-| `convrot_w4a4` | 旋转后 W4 离线静态打包. A 不写入 artifact | `compute_precision=w4a4` 时 A4 和 W4 均会量化再解码到 `F.linear`; 当前为 PSEUDO 路径 | 不得称 native W4A4 MMA. 模块不存在自动 precision fallback; 只有显式 execution policy 或 channel-hybrid override 会改为 `w4a16`, `w8a8` 或 `bf16` |
+| `convrot_w4a4` / `method=convrot` + `strategy=w4a4_int4` | 旋转后 W4 离线静态打包. A 不写入 artifact | `compute_precision=w4a4` 时 A4 和 W4 均会量化再解码到 `F.linear`; 当前为 PSEUDO 路径 | 不得称 native W4A4 MMA. 模块不存在自动 precision fallback; 只有显式 execution policy 或 channel-hybrid override 会改为 `w4a16`, `w8a8` 或 `bf16` |
+| `method=convrot` + `strategy=w8a8_int8` | 规则 Hadamard 分组旋转后 W8 离线静态 per-row INT8. A 不写入 artifact | 每个 forward 在线旋转 A; dynamic 模式在线量化. static 模式可由 calibration_inputs 生成 scale 并走 TileLang static quant, 在 `sm_89` + FP16 + `K % 32 == 0` + `N % 8 == 0` + `M >= 32` 时自动接 CUTLASS `cuda_sm89` true W8A8 GEMM. 热路径将数学 `[K,N]` 权重离线预打包并缓存为 `[N,K]`, 避免每次 GEMM 转置. 其他形状或设备保留 Triton/TileLang/`torch_int_mm`/`ptx_sm89` 后备 | Comfy 生态主路径对应物. 模块 buffer 含 stock 形 `comfy_quant` marker (`format=int8_tensorwise`). native MMA 只看 per-forward metadata |
 | `w4a4_nvfp4`, `w4a4_mxfp4` | W4 FP4 离线打包. A 不写入 artifact | 每个 forward 打包 A4 FP4 并消费 packed W4 | 当前实现分类为 PSEUDO, 不宣称 native FP4 MMA. `FP4DynamicLinear.execution_metadata()` 会记录 engine candidates 和实际 taken fallback |
 | `static_qdq_int8` / `onnxruntime_qdq` | W/A scale 由校准写入 QDQ graph | provider 决定 Q/DQ 是否融合或 lower 到整数 kernel | QDQ graph 只说明图契约, 不证明某 provider 已跑原生 W8A8. 需要 provider profiling 或 runtime report |
 | torchao `w8a8_*` / FP8 dynamic | XQT 将 W/A config 交给 torchao | torchao 和 PyTorch 决定实际 module 和 kernel | XQT 没有该外部模块的逐 forward execution metadata. 只能描述已配置 W/A route, 不得写成已验证的 native MMA 或 speedup |
@@ -140,8 +141,27 @@ print(describe_quant_backend_capability("pytorch", method="awq", strategy="weigh
 | `awq` | 离线静态 weight-only (activation-aware 校准服务权重) | `quantizers/awq.py`, `awq_gptq_weight_only.py` |
 | `gptq` | 离线静态 weight-only (Hessian-aware) | `quantizers/gptq.py`, `awq_gptq_weight_only.py` |
 | `svd` / `svdquant` | 离线静态权重残差 + 16-bit 低秩; 激活默认运行时动态 | `quantizers/svd.py` |
+| `convrot` | 离线规则 Hadamard 分组旋转 + 静态权重量化; 激活在线旋转 | `quantizers/convrot_4bit.py` (W4A4 PSEUDO), `quantizers/convrot_int8.py` (W8A8 INT8 MMA) |
 | (torchao methods) | 由 torchao backend 承载 | `backends/torchao.py` |
 | (qdq static) | 离线静态权重 + 校准静态激活 (ONNX QDQ) | `backends/onnx_qdq.py` |
+
+ConvRot 配置 (W8A8, 对齐 Comfy INT8-Fast / stock `int8_tensorwise`):
+
+```yaml
+params:
+  backend: pytorch
+  method: convrot
+  strategy: w8a8_int8
+  compute: w8a8_int8_mma
+  policy:
+    dtype: int8
+    scheme: convrot_w8a8
+    rot_size: 256          # 必须是 4 的幂; 推荐 256
+    activation_scale_mode: dynamic
+```
+
+Comfy marker 编解码: `xqt.quant.comfy_quant` (`encode_int8_tensorwise_marker` / `decode_comfy_quant_marker`).
+调研笔记: `research/convrot-comfy/README.md`.
 
 配置 (默认先 weight-only / 离线静态权重):
 

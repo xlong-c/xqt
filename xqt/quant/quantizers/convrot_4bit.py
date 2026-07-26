@@ -590,6 +590,7 @@ def _collect_convrot_activation_stats(
     calibration_inputs: Iterable[Any] | None,
     sample_limit: int | None,
     rot_size: int,
+    quant_max: float = 7.0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """Collect per-tensor activation scales and per-channel abs-max scores."""
 
@@ -644,8 +645,10 @@ def _collect_convrot_activation_stats(
     finally:
         for handle in handles:
             handle.remove()
+    if float(quant_max) <= 0.0:
+        raise ValueError("quant_max must be positive")
     scales = {
-        name: torch.tensor(max(value / 7.0, 1e-6), dtype=torch.float32)
+        name: torch.tensor(max(value / float(quant_max), 1e-6), dtype=torch.float32)
         for name, value in maxima.items()
     }
     return scales, channel_maxima

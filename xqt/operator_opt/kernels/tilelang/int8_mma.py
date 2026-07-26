@@ -294,6 +294,194 @@ def static_activation_quantize_tilelang(
 
 
 @lru_cache(maxsize=32)
+def build_tilelang_groupwise_hadamard_static_quant_kernel(
+    rows: int,
+    features: int,
+    rot_size: int,
+    *,
+    input_dtype: str,
+    rotation_dtype: str,
+    block_m: int = 16,
+    block_n: int = 64,
+    block_k: int = 64,
+    threads: int = 128,
+    num_stages: int = 2,
+    target_arch: str | None = None,
+) -> Any:
+    """Build fused groupwise Hadamard rotation + static INT8 quantization."""
+
+    tilelang = require_tilelang()
+    import tilelang.language as T
+
+    if rows <= 0 or features <= 0 or rot_size <= 0:
+        raise ValueError("rows, features, and rot_size must be positive")
+    if features % rot_size != 0:
+        raise ValueError("features must be divisible by rot_size")
+    if rot_size % int(block_n) != 0 or rot_size % int(block_k) != 0:
+        raise ValueError("rot_size must be divisible by block_n and block_k")
+    if rows % int(block_m) != 0:
+        raise ValueError("rows must be divisible by block_m")
+    if input_dtype not in {"float16", "bfloat16", "float32"}:
+        raise ValueError("input_dtype must be float16, bfloat16, or float32")
+    if rotation_dtype not in {"float16", "bfloat16", "float32"}:
+        raise ValueError("rotation_dtype must be float16, bfloat16, or float32")
+
+    target = {"kind": "cuda", "arch": str(target_arch)} if target_arch else None
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    }
+    x_shape = [rows, features]
+    rotation_shape = [rot_size, rot_size]
+    scale_shape = [1]
+    out_shape = [rows, features]
+    x_dtype = (
+        T.float16
+        if input_dtype == "float16"
+        else T.bfloat16
+        if input_dtype == "bfloat16"
+        else T.float32
+    )
+    rot_dtype = (
+        T.float16
+        if rotation_dtype == "float16"
+        else T.bfloat16
+        if rotation_dtype == "bfloat16"
+        else T.float32
+    )
+    groups = features // rot_size
+    n_tiles = rot_size // int(block_n)
+
+    def groupwise_hadamard_static_quant_main(
+        x: T.Tensor(x_shape, x_dtype),
+        rotation: T.Tensor(rotation_shape, rot_dtype),
+        scale: T.Tensor(scale_shape, T.float32),
+        out: T.Tensor(out_shape, T.int8),
+    ):
+        with T.Kernel(
+            T.ceildiv(rows, block_m),
+            groups * n_tiles,
+            threads=threads,
+        ) as (bx, by):
+            group = by // n_tiles
+            n_tile = by - group * n_tiles
+            x_shared = T.alloc_shared([block_m, block_k], x_dtype)
+            rotation_shared = T.alloc_shared([block_k, block_n], rot_dtype)
+            acc = T.alloc_fragment([block_m, block_n], T.float32)
+
+            T.fill(acc, 0.0)
+            T.annotate_consumer_reg_alloc(255)
+            for k_tile in T.Pipelined(T.ceildiv(rot_size, block_k), num_stages=num_stages):
+                T.copy(
+                    x[
+                        bx * block_m : (bx + 1) * block_m,
+                        group * rot_size
+                        + k_tile * block_k : group * rot_size
+                        + (k_tile + 1) * block_k,
+                    ],
+                    x_shared,
+                )
+                T.copy(
+                    rotation[
+                        k_tile * block_k : (k_tile + 1) * block_k,
+                        n_tile * block_n : (n_tile + 1) * block_n,
+                    ],
+                    rotation_shared,
+                )
+                T.gemm(
+                    x_shared,
+                    rotation_shared,
+                    acc,
+                    transpose_B=False,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+            for row, col in T.Parallel(block_m, block_n):
+                scaled = T.round(acc[row, col] / scale[0])
+                clipped = T.max(T.min(scaled, 127.0), -127.0)
+                out[
+                    bx * block_m + row,
+                    group * rot_size + n_tile * block_n + col,
+                ] = clipped.astype(T.int8)
+
+    shape_suffix = (
+        f"rows{rows}_features{features}_rot{rot_size}_"
+        f"{input_dtype}_{rotation_dtype}_bm{block_m}_bn{block_n}_bk{block_k}"
+    )
+    groupwise_hadamard_static_quant_main.__name__ = (
+        f"groupwise_hadamard_static_quant_main_{shape_suffix}"
+    )
+    prim = T.prim_func(groupwise_hadamard_static_quant_main)
+
+    def builder():
+        return prim
+
+    builder.__name__ = f"groupwise_hadamard_static_quant_builder_{shape_suffix}"
+    return tilelang.jit(
+        out_idx=[],
+        target=target,
+        pass_configs=pass_configs,
+    )(builder)()
+
+
+def groupwise_hadamard_static_quantize_tilelang(
+    inputs: torch.Tensor,
+    rotation: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    rot_size: int,
+    block_m: int = 16,
+    block_n: int = 64,
+    block_k: int = 64,
+    threads: int = 128,
+    num_stages: int = 2,
+    target_arch: str | None = None,
+) -> tuple[torch.Tensor, int]:
+    """Rotate groupwise regular-Hadamard activations and quantize to INT8."""
+
+    require_cuda_tensors(inputs, rotation, scale)
+    if inputs.ndim != 2:
+        raise XQTBackendError("TileLang Hadamard quantization expects a 2D tensor")
+    if rotation.ndim != 2:
+        raise XQTBackendError("rotation must be a 2D matrix")
+    if scale.numel() != 1:
+        raise XQTBackendError("activation scale must contain one scalar")
+    if inputs.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        raise XQTBackendError("TileLang Hadamard quantization expects fp16, bf16, or fp32 inputs")
+    if rotation.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        raise XQTBackendError("rotation must be fp16, bf16, or fp32")
+    rows, features = int(inputs.shape[0]), int(inputs.shape[1])
+    normalized_rot = int(rot_size)
+    if rotation.shape != (normalized_rot, normalized_rot):
+        raise XQTBackendError("rotation shape must match rot_size")
+    if features % normalized_rot != 0:
+        raise XQTBackendError("features must be divisible by rot_size")
+    if normalized_rot % int(block_n) != 0 or normalized_rot % int(block_k) != 0:
+        raise XQTBackendError("rot_size must align with TileLang Hadamard block sizes")
+    padded, original_rows = pad_rows_to_block(inputs, int(block_m))
+    padded_rows = int(padded.shape[0])
+    kernel = build_tilelang_groupwise_hadamard_static_quant_kernel(
+        padded_rows,
+        features,
+        normalized_rot,
+        input_dtype=_activation_dtype_name(inputs.dtype),
+        rotation_dtype=_activation_dtype_name(rotation.dtype),
+        block_m=int(block_m),
+        block_n=int(block_n),
+        block_k=int(block_k),
+        threads=int(threads),
+        num_stages=int(num_stages),
+        target_arch=target_arch,
+    )
+    out = torch.empty((padded_rows, features), device=inputs.device, dtype=torch.int8)
+    kernel(
+        padded.contiguous(),
+        rotation.contiguous(),
+        scale.reshape(1).to(device=inputs.device, dtype=torch.float32),
+        out,
+    )
+    return out[:original_rows], padded_rows
+
+
+@lru_cache(maxsize=32)
 def build_tilelang_int8_linear_kernel(
     m: int,
     n: int,
@@ -1004,7 +1192,9 @@ __all__ = [
     "build_tilelang_int8_linear_kernel",
     "build_tilelang_int8_linear_static_activation_kernel",
     "build_tilelang_int8_mma_kernel",
+    "build_tilelang_groupwise_hadamard_static_quant_kernel",
     "build_tilelang_static_activation_quant_kernel",
+    "groupwise_hadamard_static_quantize_tilelang",
     "int8_linear_reference",
     "int8_linear_static_activation_m1_tilelang",
     "int8_linear_static_activation_reference",

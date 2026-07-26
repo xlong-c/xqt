@@ -1,4 +1,4 @@
-"""ctypes binding for Ada sm_89 INT8 MMA (math, prepacked B, fused static act)."""
+"""ctypes bindings for Ada sm_89 INT8 MMA CUDA kernels."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from xqt.operator_opt.kernels.prepack import INT8_SM89_B_NK, prepack_weight
 _SO_NAME = "int8mma_sm89.so"
 _ROOT = Path(__file__).resolve().parent
 _DEFAULT_SO = _ROOT / "build" / _SO_NAME
+_CUBLASLT_WORKSPACE_BYTES = 32 * 1024 * 1024
+_CUBLASLT_WORKSPACES: dict[tuple[str, int | None], torch.Tensor] = {}
 
 
 @functools.lru_cache(maxsize=1)
@@ -51,6 +53,48 @@ def _load_lib(so_path: str | None = None) -> Any:
             ctypes.c_int,
         ]
         fn.restype = ctypes.c_int
+    cutlass_names = (
+        "int8mma_run_cutlass_prepacked_b",
+        "int8mma_run_cutlass_64x128_prepacked_b",
+    )
+    for name in cutlass_names:
+        if not hasattr(lib, name):
+            continue
+        fn = getattr(lib, name)
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        fn.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_run_cublaslt_i32"):
+        lib.int8mma_run_cublaslt_i32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_run_cublaslt_i32.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_dequant_i32"):
+        lib.int8mma_dequant_i32.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        lib.int8mma_dequant_i32.restype = ctypes.c_int
     lib.int8mma_version.argtypes = []
     lib.int8mma_version.restype = ctypes.c_char_p
     lib.int8mma_smem_bytes.argtypes = []
@@ -93,6 +137,107 @@ def int8mma_version() -> str:
 def prepack_qweight_t_for_ptx_sm89(qweight_t: torch.Tensor) -> torch.Tensor:
     result = prepack_weight(qweight_t, INT8_SM89_B_NK)
     return result.packed
+
+
+def int8_linear_cutlass_sm89(
+    qactivation: torch.Tensor,
+    qweight_t: torch.Tensor,
+    activation_scale: torch.Tensor | float,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    output_dtype: torch.dtype = torch.float16,
+    prepacked_b: torch.Tensor | None = None,
+    scale_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run the fused-per-channel CUTLASS W8A8 kernel on Ada ``sm_89``.
+
+    ``prepacked_b`` is the cached contiguous ``[N, K]`` transpose of
+    ``qweight_t``. ``scale_bias`` is an optional cached ``float32[N, 2]``
+    tensor where every row stores ``activation_scale * weight_scale[n]`` and
+    ``bias[n]``. Its layout matches the CUDA epilogue's 8-byte vector type.
+    """
+
+    if not qactivation.is_cuda or not qweight_t.is_cuda:
+        raise XQTBackendError("cuda_sm89 W8A8 path requires CUDA tensors")
+    if qactivation.dtype != torch.int8 or qweight_t.dtype != torch.int8:
+        raise XQTBackendError("cuda_sm89 W8A8 path expects int8 inputs")
+    if qactivation.ndim != 2 or qweight_t.ndim != 2:
+        raise XQTBackendError("cuda_sm89 W8A8 path expects 2D tensors")
+    if qactivation.shape[1] != qweight_t.shape[0]:
+        raise XQTBackendError("cuda_sm89 W8A8 path requires A.shape[1] == B.shape[0]")
+    if output_dtype != torch.float16:
+        raise XQTBackendError("cuda_sm89 W8A8 fast path supports float16 output only")
+    major, minor = torch.cuda.get_device_capability(qactivation.device)
+    if (major, minor) != (8, 9):
+        raise XQTBackendError(
+            f"cuda_sm89 W8A8 fast path is tuned for sm_89, got sm_{major}{minor}"
+        )
+
+    m, k = int(qactivation.shape[0]), int(qactivation.shape[1])
+    n = int(qweight_t.shape[1])
+    if k % 32 != 0 or n % 8 != 0:
+        raise XQTBackendError("cuda_sm89 W8A8 requires K % 32 == 0 and N % 8 == 0")
+    if prepacked_b is None:
+        prepacked_b = prepack_qweight_t_for_ptx_sm89(qweight_t)
+    if (
+        prepacked_b.shape != (n, k)
+        or prepacked_b.dtype != torch.int8
+        or not prepacked_b.is_cuda
+        or prepacked_b.device != qactivation.device
+    ):
+        raise XQTBackendError(
+            "prepacked_b must be CUDA int8 [N,K]="
+            f"[{n},{k}], got {prepacked_b.dtype} {tuple(prepacked_b.shape)}"
+        )
+
+    if scale_bias is None:
+        activation = _device_activation_scale(activation_scale, qactivation.device)
+        weight = weight_scale.detach().to(
+            device=qactivation.device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        if weight.numel() != n:
+            raise XQTBackendError("weight_scale must have N elements")
+        bias_value = (
+            torch.zeros_like(weight)
+            if bias is None
+            else bias.detach()
+            .to(device=qactivation.device, dtype=torch.float32)
+            .reshape(-1)
+        )
+        if bias_value.numel() != n:
+            raise XQTBackendError("bias must have N elements")
+        scale_bias = torch.stack((activation * weight, bias_value), dim=1).contiguous()
+    elif (
+        not scale_bias.is_cuda
+        or scale_bias.device != qactivation.device
+        or scale_bias.dtype != torch.float32
+        or scale_bias.shape != (n, 2)
+        or not scale_bias.is_contiguous()
+    ):
+        raise XQTBackendError(
+            "scale_bias must be a contiguous CUDA float32 [N,2] tensor on the input device"
+        )
+
+    lib = _load_lib()
+    if not hasattr(lib, "int8mma_run_cutlass_64x128_prepacked_b"):
+        raise XQTBackendError(
+            "CUTLASS W8A8 symbol is unavailable; rebuild int8mma_sm89.so"
+        )
+    output = torch.empty((m, n), device=qactivation.device, dtype=torch.float16)
+    err = lib.int8mma_run_cutlass_64x128_prepacked_b(
+        qactivation.contiguous().data_ptr(),
+        prepacked_b.data_ptr(),
+        output.data_ptr(),
+        scale_bias.data_ptr(),
+        m,
+        n,
+        k,
+    )
+    if err != 0:
+        raise XQTBackendError(f"CUTLASS cuda_sm89 W8A8 GEMM failed with cuda error {err}")
+    return output
 
 
 def int8_linear_ptx_sm89(
@@ -227,6 +372,97 @@ def _device_activation_scale(
             raise XQTBackendError("activation_scale must be positive")
         scale = torch.tensor([value], device=device, dtype=torch.float32)
     return scale.contiguous()
+
+
+def _cublaslt_workspace(device: torch.device) -> torch.Tensor:
+    key = (device.type, device.index)
+    workspace = _CUBLASLT_WORKSPACES.get(key)
+    if workspace is None or workspace.device != device:
+        workspace = torch.empty(
+            _CUBLASLT_WORKSPACE_BYTES,
+            device=device,
+            dtype=torch.uint8,
+        )
+        _CUBLASLT_WORKSPACES[key] = workspace
+    return workspace
+
+
+def int8_linear_cublaslt_sm89(
+    qactivation: torch.Tensor,
+    qweight_t: torch.Tensor,
+    activation_scale: torch.Tensor | float,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Run cuBLASLt INT8 GEMM plus a CUDA fp16 scale/bias epilogue on sm_89."""
+
+    if not qactivation.is_cuda or not qweight_t.is_cuda:
+        raise XQTBackendError("cuBLASLt W8A8 path requires CUDA tensors")
+    if qactivation.dtype != torch.int8 or qweight_t.dtype != torch.int8:
+        raise XQTBackendError("cuBLASLt W8A8 path expects int8 inputs")
+    if qactivation.ndim != 2 or qweight_t.ndim != 2:
+        raise XQTBackendError("cuBLASLt W8A8 path expects 2D tensors")
+    if qactivation.shape[1] != qweight_t.shape[0]:
+        raise XQTBackendError("cuBLASLt W8A8 path requires A.shape[1] == B.shape[0]")
+    major, minor = torch.cuda.get_device_capability(qactivation.device)
+    if (major, minor) != (8, 9):
+        raise XQTBackendError(
+            f"cuBLASLt W8A8 fast path is tuned for sm_89, got sm_{major}{minor}"
+        )
+
+    m, k = int(qactivation.shape[0]), int(qactivation.shape[1])
+    n = int(qweight_t.shape[1])
+    scale = _device_activation_scale(activation_scale, qactivation.device)
+    wscale = weight_scale.detach().to(
+        device=qactivation.device,
+        dtype=torch.float32,
+    ).contiguous()
+    if wscale.numel() != n:
+        raise XQTBackendError("weight_scale must have N elements")
+    bias_half = (
+        None
+        if bias is None
+        else bias.detach().to(device=qactivation.device, dtype=torch.float16).contiguous()
+    )
+    accum = torch.empty((m, n), device=qactivation.device, dtype=torch.int32)
+    output = torch.empty((m, n), device=qactivation.device, dtype=torch.float16)
+    workspace = _cublaslt_workspace(qactivation.device)
+    stream = torch.cuda.current_stream(qactivation.device).cuda_stream
+    lib = _load_lib()
+    if not (
+        hasattr(lib, "int8mma_run_cublaslt_i32")
+        and hasattr(lib, "int8mma_dequant_i32")
+    ):
+        raise XQTBackendError(
+            "cuBLASLt W8A8 symbols are unavailable; rebuild int8mma_sm89.so"
+        )
+    err = lib.int8mma_run_cublaslt_i32(
+        qactivation.contiguous().data_ptr(),
+        qweight_t.contiguous().data_ptr(),
+        accum.data_ptr(),
+        m,
+        n,
+        k,
+        workspace.data_ptr(),
+        workspace.numel(),
+        stream,
+    )
+    if err != 0:
+        raise XQTBackendError(f"cuBLASLt W8A8 GEMM failed with status {err}")
+    err = lib.int8mma_dequant_i32(
+        accum.data_ptr(),
+        output.data_ptr(),
+        scale.data_ptr(),
+        wscale.data_ptr(),
+        0 if bias_half is None else bias_half.data_ptr(),
+        m,
+        n,
+    )
+    if err != 0:
+        raise XQTBackendError(f"cuBLASLt W8A8 epilogue failed with cuda error {err}")
+    return output if output_dtype == torch.float16 else output.to(output_dtype)
 
 
 def int8_gemv_m1_ptx_sm89(
@@ -365,6 +601,8 @@ def int8_gemv_m1_fused_static_ptx_sm89(
 __all__ = [
     "int8mma_available",
     "int8mma_version",
+    "int8_linear_cutlass_sm89",
+    "int8_linear_cublaslt_sm89",
     "int8_linear_ptx_sm89",
     "int8_linear_fused_static_ptx_sm89",
     "int8_gemv_m1_ptx_sm89",

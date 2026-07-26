@@ -15,7 +15,12 @@ from xqt.runtime.engine_resolve import (
 )
 
 _PTX_SM89_ENGINES = frozenset({"ptx_sm89", "native_sm89"})
-_VALID_ENGINES = frozenset({"auto", "tilelang", "torch_int_mm"}) | _PTX_SM89_ENGINES
+_CUDA_SM89_ENGINES = frozenset({"cuda_sm89"})
+_VALID_ENGINES = (
+    frozenset({"auto", "tilelang", "triton", "torch_int_mm"})
+    | _PTX_SM89_ENGINES
+    | _CUDA_SM89_ENGINES
+)
 _ACTIVATION_SCALE_MODES = {"dynamic", "static"}
 _OUTPUT_DTYPES = {torch.float16, torch.bfloat16, torch.float32}
 
@@ -38,6 +43,13 @@ def _tilelang_int8_api():
         "pad_rows_to_block": pad_rows_to_block,
         "static_activation_quantize_tilelang": static_activation_quantize_tilelang,
     }
+
+
+def _triton_int8_api():
+    """Lazy import Triton INT8 GEMM kernels."""
+    from xqt.operator_opt.kernels.triton.gemm import gemm_int8_triton
+
+    return {"gemm_int8_triton": gemm_int8_triton}
 
 def _target_arch_from_device(device: torch.device) -> str | None:
     if device.type != "cuda":
@@ -79,7 +91,7 @@ class Int8MmaLinear(nn.Module):
             normalized_engine = "ptx_sm89"
         if normalized_engine not in _VALID_ENGINES:
             raise ValueError(
-                "engine must be one of auto, tilelang, torch_int_mm, ptx_sm89"
+                "engine must be one of auto, triton, tilelang, torch_int_mm, ptx_sm89, cuda_sm89"
             )
         self.preferred_engines = [
             normalize_engine_name(item)
@@ -112,11 +124,15 @@ class Int8MmaLinear(nn.Module):
         self.min_int8_rows = int(min_int8_rows)
         # Lazily cached dense bf16-domain weight for the small-M fallback path.
         self._bf16_weight: torch.Tensor | None = None
+        self._auto_engine_cache: dict[tuple[str, int | None, int, str, bool, bool], str] = {}
         self.last_execution: dict[str, Any] = {"engine": "not_run"}
         self.register_buffer("qweight_t", qweight_t.to(torch.int8).contiguous())
         self.register_buffer("weight_scale", weight_scale.to(torch.float32).contiguous())
         self._qweight_prepacked_b: torch.Tensor | None = None
-        if normalized_engine == "ptx_sm89":
+        self._qweight_prepacked_b_version: int | None = None
+        self._cuda_sm89_scale_bias_cache: torch.Tensor | None = None
+        self._cuda_sm89_scale_bias_cache_key: tuple[int, int | None, int, torch.device] | None = None
+        if normalized_engine in {"ptx_sm89", "cuda_sm89"}:
             self._ensure_ptx_prepacked_b()
         initial_activation_scale = torch.tensor(0.0, dtype=torch.float32)
         self._has_static_activation_scale = activation_scale is not None
@@ -297,6 +313,8 @@ class Int8MmaLinear(nn.Module):
         self.static_activation_scale.copy_(value)
         self._has_static_activation_scale = True
         self.activation_scale_mode = "static"
+        self._cuda_sm89_scale_bias_cache = None
+        self._cuda_sm89_scale_bias_cache_key = None
 
     def calibrate_static_activation_scale(self, sample_inputs: torch.Tensor) -> torch.Tensor:
         """Calibrate this layer's static activation scale from representative inputs."""
@@ -376,10 +394,36 @@ class Int8MmaLinear(nn.Module):
             return False, "ptx_sm89 shared library not built"
         return True, "ok"
 
+    def _can_use_cuda_sm89(self, qactivation: torch.Tensor) -> tuple[bool, str]:
+        """Check the fixed-shape CUTLASS W8A8 fast path constraints."""
+
+        if not qactivation.is_cuda or not self.qweight_t.is_cuda:
+            return False, "cuda_sm89 W8A8 requires CUDA tensors"
+        if self.output_dtype != torch.float16:
+            return False, "cuda_sm89 W8A8 fast path requires float16 output"
+        if self.input_features % 32 != 0:
+            return False, "cuda_sm89 W8A8 requires input_features % 32 == 0"
+        if self.output_features % 8 != 0:
+            return False, "cuda_sm89 W8A8 requires output_features % 8 == 0"
+        major, minor = torch.cuda.get_device_capability(qactivation.device)
+        if (major, minor) != (8, 9):
+            return False, f"cuda_sm89 W8A8 requires sm_89, got sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+        except Exception as exc:
+            return False, f"cuda_sm89 import failed: {exc}"
+        if not int8mma_available():
+            return False, "cuda_sm89 shared library not built"
+        return True, "ok"
+
     def _ensure_ptx_prepacked_b(self) -> torch.Tensor | None:
-        if self.engine not in {"ptx_sm89", "auto"}:
+        if self.engine not in {"ptx_sm89", "cuda_sm89", "auto"}:
             return None
-        if self._qweight_prepacked_b is not None:
+        qweight_version = self.qweight_t._version
+        if (
+            self._qweight_prepacked_b is not None
+            and self._qweight_prepacked_b_version == qweight_version
+        ):
             if self._qweight_prepacked_b.device != self.qweight_t.device:
                 self._qweight_prepacked_b = self._qweight_prepacked_b.to(
                     device=self.qweight_t.device
@@ -393,7 +437,62 @@ class Int8MmaLinear(nn.Module):
             return None
         packed = prepack_qweight_t_for_ptx_sm89(self.qweight_t)
         self._qweight_prepacked_b = packed.to(device=self.qweight_t.device)
+        self._qweight_prepacked_b_version = qweight_version
         return self._qweight_prepacked_b
+
+    def _cuda_sm89_scale_bias(self, activation_scale: torch.Tensor) -> torch.Tensor:
+        """Return the cached CUTLASS ``[N, 2]`` scale/bias epilogue vector."""
+
+        cached = self._cuda_sm89_scale_bias_cache
+        cache_key = (
+            self.weight_scale._version,
+            None if self.bias is None else self.bias._version,
+            self.static_activation_scale._version,
+            activation_scale.device,
+        )
+        if (
+            self.activation_scale_mode == "static"
+            and cached is not None
+            and self._cuda_sm89_scale_bias_cache_key == cache_key
+        ):
+            return cached
+        weight_scale = self.weight_scale.to(
+            device=activation_scale.device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        output_scale = activation_scale.to(
+            device=activation_scale.device,
+            dtype=torch.float32,
+        ).reshape(()) * weight_scale
+        bias = (
+            torch.zeros_like(output_scale)
+            if self.bias is None
+            else self.bias.to(device=activation_scale.device, dtype=torch.float32).reshape(-1)
+        )
+        scale_bias = torch.stack((output_scale, bias), dim=1).contiguous()
+        if self.activation_scale_mode == "static":
+            self._cuda_sm89_scale_bias_cache = scale_bias
+            self._cuda_sm89_scale_bias_cache_key = cache_key
+        return scale_bias
+
+    def _run_cuda_sm89(
+        self,
+        qactivation: torch.Tensor,
+        activation_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        from xqt.operator_opt.kernels.cute.int8mma_binding import int8_linear_cutlass_sm89
+
+        prepacked = self._ensure_ptx_prepacked_b()
+        return int8_linear_cutlass_sm89(
+            qactivation,
+            self.qweight_t,
+            activation_scale,
+            self.weight_scale,
+            self.bias,
+            output_dtype=self.output_dtype,
+            prepacked_b=prepacked,
+            scale_bias=self._cuda_sm89_scale_bias(activation_scale),
+        )
 
     def _run_ptx_sm89(
         self,
@@ -464,6 +563,50 @@ class Int8MmaLinear(nn.Module):
             target_arch=target_arch,
         )
         return output[:original_rows], int(padded.shape[0]), target_arch or "auto"
+
+    def _can_use_triton(self, qactivation: torch.Tensor) -> tuple[bool, str]:
+        if not qactivation.is_cuda or not self.qweight_t.is_cuda:
+            return False, "Triton INT8 GEMM requires CUDA tensors"
+        return True, "ok"
+
+    def _run_triton(
+        self,
+        qactivation: torch.Tensor,
+        activation_scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, int, str]:
+        api = _triton_int8_api()
+        output = api["gemm_int8_triton"](
+            qactivation.contiguous(),
+            self.qweight_t,
+            activation_scale,
+            self.weight_scale,
+            self.bias,
+            transpose_b=False,
+            block_m=128,
+            block_n=128,
+            block_k=64,
+            group_m=8,
+            num_warps=4,
+            num_stages=3,
+            output_dtype=output_dtype,
+        )
+        return output, int(qactivation.shape[0]), _target_arch_from_device(qactivation.device) or "auto"
+
+    def _run_triton_static_fused(
+        self,
+        flat_inputs: torch.Tensor,
+        activation_scale: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, int, str]:
+        api = _tilelang_int8_api()
+        qactivation = api["static_activation_quantize_tilelang"](
+            flat_inputs,
+            activation_scale,
+            block_size=self.activation_quant_block_size,
+            target_arch=_target_arch_from_device(flat_inputs.device),
+        )
+        return self._run_triton(qactivation, activation_scale, output_dtype)
 
     def _can_use_tilelang_static_fused(self, flat_inputs: torch.Tensor) -> tuple[bool, str]:
         if not flat_inputs.is_cuda or not self.qweight_t.is_cuda:
@@ -566,29 +709,102 @@ class Int8MmaLinear(nn.Module):
             output = self._run_bf16_fallback(flat_inputs, flat_inputs.shape[0])
             return output.reshape(*original_shape, self.output_features)
         if selected_engine == "auto":
-            resolved = resolve_int8_mma_engine(
-                "auto",
-                preferred_engines=self.preferred_engines,
-                fallback=self.fallback_engine,
+            cache_key = (
+                flat_inputs.device.type,
+                flat_inputs.device.index,
+                int(flat_inputs.shape[0]),
+                self.activation_scale_mode,
+                bool(inputs.is_cuda),
+                bool(self.qweight_t.is_cuda),
             )
-            selected_engine = resolved.engine
-            if selected_engine == "ptx_sm89":
-                m_rows = int(flat_inputs.shape[0])
-                ptx_ok, _ = self._can_use_ptx_sm89(flat_inputs)
-                if not (ptx_ok and m_rows >= 192 and inputs.is_cuda):
-                    # Prefer tilelang when ptx not suitable for this shape/device.
-                    selected_engine = (
-                        "tilelang"
-                        if inputs.is_cuda and self.qweight_t.is_cuda
-                        else self.fallback_engine
-                    )
-            elif not inputs.is_cuda:
-                selected_engine = self.fallback_engine
+            cached_engine = self._auto_engine_cache.get(cache_key)
+            if cached_engine is not None:
+                selected_engine = cached_engine
+            else:
+                resolved = resolve_int8_mma_engine(
+                    "auto",
+                    preferred_engines=self.preferred_engines,
+                    fallback=self.fallback_engine,
+                )
+                selected_engine = resolved.engine
+                if (
+                    selected_engine == "triton"
+                    and int(flat_inputs.shape[0]) == 1
+                    and self.activation_scale_mode == "static"
+                ):
+                    ptx_ok, _ = self._can_use_ptx_sm89(flat_inputs)
+                    if ptx_ok:
+                        selected_engine = "ptx_sm89"
+                if selected_engine == "ptx_sm89":
+                    m_rows = int(flat_inputs.shape[0])
+                    ptx_ok, _ = self._can_use_ptx_sm89(flat_inputs)
+                    if not (ptx_ok and m_rows >= 192 and inputs.is_cuda):
+                        # Prefer Triton when ptx is not suitable for this shape/device.
+                        selected_engine = (
+                            "triton"
+                            if inputs.is_cuda and self.qweight_t.is_cuda
+                            else self.fallback_engine
+                        )
+                if (
+                    selected_engine == "triton"
+                    and self.activation_scale_mode == "static"
+                    and int(flat_inputs.shape[0]) >= 32
+                ):
+                    cuda_ok, _ = self._can_use_cuda_sm89(flat_inputs)
+                    if cuda_ok:
+                        selected_engine = "cuda_sm89"
+                elif not inputs.is_cuda:
+                    selected_engine = self.fallback_engine
+                self._auto_engine_cache[cache_key] = selected_engine
         prefer_tilelang = selected_engine == "tilelang"
         prefer_ptx = selected_engine == "ptx_sm89"
+        prefer_triton = selected_engine == "triton"
+        prefer_cuda_sm89 = selected_engine == "cuda_sm89"
         prefer_tilelang = selected_engine == "tilelang" or (
             selected_engine == "auto" and inputs.is_cuda and self.qweight_t.is_cuda
         )
+        if (
+            prefer_cuda_sm89
+            and self.activation_scale_mode == "static"
+            and self.fallback_engine == "torch_int_mm"
+        ):
+            activation_scale = self._static_activation_scale(flat_inputs.device)
+            used_engine = "cuda_sm89"
+            reason = "true_int8_mma_cuda_sm89_cutlass_64x128_fused_scale_bias"
+            fused_static_status = "not_attempted"
+            padded_rows = int(flat_inputs.shape[0])
+            target_arch = _target_arch_from_device(flat_inputs.device)
+            allowed, availability_reason = self._can_use_cuda_sm89(flat_inputs)
+            if allowed:
+                try:
+                    qactivation, activation_scale, activation_quant_engine = (
+                        self._quantize_activation(flat_inputs, prefer_tilelang=True)
+                    )
+                    output = self._run_cuda_sm89(qactivation, activation_scale)
+                    self.last_execution = {
+                        "engine": used_engine,
+                        "reason": reason,
+                        "true_int8_mma": True,
+                        "activation_dtype": "int8",
+                        "weight_dtype": "int8",
+                        "accumulation_dtype": "int32",
+                        "activation_scale_mode": self.activation_scale_mode,
+                        "activation_quant_engine": activation_quant_engine,
+                        "fused_static_status": "two_kernel_quant_then_cuda_gemm",
+                        "input_rows": int(qactivation.shape[0]),
+                        "padded_rows": padded_rows,
+                        "input_features": self.input_features,
+                        "output_features": self.output_features,
+                        "target_arch": target_arch,
+                        "prepacked_b": self._qweight_prepacked_b is not None,
+                    }
+                    return output.reshape(*original_shape, self.output_features)
+                except Exception as exc:
+                    reason = f"cuda_sm89_static_fallback: {exc}"
+                    fused_static_status = reason
+            else:
+                reason = f"cuda_sm89_static_unavailable: {availability_reason}"
+                fused_static_status = reason
         if (
             prefer_ptx
             and self.activation_scale_mode == "static"
@@ -632,6 +848,50 @@ class Int8MmaLinear(nn.Module):
                     fused_static_status = reason
             else:
                 reason = f"ptx_sm89_fused_static_unavailable: {reason}"
+                fused_static_status = reason
+        if (
+            prefer_triton
+            and not prefer_ptx
+            and self.activation_scale_mode == "static"
+            and self.fallback_engine == "torch_int_mm"
+        ):
+            activation_scale = self._static_activation_scale(flat_inputs.device)
+            used_engine = "triton"
+            reason = "true_int8_mma_triton_static_tilelang_quant"
+            fused_static_status = "not_attempted"
+            padded_rows = int(flat_inputs.shape[0])
+            target_arch = _target_arch_from_device(flat_inputs.device)
+            allowed, reason = self._can_use_triton(flat_inputs)
+            if allowed:
+                try:
+                    output, padded_rows, target_arch = self._run_triton_static_fused(
+                        flat_inputs,
+                        activation_scale,
+                        self.output_dtype,
+                    )
+                    self.last_execution = {
+                        "engine": used_engine,
+                        "reason": "true_int8_mma_triton_static_tilelang_quant",
+                        "true_int8_mma": True,
+                        "activation_dtype": "int8",
+                        "weight_dtype": "int8",
+                        "accumulation_dtype": "int32",
+                        "activation_scale_mode": self.activation_scale_mode,
+                        "activation_quant_engine": "tilelang_static",
+                        "fused_static_status": "two_kernel_quant_then_gemm",
+                        "input_rows": int(flat_inputs.shape[0]),
+                        "padded_rows": padded_rows,
+                        "input_features": self.input_features,
+                        "output_features": self.output_features,
+                        "target_arch": target_arch,
+                    }
+                    output = output.to(self.output_dtype)
+                    return output.reshape(*original_shape, self.output_features)
+                except Exception as exc:
+                    reason = f"triton_static_fallback: {exc}"
+                    fused_static_status = reason
+            else:
+                reason = f"triton_static_unavailable: {reason}"
                 fused_static_status = reason
         if (
             prefer_tilelang
@@ -704,7 +964,7 @@ class Int8MmaLinear(nn.Module):
         if selected_engine == "auto":
             if qactivation.is_cuda:
                 ptx_ok, _ = self._can_use_ptx_sm89(qactivation)
-                selected_engine = "ptx_sm89" if ptx_ok else "tilelang"
+                selected_engine = "triton" if not ptx_ok else "ptx_sm89"
             else:
                 selected_engine = "torch_int_mm"
 
@@ -727,11 +987,26 @@ class Int8MmaLinear(nn.Module):
                     if self._qweight_prepacked_b is not None
                     else "true_int8_mma_ptx_sm89"
                 )
+            elif selected_engine == "cuda_sm89":
+                allowed, reason = self._can_use_cuda_sm89(qactivation)
+                if not allowed:
+                    raise XQTBackendError(reason)
+                output = self._run_cuda_sm89(qactivation, activation_scale)
+                reason = "true_int8_mma_cuda_sm89_cutlass_64x128_fused_scale_bias"
             elif selected_engine == "tilelang":
                 allowed, reason = self._can_use_tilelang(qactivation)
                 if not allowed:
                     raise XQTBackendError(reason)
                 output, padded_rows, target_arch = self._run_tilelang(
+                    qactivation,
+                    activation_scale,
+                    self.output_dtype,
+                )
+            elif selected_engine == "triton":
+                allowed, reason = self._can_use_triton(qactivation)
+                if not allowed:
+                    raise XQTBackendError(reason)
+                output, padded_rows, target_arch = self._run_triton(
                     qactivation,
                     activation_scale,
                     self.output_dtype,
@@ -756,7 +1031,12 @@ class Int8MmaLinear(nn.Module):
                     dtype=torch.float32,
                 )
             )
-        if self.bias is not None and used_engine not in {"tilelang", "ptx_sm89"}:
+        if self.bias is not None and used_engine not in {
+            "tilelang",
+            "triton",
+            "ptx_sm89",
+            "cuda_sm89",
+        }:
             output = output + self.bias.to(device=output.device, dtype=output.dtype)
         self.last_execution = {
             "engine": used_engine,

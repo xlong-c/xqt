@@ -12,12 +12,14 @@ from typing import Any, Mapping, Sequence
 # Default preference when preferred_engines is empty or contains only "auto".
 # Order is capability-family aware; unknown engines are ignored.
 _DEFAULT_INT8_MMA_ORDER: tuple[str, ...] = (
+    "triton",
     "ptx_sm89",
     "tilelang",
     "torch_int_mm",
 )
 
 _ENGINE_PROVIDES: dict[str, frozenset[str]] = {
+    "cuda_sm89": frozenset({"int8_mma", "true_int8_mma"}),
     "ptx_sm89": frozenset({"int8_mma", "true_int8_mma"}),
     "native_sm89": frozenset({"int8_mma", "true_int8_mma"}),
     "tilelang": frozenset(
@@ -31,7 +33,9 @@ _ENGINE_PROVIDES: dict[str, frozenset[str]] = {
     ),
     "torch_int_mm": frozenset({"int8_mma", "true_int8_mma"}),
     "torch": frozenset({"generic", "fp16_mma", "fp8_mma"}),
-    "triton": frozenset({"generic", "fp16_mma", "fp4_mma", "dequant_gemm_epilogue"}),
+    "triton": frozenset(
+        {"generic", "int8_mma", "true_int8_mma", "fp16_mma", "fp4_mma", "dequant_gemm_epilogue"}
+    ),
     "cutlass": frozenset({"int8_mma", "fp4_mma", "int4_mma", "fp16_mma"}),
     "cute_dsl": frozenset({"int8_mma", "fp4_mma"}),
     "cutile": frozenset({"generic", "fp16_mma"}),

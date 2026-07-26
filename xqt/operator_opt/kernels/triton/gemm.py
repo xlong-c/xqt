@@ -539,7 +539,7 @@ def _gemm_int8_kernel(
     a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
 
     for k in range(0, K, BLOCK_K):
         a_mask = (offs_m[:, None] < M) & ((k + offs_k[None, :]) < K)
@@ -548,24 +548,24 @@ def _gemm_int8_kernel(
         a_int8 = tl.load(a_ptrs, mask=a_mask, other=0)
         b_int8 = tl.load(b_ptrs, mask=b_mask, other=0)
 
-        # Convert INT8 to FP32 and apply scaling
-        a_fp = a_int8.to(tl.float32)
-        b_fp = b_int8.to(tl.float32)
-
-        if has_a_scale:
-            a_scale = tl.load(a_scale_ptr)
-            a_fp = a_fp * a_scale
-
-        if has_b_scale:
-            b_scale = tl.load(b_scale_ptr + offs_n, mask=offs_n < N, other=1.0)
-            b_fp = b_fp * b_scale[None, :]
-
-        accumulator += tl.dot(a_fp, b_fp)
+        accumulator = tl.dot(
+            a_int8,
+            b_int8,
+            accumulator,
+            out_dtype=tl.int32,
+        )
 
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
-    c = accumulator.to(tl.float16)
+    c = accumulator.to(tl.float32)
+
+    if has_a_scale:
+        c = c * tl.load(a_scale_ptr).to(tl.float32)
+
+    if has_b_scale:
+        b_scale = tl.load(b_scale_ptr + offs_n, mask=offs_n < N, other=1.0)
+        c = c * b_scale[None, :].to(tl.float32)
 
     if has_bias:
         bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
@@ -721,20 +721,94 @@ def gemm_int8_triton(
     group_m: int = 8,
     num_warps: int = 4,
     num_stages: int = 3,
+    output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """INT8 GEMM with dequantization using Triton."""
+    """INT8 GEMM with a true W8A8 Tensor Core fast path on CUDA.
+
+    Floating-point activations keep the existing reference behavior because
+    they represent W8A16-style callers. The executable Triton path is only
+    selected when both operands are signed INT8 and scales are supplied.
+    """
     _require_triton()
     _require_cuda_tensors(a, b_int8)
 
     if b_int8.dtype != torch.int8:
         raise ValueError(f"b_int8 must be INT8, got {b_int8.dtype}")
+    if a.dtype != torch.int8:
+        return gemm_int8_reference(
+            a, b_int8, a_scale, b_scale, bias,
+            activation=activation,
+            transpose_b=transpose_b,
+        )
+    if output_dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        raise ValueError("output_dtype must be float16, bfloat16, or float32")
 
-    # For now, fallback to reference (full kernel implementation needs more work)
-    return gemm_int8_reference(
-        a, b_int8, a_scale, b_scale, bias,
-        activation=activation,
-        transpose_b=transpose_b,
+    if transpose_b:
+        n, k_b = b_int8.shape
+        if int(a.shape[1]) != int(k_b):
+            raise ValueError(f"Inner dimensions must match: {a.shape[1]} vs {k_b}")
+        b = b_int8.t().contiguous()
+    else:
+        k_b, n = b_int8.shape
+        if int(a.shape[1]) != int(k_b):
+            raise ValueError(f"Inner dimensions must match: {a.shape[1]} vs {k_b}")
+        b = b_int8.contiguous()
+    m, k = (int(a.shape[0]), int(a.shape[1]))
+    if a_scale is None or b_scale is None:
+        raise ValueError("true W8A8 Triton GEMM requires activation and weight scales")
+    if a_scale.numel() != 1:
+        raise ValueError("Triton W8A8 activation scale must be scalar")
+    if b_scale.numel() != int(n):
+        raise ValueError("Triton W8A8 weight_scale must contain one value per output")
+    if bias is not None and bias.numel() != int(n):
+        raise ValueError("bias must contain one value per output")
+
+    output = torch.empty((m, int(n)), device=a.device, dtype=output_dtype)
+    activation_scale = a_scale.to(device=a.device, dtype=torch.float32).reshape(1)
+    weight_scale = b_scale.to(device=a.device, dtype=torch.float32).reshape(int(n))
+    bias_tensor = (
+        bias.to(device=a.device, dtype=torch.float32).reshape(int(n))
+        if bias is not None
+        else a
     )
+    act_code = 0
+    if activation == "relu":
+        act_code = 1
+    elif activation == "gelu":
+        act_code = 2
+    elif activation == "silu":
+        act_code = 3
+    grid = lambda meta: (
+        triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(int(n), meta["BLOCK_N"]),
+    )
+    _gemm_int8_kernel[grid](
+        a,
+        b,
+        output,
+        activation_scale,
+        weight_scale,
+        bias_tensor,
+        m,
+        int(n),
+        k,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        output.stride(0),
+        output.stride(1),
+        has_a_scale=True,
+        has_b_scale=True,
+        has_bias=bias is not None,
+        activation=act_code,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        GROUP_M=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return output
 
 
 def gemm_fp8_triton(
@@ -1015,7 +1089,7 @@ TRITON_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "baseline": "torch.matmul + dequant",
         "usage": "INT8 quantized GEMM with per-tensor or per-channel scaling.",
         "hardware": "CUDA SM75+ (Turing Tensor Core)",
-        "note": "Currently uses reference fallback, full kernel TBD",
+        "note": "True W8A8 Tensor Core fast path for signed INT8 activation and weight operands; W8A16 callers retain reference fallback.",
     },
     "gemm_fp8": {
         "kernel_name": "gemm_fp8",

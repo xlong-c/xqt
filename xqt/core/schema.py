@@ -94,6 +94,8 @@ SUPPORTED_QUANT_METHODS = CANONICAL_QUANT_METHODS
 _QUANT_STRATEGY_ALIASES = {
     "fp4_weight_only": "w4a16_fp4",
     "weight_only_int4": "w4a16_int4",
+    "convrot_w4a4": "w4a4_int4",
+    "convrot_w8a8": "w8a8_int8",
 }
 
 
