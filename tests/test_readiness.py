@@ -63,6 +63,7 @@ def test_assess_xqt_readiness_default_report_is_structured() -> None:
         "tensorrt_so_plugin",
         "prune_quant_error_analysis",
         "kv_cache_quant",
+        "runtime_feature_metadata",
     }
     fp4 = scenarios["fp4_tilelang_megakernel"]
     assert fp4.status == "partial"
@@ -92,6 +93,14 @@ def test_assess_xqt_readiness_default_report_is_structured() -> None:
     assert kv.status == "partial"
     assert kv.checks["cache_runtime_owned_by_xqt"] is False
     assert kv.checks["runtime_quant_contract_kv_field"] == "kv_cache_dtype"
+    rfm = scenarios["runtime_feature_metadata"]
+    assert rfm.status == "partial"
+    assert rfm.checks["canonical_feature_count"] == len(
+        rfm.checks["canonical_features"]
+    )
+    assert rfm.checks["model_side_or_external"] is True
+    assert rfm.checks["xqt_serving_engine"] is False
+    assert rfm.checks["cache_management_in_xqt"] is False
 
 
 def test_xqt_readiness_report_writes_json_and_markdown(tmp_path: Path) -> None:

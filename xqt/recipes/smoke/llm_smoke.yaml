@@ -1,0 +1,32 @@
+project:
+  name: llm_smoke
+  artifact_dir: artifacts/xqt/smoke/llm
+model:
+  target: xqt.model.build_smoke_llm
+  params:
+    vocab_size: 64
+    hidden_dim: 16
+    num_heads: 2
+    num_layers: 2
+    dim_feedforward: 32
+task:
+  type: llm
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- sparsity
+hardware:
+  device: cpu
+  backends: []
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    method: global_l1_unstructured
+    target_sparsity: 0.2
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

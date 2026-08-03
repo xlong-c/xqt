@@ -19,6 +19,7 @@ from xqt.contracts import (
     TensorStorageSpec,
 )
 from xqt.core.errors import XQTBackendError
+from xqt.core.schema import CONVERT_ENGINE_NAMES
 
 from xqt.conversion_impl.converter import _ModuleConverter
 from xqt.conversion_impl.precision import (
@@ -95,6 +96,12 @@ def convert(
         engine="torch" if engine is None else engine,
         context="xqt.convert",
     )
+    if resolved_engine not in CONVERT_ENGINE_NAMES:
+        allowed = ", ".join(CONVERT_ENGINE_NAMES)
+        raise XQTBackendError(
+            f"xqt.convert engine={resolved_engine!r} is not a convert "
+            f"materialize preference. Allowed: {allowed}"
+        )
     result = _ModuleConverter(
         engine=resolved_engine,
         target=target,

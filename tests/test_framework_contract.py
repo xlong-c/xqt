@@ -387,7 +387,7 @@ def test_run_quant_stage_sets_runtime_quant_config(
     monkeypatch.setattr(
         quant_stage_module,
         "_build_quant_layer_analysis_summary",
-        lambda context: {"available": False, "reason": "test"},
+        lambda context, **kwargs: {"available": False, "reason": "test"},
     )
 
     output = run_quant_stage(
@@ -436,7 +436,7 @@ def test_run_quant_stage_does_not_require_prepopulated_runtime_quant_config(
     monkeypatch.setattr(
         quant_stage_module,
         "_build_quant_layer_analysis_summary",
-        lambda context: {"available": False, "reason": "test"},
+        lambda context, **kwargs: {"available": False, "reason": "test"},
     )
 
     output = run_quant_stage(

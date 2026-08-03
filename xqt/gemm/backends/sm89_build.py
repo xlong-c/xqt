@@ -451,11 +451,33 @@ def build_sm89_fp8_artifact(
             "implementation": "cutlass_device_gemm_sm89",
             "formats": ["fp8_e4m3", "fp8_e5m2"],
             "instruction_shape": [16, 8, 32],
-            "supported_scale_modes": ["w:per_tensor/a:per_tensor"],
+            "supported_scale_modes": ["w:per_tensor/a:per_tensor", "w:blockwise/a:blockwise"],
             "unsupported_scale_modes_reason": (
                 "per-channel/per-token scales require a separate row/column epilogue"
             ),
             "native_gemm": True,
+            "blockwise": {
+                "implementation": "custom_cuda_cutlass_warp_mma",
+                "tile_shape": [16, 8, 32],
+                "warp_count": 1,
+                "scale_application": "per_k_block_promotion_inside_mainloop",
+                "scale_layout": "a [M, ceil(K/block_k)] fp32, w [N, ceil(K/block_k)] fp32",
+                "block_k_values": [32, 64, 128],
+                "adapter_padding": "bytes zero-padded to M%16=0, N%8=0, K%32=0; scale rows padded with zeros",
+                "partial_block": "trailing partial K block keeps its own scale slot; zero padding contributes zero",
+                "split_k": {
+                    "abi": "workspace_reduction",
+                    "workspace": "float32 [split_count, padded_M, padded_N]",
+                    "reduction": "second_kernel_deterministic_sum_beta_c_once",
+                    "alignment": "splits are block_k aligned; a scale block never straddles a split",
+                    "opt_in": "executor split_k>=2, split_k=1 keeps the full-K ABI",
+                },
+                "sm90_note": (
+                    "SM90 WGMMA/TMA blockwise is a separate registry entry "
+                    "(sm90_fp8_*_wgmma, metadata_only); the SM89 kernel has no "
+                    "architecture if-else and no SM90 evidence exists on this host"
+                ),
+            },
         },
     )
     manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))

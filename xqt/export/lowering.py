@@ -65,6 +65,20 @@ def _fp4_weight_only_linear_to_dense(module: nn.Module) -> nn.Linear:
     return lowered
 
 
+def _packed_storage_weight(module: nn.Module) -> torch.Tensor:
+    """按优先级取 packed/quantized 权重, 都没有则抛清楚的异常."""
+
+    # 不能用 getattr 的默认值参数做级联: 默认值会急切求值,
+    # 只有 packed_weight 而无 quantized_weight 的模块会在内层 getattr 抛 AttributeError.
+    for attr in ("packed_weight", "quantized_weight"):
+        weight = getattr(module, attr, None)
+        if weight is not None:
+            return weight
+    raise AttributeError(
+        f"{type(module).__name__} has neither packed_weight nor quantized_weight"
+    )
+
+
 def _replace_fp4_weight_only_linears(model: nn.Module) -> list[dict[str, Any]]:
     """Replace every FP4 storage Linear with its dense dequantized equivalent."""
 
@@ -86,9 +100,7 @@ def _replace_fp4_weight_only_linears(model: nn.Module) -> list[dict[str, Any]]:
                 "target_module_type": type(lowered).__name__,
                 "source_weight_storage": "packed_fp4",
                 "target_weight_storage": "dense_dequantized",
-                "source_weight_dtype": str(
-                    getattr(module, "packed_weight", getattr(module, "quantized_weight")).dtype
-                ),
+                "source_weight_dtype": str(_packed_storage_weight(module).dtype),
                 "target_weight_dtype": str(lowered.weight.dtype),
             }
         )
@@ -126,13 +138,7 @@ def apply_pre_export_lowering(
                 "target_module_type": type(lowered_root).__name__,
                 "source_weight_storage": "packed_fp4",
                 "target_weight_storage": "dense_dequantized",
-                "source_weight_dtype": str(
-                    getattr(
-                        target_model,
-                        "packed_weight",
-                        getattr(target_model, "quantized_weight"),
-                    ).dtype
-                ),
+                "source_weight_dtype": str(_packed_storage_weight(target_model).dtype),
                 "target_weight_dtype": str(lowered_root.weight.dtype),
             }
         ]

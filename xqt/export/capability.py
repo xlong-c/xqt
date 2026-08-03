@@ -152,6 +152,21 @@ DEFAULT_EXPORT_CAPABILITIES: tuple[ExportCapability, ...] = (
         maturity="reference_guarded",
         notes="ONNX -> MNN command adapter with dry-run support.",
     ),
+    ExportCapability(
+        format="qnn",
+        priority="P2",
+        runtimes=("qnn",),
+        precisions=("fp32", "fp16", "int8"),
+        dynamic_shapes=False,
+        quantization=True,
+        status="adapter",
+        maturity="reference_guarded",
+        notes=(
+            "Qualcomm QNN SDK ONNX converter command adapter with dry-run "
+            "support; real conversion requires the official QNN SDK on the "
+            "target machine."
+        ),
+    ),
 )
 
 

@@ -81,7 +81,19 @@ def test_cutile_registry_covers_tilelang_operator_patterns() -> None:
     cutile_specs = list_cutile_kernel_specs()
     tilelang_specs = list_tilelang_kernel_specs()
 
-    tilelang_only = {"conv3d_1x1x1", "int8_mma", "linear_marlin"}
+    # 仅 tilelang 提供, cutile 不镜像的 pattern:
+    # cutile 是评估线, 不为评估线伪造能力, 这里显式列出并说明原因.
+    # - conv3d_1x1x1 / int8_mma / linear_marlin: tilelang 专用 kernel 形态.
+    # - int8_linear / int8_linear_static_activation: 真 W8A8 int8 GEMM, 仅 tilelang 实现.
+    # - mxfp4_packed_dequant_gemm_epilogue: MXFP4 packed 路径, 仅 tilelang 实现.
+    tilelang_only = {
+        "conv3d_1x1x1",
+        "int8_mma",
+        "linear_marlin",
+        "int8_linear",
+        "int8_linear_static_activation",
+        "mxfp4_packed_dequant_gemm_epilogue",
+    }
     assert (set(tilelang_specs) - tilelang_only).issubset(cutile_specs)
     assert "bias_silu" in cutile_specs
     assert (

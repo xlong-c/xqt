@@ -22,6 +22,7 @@ from xqt.core.schema import (
     OperatorOptimizationTargetConfig,
     OutputDiffConfig,
     PruneConfig,
+    QNNExportConfig,
     QuantComponentPolicyConfig,
     QuantConfig,
     TensorRTExportConfig,
@@ -65,6 +66,7 @@ _LEGACY_TENSORRT_TARGET_PARAM_KEYS = frozenset(
 
 _LEGACY_OPENVINO_TARGET_PARAM_KEYS = frozenset(
     {
+        "benchmark",
         "device",
         "dry_run",
         "input_shape",
@@ -110,6 +112,16 @@ _LEGACY_MNN_TARGET_PARAM_KEYS = frozenset(
         "dry_run",
         "extra_args",
         "framework",
+        "onnx_path",
+        "timeout",
+    }
+)
+
+_LEGACY_QNN_TARGET_PARAM_KEYS = frozenset(
+    {
+        "converter_path",
+        "dry_run",
+        "extra_args",
         "onnx_path",
         "timeout",
     }
@@ -580,6 +592,8 @@ def _validate_export_targets(
             _validate_ncnn_target(target, location=target_location)
         elif target.format == "mnn":
             _validate_mnn_target(target, location=target_location)
+        elif target.format == "qnn":
+            _validate_qnn_target(target, location=target_location)
 
 
 def _validate_onnx_target(target: ExportTargetConfig, *, location: str) -> None:
@@ -766,6 +780,30 @@ def _validate_mnn_export_config(
         raise XQTConfigError(f"{location}.converter_path must not be empty")
     if not config.framework:
         raise XQTConfigError(f"{location}.framework must not be empty")
+    if config.timeout is not None and config.timeout <= 0:
+        raise XQTConfigError(f"{location}.timeout must be positive")
+
+
+def _validate_qnn_target(target: ExportTargetConfig, *, location: str) -> None:
+    legacy_keys = sorted(_LEGACY_QNN_TARGET_PARAM_KEYS & set(target.params))
+    if legacy_keys:
+        keys = ", ".join(legacy_keys)
+        raise XQTConfigError(
+            f"{location}.params contains legacy QNN keys: {keys}. "
+            f"Move them to {location}.qnn."
+        )
+    _validate_qnn_export_config(target.qnn, location=f"{location}.qnn")
+
+
+def _validate_qnn_export_config(
+    config: QNNExportConfig,
+    *,
+    location: str,
+) -> None:
+    if config.source_path == "":
+        raise XQTConfigError(f"{location}.source_path must not be empty")
+    if not config.converter_path:
+        raise XQTConfigError(f"{location}.converter_path must not be empty")
     if config.timeout is not None and config.timeout <= 0:
         raise XQTConfigError(f"{location}.timeout must be positive")
 

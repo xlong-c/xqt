@@ -136,5 +136,13 @@ def _check_export_targets(
                 f"{target_prefix}.MNNConvert",
                 dry_run=mnn.dry_run,
             )
+        elif target_format == "qnn":
+            qnn = target.qnn
+            _check_optional_executable(
+                report,
+                qnn.converter_path,
+                f"{target_prefix}.qnn_onnx_converter",
+                dry_run=qnn.dry_run,
+            )
         else:
             report.add(target_prefix, False, "unsupported export target")

@@ -389,17 +389,22 @@ def _inference_optimization_capability_matrix() -> dict[str, list[dict[str, Any]
             kind="runtime_feature",
             name="llm_runtime_metadata",
             engine="adapter_only",
-            status="planned",
+            status="partial",
             maturity="metadata_only",
             runtime="external_serving",
             artifact_kind="metadata",
             available=False,
-            supported=False,
+            supported=True,
             notes=(
-                "XQT records runtime feature metadata for backend adapters but does not implement serving schedulers.",
+                "XQT records canonical runtime feature metadata (prefix_cache, "
+                "paged_kv, kv_cache_quant, chunked_prefill, speculative_decode, "
+                "continuous_batching) and a reference KV-scale attention entity; "
+                "it does not implement serving schedulers.",
             ),
             limitations=(
-                "Paged KV, prefix cache, speculative decode, and continuous batching require an external runtime.",
+                "Paged KV, prefix cache, speculative decode, and continuous "
+                "batching require an external runtime; CUDA kernel verification "
+                "is pending.",
             ),
             metadata=reporting_schema_payload()["runtime_features"],
         )
@@ -763,6 +768,51 @@ def _kv_cache_quant_readiness() -> XQTReadinessScenario:
     )
 
 
+def _runtime_feature_metadata_readiness() -> XQTReadinessScenario:
+    """Canonical runtime feature metadata + reference KV attention entity."""
+
+    from xqt.contracts.runtime_features import runtime_feature_specs
+
+    specs = runtime_feature_specs()
+    checks = {
+        "canonical_feature_count": len(specs),
+        "canonical_features": [spec["name"] for spec in specs],
+        "model_side_or_external": all(
+            spec["scope"] == "model_side_metadata" or spec["owner"] == "external_runtime"
+            for spec in specs
+        ),
+        "xqt_serving_engine": False,
+        "cache_management_in_xqt": False,
+    }
+    evidence = [
+        "RuntimeFeatureMetadata schema declares scope and XQT status per feature",
+        "speculative_decode records draft/target model, acceptance rate, backend",
+        "prefix_cache / paged_kv record switch, cache block size and hit rate only",
+        "KvScaleAttention reference entity consumes KvScaleArtifact + RuntimeQuantContract",
+        "report explains supported / unsupported / unverified reasons per feature",
+    ]
+    gaps = [
+        "CUDA fused KV attention kernel verification pending (no CUDA in current environment)",
+        "real serving engine startup is an optional milestone, not an XQT gate",
+    ]
+    required_actions = [
+        "attach runtime_features metadata to quant pair / manifest when emitting handoff artifacts",
+        "run KV-scale entity numerical verification on CUDA hardware when available",
+    ]
+    return XQTReadinessScenario(
+        name="runtime_feature_metadata",
+        status="partial",
+        summary=(
+            "Runtime feature metadata schema and the reference KV-scale "
+            "attention entity are landed; CUDA kernel verification is pending."
+        ),
+        evidence=evidence,
+        gaps=gaps,
+        required_actions=required_actions,
+        checks=checks,
+    )
+
+
 def assess_xqt_readiness(
     *,
     run_tilelang_probe: bool = False,
@@ -792,6 +842,7 @@ def assess_xqt_readiness(
         ),
         _analysis_readiness(),
         _kv_cache_quant_readiness(),
+        _runtime_feature_metadata_readiness(),
     ]
     return XQTReadinessReport(
         overall_status=_overall_status(scenarios),

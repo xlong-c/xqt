@@ -28,6 +28,13 @@ from .capability import (
     QuantBackendCapability,
     describe_quant_backend_capability,
     list_quant_backend_capabilities,
+    supported_quant_backends,
+)
+from .axes import (
+    quant_axis_report,
+    quant_compute_specs,
+    quant_method_specs,
+    quant_storage_specs,
 )
 from .backends.onnx_qdq import (
     IterableCalibrationDataReader,
@@ -168,6 +175,10 @@ __all__ = [
     "ActivationDriftRecord",
     "ActivationScaleArtifact",
     "ActivationStatistic",
+    "quant_axis_report",
+    "quant_compute_specs",
+    "quant_method_specs",
+    "quant_storage_specs",
     "ExternalQuantInfo",
     "GraphQuantTransform",
     "RotationAbsorbTransform",

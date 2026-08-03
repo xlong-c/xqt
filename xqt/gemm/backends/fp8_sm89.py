@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +30,54 @@ _BLOCKWISE_SYMBOLS = {
     ("fp8_e5m2", "fp16"): "fp8_sm89_e5m2_fp16_run_blockwise",
     ("fp8_e5m2", "bf16"): "fp8_sm89_e5m2_bf16_run_blockwise",
 }
+_BLOCKWISE_SPLITK_SYMBOLS = {
+    ("fp8_e4m3", "fp16"): "fp8_sm89_e4m3_fp16_run_blockwise_splitk",
+    ("fp8_e4m3", "bf16"): "fp8_sm89_e4m3_bf16_run_blockwise_splitk",
+    ("fp8_e5m2", "fp16"): "fp8_sm89_e5m2_fp16_run_blockwise_splitk",
+    ("fp8_e5m2", "bf16"): "fp8_sm89_e5m2_bf16_run_blockwise_splitk",
+}
+_RESOURCE_QUERY_SYMBOL = "fp8_sm89_blockwise_resource_query"
+_BLOCKWISE_RESOURCE_FORMATS = {"fp8_e4m3": 0, "fp8_e5m2": 1}
+_BLOCKWISE_RESOURCE_OUTPUTS = {"fp16": 0, "bf16": 1}
+_BLOCKWISE_ALIGNMENT = (16, 8, 32)
+
+
+@dataclass(frozen=True, slots=True)
+class Sm89Fp8BlockwiseResourceReport:
+    """Runtime CUDA resource and occupancy evidence for one blockwise variant."""
+
+    artifact: str
+    format_name: str
+    output_dtype: str
+    block_k: int
+    block_threads: int
+    registers_per_thread: int
+    static_shared_bytes: int
+    max_active_blocks_per_sm: int
+    multiprocessor_count: int
+    max_threads_per_sm: int
+    occupancy: float | None
+    device: str
+    device_name: str
+    capability: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "artifact": self.artifact,
+            "format_name": self.format_name,
+            "output_dtype": self.output_dtype,
+            "block_k": self.block_k,
+            "block_threads": self.block_threads,
+            "registers_per_thread": self.registers_per_thread,
+            "static_shared_bytes": self.static_shared_bytes,
+            "max_active_blocks_per_sm": self.max_active_blocks_per_sm,
+            "multiprocessor_count": self.multiprocessor_count,
+            "max_threads_per_sm": self.max_threads_per_sm,
+            "occupancy": self.occupancy,
+            "device": self.device,
+            "device_name": self.device_name,
+            "capability": self.capability,
+        }
 
 
 def _load_library(artifact: str | Path) -> ctypes.CDLL:
@@ -61,8 +111,8 @@ def _load_library(artifact: str | Path) -> ctypes.CDLL:
         function.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_int,
@@ -70,6 +120,37 @@ def _load_library(artifact: str | Path) -> ctypes.CDLL:
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_float,
+        ]
+        function.restype = ctypes.c_int
+    for symbol in _BLOCKWISE_SPLITK_SYMBOLS.values():
+        if not hasattr(library, symbol):
+            raise XQTBackendError(f"SM89 FP8 artifact lacks {symbol}")
+        function = getattr(library, symbol)
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_float,
+        ]
+        function.restype = ctypes.c_int
+    if hasattr(library, _RESOURCE_QUERY_SYMBOL):
+        function = getattr(library, _RESOURCE_QUERY_SYMBOL)
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
         ]
         function.restype = ctypes.c_int
     return library
@@ -83,6 +164,144 @@ def sm89_fp8_artifact_available(artifact: str | Path) -> bool:
     except XQTBackendError:
         return False
     return True
+
+
+def fp8_blockwise_split_k_partition(
+    padded_k: int, block_k: int, split_k: int
+) -> tuple[int, int]:
+    """Return (k_per_split, split_count) for one blockwise split-K launch.
+
+    Splits are block_k aligned so a scale block never straddles a split
+    boundary; the reduction pass is then a plain deterministic sum.
+    """
+
+    block_k = validate_fp8_block_k(block_k)
+    if int(padded_k) <= 0 or int(padded_k) % 32 != 0:
+        raise ValueError(f"blockwise split-K requires padded_k % 32 == 0, got {padded_k!r}")
+    if int(split_k) < 2:
+        raise ValueError(f"blockwise split-K requires split_k >= 2, got {split_k!r}")
+    execution_blocks = (int(padded_k) + block_k - 1) // block_k
+    blocks_per_split = -(-execution_blocks // int(split_k))
+    k_per_split = blocks_per_split * block_k
+    split_count = -(-int(padded_k) // k_per_split)
+    return k_per_split, split_count
+
+
+def select_fp8_blockwise_split_k(
+    *,
+    m: int,
+    n: int,
+    k: int,
+    block_k: int,
+    sm_count: int,
+    max_split: int = 16,
+    k_tiles_per_split: int = 16,
+) -> int:
+    """Shape heuristic for the opt-in blockwise split-K path.
+
+    The full-K warp-MMA CTA is one warp per 16x8 output tile, so K runs
+    serially inside a single warp.  Split-K is useful when the K loop is long
+    relative to the available (M, N) parallelism.  The heuristic asks for at
+    least ``k_tiles_per_split`` 32-wide K tiles per split and never exceeds
+    ``max_split``; it returns 1 (full-K) when the K loop is already short or
+    the (M, N) grid alone fills the device.  ``split_k=1`` must route to the
+    full-K ABI.  This mirrors ``select_fused_split_k`` for the fused W4A16
+    path; the blockwise partition itself is aligned to ``block_k`` by
+    ``fp8_blockwise_split_k_partition``.
+    """
+
+    validate_fp8_block_k(block_k)
+    if m <= 0 or n <= 0 or k <= 0 or sm_count <= 0:
+        raise XQTBackendError(
+            "select_fp8_blockwise_split_k requires positive m/n/k/sm_count"
+        )
+    k_tiles = (k + 31) // 32
+    if k_tiles <= k_tiles_per_split:
+        return 1
+    base_blocks = ((m + 15) // 16) * ((n + 7) // 8)
+    if base_blocks >= 2 * sm_count and k_tiles <= 2 * k_tiles_per_split:
+        return 1
+    split_k = -(-k_tiles // k_tiles_per_split)
+    return max(1, min(split_k, max_split, k_tiles))
+
+
+def query_sm89_fp8_blockwise_resources(
+    artifact: str | Path,
+    *,
+    format_name: str,
+    output_dtype: str,
+    block_k: int,
+    device: torch.device | str | None = None,
+) -> Sm89Fp8BlockwiseResourceReport:
+    """Query CUDA function attributes and occupancy for one blockwise variant.
+
+    The query calls CUDA runtime introspection only; it does not launch a
+    kernel.  ``block_k`` selects the templated mainloop unroll actually used by
+    the launch ABI.
+    """
+
+    block_k = validate_fp8_block_k(block_k)
+    try:
+        format_id = _BLOCKWISE_RESOURCE_FORMATS[str(format_name)]
+        output_id = _BLOCKWISE_RESOURCE_OUTPUTS[str(output_dtype)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported FP8 blockwise resource variant: {format_name!r}/{output_dtype!r}"
+        ) from exc
+    if not torch.cuda.is_available():
+        raise XQTBackendError("FP8 blockwise resource query requires CUDA")
+    cuda_device = (
+        torch.device(device)
+        if device is not None
+        else torch.device("cuda", torch.cuda.current_device())
+    )
+    if cuda_device.type != "cuda":
+        raise ValueError(f"FP8 blockwise resource query requires a CUDA device, got {cuda_device}")
+    major, minor = torch.cuda.get_device_capability(cuda_device)
+    if (major, minor) != (8, 9):
+        raise XQTBackendError(f"SM89 FP8 resource query received sm_{major}{minor}")
+    library = _load_library(artifact)
+    if not hasattr(library, _RESOURCE_QUERY_SYMBOL):
+        raise XQTBackendError("SM89 FP8 artifact lacks resource query symbol")
+    registers = ctypes.c_int()
+    static_shared = ctypes.c_int()
+    max_blocks = ctypes.c_int()
+    error = getattr(library, _RESOURCE_QUERY_SYMBOL)(
+        format_id,
+        output_id,
+        block_k,
+        ctypes.byref(registers),
+        ctypes.byref(static_shared),
+        ctypes.byref(max_blocks),
+    )
+    if error != 0:
+        raise XQTBackendError(f"SM89 FP8 resource query failed with CUDA error {error}")
+    properties = torch.cuda.get_device_properties(cuda_device)
+    multiprocessors = int(properties.multi_processor_count)
+    max_threads_per_sm = int(properties.max_threads_per_multi_processor)
+    block_threads = 32
+    active_threads = max_blocks.value * block_threads
+    occupancy = (
+        float(active_threads) / float(max_threads_per_sm)
+        if max_threads_per_sm > 0
+        else None
+    )
+    return Sm89Fp8BlockwiseResourceReport(
+        artifact=str(Path(artifact).expanduser()),
+        format_name=str(format_name),
+        output_dtype=str(output_dtype),
+        block_k=block_k,
+        block_threads=block_threads,
+        registers_per_thread=int(registers.value),
+        static_shared_bytes=int(static_shared.value),
+        max_active_blocks_per_sm=int(max_blocks.value),
+        multiprocessor_count=multiprocessors,
+        max_threads_per_sm=max_threads_per_sm,
+        occupancy=occupancy,
+        device=str(cuda_device),
+        device_name=str(torch.cuda.get_device_name(cuda_device)),
+        capability=f"sm_{major}{minor}",
+    )
 
 
 def _scale_scalar(value: torch.Tensor | None, *, name: str) -> float:
@@ -167,8 +386,18 @@ def fp8_sm89_executor(
     bias: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     artifact: str | Path,
+    split_k: int | None = None,
 ) -> torch.Tensor:
-    """Run SM89 FP8 native paths; unsupported scale modes raise for fallback."""
+    """Run SM89 FP8 native paths; unsupported scale modes raise for fallback.
+
+    The tensorwise path pads bytes to (8, 8, 32) and runs the CUTLASS device
+    GEMM.  The blockwise path pads bytes to (16, 8, 32), pads scale rows to the
+    padded M/N, and runs the K-block warp MMA mainloop; ``split_k>=2`` opts
+    into the block_k-aligned split-K workspace/reduction ABI, while
+    ``split_k=None`` or ``1`` keeps the full-K ABI.  Zero padding contributes
+    exactly zero to every MMA tile and padded scale rows are multiplied into
+    discarded output rows only.
+    """
 
     quant = spec.quant
     if quant.weight_dtype not in {"fp8_e4m3", "fp8_e5m2"}:
@@ -191,6 +420,13 @@ def fp8_sm89_executor(
         raise XQTBackendError("native SM89 FP8 has no fused activation epilogue")
     if weight_zero_points is not None or activation_zero_points is not None:
         raise XQTBackendError("FP8 native GEMM does not accept zero points")
+    if split_k is not None:
+        if not isinstance(split_k, bool) and int(split_k) >= 1:
+            split_k = int(split_k)
+        else:
+            raise XQTBackendError("FP8 split_k must be an int >= 1")
+    if tensorwise and split_k not in {None, 1}:
+        raise XQTBackendError("FP8 split_k applies to the blockwise path, not tensorwise")
     qweight, packed_scales = _weight_payload(weight)
     if weight_scales is None:
         weight_scales = packed_scales
@@ -243,37 +479,85 @@ def fp8_sm89_executor(
             device=activation.device,
             name="weight_scales",
         )
+        alignment_m, alignment_n, alignment_k = _BLOCKWISE_ALIGNMENT
+        padded_m = (spec.problem.m + alignment_m - 1) // alignment_m * alignment_m
+        padded_n = (spec.problem.n + alignment_n - 1) // alignment_n * alignment_n
+        padded_k = (spec.problem.k + alignment_k - 1) // alignment_k * alignment_k
+        a_padded = a_bytes
+        if tuple(a_bytes.shape) != (padded_m, padded_k):
+            a_padded = F.pad(a_bytes, (0, padded_k - spec.problem.k, 0, padded_m - spec.problem.m))
+        w_padded = w_bytes
+        if tuple(w_bytes.shape) != (padded_n, padded_k):
+            w_padded = F.pad(w_bytes, (0, padded_k - spec.problem.k, 0, padded_n - spec.problem.n))
+        a_scale_padded = a_scale
+        if padded_m != spec.problem.m:
+            a_scale_padded = F.pad(a_scale, (0, 0, 0, padded_m - spec.problem.m))
+        w_scale_padded = w_scale
+        if padded_n != spec.problem.n:
+            w_scale_padded = F.pad(w_scale, (0, 0, 0, padded_n - spec.problem.n))
         c_source = None
         if has_c:
             c_source = torch.zeros(
-                (spec.problem.m, spec.problem.n),
+                (padded_m, padded_n),
                 device=activation.device,
                 dtype=output_dtype,
             )
             if bias is not None:
-                c_source.add_(bias.to(device=activation.device, dtype=output_dtype).reshape(1, -1))
+                c_source[:, : spec.problem.n].add_(
+                    bias.to(device=activation.device, dtype=output_dtype).reshape(1, -1)
+                )
             if residual is not None:
-                c_source.add_(residual.to(device=activation.device, dtype=output_dtype))
-        output = torch.empty((spec.problem.m, spec.problem.n), device=activation.device, dtype=output_dtype)
-        symbol = _BLOCKWISE_SYMBOLS[(quant.weight_dtype, quant.output_dtype)]
-        a_runtime = a_bytes.contiguous()
-        w_runtime = w_bytes.contiguous()
-        error = getattr(library, symbol)(
-            a_runtime.data_ptr(),
-            w_runtime.data_ptr(),
-            a_scale.data_ptr(),
-            w_scale.data_ptr(),
-            None if c_source is None else c_source.data_ptr(),
-            output.data_ptr(),
-            spec.problem.m,
-            spec.problem.n,
-            spec.problem.k,
-            block_k,
-            ctypes.c_float(1.0 if has_c else 0.0),
+                c_source[: spec.problem.m, : spec.problem.n].add_(
+                    residual.to(device=activation.device, dtype=output_dtype)
+                )
+        output = torch.empty(
+            (padded_m, padded_n), device=activation.device, dtype=output_dtype
         )
+        a_runtime = a_padded.contiguous()
+        w_runtime = w_padded.contiguous()
+        a_scale_runtime = a_scale_padded.contiguous()
+        w_scale_runtime = w_scale_padded.contiguous()
+        if split_k is not None and split_k >= 2:
+            _, split_count = fp8_blockwise_split_k_partition(padded_k, block_k, split_k)
+            workspace = torch.empty(
+                (split_count, padded_m, padded_n),
+                device=activation.device,
+                dtype=torch.float32,
+            )
+            symbol = _BLOCKWISE_SPLITK_SYMBOLS[(quant.weight_dtype, quant.output_dtype)]
+            error = getattr(library, symbol)(
+                a_runtime.data_ptr(),
+                w_runtime.data_ptr(),
+                a_scale_runtime.data_ptr(),
+                w_scale_runtime.data_ptr(),
+                None if c_source is None else c_source.data_ptr(),
+                output.data_ptr(),
+                workspace.data_ptr(),
+                padded_m,
+                padded_n,
+                padded_k,
+                block_k,
+                split_k,
+                ctypes.c_float(1.0 if has_c else 0.0),
+            )
+        else:
+            symbol = _BLOCKWISE_SYMBOLS[(quant.weight_dtype, quant.output_dtype)]
+            error = getattr(library, symbol)(
+                a_runtime.data_ptr(),
+                w_runtime.data_ptr(),
+                a_scale_runtime.data_ptr(),
+                w_scale_runtime.data_ptr(),
+                None if c_source is None else c_source.data_ptr(),
+                output.data_ptr(),
+                padded_m,
+                padded_n,
+                padded_k,
+                block_k,
+                ctypes.c_float(1.0 if has_c else 0.0),
+            )
         if error != 0:
             raise XQTBackendError(f"SM89 FP8 blockwise GEMM failed with CUDA error {error}")
-        return output
+        return output[: spec.problem.m, : spec.problem.n]
 
     alpha = _scale_scalar(weight_scales, name="weight_scales") * _scale_scalar(
         activation_scales, name="activation_scales"
@@ -367,7 +651,11 @@ def install_sm89_fp8_executors(
 
 
 __all__ = [
+    "Sm89Fp8BlockwiseResourceReport",
+    "fp8_blockwise_split_k_partition",
     "fp8_sm89_executor",
     "install_sm89_fp8_executors",
+    "query_sm89_fp8_blockwise_resources",
+    "select_fp8_blockwise_split_k",
     "sm89_fp8_artifact_available",
 ]

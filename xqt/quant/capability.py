@@ -2,7 +2,7 @@
 
 AWQ / GPTQ / SVD (SVDQuant) are quant *methods*, not operator engines.
 ``tilelang`` is an operator engine only. ``svdquant`` is not a quant backend
-name either — use ``backend='pytorch'`` with ``method='svd'`` and WxAy
+name either - use ``backend='pytorch'`` with ``method='svd'`` and WxAy
 ``strategy`` plus optional ``compute``.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
 
+from xqt.core.schema import CANONICAL_QUANT_STRATEGIES
 from xqt.core.reporting import OptimizationCapability
 
 from .strategy import normalize_quant_compute, normalize_quant_method, normalize_quant_strategy
@@ -50,7 +51,7 @@ _COMPUTE_TRUE_NATURE = frozenset(
 )
 
 
-# Load-time online weight quant (T14): advertised as planned only — not an
+# Load-time online weight quant (T14): advertised as planned only - not an
 # executable XQT algorithm yet. Distinct from runtime dynamic activation.
 _PLANNED_ONLINE_WEIGHT_METHODS = frozenset(
     {
@@ -129,6 +130,8 @@ class QuantBackendCapability:
     methods: tuple[str, ...]
     model_families: tuple[str, ...]
     primary_module_types: tuple[str, ...]
+    storage_strategies: tuple[str, ...] = ()
+    compute_contracts: tuple[str, ...] = ()
     candidate_module_types: tuple[str, ...] = ()
     default_high_precision: tuple[str, ...] = ()
     preferred_devices: tuple[str, ...] = ()
@@ -165,6 +168,8 @@ class QuantBackendCapability:
                 "default_high_precision": list(self.default_high_precision),
                 "preferred_devices": list(self.preferred_devices),
                 "nature": self.nature.value,
+                "storage_strategies": list(self.storage_strategies),
+                "compute_contracts": list(self.compute_contracts),
             },
         )
 
@@ -176,6 +181,8 @@ class QuantBackendCapability:
             "runtime": self.runtime,
             "artifact_kind": self.artifact_kind,
             "methods": list(self.methods),
+            "storage_strategies": list(self.storage_strategies),
+            "compute_contracts": list(self.compute_contracts),
             "model_families": list(self.model_families),
             "primary_module_types": list(self.primary_module_types),
             "candidate_module_types": list(self.candidate_module_types),
@@ -213,6 +220,8 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         artifact_kind="pytorch_model",
         methods=(
             "none",
+        ),
+        storage_strategies=(
             "w8a8_int8",
             "w8a8_fp8_e4m3",
             "w8a8_fp8_e5m2",
@@ -221,6 +230,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
             "w4a16_int4",
             "w8a16_int8",
         ),
+        compute_contracts=("dequant_fp16",),
         model_families=(
             "linear_heavy",
             "vision_transformer",
@@ -246,7 +256,9 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         maturity="executable",
         runtime="onnxruntime",
         artifact_kind="onnx_qdq",
-        methods=("none", "w8a8_int8",),
+        methods=("none",),
+        storage_strategies=("w8a8_int8",),
+        compute_contracts=("qdq_static", "qdq_dynamic"),
         model_families=(
             "cnn",
             "resnet",
@@ -281,21 +293,15 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
             "svd",
             "convrot",
             "turboquant",
-            "w4a16_int4",
-            "w8a16_int8",
-            "w4a16_fp4",
-            "w4a16_nvfp4",
-            "w4a16_mxfp4",
-            "w8a16_mxfp8",
-            "w8a16_fp8_e4m3",
-            "w8a16_fp8_e5m2",
-            "w8a8_int8",
-            "w8a8_fp8_e4m3",
-            "w8a8_fp8_e5m2",
-            "w4a4_int4",
-            "w4a4_fp4",
-            "w4a4_nvfp4",
-            "w4a4_mxfp4",
+            "moe",
+            "moe_weight_only",
+        ),
+        storage_strategies=CANONICAL_QUANT_STRATEGIES,
+        compute_contracts=(
+            "dequant_fp16",
+            "w8a8_int8_mma",
+            "fp8_mma",
+            "dequant_gemm",
         ),
         model_families=("linear_heavy", "llm", "decoder_only_transformer", "vlm_decoder"),
         primary_module_types=("Linear",),
@@ -320,7 +326,9 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         maturity="planned",
         runtime="transformers",
         artifact_kind="hf_runtime_model",
-        methods=("none", "w4a16_int4", "w8a16_int8"),
+        methods=("none",),
+        storage_strategies=("w4a16_int4", "w8a16_int8"),
+        compute_contracts=("dequant_fp16",),
         model_families=("llm", "vlm", "linear_heavy"),
         primary_module_types=("Linear",),
         default_high_precision=_DEFAULT_HIGH_PRECISION,
@@ -330,6 +338,12 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
     ),
 }
 
+
+
+def supported_quant_backends() -> tuple[str, ...]:
+    """Return the canonical quant backend names (single capability fact source)."""
+
+    return tuple(_BASE_CAPABILITIES)
 
 
 def _strategy_requires_cuda(
@@ -386,6 +400,8 @@ def describe_quant_backend_capability(
             runtime=base.runtime,
             artifact_kind=base.artifact_kind,
             methods=tuple(sorted(set(base.methods) | set(_PLANNED_ONLINE_WEIGHT_METHODS))),
+            storage_strategies=base.storage_strategies,
+            compute_contracts=base.compute_contracts,
             model_families=base.model_families,
             primary_module_types=base.primary_module_types,
             default_high_precision=base.default_high_precision,
@@ -481,4 +497,5 @@ __all__ = [
     "QuantBackendCapability",
     "describe_quant_backend_capability",
     "list_quant_backend_capabilities",
+    "supported_quant_backends",
 ]

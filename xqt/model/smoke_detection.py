@@ -23,6 +23,7 @@ class SmokeDetectionModule(nn.Module):
         self.boxes_per_image = boxes_per_image
         self.input_channels = input_channels
         self.stem = nn.Conv2d(input_channels, input_channels, kernel_size=1, bias=False)
+        self.detection_head = nn.Identity()
         with torch.no_grad():
             self.stem.weight.zero_()
 
@@ -44,7 +45,7 @@ class SmokeDetectionModule(nn.Module):
             output[:, 2, box_index] = x2
             output[:, 3, box_index] = y2
             output[:, 4 + (box_index % max(self.num_classes, 1)), box_index] = 10.0
-        return output + anchor.view(batch_size, 1, 1)
+        return self.detection_head(output + anchor.view(batch_size, 1, 1))
 
 
 def build_smoke_detection_module(

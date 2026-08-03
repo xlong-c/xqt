@@ -1,0 +1,43 @@
+project:
+  name: moe_smoke
+  artifact_dir: artifacts/xqt/smoke/moe
+model:
+  target: xqt.model.build_smoke_moe
+  params:
+    hidden_dim: 16
+    intermediate_dim: 32
+    num_experts: 2
+    num_layers: 1
+task:
+  type: llm
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- sparsity
+- precision
+hardware:
+  device: cpu
+  backends:
+  - pytorch
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    method: global_l1_unstructured
+    target_sparsity: 0.2
+- name: quant_model
+  kind: quant
+  params:
+    backend: pytorch
+    method: moe_weight_only
+    strategy: w4a16_int4
+    policy:
+      bits: 4
+      group_size: 16
+      base_method: awq
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

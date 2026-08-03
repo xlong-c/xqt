@@ -166,6 +166,15 @@ class StructuredPruningReport:
     topology_changes: list[dict[str, Any]] = field(default_factory=list)
     export_status: dict[str, Any] = field(default_factory=dict)
     benchmark_status: dict[str, Any] = field(default_factory=dict)
+    removed_modules: list[dict[str, Any]] = field(default_factory=list)
+    changed_dimensions: list[dict[str, Any]] = field(default_factory=list)
+    mask_only_modules: list[str] = field(default_factory=list)
+    flops_before: Optional[float] = None
+    flops_after: Optional[float] = None
+    flops_reduction_ratio: Optional[float] = None
+    safety: dict[str, Any] = field(default_factory=dict)
+    forward_diff: dict[str, Any] = field(default_factory=dict)
+    export_readiness: dict[str, Any] = field(default_factory=dict)
     targets: list[PruningTarget] = field(default_factory=list)
     actions: list[StructuredPruningAction] = field(default_factory=list)
 
@@ -212,6 +221,15 @@ class StructuredPruningReport:
             "topology_changes": [dict(item) for item in self.topology_changes],
             "export_status": dict(self.export_status),
             "benchmark_status": dict(self.benchmark_status),
+            "removed_modules": [dict(item) for item in self.removed_modules],
+            "changed_dimensions": [dict(item) for item in self.changed_dimensions],
+            "mask_only_modules": list(self.mask_only_modules),
+            "flops_before": self.flops_before,
+            "flops_after": self.flops_after,
+            "flops_reduction_ratio": self.flops_reduction_ratio,
+            "safety": dict(self.safety),
+            "forward_diff": dict(self.forward_diff),
+            "export_readiness": dict(self.export_readiness),
             "parameter_count_before": self.parameter_count_before,
             "parameter_count_after": self.parameter_count_after,
             "parameter_reduction": self.parameter_reduction,
@@ -272,6 +290,7 @@ class NMStructuredPruningReport:
     pattern_m: int
     module_types: list[str]
     layers: list[NMStructuredLayerReport] = field(default_factory=list)
+    mask_only_modules: list[str] = field(default_factory=list)
 
     @property
     def total_parameters(self) -> int:
@@ -305,6 +324,7 @@ class NMStructuredPruningReport:
             "sparsity": self.sparsity,
             "compliance_ratio": self.compliance_ratio,
             "layers": [layer.to_dict() for layer in self.layers],
+            "mask_only_modules": list(self.mask_only_modules),
         }
 
 
@@ -354,6 +374,7 @@ class BlockSparsePruningReport:
     zero_parameters_after: int
     module_types: list[str]
     layers: list[BlockSparseLayerReport] = field(default_factory=list)
+    mask_only_modules: list[str] = field(default_factory=list)
 
     @property
     def sparsity(self) -> float:
@@ -383,6 +404,7 @@ class BlockSparsePruningReport:
             "sparsity": self.sparsity,
             "parameter_sparsity": self.parameter_sparsity,
             "layers": [layer.to_dict() for layer in self.layers],
+            "mask_only_modules": list(self.mask_only_modules),
         }
 
 

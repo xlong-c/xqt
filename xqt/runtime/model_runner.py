@@ -16,6 +16,10 @@ from xqt.contracts.layout_kernel_report import LayoutKernelReport
 from xqt.contracts.quantized import QuantizedModel
 from xqt.contracts.runtime_manifest import build_runtime_manifest
 from xqt.contracts.runtime_quant import RuntimeQuantContract
+from xqt.contracts.runtime_features import (
+    RUNTIME_FEATURES_KEY,
+    runtime_feature_report,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +160,9 @@ class ModelRunner:
         meta: dict[str, Any] = {}
         manifest = build_runtime_manifest(self.metadata)
         meta["manifest_kernels"] = list(manifest.selected_kernels)
+        raw_features = self.metadata.get(RUNTIME_FEATURES_KEY)
+        if raw_features is not None:
+            meta["runtime_features"] = runtime_feature_report(raw_features)
         if selected is None and manifest.selected_kernels:
             selected = manifest.selected_kernels[0]
         if fallback is None and manifest.fallback_kernels:

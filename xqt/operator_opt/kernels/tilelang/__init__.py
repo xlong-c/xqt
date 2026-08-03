@@ -29,6 +29,13 @@ from .gemm import (
     nvfp4_packed_dequant_gemm_epilogue_reference,
     nvfp4_packed_dequant_gemm_epilogue_tilelang,
 )
+from .kv_int8_attention import (
+    KV_INT8_FUSED_KERNEL_NAME,
+    TILELANG_KV_INT8_ATTENTION_KERNEL_METADATA,
+    build_tilelang_kv_int8_attention_kernel,
+    fused_kv_int8_attention_forward_tilelang,
+    kv_int8_attention_dequant_reference,
+)
 from .int8_mma import (
     TILELANG_INT8_MMA_KERNEL_METADATA,
     build_tilelang_int8_linear_kernel,
@@ -62,6 +69,11 @@ from .norm import (
     TILELANG_NORM_KERNEL_METADATA,
     layer_norm_reference,
     layer_norm_tilelang,
+)
+from .svd_fused import (
+    TILELANG_SVD_FUSED_KERNEL_METADATA,
+    build_tilelang_svd_fused_kernel,
+    svd_fused_dequant_gemm_low_rank_tilelang,
 )
 from .gemm_builder import (
     build_tilelang_fp4_fused_dequant_gemm_kernel,
@@ -104,19 +116,24 @@ TILELANG_KERNEL_METADATA = {
     **TILELANG_CONV_KERNEL_METADATA,
     **TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     **TILELANG_INT8_MMA_KERNEL_METADATA,
+    **TILELANG_KV_INT8_ATTENTION_KERNEL_METADATA,
     **TILELANG_LINEAR_KERNEL_METADATA,
     **TILELANG_MARLIN_LINEAR_KERNEL_METADATA,
     **TILELANG_NORM_KERNEL_METADATA,
+    **TILELANG_SVD_FUSED_KERNEL_METADATA,
 }
 
 __all__ = [
+    "KV_INT8_FUSED_KERNEL_NAME",
     "TILELANG_KERNEL_METADATA",
     "TILELANG_CONV_KERNEL_METADATA",
     "TILELANG_DEQUANT_GEMM_KERNEL_METADATA",
     "TILELANG_INT8_MMA_KERNEL_METADATA",
+    "TILELANG_KV_INT8_ATTENTION_KERNEL_METADATA",
     "TILELANG_LINEAR_KERNEL_METADATA",
     "TILELANG_MARLIN_LINEAR_KERNEL_METADATA",
     "TILELANG_NORM_KERNEL_METADATA",
+    "TILELANG_SVD_FUSED_KERNEL_METADATA",
     "TileLangAttentionDesign",
     "build_tilelang_attention_design",
     "build_tilelang_conv1x1_nchw_kernel",
@@ -127,11 +144,13 @@ __all__ = [
     "build_tilelang_int8_linear_kernel",
     "build_tilelang_int8_linear_static_activation_kernel",
     "build_tilelang_int8_mma_kernel",
+    "build_tilelang_kv_int8_attention_kernel",
     "build_tilelang_marlin_linear_kernel",
     "build_tilelang_nvfp4_packed_activation_fused_gemm_kernel",
     "build_tilelang_nvfp4_unpack_dequant_kernel",
     "build_tilelang_nvfp4_fused_dequant_gemm_kernel",
     "build_tilelang_static_activation_quant_kernel",
+    "build_tilelang_svd_fused_kernel",
     "conv2d_reference",
     "conv2d_tilelang",
     "conv3d_1x1x1_reference",
@@ -152,6 +171,7 @@ __all__ = [
     "nvfp4_packed_dequant_gemm_epilogue_tilelang",
     "fused_attention_forward_reference",
     "fused_attention_forward_tilelang",
+    "fused_kv_int8_attention_forward_tilelang",
     "gqa_decode_attention_reference",
     "gqa_decode_attention_tilelang",
     "half_linear_reference",
@@ -161,6 +181,7 @@ __all__ = [
     "int8_linear_tilelang",
     "int8_mma_reference",
     "int8_mma_tilelang",
+    "kv_int8_attention_dequant_reference",
     "layer_norm_reference",
     "layer_norm_tilelang",
     "linear_marlin_reference",
@@ -179,6 +200,7 @@ __all__ = [
     "scaled_nvfp4_quant_reference",
     "scaled_nvfp4_quant_tilelang",
     "static_activation_quantize_tilelang",
+    "svd_fused_dequant_gemm_low_rank_tilelang",
     "swiglu_reference",
     "swiglu_tilelang",
 ]

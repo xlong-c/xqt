@@ -52,8 +52,12 @@ from .mixed_input_probe_sm89 import (
 )
 from .fp8_probe_sm89 import run_sm89_fp8_probe, sm89_fp8_probe_artifact_available
 from .fp8_sm89 import (
+    Sm89Fp8BlockwiseResourceReport,
+    fp8_blockwise_split_k_partition,
     fp8_sm89_executor,
     install_sm89_fp8_executors,
+    query_sm89_fp8_blockwise_resources,
+    select_fp8_blockwise_split_k,
     sm89_fp8_artifact_available,
 )
 
@@ -97,4 +101,8 @@ __all__ = [
     "fp8_sm89_executor",
     "install_sm89_fp8_executors",
     "sm89_fp8_artifact_available",
+    "Sm89Fp8BlockwiseResourceReport",
+    "fp8_blockwise_split_k_partition",
+    "query_sm89_fp8_blockwise_resources",
+    "select_fp8_blockwise_split_k",
 ]

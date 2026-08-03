@@ -118,7 +118,9 @@ def test_tilelang_awq_int4_operator_stage_reports_weight_only_metadata() -> None
 
     quant_stage = session.quant(
         name="int4_awq_quant",
-        backend="tilelang",
+        # tilelang 是 operator engine 不是 quant backend, stage schema 会拒绝,
+        # 这里用合法的 pytorch backend 跑 AWQ weight_only_int4.
+        backend="pytorch",
         method="awq",
         strategy="weight_only_int4",
         policy={

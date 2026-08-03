@@ -6,6 +6,13 @@ from .capability import (
     prune_runtime_capability_from_report,
 )
 from .support_matrix import PruneGranularitySupport, structured_prune_support_matrix
+from .granularity import (
+    PruneGranularitySpec,
+    describe_prune_granularity,
+    normalize_prune_granularity,
+    rewrite_supported_granularities,
+    supported_prune_granularities,
+)
 from .methods import (
     PruneMethodSpec,
     SUPPORTED_PRUNE_METHODS,
@@ -71,6 +78,9 @@ from .sparsity import (
     apply_block_sparse_pruning,
     apply_nm_structured_sparsity,
 )
+from .dimensions import diff_module_dimensions, snapshot_module_dimensions
+from .flops import estimate_model_flops, estimate_module_flops
+from .safety import PruneSafetyCheck, PruneSafetyReport, assess_prune_safety
 from .toy_models import StructuredPruningToyCNN
 
 __all__ = [
@@ -84,9 +94,14 @@ __all__ = [
     "DEFAULT_PRUNABLE_TYPES",
     "DependencyGroup",
     "describe_prune_runtime_capability",
+    "describe_prune_granularity",
+    "diff_module_dimensions",
+    "estimate_model_flops",
+    "estimate_module_flops",
     "apply_block_sparse_pruning",
     "apply_global_l1_unstructured_pruning",
     "apply_nm_structured_sparsity",
+    "assess_prune_safety",
     "BlockSparseLayerReport",
     "BlockSparsePruningReport",
     "collect_module_importance",
@@ -95,8 +110,11 @@ __all__ = [
     "NMStructuredPruningReport",
     "PruneCandidateRecord",
     "PruneGranularitySupport",
+    "PruneGranularitySpec",
     "PruneMethodSpec",
     "PruneRuntimeCapability",
+    "PruneSafetyCheck",
+    "PruneSafetyReport",
     "PruningDependencyGraph",
     "PruningTarget",
     "prune_batchnorm_channels",
@@ -109,9 +127,13 @@ __all__ = [
     "prune_runtime_capability_from_report",
     "rank_prune_candidates",
     "remove_pruning_reparameterization",
+    "normalize_prune_granularity",
+    "rewrite_supported_granularities",
     "run_prune_schedule",
     "run_structured_prune_schedule",
     "summarize_pruning",
+    "snapshot_module_dimensions",
+    "supported_prune_granularities",
     "SUPPORTED_GRANULARITIES",
     "SUPPORTED_IMPORTANCE_METRICS",
     "SUPPORTED_PRUNE_METHODS",

@@ -16,6 +16,10 @@ from xqt.contracts.runtime_quant import (
     RuntimeQuantContract,
     extract_runtime_quant_contract,
 )
+from xqt.contracts.runtime_features import (
+    RUNTIME_FEATURES_KEY,
+    RuntimeFeatureMetadata,
+)
 from xqt.core.errors import XQTConfigError
 
 RUNTIME_MANIFEST_KEY = "runtime_manifest"
@@ -55,6 +59,7 @@ class RuntimeManifest:
     fallback_kernels: tuple[str, ...] = ()
     prefill_supported: bool | None = None
     decode_supported: bool | None = None
+    runtime_features: RuntimeFeatureMetadata | None = None
     notes: tuple[str, ...] = ()
     schema_version: int = RUNTIME_MANIFEST_SCHEMA_VERSION
 
@@ -74,6 +79,11 @@ class RuntimeManifest:
             "fallback_kernels": list(self.fallback_kernels),
             "prefill_supported": prefill,
             "decode_supported": decode,
+            "runtime_features": (
+                None
+                if self.runtime_features is None
+                else self.runtime_features.to_dict()
+            ),
             "notes": list(self.notes),
         }
 
@@ -114,6 +124,19 @@ class RuntimeManifest:
             raise XQTConfigError("RuntimeManifest.prefill_supported must be bool or None")
         if decode is not None and not isinstance(decode, bool):
             raise XQTConfigError("RuntimeManifest.decode_supported must be bool or None")
+        raw_features = payload.get("runtime_features")
+        runtime_features: RuntimeFeatureMetadata | None
+        if raw_features is None:
+            runtime_features = None
+        elif isinstance(raw_features, RuntimeFeatureMetadata):
+            runtime_features = raw_features
+        elif isinstance(raw_features, Mapping):
+            runtime_features = RuntimeFeatureMetadata.from_dict(raw_features)
+        else:
+            raise XQTConfigError(
+                "RuntimeManifest.runtime_features must be a mapping, "
+                "RuntimeFeatureMetadata, or None"
+            )
         version = payload.get("schema_version", RUNTIME_MANIFEST_SCHEMA_VERSION)
         try:
             version_i = int(version)
@@ -128,6 +151,7 @@ class RuntimeManifest:
             fallback_kernels=_as_str_tuple(payload.get("fallback_kernels")),
             prefill_supported=prefill,
             decode_supported=decode,
+            runtime_features=runtime_features,
             notes=_as_str_tuple(payload.get("notes")),
             schema_version=version_i,
         )
@@ -211,6 +235,18 @@ def build_runtime_manifest(
         selected = tuple(contract.required_kernels)
     prefill = None if contract is None else contract.prefill_supported
     decode = None if contract is None else contract.decode_supported
+    runtime_features: RuntimeFeatureMetadata | None = None
+    raw_features = metadata.get(RUNTIME_FEATURES_KEY)
+    if raw_features is not None:
+        if isinstance(raw_features, RuntimeFeatureMetadata):
+            runtime_features = raw_features
+        elif isinstance(raw_features, Mapping):
+            runtime_features = RuntimeFeatureMetadata.from_dict(raw_features)
+        else:
+            raise XQTConfigError(
+                f"metadata[{RUNTIME_FEATURES_KEY!r}] must be a mapping or "
+                "RuntimeFeatureMetadata"
+            )
     return RuntimeManifest(
         contract=contract,
         layout_reports=tuple(layouts),
@@ -218,6 +254,7 @@ def build_runtime_manifest(
         fallback_kernels=fallback,
         prefill_supported=prefill,
         decode_supported=decode,
+        runtime_features=runtime_features,
         notes=tuple(notes),
     )
 

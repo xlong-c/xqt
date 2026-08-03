@@ -33,6 +33,17 @@ OPERATOR_OPT_ENGINES = (
     "cute_dsl",
     "custom_cuda",
 )
+# DEBT-001: convert() accepts a materialize *preference* subset. The full
+# implementation vocabulary lives in xqt.runtime.engine_resolve; this tuple is
+# the config-facing subset for xqt.convert and must stay in sync with the
+# operator capability matrix (regression test).
+CONVERT_ENGINE_NAMES = (
+    "torch",
+    "triton",
+    "tilelang",
+    "cutile",
+    "cute_dsl",
+)
 TILELANG_PASS_CONFIG_KEYS = (
     "TL_ENABLE_FAST_MATH",
     "TL_DISABLE_WARP_SPECIALIZED",
@@ -88,6 +99,8 @@ CANONICAL_QUANT_METHODS = (
     "svd",
     "convrot",
     "turboquant",
+    "moe",
+    "moe_weight_only",
 )
 SUPPORTED_QUANT_METHODS = CANONICAL_QUANT_METHODS
 
@@ -226,6 +239,7 @@ class TaskConfig:
 
     type: str = "classification"
     class_names: List[str] = field(default_factory=list)
+    sampling_steps: Optional[int] = None
     detection_postprocess: DetectionPostprocessConfig = field(
         default_factory=DetectionPostprocessConfig
     )
@@ -445,6 +459,17 @@ class ONNXExportConfig:
 
 
 @dataclass
+@dataclass
+class OpenVINOBenchmarkConfig:
+    """Optional OpenVINO runtime benchmark configuration for one export target."""
+
+    enabled: bool = False
+    warmup: int = 10
+    iterations: int = 50
+    measure_memory: bool = False
+
+
+@dataclass
 class OpenVINOExportConfig:
     """Typed OpenVINO-specific settings for one export target."""
 
@@ -453,6 +478,9 @@ class OpenVINOExportConfig:
     dry_run: bool = False
     runtime_diff: bool = True
     device: str = "CPU"
+    benchmark: OpenVINOBenchmarkConfig = field(
+        default_factory=OpenVINOBenchmarkConfig
+    )
 
 
 @dataclass
@@ -542,6 +570,17 @@ class MNNExportConfig:
 
 
 @dataclass
+class QNNExportConfig:
+    """Typed Qualcomm QNN converter settings for one export target."""
+
+    source_path: Optional[str] = None
+    converter_path: str = "qnn-onnx-converter"
+    extra_args: List[str] = field(default_factory=list)
+    timeout: Optional[float] = None
+    dry_run: bool = False
+
+
+@dataclass
 class ExportTargetConfig:
     """Single export target settings."""
 
@@ -561,6 +600,7 @@ class ExportTargetConfig:
     executorch: ExecuTorchExportConfig = field(default_factory=ExecuTorchExportConfig)
     ncnn: NCNNExportConfig = field(default_factory=NCNNExportConfig)
     mnn: MNNExportConfig = field(default_factory=MNNExportConfig)
+    qnn: QNNExportConfig = field(default_factory=QNNExportConfig)
     params: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -635,6 +675,7 @@ class AnalysisConfig:
 
 __all__ = [
     "COMPRESSION_AXES",
+    "CONVERT_ENGINE_NAMES",
     "CUTILE_PASS_CONFIG_KEYS",
     "CUTLASS_PASS_CONFIG_KEYS",
     "CUTE_DSL_PASS_CONFIG_KEYS",

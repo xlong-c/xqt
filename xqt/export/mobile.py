@@ -248,6 +248,143 @@ def export_mnn_from_onnx(
     )
 
 
+def build_qnn_onnx_converter_command(
+    onnx_path: str | Path,
+    output_dir: str | Path,
+    *,
+    converter_path: str = "qnn-onnx-converter",
+    extra_args: Optional[Sequence[str]] = None,
+) -> list[str]:
+    """Build a Qualcomm QNN ONNX converter command.
+
+    The QNN SDK converter is installed on the target machine by Qualcomm's
+    official SDK; XQT only builds the adapter command and preflight checks.
+    """
+
+    return [
+        converter_path,
+        "--input_model",
+        str(Path(onnx_path)),
+        "--output_dir",
+        str(Path(output_dir)),
+        *(str(arg) for arg in (extra_args or ())),
+    ]
+
+
+def export_qnn_from_onnx(
+    onnx_path: str | Path,
+    output_dir: str | Path,
+    *,
+    converter_path: str = "qnn-onnx-converter",
+    extra_args: Optional[Sequence[str]] = None,
+    timeout: Optional[float] = None,
+    dry_run: bool = False,
+) -> CommandExportResult:
+    """Convert ONNX to a Qualcomm QNN model directory.
+
+    Dry-run only validates the command shape and creates the output directory;
+    real conversion requires the official QNN SDK installed on the target
+    machine.
+    """
+
+    onnx = _ensure_input_file(onnx_path, description="ONNX")
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    command = build_qnn_onnx_converter_command(
+        onnx,
+        output,
+        converter_path=converter_path,
+        extra_args=extra_args,
+    )
+    if dry_run:
+        return CommandExportResult(
+            output_paths=[output],
+            command=command,
+            dry_run=True,
+            metadata={"source": str(onnx)},
+        )
+
+    executable = shutil.which(converter_path)
+    if executable is None:
+        raise XQTBackendError(
+            f"QNN converter executable not found: {converter_path}"
+        )
+    command = [executable, *command[1:]]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise XQTBackendError(
+            f"QNN converter failed with return code {completed.returncode}: "
+            f"{completed.stderr.strip()}"
+        )
+    artifacts = sorted(path for path in output.rglob("*") if path.is_file())
+    if not artifacts:
+        raise XQTBackendError(
+            f"QNN converter did not create artifacts in {output}"
+        )
+    checksums = {str(path): file_sha256(path) for path in artifacts}
+    return CommandExportResult(
+        output_paths=[output],
+        command=command,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        checksums=checksums,
+        dry_run=False,
+        metadata={"source": str(onnx)},
+    )
+
+
+def mobile_export_diagnosis(
+    *,
+    target_format: str,
+    dry_run: bool,
+    source_missing: bool = False,
+    converter_missing: bool = False,
+    materialized: bool = False,
+    message: str = "",
+) -> dict[str, Any]:
+    """Return a structured reason for mobile/edge export readiness.
+
+    The diagnosis distinguishes dry-run preflight, missing source artifact,
+    missing converter executable, missing runtime/dependency, and a real
+    materialized artifact, so a blocked export always explains why.
+    """
+
+    if dry_run:
+        status = "command_only"
+        reason = "dry_run_preflight_only"
+        blocked_by: Optional[str] = None
+    elif source_missing:
+        status = "blocked"
+        reason = "source_artifact_missing"
+        blocked_by = "source_artifact"
+    elif converter_missing:
+        status = "blocked"
+        reason = "converter_executable_missing"
+        blocked_by = "converter"
+    elif not materialized:
+        status = "blocked"
+        reason = "artifact_not_materialized"
+        blocked_by = "runtime_or_converter"
+    else:
+        status = "materialized"
+        reason = "artifact_materialized"
+        blocked_by = None
+    return {
+        "format": target_format,
+        "status": status,
+        "reason": reason,
+        "blocked_by": blocked_by,
+        "message": message,
+    }
+
+
 def export_executorch_program(
     model: nn.Module,
     example_input: Any,
@@ -297,8 +434,11 @@ __all__ = [
     "build_mnnconvert_command",
     "build_onnx2ncnn_command",
     "build_pnnx_command",
+    "build_qnn_onnx_converter_command",
     "export_executorch_program",
     "export_mnn_from_onnx",
     "export_ncnn_from_onnx",
     "export_ncnn_with_pnnx",
+    "export_qnn_from_onnx",
+    "mobile_export_diagnosis",
 ]

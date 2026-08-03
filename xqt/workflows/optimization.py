@@ -94,11 +94,20 @@ _StageSpecT = TypeVar("_StageSpecT", bound=StageSpec)
 
 @dataclass
 class StageAcceptanceConfig:
-    """Acceptance thresholds for one model-side stage."""
+    """Acceptance thresholds for one model-side stage.
+
+    Four policy dimensions are supported: numeric diff (``max_mean_abs`` /
+    ``max_max_abs`` / ``max_relative_error``), speedup (``min_speedup``),
+    peak memory (``max_memory_mb``) and accuracy drop
+    (``max_accuracy_drop``). Missing evidence fails the corresponding check.
+    """
 
     min_speedup: Optional[float] = None
     max_mean_abs: Optional[float] = None
     max_max_abs: Optional[float] = None
+    max_relative_error: Optional[float] = None
+    max_memory_mb: Optional[float] = None
+    max_accuracy_drop: Optional[float] = None
 
 
 @dataclass
@@ -538,6 +547,25 @@ class XQTOptimizationSession:
             raise ValueError("baseline stage is not initialized")
         return self.compare_stages(self._state.baseline_stage, stage_name)
 
+    def benchmark_leaderboard(
+        self,
+        *,
+        metric: str = "speedup",
+    ) -> Any:
+        """Rank stage benchmark history into best / rejected stage view.
+
+        The returned leaderboard is a pure view of ``stage_results``; it does
+        not mutate session state. Supported metrics: ``speedup``, ``memory``,
+        ``numeric``.
+        """
+
+        from xqt.auto.stage_history import rank_stage_benchmark_history
+
+        return rank_stage_benchmark_history(
+            self._state.stage_results,
+            metric=metric,
+        )
+
     def set_example_inputs(self, example_inputs: Any) -> None:
         self._state.context.example_inputs = example_inputs
 
@@ -748,6 +776,7 @@ class XQTOptimizationSession:
         executorch: Mapping[str, Any] | None = None,
         ncnn: Mapping[str, Any] | None = None,
         mnn: Mapping[str, Any] | None = None,
+        qnn: Mapping[str, Any] | None = None,
         opset: int | None = None,
         from_stage: str | None = None,
         compare_to: str | None = None,
@@ -770,6 +799,7 @@ class XQTOptimizationSession:
             executorch=executorch,
             ncnn=ncnn,
             mnn=mnn,
+            qnn=qnn,
         )
         return self._run(
             name=name,
@@ -797,6 +827,7 @@ class XQTOptimizationSession:
         executorch: Mapping[str, Any] | None = None,
         ncnn: Mapping[str, Any] | None = None,
         mnn: Mapping[str, Any] | None = None,
+        qnn: Mapping[str, Any] | None = None,
         runtime_handle: Mapping[str, Any] | None = None,
         opset: int | None = None,
         from_stage: str | None = None,
@@ -820,6 +851,7 @@ class XQTOptimizationSession:
             executorch=executorch,
             ncnn=ncnn,
             mnn=mnn,
+            qnn=qnn,
         )
         if runtime_handle is not None:
             params["runtime_handle"] = dict(runtime_handle)

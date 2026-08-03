@@ -145,6 +145,7 @@ def run_structured_prune_schedule(
     importance: dict[str, object] | None = None,
     selection: dict[str, object] | None = None,
     example_input: object = None,
+    task_type: str | None = None,
 ) -> StructuredPruneScheduleReport:
     """Apply scheduled structured pruning without recovery training."""
 
@@ -160,6 +161,7 @@ def run_structured_prune_schedule(
         importance=importance,
         selection=selection,
         example_input=example_input,
+        task_type=task_type,
     )
     reports: list[StructuredPruneScheduleStepReport] = []
     for step_index, sparsity in enumerate(schedule_values):

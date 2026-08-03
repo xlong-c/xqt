@@ -199,6 +199,8 @@ def openvino_runtime_layer_report(
 ) -> dict[str, Any]:
     """Summarize OpenVINO export readiness as runtime-specific layers."""
 
+    import importlib.util
+
     metadata = export_result.metadata
     xml_path = Path(export_result.xml_path)
     ir_materialized = (not export_result.dry_run) and (
@@ -279,13 +281,59 @@ def openvino_runtime_layer_report(
             "diff": diff_data,
         }
 
-    benchmark_layer = {
-        "status": "not_configured",
-        "passed": True,
-        "requested": False,
-        "benchmark": None,
-        "reason": "openvino runtime benchmark config is not defined for export targets",
+    benchmark_config = target.openvino.benchmark
+    benchmark_requested = bool(benchmark_config.enabled)
+    benchmark_spec = {
+        "warmup": benchmark_config.warmup,
+        "iterations": benchmark_config.iterations,
+        "measure_memory": benchmark_config.measure_memory,
     }
+    if not benchmark_requested:
+        benchmark_layer = {
+            "status": "not_configured",
+            "passed": True,
+            "requested": False,
+            "benchmark": None,
+            "reason": "openvino runtime benchmark config is not enabled for this target",
+        }
+    elif export_result.dry_run:
+        benchmark_layer = {
+            "status": "not_run_dry_run",
+            "passed": True,
+            "requested": True,
+            "benchmark": benchmark_spec,
+            "reason": "benchmark requires a materialized IR; dry-run did not convert",
+        }
+    elif not ir_materialized:
+        benchmark_layer = {
+            "status": "not_run_missing_ir",
+            "passed": True,
+            "requested": True,
+            "benchmark": benchmark_spec,
+            "reason": "benchmark requires a materialized OpenVINO IR",
+        }
+    elif importlib.util.find_spec("openvino") is None:
+        benchmark_layer = {
+            "status": "not_run_missing_dependency",
+            "passed": True,
+            "requested": True,
+            "benchmark": benchmark_spec,
+            "reason": (
+                "openvino python package is missing; real benchmark execution "
+                "is an optional milestone on the target machine"
+            ),
+        }
+    else:
+        benchmark_layer = {
+            "status": "configured",
+            "passed": True,
+            "requested": True,
+            "benchmark": benchmark_spec,
+            "reason": (
+                "benchmark config is wired into the report; latency measurement "
+                "requires running OpenVINO runtime on the target machine"
+            ),
+        }
     layers = {
         "conversion": conversion_layer,
         "runtime_load": runtime_load_layer,

@@ -14,6 +14,7 @@ from .candidates import (
     _candidate_to_target,
 )
 from .graph import validate_candidate_dependencies
+from .granularity import describe_prune_granularity, normalize_prune_granularity
 from .report import StructuredPruningAction, StructuredPruningPlan
 
 
@@ -326,9 +327,19 @@ def build_structured_pruning_plan(
 
     if target_sparsity < 0.0 or target_sparsity > 1.0:
         raise ValueError("target_sparsity must be in [0, 1]")
-    if granularity not in supported_granularities:
+    canonical_granularity = normalize_prune_granularity(granularity)
+    if canonical_granularity not in supported_granularities:
+        spec = describe_prune_granularity(canonical_granularity)
+        if not spec["rewrites_structure"]:
+            raise ValueError(
+                f"Structured prune granularity '{canonical_granularity}' is "
+                f"{spec['runtime_support']} in XQT: it records metadata but has no "
+                "generic structural rewrite, so structured pruning cannot proceed"
+            )
         allowed = ", ".join(supported_granularities)
-        raise ValueError(f"Unsupported structured granularity '{granularity}'. Allowed: {allowed}")
+        raise ValueError(
+            f"Unsupported structured granularity '{canonical_granularity}'. Allowed: {allowed}"
+        )
     if scope not in supported_scopes:
         allowed = ", ".join(supported_scopes)
         raise ValueError(f"Unsupported structured scope '{scope}'. Allowed: {allowed}")
@@ -346,14 +357,17 @@ def build_structured_pruning_plan(
         raise ValueError(
             f"Unsupported structured importance metric '{importance_metric}'. Allowed: {allowed}"
         )
-    if importance_metric == "bn_gamma" and granularity not in {"channel", "filter"}:
+    if importance_metric == "bn_gamma" and canonical_granularity not in {
+        "channel",
+        "filter",
+    }:
         raise ValueError("importance.metric=bn_gamma only supports channel/filter pruning")
-    if importance_metric == "usage" and granularity != "expert":
+    if importance_metric == "usage" and canonical_granularity != "expert":
         raise ValueError("importance.metric=usage only supports expert pruning")
 
     discovery = collect_candidates(
         model,
-        granularity=granularity,
+        granularity=canonical_granularity,
         importance_metric=importance_metric,
     )
     candidates = discovery.candidates
@@ -387,13 +401,13 @@ def build_structured_pruning_plan(
         model,
         candidates=candidates,
         keep_by_candidate=keep_by_candidate,
-        granularity=granularity,
+        granularity=canonical_granularity,
         validate_action_keep_indices=validate_action_keep_indices,
     )
 
     return StructuredPruningPlan(
         method="structured",
-        granularity=granularity,
+        granularity=canonical_granularity,
         scope=scope,
         target_sparsity=target_sparsity,
         importance_metric=importance_metric,

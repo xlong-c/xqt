@@ -425,3 +425,176 @@ def test_fp8_metadata_only_candidate_falls_back_to_reference() -> None:
             activation_scales=activation_scale,
         ),
     )
+
+
+@pytest.mark.parametrize("format_name", ["fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("block_k", [32, 64, 128])
+def test_fp8_blockwise_scale_layout_covers_partial_trailing_block(
+    format_name: str, block_k: int
+) -> None:
+    torch.manual_seed(20260803 + block_k)
+    cols = block_k + 17
+    values = torch.randn(3, cols) * 0.5
+    scale = calibrate_fp8_scale(
+        values,
+        format_name=format_name,
+        granularity="blockwise",
+        role="activation",
+        block_k=block_k,
+    )
+    assert tuple(scale.shape) == (3, 2)
+    trailing = values[:, block_k:].abs().amax(dim=1, keepdim=True) / fp8_format_spec(
+        format_name
+    ).max_finite
+    torch.testing.assert_close(scale[:, 1:2], trailing)
+    quantized = quantize_fp8(
+        values,
+        format_name=format_name,
+        granularity="blockwise",
+        role="activation",
+        source="activation_static",
+        scale=scale,
+        block_k=block_k,
+    )
+    assert quantized.block_k == block_k
+    assert tuple(quantized.scale.shape) == (3, 2)
+    assert tuple(quantized.storage.shape) == (3, cols)
+    # E5M2 keeps only two mantissa bits, so its round-trip noise is wider.
+    atol, rtol = (0.03, 0.06) if format_name == "fp8_e4m3" else (0.06, 0.15)
+    torch.testing.assert_close(quantized.dequantize(), values, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("block_k", [32, 64, 128])
+def test_fp8_blockwise_dynamic_scale_is_per_row_per_block(block_k: int) -> None:
+    torch.manual_seed(20260804 + block_k)
+    values = torch.randn(4, 2 * block_k) * 0.25
+    quantized = quantize_fp8(
+        values,
+        format_name="fp8_e4m3",
+        granularity="blockwise",
+        role="activation",
+        source="activation_dynamic",
+        block_k=block_k,
+    )
+    expected = (
+        values.view(4, 2, block_k).abs().amax(dim=2) / fp8_format_spec("fp8_e4m3").max_finite
+    )
+    assert tuple(quantized.scale.shape) == (4, 2)
+    torch.testing.assert_close(quantized.scale, expected)
+
+
+def test_fp8_blockwise_rejects_invalid_block_k_and_scale_shape() -> None:
+    with pytest.raises(ValueError, match="block_k must be one of"):
+        quantize_fp8(
+            torch.ones(2, 64),
+            format_name="fp8_e4m3",
+            granularity="blockwise",
+            role="activation",
+            source="activation_dynamic",
+            block_k=16,
+        )
+    with pytest.raises(ValueError, match="block_k is only valid for blockwise"):
+        quantize_fp8(
+            torch.ones(2, 64),
+            format_name="fp8_e4m3",
+            granularity="per_tensor",
+            role="activation",
+            source="activation_static",
+            scale=torch.ones(1, 1),
+            block_k=32,
+        )
+    with pytest.raises(ValueError, match="blockwise scale must be"):
+        quantize_fp8(
+            torch.ones(2, 64),
+            format_name="fp8_e4m3",
+            granularity="blockwise",
+            role="weight",
+            source="weight_offline",
+            scale=torch.ones(2, 3),
+            block_k=32,
+        )
+    with pytest.raises(ValueError, match="requires block_k"):
+        quantize_fp8(
+            torch.ones(2, 64),
+            format_name="fp8_e4m3",
+            granularity="blockwise",
+            role="activation",
+            source="activation_dynamic",
+        )
+
+
+@pytest.mark.parametrize("format_name", ["fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("block_k", [32, 64, 128])
+def test_fp8_blockwise_reference_gemm_matches_manual_dequantize(
+    format_name: str, block_k: int
+) -> None:
+    torch.manual_seed(20260805 + block_k)
+    m, n, k = 3, 5, 100
+    activation = torch.randn(m, k) * 0.25
+    weight = torch.randn(n, k) * 0.25
+    activation_scale = calibrate_fp8_scale(
+        activation,
+        format_name=format_name,
+        granularity="blockwise",
+        role="activation",
+        block_k=block_k,
+    )
+    weight_scale = calibrate_fp8_scale(
+        weight,
+        format_name=format_name,
+        granularity="blockwise",
+        role="weight",
+        block_k=block_k,
+    )
+    encoded_activation = quantize_fp8(
+        activation,
+        format_name=format_name,
+        granularity="blockwise",
+        role="activation",
+        source="activation_static",
+        scale=activation_scale,
+        block_k=block_k,
+    )
+    encoded_weight = quantize_fp8(
+        weight,
+        format_name=format_name,
+        granularity="blockwise",
+        role="weight",
+        source="weight_offline",
+        scale=weight_scale,
+        block_k=block_k,
+    )
+    quant = QuantSpec(
+        weight_dtype=format_name,
+        activation_dtype=format_name,
+        output_dtype="fp32",
+        weight_granularity="blockwise",
+        activation_granularity="blockwise",
+        group_size=block_k,
+        weight_scale_source="weight_offline",
+        activation_scale_source="activation_static",
+        storage_layout="xqt_fp8_rowmajor_v1",
+        pack_version="xqt-fp8-v1",
+    )
+    packed = build_packed_weight(
+        encoded_weight.storage,
+        logical_shape=(n, k),
+        spec=quant,
+        scales=encoded_weight.scale,
+        padded_k=k,
+        storage_layout="xqt_fp8_rowmajor_v1",
+        pack_version="xqt-fp8-v1",
+    )
+    spec = GemmSpec(
+        problem=GemmProblem(m=m, n=n, k=k),
+        quant=quant,
+        epilogue=EpilogueSpec(output_dtype="fp32"),
+    )
+    actual = reference_gemm(
+        encoded_activation.storage,
+        packed,
+        spec=spec,
+        activation_scales=encoded_activation.scale,
+    )
+    expected = encoded_activation.dequantize() @ encoded_weight.dequantize().T
+    torch.testing.assert_close(actual, expected)

@@ -207,63 +207,20 @@ def create_optimization_state(
     return state
 
 
-def _max_nested_numeric(value: Any, key: str) -> Optional[float]:
-    values: list[float] = []
-    if isinstance(value, Mapping):
-        raw = value.get(key)
-        if isinstance(raw, (float, int)):
-            values.append(float(raw))
-        for item in value.values():
-            nested = _max_nested_numeric(item, key)
-            if nested is not None:
-                values.append(nested)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            nested = _max_nested_numeric(item, key)
-            if nested is not None:
-                values.append(nested)
-    return max(values) if values else None
-
-
-def _benchmark_speedup(
-    reference: Mapping[str, Any] | None, metrics: Mapping[str, Any]
-) -> Optional[float]:
-    if reference is None:
-        return None
-    reference_latency = _max_nested_numeric(reference, "p50_ms")
-    current_latency = _max_nested_numeric(metrics, "p50_ms")
-    if reference_latency is None or current_latency is None or current_latency <= 0:
-        return None
-    return reference_latency / current_latency
-
-
 def _accept_stage(
     stage: "OptimizationStageConfig",
     metrics: Mapping[str, Any],
     *,
     reference_benchmark: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    accept = stage.accept
-    accepted = True
+    from xqt.auto.acceptance import evaluate_stage_acceptance
 
-    if accept.min_speedup is not None:
-        speedup = _benchmark_speedup(reference_benchmark, metrics)
-        if speedup is None:
-            speedup = _max_nested_numeric(metrics, "speedup")
-        if speedup is None or speedup < accept.min_speedup:
-            accepted = False
-
-    if accept.max_mean_abs is not None:
-        mean_abs = _max_nested_numeric(metrics, "mean_abs")
-        if mean_abs is None or mean_abs > accept.max_mean_abs:
-            accepted = False
-
-    if accept.max_max_abs is not None:
-        max_abs = _max_nested_numeric(metrics, "max_abs")
-        if max_abs is None or max_abs > accept.max_max_abs:
-            accepted = False
-
-    return accepted, "ok" if accepted else "rejected by acceptance thresholds"
+    evaluation = evaluate_stage_acceptance(
+        stage.accept,
+        metrics,
+        reference_benchmark=reference_benchmark,
+    )
+    return evaluation.accepted, evaluation.message
 
 
 def _new_artifacts(

@@ -77,6 +77,7 @@ def apply_structured_pruning(
     importance: Optional[Mapping[str, Any]] = None,
     selection: Optional[Mapping[str, Any]] = None,
     example_input: Any = None,
+    task_type: Optional[str] = None,
 ) -> StructuredPruningReport:
     """Plan and apply a structured-pruning rewrite in place."""
 
@@ -88,7 +89,12 @@ def apply_structured_pruning(
         importance=importance,
         selection=selection,
     )
-    return apply_structured_pruning_plan(model, plan, example_input=example_input)
+    return apply_structured_pruning_plan(
+        model,
+        plan,
+        example_input=example_input,
+        task_type=task_type,
+    )
 
 
 __all__ = [

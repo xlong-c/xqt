@@ -30,6 +30,12 @@ def handle_ncnn(
         else:
             source_path = context.artifacts.get("last_onnx")
     if source_path is None:
+        context.metrics[f"export_{index}.ncnn_readiness"] = _ep.mobile_export_diagnosis(
+            target_format="ncnn",
+            dry_run=ncnn.dry_run,
+            source_missing=True,
+            message="ncnn export requires ncnn.source_path or a compatible prior export",
+        )
         raise ValueError(
             "ncnn export requires ncnn.source_path or a compatible prior export"
         )
@@ -39,26 +45,36 @@ def handle_ncnn(
     bin_path = ncnn.bin_path
     if bin_path is None:
         bin_path = str(Path(param_path).with_suffix(".bin"))
-    if ncnn.converter == "pnnx":
-        result = _ep.export_ncnn_with_pnnx(
-            source_path,
-            pnnx_path=ncnn.pnnx_path,
-            param_path=param_path,
-            bin_path=bin_path,
-            extra_args=ncnn.extra_args,
-            timeout=ncnn.timeout,
+    try:
+        if ncnn.converter == "pnnx":
+            result = _ep.export_ncnn_with_pnnx(
+                source_path,
+                pnnx_path=ncnn.pnnx_path,
+                param_path=param_path,
+                bin_path=bin_path,
+                extra_args=ncnn.extra_args,
+                timeout=ncnn.timeout,
+                dry_run=ncnn.dry_run,
+            )
+        else:
+            result = _ep.export_ncnn_from_onnx(
+                source_path,
+                param_path,
+                bin_path,
+                onnx2ncnn_path=ncnn.onnx2ncnn_path,
+                extra_args=ncnn.extra_args,
+                timeout=ncnn.timeout,
+                dry_run=ncnn.dry_run,
+            )
+    except Exception as exc:
+        context.metrics[f"export_{index}.ncnn_readiness"] = _ep.mobile_export_diagnosis(
+            target_format="ncnn",
             dry_run=ncnn.dry_run,
+            converter_missing="executable not found" in str(exc),
+            materialized=False,
+            message=str(exc),
         )
-    else:
-        result = _ep.export_ncnn_from_onnx(
-            source_path,
-            param_path,
-            bin_path,
-            onnx2ncnn_path=ncnn.onnx2ncnn_path,
-            extra_args=ncnn.extra_args,
-            timeout=ncnn.timeout,
-            dry_run=ncnn.dry_run,
-        )
+        raise
     context.artifacts[f"export_{index}"] = result.output_paths
     if context.manifest is not None and result.checksums:
         for output in result.output_paths:
@@ -86,6 +102,11 @@ def handle_ncnn(
         else "executed",
         "command": result.command,
         "checksums": result.checksums,
+        "export_readiness": _ep.mobile_export_diagnosis(
+            target_format="ncnn",
+            dry_run=result.dry_run,
+            materialized=not result.dry_run,
+        ),
     }
     summary = _target_summary(target, exported_entry)
     return exported_entry, summary

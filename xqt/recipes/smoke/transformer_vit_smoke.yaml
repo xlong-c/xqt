@@ -1,0 +1,73 @@
+project:
+  name: transformer_vit_smoke
+  artifact_dir: artifacts/xqt/smoke/transformer_vit
+model:
+  target: xqt.model.build_smoke_vit_classifier
+  params:
+    image_size: 32
+    patch_size: 8
+    hidden_dim: 32
+    num_heads: 2
+    num_layers: 2
+    dim_feedforward: 64
+    num_classes: 10
+task:
+  type: classification
+  class_names:
+  - cls0
+  - cls1
+  - cls2
+  - cls3
+  - cls4
+  - cls5
+  - cls6
+  - cls7
+  - cls8
+  - cls9
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+- sparsity
+hardware:
+  device: cpu
+  backends:
+  - torchao
+  - onnxruntime
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    method: global_l1_unstructured
+    target_sparsity: 0.2
+- name: quant_model
+  kind: quant
+  params:
+    backend: torchao
+    strategy: w8a8_int8
+    keep_high_precision:
+    - head
+    policy:
+      include_module_types:
+      - Linear
+- name: export_model
+  kind: export
+  save_model: false
+  params:
+    targets:
+    - format: onnx
+      output_path: artifacts/xqt/smoke/transformer_vit/smoke_vit.onnx
+      opset: 18
+      onnx:
+        input_names:
+        - image
+        output_names:
+        - logits
+        dynamo: false
+        runtime_diff: false
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

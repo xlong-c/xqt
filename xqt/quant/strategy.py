@@ -134,6 +134,27 @@ _SCHEME_FIELD_NAMES = frozenset(
 )
 
 
+def canonical_quant_strategies() -> tuple[str, ...]:
+    """Return the canonical strategy names (single fact source).
+
+    ``CANONICAL_QUANT_STRATEGIES`` in ``xqt/core/schema.py`` must stay aligned
+    with this set; a regression test asserts the two never drift. Strategy
+    strings are config-facing aliases of a ``QuantScheme`` (storage +
+    activation axes), not a mixed-axis execution enum.
+    """
+
+    return tuple(_STRATEGY_SCHEME_TEMPLATES)
+
+
+def strategy_scheme_templates() -> dict[str, dict[str, Any]]:
+    """Return copies of the canonical strategy -> QuantScheme templates."""
+
+    return {
+        name: dict(template)
+        for name, template in _STRATEGY_SCHEME_TEMPLATES.items()
+    }
+
+
 def resolve_scheme(
     strategy: Any | None,
     policy: Mapping[str, Any] | None = None,
@@ -222,6 +243,7 @@ __all__ = [
     "SUPPORTED_QUANT_COMPUTES",
     "SUPPORTED_QUANT_METHODS",
     "SUPPORTED_QUANT_STRATEGIES",
+    "canonical_quant_strategies",
     "coerce_quant_scheme",
     "is_supported_quant_compute",
     "is_supported_quant_method",
@@ -233,4 +255,5 @@ __all__ = [
     "require_supported_quant_method",
     "require_supported_quant_strategy",
     "resolve_scheme",
+    "strategy_scheme_templates",
 ]

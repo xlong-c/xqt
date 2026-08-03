@@ -37,8 +37,8 @@
 
 | ID | 标题 | 状态 | 优先级 |
 | --- | --- | --- | --- |
-| [DEBT-001](#debt-001-xqtconvert-engine-把推理-engine-绑在-convert-参数上) | `xqt.convert(..., engine=...)` 绑定推理 engine | planned | high |
-| [DEBT-002](#debt-002-quant-capability-把算法方法与-mma-计算契约-engine-缠在一起) | quant capability 把 AWQ/GPTQ/SVD 与 MMA/engine 缠在一起 | planned | high |
+| [DEBT-001](#debt-001-xqtconvert-engine-把推理-engine-绑在-convert-参数上) | `xqt.convert(..., engine=...)` 绑定推理 engine | done | high |
+| [DEBT-002](#debt-002-quant-capability-把算法方法与-mma-计算契约-engine-缠在一起) | quant capability 把 AWQ/GPTQ/SVD 与 MMA/engine 缠在一起 | done | high |
 | [DEBT-003](#debt-003-量化与推理未严格解耦-推理应只消费模型--计算配置) | 量化与推理未严格解耦; 推理应只消费模型 + 计算配置 | done | high |
 | [DEBT-004](#debt-004-gemm-selector-fp4nvfp4-goal-感知尚未落地) | gemm selector `goal` 对 fp4/nvfp4 尚无差异化 | done | medium |
 | [DEBT-005](#debt-005-svdquant-应走-composite-add-混合精度而非特例-runtime) | SVDQuant 应走 composite_add 混合精度而非特例 runtime | planned (partial) | high |
@@ -47,7 +47,7 @@
 
 ## DEBT-001: `xqt.convert(..., engine=...)` 把推理 engine 绑在 convert 参数上
 
-**状态**: planned  
+**状态**: done (2026-08-03)
 **提出**: 2026-07-12  
 **优先级**: high (术语与 API 边界)  
 **方案**: [xqt-infer-handoff.md](xqt-infer-handoff.md) §5.1 - `engine` 降级为 materialize preference; 默认 `torch`; 不删参数.
@@ -106,6 +106,12 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 - `engine=None` 默认 `"torch"`; docstring 标明 preference 非交接主键
 - 完整拆 `to_facade` / `materialize` 仍可后续
 
+### 全量落地 (2026-08-03)
+
+- 词表合一: 实现侧 `engine_registry_names()` (`xqt/runtime/engine_resolve.py`), 配置面 `OPERATOR_OPT_ENGINES` (`xqt/core/schema.py`), convert materialize 子集 `CONVERT_ENGINE_NAMES` (`torch` / `triton` / `tilelang` / `cutile` / `cute_dsl`); `xqt.convert` 对非子集 engine 显式报错.
+- 回归测试 `tests/xqt/quant/test_quant_axes.py::test_engine_vocabulary_fact_sources_are_aligned` 断言三份词表不漂移; `test_convert_engine_preference_uses_canonical_subset` 锁定 convert 子集.
+- 文档: `xqt/FRAMEWORK.md` Backend / Engine 术语注明词表事实源.
+
 ### 相关
 
 - [xqt-infer-handoff.md](xqt-infer-handoff.md)
@@ -117,7 +123,7 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 
 ## DEBT-002: quant capability 把算法方法与 MMA 计算契约 / engine 缠在一起
 
-**状态**: planned  
+**状态**: done (2026-08-03)
 **提出**: 2026-07-12  
 **优先级**: high (术语, 能力模型, 与 operator 边界)  
 **方案**: [xqt-infer-handoff.md](xqt-infer-handoff.md) §4 - 三轴模型; Infer 只消费 compute/storage; recipe backend+strategy 暂不改.
@@ -192,6 +198,13 @@ AWQ/GPTQ 只出现在轴 1; SVD 分解是轴 1 (+ 可选 low-rank 存储形态);
 - **已删除** quant backend 名 `tilelang` / `svdquant`; `awq`/`gptq`/`svd` 仅作为 `backend=pytorch` 的 quant method
 - executor / capability 拒绝 `backend=tilelang` 与 `backend=svdquant`; operator stage 仍用 `engine=tilelang`
 - recipe 字段名 `backend`+`strategy` 保留; 全量三轴公开 API 仍后续
+
+### 全量三轴公开 API 落地 (2026-08-03)
+
+- 三轴公开事实源 `xqt/quant/axes.py`: `quant_method_specs` (轴 1, 含注册表 method 并集), `quant_storage_specs` (轴 2, 从 strategy 模板派生, strategy 字符串显式为 scheme alias), `quant_compute_specs` (轴 3, compute contract + nature), `quant_axis_report` 汇总.
+- `QuantBackendCapability` 拆分: `methods` 只列轴 1 算法; 新增 `storage_strategies` / `compute_contracts`; `to_dict` 与 `OptimizationCapability` metadata 携带三轴.
+- strategy 单一事实源: `xqt/quant/strategy.py::canonical_quant_strategies` 从 `_STRATEGY_SCHEME_TEMPLATES` 派生; 回归测试断言与 `core.schema.CANONICAL_QUANT_STRATEGIES` 一致.
+- recipe 字段名 `backend`+`strategy` 保留为兼容配置面; 执行层仍只消费 `QuantScheme` 与 compute contract.
 
 ### 相关
 

@@ -602,6 +602,12 @@ def test_export_pass_forwards_typed_openvino_target_config(
         "dry_run": True,
         "runtime_diff": False,
         "device": "GPU",
+        "benchmark": {
+            "enabled": False,
+            "warmup": 10,
+            "iterations": 50,
+            "measure_memory": False,
+        },
     }
 
 

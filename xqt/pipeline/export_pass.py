@@ -32,6 +32,8 @@ from xqt.export import (
     export_mnn_from_onnx,
     export_ncnn_from_onnx,
     export_ncnn_with_pnnx,
+    export_qnn_from_onnx,
+    mobile_export_diagnosis,
     export_onnx,
     export_openvino_ir,
     export_artifact_lineage_report,
@@ -56,6 +58,7 @@ from .export_handlers._context import (
 from .export_handlers.executorch import handle_executorch
 from .export_handlers.mnn import handle_mnn
 from .export_handlers.ncnn import handle_ncnn
+from .export_handlers.qnn import handle_qnn
 from .export_handlers.onnx import handle_onnx
 from .export_handlers.openvino import handle_openvino
 from .export_handlers.tensorrt import handle_tensorrt
@@ -268,6 +271,7 @@ _FORMAT_HANDLERS: dict[str, Any] = {
     "executorch": handle_executorch,
     "ncnn": handle_ncnn,
     "mnn": handle_mnn,
+    "qnn": handle_qnn,
 }
 
 _FORMATS_NEEDING_MODEL = frozenset(
@@ -365,7 +369,7 @@ class ExportPass:
                     output_diff_config=resolved_output_diff,
                 )
 
-            elif target.format in ("tensorrt", "ncnn", "mnn"):
+            elif target.format in ("tensorrt", "ncnn", "mnn", "qnn"):
                 item, summary = handler(
                     context, target, index, artifact_dir=artifact_dir
                 )

@@ -25,20 +25,15 @@ from .candidates_vit import (
     collect_vit_embedding_width_candidates,
     collect_vit_hidden_width_candidates,
 )
+from .granularity import (
+    describe_prune_granularity,
+    normalize_prune_granularity,
+    rewrite_supported_granularities,
+)
 from .report import StructuredPruningAction
 from .rewrite import attention_variant, infer_attention_role, validate_conv2d_keep_indices
 
-SUPPORTED_GRANULARITIES = (
-    "channel",
-    "filter",
-    "mlp_neuron",
-    "head",
-    "block",
-    "stage",
-    "hidden_width",
-    "embedding_width",
-    "expert",
-)
+SUPPORTED_GRANULARITIES = rewrite_supported_granularities()
 SUPPORTED_IMPORTANCE_METRICS = ("l1", "l2", "bn_gamma", "usage")
 SUPPORTED_SCOPES = ("global", "per_layer")
 
@@ -272,9 +267,10 @@ def collect_structured_candidates(
 ) -> _CandidateDiscoveryResult:
     """Collect candidates through the supported model-family adapters."""
 
+    canonical = normalize_prune_granularity(granularity)
     return collect_candidates(
         model,
-        granularity=granularity,
+        granularity=canonical,
         importance_metric=importance_metric,
         adapters=_STRUCTURED_ADAPTERS,
         supported_granularities=SUPPORTED_GRANULARITIES,

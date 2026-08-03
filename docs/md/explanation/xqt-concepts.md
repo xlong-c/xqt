@@ -72,7 +72,7 @@ XQT model transform
 
 ## 当前能力地图
 
-- 已基本可用: PTQ / QDQ / torchao 量化, 常规剪枝, ONNX / torch.export / TorchScript / TensorRT / OpenVINO / ExecuTorch / ncnn / MNN 导出, output diff, layer analysis, latency / memory benchmark, manifest
+- 已基本可用: PTQ / QDQ / torchao 量化, 常规剪枝, ONNX / torch.export / TorchScript / TensorRT / OpenVINO / ExecuTorch / ncnn / MNN / QNN 导出 (mobile 目标以 adapter + dry-run preflight + artifact metadata 为主), output diff, layer analysis, latency / memory benchmark, manifest, 自动策略建议 (backend / precision / stage leaderboard / acceptance policy / QuantScheme search), 模型族 smoke 链路 (Transformer / ViT, Detection, LLM, MoE, Diffusion, Multimodal)
 - 半可用: TensorRT engine / plugin preflight, TileLang 的受限 kernel target, FP4 packed weight 到 TileLang operator stage 的桥接
 - 偏实验: 更完整的 AWQ / GPTQ packed megakernel, 以及更广泛的 engine capability 闭环
 

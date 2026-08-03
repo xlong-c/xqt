@@ -151,6 +151,7 @@ def apply_nm_structured_sparsity(
         pattern_m=pattern_m,
         module_types=[module_type.__name__ for module_type in module_types],
         layers=layer_reports,
+        mask_only_modules=[layer.module_name for layer in layer_reports],
     )
 
 
@@ -295,6 +296,7 @@ def apply_block_sparse_pruning(
         ),
         module_types=[module_type.__name__ for module_type in module_types],
         layers=layer_reports,
+        mask_only_modules=[layer.module_name for layer in layer_reports],
     )
 
 

@@ -15,6 +15,7 @@ _TYPED_TARGET_CONFIG_NAMES = (
     "executorch",
     "ncnn",
     "mnn",
+    "qnn",
 )
 
 
@@ -40,6 +41,7 @@ def build_session_export_targets(
     executorch: Mapping[str, Any] | None = None,
     ncnn: Mapping[str, Any] | None = None,
     mnn: Mapping[str, Any] | None = None,
+    qnn: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize one session export/deploy request into workflow targets."""
 
@@ -52,6 +54,7 @@ def build_session_export_targets(
         "executorch": _copy_mapping(executorch),
         "ncnn": _copy_mapping(ncnn),
         "mnn": _copy_mapping(mnn),
+        "qnn": _copy_mapping(qnn),
     }
     selected_typed_configs = [
         name

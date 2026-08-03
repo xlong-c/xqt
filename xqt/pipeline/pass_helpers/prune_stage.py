@@ -18,6 +18,8 @@ from xqt.prune import (
     apply_global_l1_unstructured_pruning,
     apply_nm_structured_sparsity,
     apply_structured_pruning,
+    describe_prune_granularity,
+    estimate_model_flops,
     prune_method_report_fields,
     prune_runtime_capability_from_report,
     remove_pruning_reparameterization,
@@ -89,6 +91,7 @@ def _detection_structured_prune_skip_report(
     return {
         **summary,
         **prune_method_report_fields(method),
+        **describe_prune_granularity(granularity or "channel"),
         "method": method,
         "granularity": granularity or "channel",
         "scope": scope,
@@ -97,6 +100,22 @@ def _detection_structured_prune_skip_report(
         "applied": False,
         "execution_state": "skipped",
         "skip_reason": skip_reason,
+        "safety": {
+            "task_type": "detection",
+            "passed": True,
+            "checks": [
+                {
+                    "name": "detection_head_guard",
+                    "family": "detection",
+                    "passed": True,
+                    "blocked_modules": [],
+                    "violations": [],
+                    "notes": [skip_reason],
+                }
+            ],
+            "blocked_modules": [],
+            "violations": [],
+        },
         "skipped_modules": [
             {
                 "module_name": module_name,
@@ -110,9 +129,11 @@ def _detection_structured_prune_skip_report(
 def _annotate_unstructured_prune_report(
     report: dict[str, object],
     *,
+    model: nn.Module,
     task_type: str,
     target_sparsity: float,
 ) -> dict[str, object]:
+    flops_before = estimate_model_flops(model)["flops"]
     report["method"] = "global_l1_unstructured"
     report["target_sparsity"] = target_sparsity
     report["applied"] = True
@@ -121,6 +142,13 @@ def _annotate_unstructured_prune_report(
     report.update(prune_method_report_fields("global_l1_unstructured"))
     report["skip_reason"] = None
     report["skipped_modules"] = []
+    report["mask_only_modules"] = [
+        str(entry["module_name"]) for entry in report.get("entries", [])
+    ]
+    report["flops_before"] = flops_before
+    report["flops_after"] = flops_before
+    report["flops_reduction_ratio"] = 0.0
+    report["flops_estimate_kind"] = "shape_based_per_output_position"
     return report
 
 
@@ -285,6 +313,7 @@ def _run_prune_with_resolved_config(
                 importance=dict(resolved_prune.importance),
                 selection=dict(resolved_prune.selection),
                 example_input=example_input,
+                task_type=_context_task_type(context),
             )
             context.metrics["prune"] = report.to_dict()
             if context.manifest is not None:
@@ -311,6 +340,7 @@ def _run_prune_with_resolved_config(
             importance=resolved_prune.importance,
             selection=resolved_prune.selection,
             example_input=example_input,
+            task_type=_context_task_type(context),
         )
         context.metrics["prune"] = report.to_dict()
         if context.manifest is not None:
@@ -372,6 +402,7 @@ def _run_prune_with_resolved_config(
     report = summarize_pruning(model)
     report_dict = _annotate_unstructured_prune_report(
         report.to_dict(),
+        model=model,
         task_type=_context_task_type(context),
         target_sparsity=resolved_prune.target_sparsity,
     )

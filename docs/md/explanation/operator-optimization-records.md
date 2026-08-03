@@ -574,3 +574,281 @@ profiling 证据见 `research/xqt-gemm/profile_sm89_fp8.py` 和
 - [FP8 evidence script](../../../research/xqt-gemm/bench_sm89_fp8.py)
 - [FP8 profile script](../../../research/xqt-gemm/profile_sm89_fp8.py)
 - [FP8 tests](../../../tests/xqt/gemm/test_fp8.py)
+
+## R-008: SVDQuant FUSE_DOWN/FUSE_UP 单 TileLang fused kernel (DEBT-005)
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `SVDQuantLinear` (fp16 低秩分支 + packed signed INT4 groupwise residual) |
+| GPU | NVIDIA vGPU-32GB (Ada), `sm_89`, CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| 融合契约 | FUSE_DOWN (activation 单次读入, 同 tile 喂主 dequant GEMM 与 down GEMM), FUSE_UP (up GEMM 与 bias 共享主 GEMM 的 fp32 accumulator) |
+| 精度契约 | fp16 输入/权重/输出, packed uint8 INT4 + fp32 groupwise scale kernel 内反量化, fp32 累加 |
+
+### 基线与方法
+
+数值基线是 `xqt/runtime/svd_fusion.py::fused_svd_forward` reference (同 dtype fp16, 同在 CUDA 上). 延迟基线是 `SVDQuantLinear.forward` 未融合路径 (每次调用重新反量化 residual, 再走 fp16 matmul + 两个低秩 GEMM + bias). 计时用 `xqt.benchmark.latency.benchmark_callable` (CUDA event, warmup 20, iterations 50), 两个 shape: 小 batch `M=64,K=1024,N=1024,rank=32,group=128` 和大 batch `M=1024,K=2048,N=2048,rank=64,group=128`, 均带 bias.
+
+### 实现
+
+1. 新 kernel `xqt/operator_opt/kernels/tilelang/svd_fused.py::build_tilelang_svd_fused_kernel`, 单 kernel 完成 `y = dequant_gemm(x, packed_int4, group_scale) + up(down(x)) + bias`.
+2. FUSE_DOWN: K 分块 pipelined mainloop 中 activation tile 只 `T.copy` 进 `a_shared` 一次, 同一份 shared tile 先后喂主 dequant GEMM (`acc_o`) 和 down GEMM (`h_acc`).
+3. residual 在 mainloop 内按 nibble decode (低 4 位在前, 与 `packing_int4._pack_int4` 一致) 并乘 groupwise scale 写入 `b_shared`, 不落地反量化权重.
+4. FUSE_UP: `h_acc` 经 `h_shared` 后直接作为第二个 `T.gemm` 的 A 操作数累加进 `acc_o`, bias 在同一 epilogue 加, `h` 不写回 global memory.
+5. rank 非 16 倍数时 host 侧零填充到 16 的倍数. 实测 TileLang 0.1.12 `T.gemm` 在 rank=4 拒绝编译 (N % 8), rank=8 数值错误, rank=16/32 正确; 零填充行列对累加无贡献.
+6. 接线 `fused_svd_forward_cuda(module, x)`: 无 CUDA / 无 TileLang / 非 fp16 / 维度非 block 倍数时显式抛 `XQTBackendError`, 不静默 fallback; 成功时 report `status="cuda_fused"`, `cuda_verified=True`, kernel_names 为真实 kernel 名. CPU reference 路径与 `svd_fusion_report()` 行为不变.
+
+### 结果
+
+| shape | 未融合 mean | fused mean | 加速 |
+| --- | ---: | ---: | ---: |
+| `M=64,K=1024,N=1024,rank=32,g=128` | `0.818548 ms` | `0.111318 ms` | `7.353x` |
+| `M=1024,K=2048,N=2048,rank=64,g=128` | `0.769527 ms` | `0.325372 ms` | `2.365x` |
+
+数值对比 fused kernel vs `fused_svd_forward` reference (fp16, CUDA): 两个 shape 均为 max_abs `0.001953`, mean_abs 约 `1.2e-4`, cosine `1.000000` (reference absmax 2.6/3.1). 多 group_size/rank/bias 组合 (group 32/64/128, rank 4/8/16/32, 有无 bias) 测试内 max_abs 均不超过 `2e-3`. fp16 容差 (测试断言 `rtol=2e-2, atol=5e-3`) 的理由: kernel 与 reference 都是 fp16 输入 fp32 累加, 差异只来自累加顺序和 `h` 的 fp16 回写, 实测误差比容差低一个数量级以上.
+
+加速来源如实说明: 未融合基线每次调用都重新反量化 residual 权重, fused kernel 消除了这部分以及低秩分支的中间 tensor 读写; 小 batch (访存主导) 收益大于大 batch (计算主导).
+
+### 适用边界与回退
+
+- 要求 CUDA + 可用的 TileLang runtime, fp16 module (`.half()`) 与 fp16 输入.
+- minimal kernel 约束: `M % block_m == 0`, `N % block_n == 0`, `K % block_k == 0` (默认 block 64/64/64); rank 任意 (host 零填充). 不满足时显式抛 `XQTBackendError`, 不做隐式 pad 或静默错算.
+- CPU / 非 fp16 / 非 SVD 模块分别走 reference 路径或显式 TypeError/XQTBackendError.
+
+### 未采纳方案
+
+- 不用 `T.gemm` 直接吃非 16 倍数 rank (rank=8 实测数值错误), 改为 host 零填充.
+- 不把 up 分支写成独立 kernel 再相加; 那会丢失 FUSE_UP 的 accumulator 共享并让 `h` 落地 global memory.
+
+### 验证落点
+
+- [fused kernel 与入口](../../../xqt/operator_opt/kernels/tilelang/svd_fused.py)
+- [runtime 接线](../../../xqt/runtime/svd_fusion.py)
+- [GPU 测试](../../../tests/xqt/runtime/test_svd_fusion.py)
+- [evidence 脚本](../../../research/xqt-inference-optimization/bench_svd_fused_tilelang.py): 复跑命令 `python research/xqt-inference-optimization/bench_svd_fused_tilelang.py`
+
+## R-009: KV-int8 fused attention TileLang kernel (RUNTIME-1)
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `KvScaleAttention`, per-tensor scale int8 K/V self-attention |
+| GPU | NVIDIA vGPU-32GB (`sm_89`), CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| shape | `batch=2`, `heads=4`, `head_dim=32`, `seq=128/256` (数值), `seq=128/1024` (benchmark) |
+| operands | Q FP16, K/V INT8 存储 + per-tensor FP32 scale, FP16 output |
+| kernel | `tilelang_kv_int8_fused_attention` |
+
+### 基线与方法
+
+数值基线是同一实体的 reference forward: 同一份 `_quantize_kv_int8` 产出的
+int8 K/V 先 dequant 为 FP16, 再走 `F.scaled_dot_product_attention`. 两条
+路径共享同一量化语义 (round/clamp 到 `[-127,127]`), 差异只来自 SDPA 与
+TileLang kernel 的累加顺序. benchmark 用 CUDA event 计时, warmup 20,
+iters 50, 对实体级 forward (含 qkv projection 和 int8 量化) 取平均.
+
+### 实现
+
+1. 新增 `xqt/operator_opt/kernels/tilelang/kv_int8_attention.py`. mainloop
+   沿用 `learn/tilelang/flashatt.py` 的 flash-attention 设计 (online
+   softmax, `T.GemmWarpPolicy.FullRow`), 差异是 K/V 输入为 int8 tensor,
+   每个 kv tile 先 `T.copy` 进 int8 shared, 再在 kernel 内做
+   `int8 -> fp32 * scale -> fp16` dequant 后参与 GEMM, 不在 host 侧物化
+   FP16 K/V. scale 以 FP32 标量参数传入, 不烘进编译产物.
+2. `KvScaleAttention` 新增 opt-in 构造参数 `preferred_kernel`
+   (`"reference"|"auto"|"tilelang"`, 默认 `"reference"` 行为不变) 和
+   `fused_block_m/fused_block_n`. forward 先算 int8 K/V, fused 可用时直接
+   把 int8 交给 kernel; 不可用或 kernel 抛错时记录 `fallback_reason` 并
+   走原 reference 路径.
+3. report 新增 `preferred_kernel`, `cuda_fused_verified` 字段;
+   `selected_kernel` 只在 fused forward 真实跑过后才写
+   `tilelang_kv_int8_fused_attention`, 否则保持
+   `torch_sdpa_kv_scale_reference`. contract 缺失不再覆盖 kernel fallback
+   原因, 也不把已验证的 fused 路径标成 fallback.
+
+### 结果
+
+数值 diff (实体级输出, fused vs reference):
+
+| seq | causal | max_abs | cosine |
+| ---: | --- | ---: | ---: |
+| 128 | False | `3.05e-05` | `0.99999994` |
+| 128 | True | `2.44e-04` | `0.99999988` |
+| 256 | False | `3.05e-05` | `1.00000000` |
+| 256 | True | `4.88e-04` | `0.99999988` |
+
+benchmark (CUDA event 平均, 实体级 forward):
+
+| seq | causal | reference | fused | fused/reference |
+| ---: | --- | ---: | ---: | ---: |
+| 128 | False | `0.2768 ms` | `0.3023 ms` | `1.092x` |
+| 128 | True | `0.2747 ms` | `0.3013 ms` | `1.097x` |
+| 1024 | False | `0.2705 ms` | `0.3005 ms` | `1.111x` |
+| 1024 | True | `0.2729 ms` | `0.3026 ms` | `1.109x` |
+
+方向如实记录: 当前 fused 路径在这个小 synthetic shape 上比 reference
+慢约 9-11%. seq=128 与 seq=1024 的 reference 延迟几乎相同, 说明实体级
+延迟被 host 侧 (projection launch, 量化 kernel launch) 主导; fused 路径
+每次 forward 多两次 `scale.item()` DtoH 同步, 约 0.03 ms, 是主要差距
+来源. 该记录只证明 fused kernel 编译, 执行和数值正确, 不宣传性能收益.
+
+### 适用边界与回退
+
+- fused 要求 CUDA, FP16 输入, `dropout_p == 0`, `head_dim % 16 == 0`,
+  `seq_kv >= seq_q`, TileLang runtime usable. seq 不需要是 block 的倍数
+  (TileLang `T.copy` 对尾部 tile 自动 predication, 已在 seq=100 验证).
+- 不满足时按顺序回退 reference, `fallback_reason` 分别为
+  `cuda_unavailable`, `dtype_not_fp16`, `dropout_unsupported`,
+  `head_dim_not_multiple_of_16`, TileLang 不可用原因或
+  `tilelang_kernel_error:<类型>`.
+- 实体仍为模型侧参考实体, 不含 page table, cache 管理或 serving 调度.
+
+### 未采纳方案
+
+- 没有把 scale 烘进编译产物: 每次 shape+scale 组合重编译不可接受, scale
+  走 FP32 标量参数.
+- 没有把 dequant 挪回 host 再调 FP16 fused kernel (备选方案 b): 实测
+  in-kernel dequant (方案 a) 直接可行且数值正确, 不需要降级.
+- 没有为省 `.item()` 同步而缓存 scale 标量: buffer 可能被
+  `load_state_dict` 改写, 隐式缓存有静默复用旧值风险.
+
+### 可复用规则
+
+- int8 存储 + per-tensor scale 的 K/V 可以直接进 TileLang kernel: int8
+  shared tile + kernel 内 `fp32 * scale -> fp16` dequant 即可, 数值与
+  host dequant 在 fp16 舍入级别一致 (max_abs 约 5e-4 以内).
+- 小 shape 实体级 benchmark 会被 host launch 主导, fused kernel 的收益
+  判断必须在大 seq 或 kernel-only 计时下进行, 不能用实体级数字否定或
+  肯定 kernel.
+- opt-in kernel 选择的 report 必须区分 "preferred", "实际 selected" 和
+  "是否真跑过", 否则 contract 检查之类的旁路信息会覆盖执行路径事实.
+
+### 验证落点
+
+- [KV-int8 fused kernel](../../../xqt/operator_opt/kernels/tilelang/kv_int8_attention.py)
+- [runtime 接线](../../../xqt/runtime/modules/kv_attention.py)
+- [CUDA 测试](../../../tests/xqt/runtime/test_kv_attention_cuda.py): 复跑命令 `python -m pytest tests/xqt/runtime/test_kv_attention_cuda.py -q`
+- 既有回归 `tests/xqt/runtime/test_runtime_features.py` 保持通过 (10 passed)
+
+## R-010: SM89 FP8 K-blockwise mainloop (scale 进入 K 主循环)
+
+### 目标
+
+为 `xqt.gemm` 建立 FP8 K-blockwise native 执行路径,让 per-block scale 在 K
+mainloop 内逐 block 提升 (promotion) 到 FP32 accumulator,而不是最终
+epilogue scalar 伪实现. 目标设备为 NVIDIA vGPU-32GB (`sm_89`),CUDA 13.0,
+CUTLASS 4.1.0 (tilelang 3rdparty headers). scale layout 固定为
+`scale_a [M, ceil(K/block_k)] fp32` 与 `scale_w [N, ceil(K/block_k)] fp32`,
+合法 `block_k` 集合为 `{32, 64, 128}`.
+
+### 基线与方法
+
+数值基线是按 block dequantize FP8 后执行 dense FP32 accumulation reference
+GEMM. correctness 覆盖 36 case (E4M3/E5M2 x FP16/BF16 output x block_k
+32/64/128 x 3 shape,含 partial trailing K block `17x13x100` 与 bias
+变体),tolerance FP16 `atol=0.125, rtol=0.02`,BF16 `atol=0.25, rtol=0.03`.
+split-K correctness 另覆盖 24 case (`split_k` 2/4 x 3 block_k x 2 format x
+2 shape). benchmark 使用 CUDA event,warmup 20,repeats 15,prefill
+`M=256,N=1024,K=1024` 分别测三个 block_k,另有 long-K
+`M=256,N=1024,K=4096` (block_k=128) 评估 split-K 启发式.
+
+### 实现
+
+1. `fp8_cutlass_sm89.cu` v3 改为 custom CUDA + CUTLASS warp MMA primitive
+   `cutlass::arch::Mma<GemmShape<16,8,32>, 32, ElementF8, RowMajor,
+   ElementF8, ColumnMajor, float, RowMajor, OpMultiplyAdd>`,一个 warp 负责
+   一个 `16x8` output tile,fragment 直接从 global memory 以 `uint32` 加载
+   (K 由 adapter 零填充到 32 的倍数,保证 4 字节对齐),无 shared staging,
+   无 cp.async.
+2. scale 提升在 mainloop 内完成: 每跨过一个 `block_k` 边界,当前 block 的
+   fragment accumulator 乘 `scale_a[m, block] * scale_w[col, block]` 后累入
+   FP32 total accumulator,再清零进入下一 block. 尾部 partial K block 保留
+   自己的 scale slot,零填充贡献零,语义与 reference 一致.
+3. split-K 为 opt-in (`split_k>=2`): 分段按 `block_k` 对齐,一个 scale block
+   不跨 split;partial kernel 把 FP32 partial 写入
+   `[split_count, padded_M, padded_N]` workspace,第二个 deterministic
+   reduction kernel 求和并一次性加 bias (弃用 atomicAdd,accumulation
+   order 可复现). `split_k=1` 保持 full-K ABI. 选择逻辑
+   `select_fp8_blockwise_split_k` 镜像 W4A16 fused 的启发式 (32-wide tile).
+4. adapter (`fp8_sm89.py`) 把 bytes 零填充到 `M%16=0, N%8=0, K%32=0`,
+   scale 行同步填充,输出切片回 logical shape;非法 `block_k` 与非对齐
+   shape 显式拒绝,tensorwise 路径拒绝 `split_k` 参数.
+5. SM90 WGMMA/TMA blockwise 保持独立 `metadata_only` entry
+   (`sm90_fp8_*_wgmma`);SM89 kernel 不含架构 if-else,本机无 SM90 设备,
+   不外推任何 SM90 结论.
+6. manifest (`sm89_build.py`) 记录 blockwise metadata
+   (implementation `custom_cuda_cutlass_warp_mma`,tile `16x8x32`,
+   split-K workspace/reduction ABI),correctness evidence 写入 sidecar 后
+   promotion 为 `executable`.
+
+### 结果
+
+correctness: blockwise 36/36 通过,全局 max abs error `0.5` (出现在 BF16
+case,FP16 case 不超过 `0.0625`);split-K 24/24 通过,max abs error
+`0.0625`. SASS 同时包含 `QMMA.16832.F32.E4M3.E4M3` 与
+`QMMA.16832.F32.E5M2.E5M2`,且含 blockwise kernel 符号,确认 scale 路径在
+native kernel 内而非 dequant + dense.
+
+prefill `M=256,N=1024,K=1024` CUDA event (median,warmup 20,repeats 15):
+
+| block_k | dequant reference | blockwise MMA | speedup |
+| --- | ---: | ---: | ---: |
+| 32 | `0.2993 ms` | `0.1975 ms` | 约 1.52x |
+| 64 | `0.3000 ms` | `0.1843 ms` | 约 1.63x |
+| 128 | `0.3104 ms` | `0.1833 ms` | 约 1.69x |
+
+long-K `M=256,N=1024,K=4096` (block_k=128): dequant reference
+`0.3584 ms`,full-K `0.2550 ms`,split-K 启发式 (`split_k=8`,
+`k_per_split=512`,workspace 8 MiB,extra write/read 16 MiB) `0.2818 ms`.
+split-K 在该 shape 未快于 full-K,当前定位为 opt-in 能力加保守启发式,不
+宣称收益.
+
+带宽与资源证据:
+
+- 逻辑最小流量 (A+W+scales+output 各计一次) 约 `1.88 MB` (block_k=128),
+  scale 占逻辑流量比例 block_k=128 `2.2%`,64 `4.3%`,32 `8.2%`;effective
+  bandwidth 约 `10.1-10.4 GB/s`. 该值偏低是一 warp 一 tile,无 cp.async,
+  无 shared staging 的真实水平,如实记录,是当前实现的带宽上限来源.
+- resource query: `43-48` registers/thread,static shared `0 B`,
+  32 threads/block,max active blocks/SM `24`,occupancy `0.5`.
+- cache sensitivity (indirect signal): 256 MiB L2 thrash 后 cold
+  `0.2014 ms` vs hot `0.2171 ms`,cold/hot `0.928`;仅作间接信号,直接
+  cache counter 需要 ncu.
+- ncu: 本机 `blocked_runtime` (workload 单独运行正常,ncu 下 app
+  returncode 11,无 ERR_NVGPUCTRPERM,与 T031 的 `blocked_permission`
+  区分记录). 带 `--kernel-name regex:.*fp8_blockwise.* --set detailed`
+  的可复跑命令已存 artifact.
+
+### 适用边界与回退
+
+- native 支持 `w:per_tensor/a:per_tensor` 与 `w:blockwise/a:blockwise`
+  (E4M3/E5M2,FP32 accumulator,FP16/BF16 output,bias/no-bias,
+  `block_k` 32/64/128).
+- `w:per_channel/a:per_tensor`,`w:per_tensor/a:per_token` 和
+  `w:per_channel/a:per_token` 保持 reference-only.
+- blockwise MMA 相对 dequant reference 的 1.5-1.7x 只代表当前 prefill
+  shape 与设备;绝对带宽约 10 GB/s,距离 tensor core 峰值很远,后续优化
+  (multi-warp tile,cp.async,shared staging) 未在本轮采纳.
+- 非 native 组合,非法 `block_k`,非对齐 shape 或 artifact 缺失时回到 FP8
+  dequant reference,report 保留 selected kernel 与 fallback reason.
+
+### 未采纳方案与规则
+
+- 不把 scale 塞进最终 epilogue scalar;必须 per-block 在 mainloop 提升.
+- split-K 不用 atomicAdd,用 workspace + deterministic reduction kernel.
+- 不在一个 kernel 内加 SM89/SM90 架构 if-else;SM90 独立 entry 评估.
+- 不把 split-K 启发式写成收益承诺;long-K 实测未快于 full-K 时如实记录.
+- 不用 ncu 缺失时的猜测补 cache/occupancy 结论;indirect signal 与
+  blocked reason 原样入 artifact.
+
+### 验证落点
+
+- [FP8 contract](../../../xqt/gemm/fp8.py)
+- [SM89 FP8 native source](../../../xqt/gemm/backends/fp8_cutlass_sm89.cu)
+- [SM89 FP8 adapter](../../../xqt/gemm/backends/fp8_sm89.py)
+- [SM89 build/manifest](../../../xqt/gemm/backends/sm89_build.py)
+- [FP8 evidence script](../../../research/xqt-gemm/bench_sm89_fp8.py)
+- [FP8 evidence artifact](../../../research/xqt-gemm/artifacts/sm89_fp8_evidence.json)
+- [FP8 contract tests](../../../tests/xqt/gemm/test_fp8.py)
+- [FP8 backend GPU tests](../../../tests/xqt/gemm/test_fp8_backend.py)

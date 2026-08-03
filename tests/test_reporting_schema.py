@@ -188,10 +188,13 @@ def test_stage_report_extracts_engine_target_benchmark_and_diff() -> None:
 
 def test_stage_report_serializes_tensorrt_runtime_session_without_live_handles() -> None:
     from pathlib import Path
-
-    import tensorrt as trt
+    from types import SimpleNamespace
 
     from xqt.export.tensorrt import TensorRTRuntimeSession
+
+    # 报告序列化只把 trt 当不透明 handle 持有, 不访问其属性,
+    # 因此用占位对象即可, 不强依赖本机安装 tensorrt 包.
+    trt = SimpleNamespace(__name__="tensorrt")
 
     session = TensorRTRuntimeSession(
         engine_path=Path("artifacts/model.engine"),

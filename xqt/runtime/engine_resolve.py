@@ -282,6 +282,12 @@ def iter_engine_registrations() -> Iterator[EngineRegistration]:
     )
 
 
+def engine_registry_names() -> tuple[str, ...]:
+    """Return the canonical implementation-side engine names (DEBT-001)."""
+
+    return tuple(sorted(_ENGINE_REGISTRY))
+
+
 def engines_providing(capability: str) -> list[str]:
     """List engines that declare a single capability."""
     cap = str(capability).strip()
@@ -486,6 +492,7 @@ __all__ = [
     "EngineRegistration",
     "EngineResolveResult",
     "default_auto_engine_order",
+    "engine_registry_names",
     "engine_resolve_from_compute_config",
     "engines_providing",
     "engines_providing_all",
