@@ -1,0 +1,61 @@
+project:
+  name: external_detection_trt_plugin_deploy
+  artifact_dir: artifacts/xqt/detection/external_detection_trt_plugin_deploy
+task:
+  type: detection
+  detection_postprocess:
+    format: yolo_raw
+    box_format: cxcywh
+    score_activation: sigmoid
+  params:
+    imgsz: 640
+stages:
+- name: build_trt_engine_with_plugins
+  kind: deploy
+  save_model: false
+  params:
+    targets:
+    - format: tensorrt
+      output_path: artifacts/xqt/detection/external_detection_trt_plugin_deploy/deploy/external_detection.engine
+      precision: fp16
+      profiles:
+        images:
+          min:
+          - 1
+          - 3
+          - 640
+          - 640
+          opt:
+          - 1
+          - 3
+          - 640
+          - 640
+          max:
+          - 1
+          - 3
+          - 640
+          - 640
+      tensorrt:
+        backend: python_api
+        dry_run: true
+        onnx_path: /tmp/xqt-external-detection.onnx
+        plugin_libraries:
+        - /tmp/libxqt_custom_trt_plugin.so
+        serialize_plugin_libraries: true
+        runtime_benchmark:
+          enabled: false
+          input_shapes:
+            images:
+            - 1
+            - 3
+            - 640
+            - 640
+          warmup: 10
+          iterations: 50
+          device: cuda:0
+compression_axes:
+- precision
+hardware:
+  device: cuda
+  backends:
+  - tensorrt

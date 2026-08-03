@@ -1,0 +1,39 @@
+project:
+  name: fp4_tilelang_workflow
+  artifact_dir: artifacts/xqt/operator/tilelang/fp4_workflow
+model:
+  target: xqt.operator_opt.toy_models.build_toy_fp4_mlp
+  params:
+    hidden_dim: 64
+stages:
+- name: fp4_quant
+  kind: quant
+  params:
+    backend: pytorch
+    method: awq
+    strategy: w4a16_fp4
+    policy:
+      dtype: fp4
+      scheme: weight_only
+      include_module_names:
+      - fc1
+      group_size: 64
+- name: tilelang_fp4_fc1
+  kind: operator
+  from_stage: fp4_quant
+  params:
+    default_engine: tilelang
+    targets:
+    - name: fc1_tilelang
+      target: fc1
+      engine: tilelang
+      patterns:
+      - dequant_gemm_epilogue
+      min_speedup: 1.01
+compression_axes:
+- precision
+hardware:
+  device: cuda
+  backends:
+  - pytorch
+  - tilelang

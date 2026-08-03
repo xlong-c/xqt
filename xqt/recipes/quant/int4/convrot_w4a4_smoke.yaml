@@ -1,0 +1,39 @@
+project:
+  name: convrot_w4a4_smoke
+  artifact_dir: artifacts/xqt/quant/int4/convrot_w4a4_smoke
+model:
+  target: xqt.operator_opt.toy_models.build_toy_linear_block
+  params:
+    input_dim: 16
+    hidden_dim: 32
+    output_dim: 8
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+  - precision
+hardware:
+  device: cpu
+  backends:
+    - pytorch
+stages:
+  - name: convrot_quant
+    kind: quant
+    params:
+      backend: pytorch
+      method: convrot
+      strategy: w4a4_int4
+      compute: dequant_fp16
+      policy:
+        dtype: int4
+        scheme: convrot_w4a4
+        include_module_names:
+          - linear
+        group_size: 8
+        rot_size: 4
+        mixed_precision_ratio: 1.0
+  - name: benchmark_model
+    kind: benchmark
+    params:
+      warmup: 0
+      iterations: 1

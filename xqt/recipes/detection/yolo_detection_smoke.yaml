@@ -1,0 +1,64 @@
+project:
+  name: detection_yolo_smoke
+  artifact_dir: artifacts/xqt/detection/yolo_smoke
+model:
+  target: xqt.model.build_smoke_detection_module
+  params:
+    num_classes: 3
+    boxes_per_image: 2
+task:
+  type: detection
+  class_names:
+  - cls0
+  - cls1
+  - cls2
+  detection_postprocess:
+    format: yolo_raw
+    max_detections: 100
+    score_activation: sigmoid
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+- sparsity
+hardware:
+  device: cpu
+  backends:
+  - onnx
+  - openvino
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    target_sparsity: 0.2
+- name: export_model
+  kind: export
+  save_model: false
+  params:
+    targets:
+    - format: onnx
+      output_path: artifacts/xqt/detection/yolo_smoke/smoke_detection.onnx
+      opset: 18
+      onnx:
+        input_names:
+        - image
+        output_names:
+        - predictions
+        dynamo: false
+        runtime_diff: false
+    - format: openvino
+      output_path: artifacts/xqt/detection/yolo_smoke/smoke_detection.xml
+      precision: fp32
+      openvino:
+        dry_run: true
+        input_shape:
+        - 1
+        - 3
+        - 64
+        - 64
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

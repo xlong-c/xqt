@@ -1,0 +1,38 @@
+project:
+  name: smoke_cpu
+  artifact_dir: artifacts/xqt/smoke/cpu
+model:
+  target: torch.nn.Linear
+  params:
+    in_features: 4
+    out_features: 2
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+- sparsity
+hardware:
+  device: cpu
+  backends:
+  - torch_export
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    target_sparsity: 0.5
+- name: export_model
+  kind: export
+  save_model: false
+  params:
+    targets:
+    - format: torch_export
+      output_path: artifacts/xqt/smoke/cpu/model.pt2
+      torch_export:
+        validate: true
+        runtime_diff: true
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

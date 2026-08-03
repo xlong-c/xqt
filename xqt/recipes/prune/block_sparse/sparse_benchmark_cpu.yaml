@@ -1,0 +1,34 @@
+project:
+  name: prune_block_sparse_benchmark
+  artifact_dir: artifacts/xqt/prune/block_sparse/benchmark
+model:
+  target: torch.nn.Linear
+  params:
+    in_features: 16
+    out_features: 8
+benchmark:
+  warmup: 0
+  iterations: 2
+compression_axes:
+- sparsity
+hardware:
+  device: cpu
+  backends: []
+stages:
+- name: prune_model
+  kind: prune
+  params:
+    method: block_sparse
+    target_sparsity: 0.5
+    selection:
+      block_shape:
+      - 2
+      - 2
+    params:
+      include_module_types:
+      - Linear
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 2

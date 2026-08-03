@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+import importlib.util
+
+import pytest
+import torch
+
+from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.workflows import XQTOptimizationSession
+
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for FP4 TileLang CUDA workflow test",
+)
+
+requires_tilelang = pytest.mark.skipif(
+    not tilelang_runtime_usable(),
+    reason="a runtime-compatible TileLang adapter is required for FP4 TileLang CUDA workflow test",
+)
+
+
+class _TinyMLP(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = torch.nn.Linear(64, 64)
+        self.norm = torch.nn.LayerNorm(64)
+        self.fc2 = torch.nn.Linear(64, 64)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        hidden = self.fc1(inputs)
+        hidden = self.norm(hidden)
+        return self.fc2(hidden)
+
+
+def test_fp4_quant_stage_can_feed_tilelang_dequant_gemm_operator_stage() -> None:
+    torch.manual_seed(0)
+    model = _TinyMLP().eval()
+    session = XQTOptimizationSession(
+        project={
+            "name": "fp4_tilelang_workflow",
+            "artifact_dir": "artifacts/xqt/tests/fp4_tilelang_workflow",
+        },
+        model=model,
+        example_inputs=torch.randn(64, 64, dtype=torch.float32),
+    )
+
+    quant_stage = session.quant(
+        name="fp4_quant",
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={
+            "dtype": "fp4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc1"],
+            "group_size": 64,
+        },
+    )
+    operator_stage = session.operator(
+        name="tilelang_fp4_fc1",
+        from_stage="fp4_quant",
+        targets=[
+            {
+                "name": "fc1_tilelang",
+                "target": "fc1",
+                "engine": "tilelang",
+                "patterns": ["dequant_gemm_epilogue"],
+                "min_speedup": 1.01,
+                "tilelang": {
+                    "target_arch": "sm_80",
+                },
+            }
+        ],
+    )
+
+    assert quant_stage.accepted is True
+    assert operator_stage.kind == "operator"
+
+    quant_metrics = operator_stage.metrics
+    assert quant_metrics["target_count"] == 1
+    target = quant_metrics["targets"][0]
+    assert target["engine"] == "tilelang"
+    assert target["module_path"] == "fc1"
+    assert target["metadata"]["execution_state"] in {"executed", "fallback"}
+    assert target["metadata"]["execution_mode"] == "reference_fallback"
+    assert target["metadata"]["kernel_kind"] == "reference_fallback"
+    assert (
+        "dequant_gemm_epilogue"
+        in target["metadata"]["kernel_constraints"]["supported_patterns"]
+    )
+    assert (
+        target["metadata"]["kernel_constraints"]["supports_fp4_weight_only_linear_bridge"]
+        is True
+    )
+    assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
+    assert target["metadata"]["weight_source"] == "fp4_weight_only_linear_packed_bridge"
+    assert target["metadata"]["weight_representation"] == "packed_signed_int4_plus_group_scale"
+    assert target["metadata"]["consumes_packed_weight"] is True
+    assert target["metadata"]["unpack_stage"] == "eager_reference_fallback"
+    assert target["metadata"]["settings"]["target_arch"] == "sm_80"
+    assert "requires CUDA tensors" in str(target["metadata"]["execution_reason"])
+
+
+def test_tilelang_awq_int4_operator_stage_reports_weight_only_metadata() -> None:
+    torch.manual_seed(1)
+    model = _TinyMLP().eval()
+    example_inputs = torch.randn(64, 64, dtype=torch.float32)
+    session = XQTOptimizationSession(
+        project={
+            "name": "int4_awq_tilelang_workflow",
+            "artifact_dir": "artifacts/xqt/tests/int4_awq_tilelang_workflow",
+        },
+        model=model,
+        example_inputs=example_inputs,
+        calibration_inputs=[example_inputs],
+    )
+
+    quant_stage = session.quant(
+        name="int4_awq_quant",
+        backend="tilelang",
+        method="awq",
+        strategy="weight_only_int4",
+        policy={
+            "dtype": "int4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc1"],
+            "bits": 4,
+            "group_size": 64,
+        },
+    )
+    operator_stage = session.operator(
+        name="tilelang_int4_fc1",
+        from_stage="int4_awq_quant",
+        targets=[
+            {
+                "name": "fc1_tilelang",
+                "target": "fc1",
+                "engine": "tilelang",
+                "patterns": ["dequant_gemm_epilogue"],
+                "min_speedup": 1.01,
+                "tilelang": {
+                    "target_arch": "sm_80",
+                },
+            }
+        ],
+    )
+
+    assert quant_stage.accepted is True
+    assert quant_stage.metrics["algorithm_executable"] is True
+    target = operator_stage.metrics["targets"][0]
+    assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
+    assert target["metadata"]["weight_source"] == "awq_weight_only_int4_linear_packed_bridge"
+    assert target["metadata"]["weight_representation"] == "packed_signed_int4_plus_group_scale"
+    assert target["metadata"]["consumes_packed_weight"] is True
+
+
+@requires_cuda
+@requires_tilelang
+def test_fp4_tilelang_operator_stage_uses_packed_cuda_entry() -> None:
+    torch.manual_seed(2)
+    model = _TinyMLP().eval()
+    session = XQTOptimizationSession(
+        project={
+            "name": "fp4_tilelang_cuda_workflow",
+            "artifact_dir": "artifacts/xqt/tests/fp4_tilelang_cuda_workflow",
+        },
+        model=model,
+        device="cuda",
+        example_inputs=torch.randn(64, 64, dtype=torch.float16, device="cuda"),
+    )
+
+    session.quant(
+        name="fp4_quant",
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={
+            "dtype": "fp4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc1"],
+            "group_size": 64,
+        },
+    )
+    operator_stage = session.operator(
+        name="tilelang_fp4_fc1",
+        from_stage="fp4_quant",
+        targets=[
+            {
+                "name": "fc1_tilelang",
+                "target": "fc1",
+                "engine": "tilelang",
+                "patterns": ["dequant_gemm_epilogue"],
+                "min_speedup": 1.01,
+            }
+        ],
+    )
+
+    target = operator_stage.metrics["targets"][0]
+    assert target["metadata"]["execution_mode"] == "cuda_native_fastpath"
+    assert target["metadata"]["kernel_kind"] == "native_runtime_fastpath"
+    assert target["metadata"]["kernel_pattern"] == "dense_linear_epilogue"
+    assert target["metadata"]["weight_source"] == "fp4_weight_only_linear_dense_cache_bridge"
+    assert target["metadata"]["consumes_packed_weight"] is False
+    assert target["metadata"]["unpack_stage"] == "one_time_eager_dequant_cache"
+    assert target["metadata"]["fusion_status"] == "tilelang_dense_half_gemm_epilogue"
+    assert target["metadata"]["epilogue_stage"] == "torch_bias_activation"
+
+
+@requires_cuda
+@requires_tilelang
+def test_fp4_tilelang_operator_stage_can_force_packed_cuda_entry() -> None:
+    torch.manual_seed(2)
+    model = _TinyMLP().eval()
+    session = XQTOptimizationSession(
+        project={
+            "name": "fp4_tilelang_cuda_workflow_packed",
+            "artifact_dir": "artifacts/xqt/tests/fp4_tilelang_cuda_workflow_packed",
+        },
+        model=model,
+        device="cuda",
+        example_inputs=torch.randn(64, 64, dtype=torch.float16, device="cuda"),
+    )
+
+    session.quant(
+        name="fp4_quant",
+        backend="pytorch",
+        method="awq",
+        strategy="fp4_weight_only",
+        policy={
+            "dtype": "fp4",
+            "scheme": "weight_only",
+            "include_module_names": ["fc1"],
+            "group_size": 64,
+        },
+    )
+    operator_stage = session.operator(
+        name="tilelang_fp4_fc1_packed",
+        from_stage="fp4_quant",
+        targets=[
+            {
+                "name": "fc1_tilelang",
+                "target": "fc1",
+                "engine": "tilelang",
+                "patterns": ["fp4_packed_dequant_gemm_epilogue"],
+                "min_speedup": 1.01,
+                "tilelang": {
+                    "linear_runtime": "tilelang",
+                    "linear_fastpath": "packed",
+                },
+            }
+        ],
+    )
+
+    target = operator_stage.metrics["targets"][0]
+    assert target["metadata"]["execution_mode"] == "cuda_tilelang_entry"
+    assert target["metadata"]["kernel_kind"] == "minimal_cuda_jit"
+    assert target["metadata"]["kernel_pattern"] == "fp4_packed_dequant_gemm_epilogue"
+    assert target["metadata"]["weight_source"] == "fp4_weight_only_linear_packed_bridge"
+    assert target["metadata"]["consumes_packed_weight"] is True
+    assert target["metadata"]["unpack_stage"] == "tilelang_fused_gemm_kernel"
+    assert target["metadata"]["fusion_status"] == "single_tilelang_kernel_for_unpack_dequant_gemm_epilogue"
+    assert target["metadata"]["epilogue_stage"] == "tilelang_fused_bias_activation"

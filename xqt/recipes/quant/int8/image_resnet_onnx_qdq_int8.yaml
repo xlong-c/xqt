@@ -1,0 +1,58 @@
+project:
+  name: quant_int8_resnet_onnx_qdq
+  artifact_dir: artifacts/xqt/quant/int8/resnet_onnx_qdq
+model:
+  target: xdl.model.resnet18
+  params:
+    num_classes: 10
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+hardware:
+  device: cuda
+  backends:
+  - onnxruntime_qdq
+  - tensorrt
+stages:
+- name: quant_model
+  kind: quant
+  params:
+    backend: onnxruntime_qdq
+    strategy: w8a8_int8
+    keep_high_precision:
+    - head
+    policy:
+      source_name: resnet18_source.onnx
+      output_path: artifacts/xqt/quant/int8/resnet_onnx_qdq/resnet18_qdq.onnx
+      input_names:
+      - input
+      output_names:
+      - output
+      sample_limit: 2
+      activation_type: QUInt8
+      weight_type: QInt8
+      op_types_to_quantize:
+      - Conv
+      - MatMul
+      - Gemm
+- name: deploy_model
+  kind: deploy
+  save_model: false
+  params:
+    targets:
+    - format: tensorrt
+      output_path: artifacts/xqt/quant/int8/resnet_onnx_qdq/resnet18_int8.engine
+      precision: int8
+      tensorrt:
+        dry_run: true
+        performance_thresholds:
+          throughput_qps_min: 1.0
+          latency_p99_ms_max: 10.0
+          gpu_compute_time_p99_ms_max: 10.0
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

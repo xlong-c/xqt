@@ -1,0 +1,34 @@
+project:
+  name: operator_torch_compile_smoke_cpu
+  artifact_dir: artifacts/xqt/operator/torch_compile/smoke_cpu
+model:
+  target: torch.nn.Linear
+  params:
+    in_features: 4
+    out_features: 2
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+hardware:
+  device: cpu
+  backends:
+  - torch_compile
+stages:
+- name: optimize_operators
+  kind: operator
+  params:
+    targets:
+    - name: model
+      engine: torch_compile
+      mode: reduce-overhead
+      dynamic: false
+      options:
+        engine: inductor
+      min_speedup: 1.000001
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1

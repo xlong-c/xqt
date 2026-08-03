@@ -1,0 +1,43 @@
+project:
+  name: quant_fp8_vit_torchao
+  artifact_dir: artifacts/xqt/quant/fp8/vit_torchao
+model:
+  target: xdl.model.vit_tiny_patch16_224
+  params:
+    num_classes: 10
+    dropout: 0.0
+    attn_dropout: 0.0
+  dtype: float32
+  device: cuda:0
+benchmark:
+  warmup: 5
+  iterations: 20
+compression_axes:
+- precision
+hardware:
+  device: cuda:0
+  backends:
+  - torchao
+stages:
+- name: quant_model
+  kind: quant
+  params:
+    backend: torchao
+    strategy: w8a8_fp8_e4m3
+    skip_quantize:
+    - head
+    - norm
+    keep_high_precision:
+    - head
+    - norm
+    policy:
+      strategy: w8a8_fp8_e4m3
+      include_module_types:
+      - Linear
+      exclude_name_patterns:
+      - head
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 5
+    iterations: 20

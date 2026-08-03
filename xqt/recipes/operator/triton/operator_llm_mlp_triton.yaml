@@ -1,0 +1,38 @@
+project:
+  name: operator_triton_llm_mlp
+  artifact_dir: artifacts/xqt/operator/triton/llm_mlp
+model:
+  target: xqt.operator_opt.toy_models.build_toy_llm_mlp_classifier
+  params:
+    hidden_dim: 8
+    intermediate_dim: 16
+    num_classes: 2
+benchmark:
+  warmup: 0
+  iterations: 1
+compression_axes:
+- precision
+hardware:
+  device: cuda
+  backends:
+  - triton
+stages:
+- name: optimize_operators
+  kind: operator
+  params:
+    default_engine: triton
+    targets:
+    - name: mlp_triton
+      target: mlp
+      engine: triton
+      patterns:
+      - swiglu
+      min_speedup: 1.1
+      validate:
+        atol: 0.0001
+        rtol: 0.0001
+- name: benchmark_model
+  kind: benchmark
+  params:
+    warmup: 0
+    iterations: 1
