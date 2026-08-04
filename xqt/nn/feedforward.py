@@ -14,8 +14,8 @@ from xqt.operator_opt.backends import run_triton_kernel
 from xqt.operator_opt.kernels.triton.gemm import (
     gemm_bf16_triton,
     gemm_fp16_triton,
-    gemm_reference,
 )
+from xqt.gemm import dense_gemm_reference
 
 from .linear import LayerNorm, Linear
 from .norm import RMSNorm
@@ -408,7 +408,7 @@ class FeedForward(nn.Module):
                     stage="linear_epilogue",
                     reason=exc,
                 )
-        out = gemm_reference(
+        out = dense_gemm_reference(
             flat_compute,
             weight,
             bias,

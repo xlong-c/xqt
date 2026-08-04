@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+from xqt.gemm import dense_gemm_reference
 from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
 
 from xqt.operator_opt.kernels.tilelang._common import (
@@ -88,18 +89,14 @@ def dequant_gemm_epilogue_reference(
     if weight_scale.ndim == 1:
         weight_scale = weight_scale.unsqueeze(-1)
     weight = qweight.to(dtype=x.dtype, device=x.device) * weight_scale
-    output = x.matmul(weight.t())
-    if bias is not None:
-        output = output + bias.to(dtype=output.dtype, device=output.device)
-    if activation is None:
-        return output
-    if activation == "gelu":
-        return F.gelu(output)
-    if activation == "silu":
-        return F.silu(output)
-    if activation == "relu":
-        return F.relu(output)
-    raise ValueError(f"unsupported activation: {activation}")
+    runtime_bias = None if bias is None else bias.to(dtype=x.dtype, device=x.device)
+    return dense_gemm_reference(
+        x,
+        weight,
+        runtime_bias,
+        activation=activation,
+        transpose_b=True,
+    )
 
 
 def _decode_packed_signed_int4(
@@ -171,18 +168,14 @@ def fp4_packed_dequant_gemm_epilogue_reference(
     weight = (grouped * weight_scale).reshape(qweight.shape[0], padded_input_features)[
         :, : int(input_features)
     ]
-    output = x.matmul(weight.t())
-    if bias is not None:
-        output = output + bias.to(dtype=output.dtype, device=output.device)
-    if activation is None:
-        return output
-    if activation == "gelu":
-        return F.gelu(output)
-    if activation == "silu":
-        return F.silu(output)
-    if activation == "relu":
-        return F.relu(output)
-    raise ValueError(f"unsupported activation: {activation}")
+    runtime_bias = None if bias is None else bias.to(dtype=x.dtype, device=x.device)
+    return dense_gemm_reference(
+        x,
+        weight,
+        runtime_bias,
+        activation=activation,
+        transpose_b=True,
+    )
 
 
 def dequant_gemm_epilogue_tilelang(
@@ -606,18 +599,14 @@ def nvfp4_packed_dequant_gemm_epilogue_reference(
     weight = (grouped * weight_scale).reshape(qweight.shape[0], padded_input_features)[
         :, : int(input_features)
     ]
-    output = x.matmul(weight.t())
-    if bias is not None:
-        output = output + bias.to(dtype=output.dtype, device=output.device)
-    if activation is None:
-        return output
-    if activation == "gelu":
-        return F.gelu(output)
-    if activation == "silu":
-        return F.silu(output)
-    if activation == "relu":
-        return F.relu(output)
-    raise ValueError(f"unsupported activation: {activation}")
+    runtime_bias = None if bias is None else bias.to(dtype=x.dtype, device=x.device)
+    return dense_gemm_reference(
+        x,
+        weight,
+        runtime_bias,
+        activation=activation,
+        transpose_b=True,
+    )
 
 
 def nvfp4_packed_dequant_gemm_epilogue_tilelang(

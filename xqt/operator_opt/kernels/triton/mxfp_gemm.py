@@ -7,6 +7,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from xqt.gemm import dense_gemm_reference
+
 from xqt.core.errors import XQTBackendError
 from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
 
@@ -279,22 +281,13 @@ def gemm_mxfp_reference(
             device=a.device,
         )
 
-    # Standard GEMM
-    output = torch.matmul(a, b_fp)
-
-    if bias is not None:
-        output = output + bias
-
-    if activation == "relu":
-        return F.relu(output)
-    elif activation == "gelu":
-        return F.gelu(output)
-    elif activation == "silu":
-        return F.silu(output)
-    elif activation is None:
-        return output
-    else:
-        raise ValueError(f"unsupported activation: {activation}")
+    return dense_gemm_reference(
+        a,
+        b_fp,
+        bias,
+        activation=activation,
+        transpose_b=False,
+    )
 
 
 def dequantize_mxfp_weight_triton(

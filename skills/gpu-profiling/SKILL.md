@@ -1,7 +1,6 @@
 ---
 name: gpu-profiling
 description: How to profile CUDA kernels in this workspace with torch.profiler and ncu. Use when asked why a kernel is slow, when benchmark numbers need bottleneck attribution, or when writing profiling evidence for xqt.gemm manifests/docs.
-user-invocable: false
 ---
 
 # GPU Profiling (torch.profiler + ncu)

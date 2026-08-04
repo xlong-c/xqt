@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
+from xqt.gemm import dense_gemm_reference
 from xqt.core.errors import XQTBackendError
 from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
 from xqt.runtime.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
@@ -163,25 +163,15 @@ def gemm_reference(
     activation: str | None = None,
     transpose_b: bool = True,
 ) -> torch.Tensor:
-    """Reference GEMM implementation using torch.matmul."""
-    if transpose_b:
-        output = torch.matmul(a, b.t())
-    else:
-        output = torch.matmul(a, b)
+    """Compatibility wrapper for the xqt.gemm-owned dense reference path."""
 
-    if bias is not None:
-        output = output + bias
-
-    if activation == "relu":
-        return F.relu(output)
-    elif activation == "gelu":
-        return F.gelu(output)
-    elif activation == "silu":
-        return F.silu(output)
-    elif activation is None:
-        return output
-    else:
-        raise ValueError(f"unsupported activation: {activation}")
+    return dense_gemm_reference(
+        a,
+        b,
+        bias,
+        activation=activation,
+        transpose_b=transpose_b,
+    )
 
 
 def _dense_triton_output_dtype(a: torch.Tensor) -> torch.dtype:

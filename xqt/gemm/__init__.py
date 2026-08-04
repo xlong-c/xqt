@@ -43,6 +43,7 @@ from .layout import (
 )
 from .reference import (
     apply_epilogue_reference,
+    dense_gemm_reference,
     dequantize_weight_reference,
     reference_dense_gemm,
     reference_gemm,
@@ -166,6 +167,7 @@ __all__ = [
     "cutlass_weight_view",
     "default_registry",
     "default_cache_dir",
+    "dense_gemm_reference",
     "dequantize_weight_reference",
     "decode_fp8_storage",
     "dequantize_fp8",

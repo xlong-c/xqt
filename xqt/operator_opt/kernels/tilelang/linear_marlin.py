@@ -13,6 +13,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from xqt.gemm import dense_gemm_reference
+
 from xqt.core.errors import XQTBackendError
 
 from xqt.operator_opt.kernels.tilelang._common import (
@@ -240,10 +242,11 @@ def linear_marlin_reference(
         dtype=x.dtype,
         device=x.device,
     )
-    output = F.linear(
+    output = dense_gemm_reference(
         x,
         dense_weight,
         None if bias is None else bias.to(dtype=x.dtype, device=x.device),
+        transpose_b=True,
     )
     return _apply_activation_reference(output, activation)
 

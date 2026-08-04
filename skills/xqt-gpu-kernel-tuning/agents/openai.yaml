@@ -1,0 +1,4 @@
+interface:
+  display_name: "XQT GPU Kernel Tuning"
+  short_description: "Profile XQT kernels and GPU profiler bottlenecks"
+  default_prompt: "Use $xqt-gpu-kernel-tuning to profile and tune XQT kernels with nsys or ncu on NVIDIA GPUs."

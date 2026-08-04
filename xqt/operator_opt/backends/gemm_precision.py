@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from xqt.contracts import PrecisionPolicy
 from xqt.core.errors import XQTBackendError
+from xqt.gemm import dense_gemm_reference
 
 from . import run_tilelang_kernel, run_triton_kernel
 from .gemm_selector import GemmShape, select_gemm_engine
@@ -1938,8 +1939,6 @@ def _gemm_torch(
     kwargs: dict[str, Any],
 ) -> torch.Tensor:
     """PyTorch fallback dispatcher."""
-    from ..kernels.triton.gemm import gemm_reference
-
     del kwargs
     compute_dtype = _precision_name_to_dtype(
         precision.mma,
@@ -1970,7 +1969,7 @@ def _gemm_torch(
             )
         )
     )
-    output = gemm_reference(
+    output = dense_gemm_reference(
         lhs, rhs, bias_value, activation=activation, transpose_b=transpose_b
     )
     return output.to(_precision_name_to_dtype(precision.output, role="output"))

@@ -323,6 +323,46 @@ def apply_epilogue_reference(
     return output.to(dtype=_output_dtype(epilogue.output_dtype))
 
 
+def dense_gemm_reference(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    activation: str | None = None,
+    transpose_b: bool = True,
+) -> torch.Tensor:
+    """Run a dense a @ b or a @ b.T reference GEMM with a small epilogue.
+
+    This is the xqt.gemm-owned facade for legacy dense GEMM kernel references
+    that do not yet carry a full GemmSpec. New contract-aware code should
+    prefer reference_gemm.
+    """
+
+    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
+        raise TypeError("a and b must be torch.Tensor")
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError("dense_gemm_reference expects rank-2 GEMM inputs")
+    rhs = b.transpose(0, 1) if transpose_b else b
+    if int(a.shape[1]) != int(rhs.shape[0]):
+        raise ValueError(
+            f"inner dimensions must match: {int(a.shape[1])} vs {int(rhs.shape[0])}"
+        )
+
+    output = torch.matmul(a, rhs)
+    if bias is not None:
+        output = output + bias
+
+    if activation is None or activation == "none":
+        return output
+    if activation == "relu":
+        return F.relu(output)
+    if activation == "gelu":
+        return F.gelu(output)
+    if activation == "silu":
+        return F.silu(output)
+    raise ValueError(f"unsupported activation: {activation}")
+
+
 def _resolve_spec(
     activation: torch.Tensor,
     weight: torch.Tensor | PackedWeight,
@@ -515,6 +555,7 @@ reference_dense_gemm = reference_gemm
 
 __all__ = [
     "apply_epilogue_reference",
+    "dense_gemm_reference",
     "dequantize_weight_reference",
     "reference_dense_gemm",
     "reference_gemm",

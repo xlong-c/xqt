@@ -3,9 +3,9 @@
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+from xqt.gemm import dense_gemm_reference
 
 from ._common import require_cuda_tensors, require_cutile, require_fp16_tensors
 
@@ -19,20 +19,15 @@ def dense_linear_epilogue_reference(
 ) -> torch.Tensor:
     """Reference dense Linear with optional bias and activation epilogue."""
 
-    output = F.linear(
+    runtime_weight = weight.to(dtype=x.dtype, device=x.device)
+    runtime_bias = None if bias is None else bias.to(dtype=x.dtype, device=x.device)
+    return dense_gemm_reference(
         x,
-        weight.to(dtype=x.dtype, device=x.device),
-        None if bias is None else bias.to(dtype=x.dtype, device=x.device),
+        runtime_weight,
+        runtime_bias,
+        activation=activation,
+        transpose_b=True,
     )
-    if activation is None:
-        return output
-    if activation == "gelu":
-        return F.gelu(output)
-    if activation == "silu":
-        return F.silu(output)
-    if activation == "relu":
-        return F.relu(output)
-    raise ValueError(f"unsupported activation: {activation}")
 
 
 def dense_linear_epilogue_cutile(
@@ -76,10 +71,11 @@ def half_linear_reference(
 ) -> torch.Tensor:
     """Reference half Linear path used by the CuTile backend."""
 
-    return F.linear(
+    return dense_gemm_reference(
         x,
         weight.to(dtype=x.dtype, device=x.device),
         None if bias is None else bias.to(dtype=x.dtype, device=x.device),
+        transpose_b=True,
     )
 
 

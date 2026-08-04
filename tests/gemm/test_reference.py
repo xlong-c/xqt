@@ -4,6 +4,7 @@ import torch
 import pytest
 
 from xqt.gemm import (
+    dense_gemm_reference,
     EpilogueSpec,
     GemmProblem,
     GemmSpec,
@@ -14,6 +15,18 @@ from xqt.gemm import (
     reference_gemm,
     reference_grouped_gemm,
 )
+
+
+def test_dense_gemm_reference_matches_legacy_dense_signature() -> None:
+    torch.manual_seed(0)
+    a = torch.randn(3, 5)
+    b = torch.randn(7, 5)
+    bias = torch.randn(7)
+
+    actual = dense_gemm_reference(a, b, bias, activation="gelu", transpose_b=True)
+    expected = torch.nn.functional.gelu(a @ b.t() + bias)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_dense_reference_matches_torch_with_epilogue() -> None:

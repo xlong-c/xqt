@@ -1,0 +1,4 @@
+interface:
+  display_name: "XQT Operator Runtime Integration"
+  short_description: "Diagnose XQT wrapper, graph, and benchmark mismatches"
+  default_prompt: "Use $xqt-operator-runtime-integration to diagnose XQT wrapper, CUDA Graph, and operator-benchmark integration mismatches."

@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+from xqt.gemm import dense_gemm_reference
 
 
 def _require_cuda_tensors(*tensors: torch.Tensor) -> None:
@@ -36,18 +36,15 @@ def gemm_epilogue_reference(
 ) -> torch.Tensor:
     """Reference GEMM with optional bias and activation epilogue."""
 
-    output = x.matmul(weight.t().to(dtype=x.dtype, device=x.device))
-    if bias is not None:
-        output = output + bias.to(dtype=output.dtype, device=output.device)
-    if activation is None:
-        return output
-    if activation == "gelu":
-        return F.gelu(output)
-    if activation == "silu":
-        return F.silu(output)
-    if activation == "relu":
-        return F.relu(output)
-    raise ValueError(f"unsupported activation: {activation}")
+    runtime_weight = weight.to(dtype=x.dtype, device=x.device)
+    runtime_bias = None if bias is None else bias.to(dtype=x.dtype, device=x.device)
+    return dense_gemm_reference(
+        x,
+        runtime_weight,
+        runtime_bias,
+        activation=activation,
+        transpose_b=True,
+    )
 
 
 def gemm_epilogue_cute_dsl(
