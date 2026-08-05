@@ -16,6 +16,7 @@ from xqt.gemm import (
     reference_gemm,
 )
 from xqt.gemm.backends.fp8_sm89 import (
+    _scale_scalar,
     fp8_sm89_executor,
     install_sm89_fp8_executors,
     sm89_fp8_artifact_available,
@@ -53,6 +54,29 @@ def test_missing_fp8_artifact_does_not_promote_registry() -> None:
     assert registry.get("sm89_fp8_e4m3_cutlass").maturity == "metadata_only"
     assert registry.get("sm89_fp8_e5m2_cutlass").maturity == "metadata_only"
     assert sm89_fp8_artifact_available("/tmp/xqt-missing-fp8-sm89.so") is False
+
+
+def test_tensorwise_scale_scalar_caches_and_invalidates_by_tensor_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scale = torch.tensor(1.5)
+    original_isfinite = torch.isfinite
+    calls = 0
+
+    def tracked_isfinite(value: torch.Tensor) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        return original_isfinite(value)
+
+    monkeypatch.setattr(torch, "isfinite", tracked_isfinite)
+
+    assert _scale_scalar(scale, name="scale") == 1.5
+    assert _scale_scalar(scale, name="scale") == 1.5
+    assert calls == 1
+
+    scale.fill_(2.0)
+    assert _scale_scalar(scale, name="scale") == 2.0
+    assert calls == 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

@@ -5,9 +5,13 @@ import importlib.util
 import pytest
 import torch
 
+from xqt import nn as xqt_nn
 from xqt.operator_opt.execute import execute_operator_optimization_plan
 from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.tilelang_wrappers import _TileLangAttentionWrapper
+from xqt.operator_opt.tilelang_wrappers import (
+    _TileLangAttentionWrapper,
+    _TileLangXqtAttentionWrapper,
+)
 from xqt.operator_opt.plan import build_operator_optimization_plan
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
@@ -203,6 +207,47 @@ def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
     second_metadata = wrapper.execution_metadata()
     ref_first, _ = tilelang_wrapper(x, x, x, need_weights=False)
     ref_second, _ = tilelang_wrapper(second_input, second_input, second_input, need_weights=False)
+
+    assert torch.allclose(first_output.float(), ref_first.float(), atol=1e-2, rtol=1e-2)
+    assert torch.allclose(second_output.float(), ref_second.float(), atol=1e-2, rtol=1e-2)
+    assert first_metadata["cuda_graph"]["state"] == "captured"
+    assert second_metadata["cuda_graph"]["state"] == "replayed"
+
+
+@requires_cuda
+@requires_tilelang
+def test_tilelang_xqt_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
+    attention = xqt_nn.Attention(32, heads=4, engine="torch").to(
+        device="cuda",
+        dtype=torch.float16,
+    )
+    wrapper = _TileLangXqtAttentionWrapper(
+        attention,
+        fallback="eager",
+        settings={
+            "target_arch": "sm_89",
+            "attention_fastpath": "graph",
+            "preferred_patterns": ["attention"],
+        },
+    ).to(device="cuda", dtype=torch.float16)
+    tilelang_wrapper = _TileLangXqtAttentionWrapper(
+        attention,
+        fallback="eager",
+        settings={
+            "target_arch": "sm_89",
+            "attention_fastpath": "tilelang",
+            "preferred_patterns": ["attention"],
+        },
+    ).to(device="cuda", dtype=torch.float16)
+    x = torch.randn(1, 64, 32, device="cuda", dtype=torch.float16)
+
+    first_output = wrapper(x).clone()
+    first_metadata = wrapper.execution_metadata()
+    second_input = x + 1
+    second_output = wrapper(second_input)
+    second_metadata = wrapper.execution_metadata()
+    ref_first = tilelang_wrapper(x)
+    ref_second = tilelang_wrapper(second_input)
 
     assert torch.allclose(first_output.float(), ref_first.float(), atol=1e-2, rtol=1e-2)
     assert torch.allclose(second_output.float(), ref_second.float(), atol=1e-2, rtol=1e-2)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -11,7 +11,16 @@ import torch.nn.functional as F
 from xqt.core.errors import XQTBackendError
 
 from ..backends.tilelang import run_tilelang_kernel
+from ..runtime import (
+    DEFAULT_CUDA_GRAPH_WARMUP,
+    capture_cuda_graph_with_static_state,
+    cuda_graph_tensor_signature,
+    replay_cuda_graph_tensor_callable,
+)
 from ._common import _resolved_target_arch
+
+if TYPE_CHECKING:
+    from xqt import nn as xqt_nn
 
 
 class _TileLangXqtAttentionWrapper(nn.Module):
@@ -32,6 +41,9 @@ class _TileLangXqtAttentionWrapper(nn.Module):
         self.last_execution_reason: str | None = None
         self.last_operator_family = "attention"
         self.last_fastpath = "none"
+        self.last_graph_state = "disabled"
+        self.last_graph_reason: str | None = None
+        self._graph_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def _project_qkv(
         self,
@@ -104,11 +116,61 @@ class _TileLangXqtAttentionWrapper(nn.Module):
             return False
         return _resolved_target_arch(self.settings, x) == "sm_89"
 
+    def _prefer_graph_attention_fastpath(self) -> bool:
+        mode = str(self.settings.get("attention_fastpath", "auto"))
+        return mode in {"graph", "tilelang_graph"}
+
+    def _attention_graph_cache_key(self, x: torch.Tensor) -> tuple[Any, ...]:
+        return (
+            cuda_graph_tensor_signature(x),
+            bool(self.attention.causal),
+            float(self.attention.dropout_p),
+            int(self.settings.get("block_m", 64)),
+            int(self.settings.get("block_n", 64)),
+            int(self.settings.get("threads", 128)),
+            int(self.settings.get("num_stages", 2)),
+            str(self.settings.get("target_arch") or ""),
+        )
+
+    def _graph_capture_attention(self, x: torch.Tensor) -> dict[str, Any]:
+        state = capture_cuda_graph_with_static_state(
+            (x,),
+            body=self._run_tilelang_xqt_attention_forward,
+            warmup=int(self.settings.get("cuda_graph_warmup", DEFAULT_CUDA_GRAPH_WARMUP)),
+        )
+        state["kind"] = "tilelang_xqt_attention_full_forward"
+        return state
+
+    def _run_attention_with_optional_graph(self, x: torch.Tensor) -> torch.Tensor:
+        if not self._prefer_graph_attention_fastpath():
+            self.last_graph_state = "disabled"
+            self.last_graph_reason = "attention_fastpath is not set to graph mode"
+            return self._forward_prefer_tilelang(x)
+        cache_key = self._attention_graph_cache_key(x)
+        state = self._graph_cache.get(cache_key)
+        if state is None:
+            try:
+                state = self._graph_capture_attention(x)
+            except Exception as exc:
+                self.last_graph_state = "fallback_eager"
+                self.last_graph_reason = f"CUDA Graph capture failed: {exc}"
+                return self._forward_prefer_tilelang(x)
+            self._graph_cache[cache_key] = state
+            self.last_graph_state = "captured"
+            self.last_graph_reason = None
+            return replay_cuda_graph_tensor_callable(state, (x,))
+        self.last_graph_state = "replayed"
+        self.last_graph_reason = None
+        return replay_cuda_graph_tensor_callable(state, (x,))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_is_cuda = x.is_cuda
+        use_graph_tilelang = input_is_cuda and self._prefer_graph_attention_fastpath()
         self.last_execution_mode = (
             "cuda_native_fastpath"
             if input_is_cuda and self._prefer_native_attention_fastpath(x)
+            else "cuda_graph_tilelang_entry"
+            if use_graph_tilelang
             else "cuda_tilelang_entry"
             if input_is_cuda
             else "reference_fallback"
@@ -116,17 +178,33 @@ class _TileLangXqtAttentionWrapper(nn.Module):
         self.last_fastpath = (
             "native_sdpa"
             if self.last_execution_mode == "cuda_native_fastpath"
+            else "tilelang_xqt_attention_cuda_graph"
+            if self.last_execution_mode == "cuda_graph_tilelang_entry"
             else "tilelang_xqt_attention_kernel"
             if self.last_execution_mode == "cuda_tilelang_entry"
             else "eager_reference_fallback"
         )
         self.last_execution_reason = (
             None
-            if self.last_execution_mode in {"cuda_native_fastpath", "cuda_tilelang_entry"}
+            if self.last_execution_mode
+            in {
+                "cuda_native_fastpath",
+                "cuda_graph_tilelang_entry",
+                "cuda_tilelang_entry",
+            }
             else "TileLang attention kernel requires CUDA tensors; using configured fallback."
         )
+        if self.last_execution_mode != "cuda_graph_tilelang_entry":
+            self.last_graph_state = "disabled"
+            self.last_graph_reason = (
+                None
+                if self.last_execution_mode == "cuda_native_fastpath"
+                else "graph fastpath was not selected"
+            )
         if self.last_execution_mode == "cuda_native_fastpath":
             return self._run_sdpa_attention_forward(x)
+        if self.last_execution_mode == "cuda_graph_tilelang_entry":
+            return self._run_attention_with_optional_graph(x)
         if self.last_execution_mode == "cuda_tilelang_entry":
             return self._forward_prefer_tilelang(x)
         return self._run_sdpa_attention_forward(x)
@@ -146,6 +224,8 @@ class _TileLangXqtAttentionWrapper(nn.Module):
         kernel_kind = (
             "native_runtime_fastpath"
             if self.last_execution_mode == "cuda_native_fastpath"
+            else "cuda_graph_replay"
+            if self.last_execution_mode == "cuda_graph_tilelang_entry"
             else "minimal_cuda_jit"
             if self.last_execution_mode == "cuda_tilelang_entry"
             else "reference_fallback"
@@ -165,4 +245,9 @@ class _TileLangXqtAttentionWrapper(nn.Module):
             },
             "fallback": self.fallback,
             "settings": dict(self.settings),
+            "cuda_graph": {
+                "state": self.last_graph_state,
+                "reason": self.last_graph_reason,
+                "cache_size": len(self._graph_cache),
+            },
         }

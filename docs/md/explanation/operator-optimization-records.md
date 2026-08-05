@@ -852,3 +852,81 @@ split-K 在该 shape 未快于 full-K,当前定位为 opt-in 能力加保守启�
 - [FP8 evidence artifact](../../../research/xqt-gemm/artifacts/sm89_fp8_evidence.json)
 - [FP8 contract tests](../../../tests/xqt/gemm/test_fp8.py)
 - [FP8 backend GPU tests](../../../tests/xqt/gemm/test_fp8_backend.py)
+
+## R-011: XQT Attention TileLang full-forward CUDA Graph fastpath
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `xqt.nn.Attention` 的 `_TileLangXqtAttentionWrapper` |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER, `sm_89`, CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| shape | `[batch=1, seq=64, dim=128]`, `heads=4`, `head_dim=32` |
+| dtype | FP16, `dropout_p=0`, non-causal |
+| fastpaths | native SDPA, eager TileLang, explicit TileLang CUDA Graph |
+
+### 基线与方法
+
+三条路径使用同一组 module 参数和输入. CUDA event benchmark 使用 warmup 20,
+50 个样本,每个样本连续调用 100 次. 编译和首次 graph capture 不计入稳态数字.
+数值基线为 eager TileLang wrapper,容差为 `atol=0.02, rtol=0.02`.
+
+### 实现
+
+1. `_TileLangXqtAttentionWrapper` 增加 `attention_fastpath="graph"` 和
+   `"tilelang_graph"` 分支,保留 `auto` 在 Ada 上选择 native SDPA 的行为.
+2. graph capture 覆盖完整的 `qkv projection -> reshape -> TileLang attention
+   -> merge -> out_proj` 路径, replay 只复制动态输入.
+3. graph cache key 包含输入 shape/stride/dtype/device, causal/dropout, tile
+   参数和 `target_arch`. 每个固定输入签名独立 capture.
+4. execution metadata 增加 `cuda_graph.state`, `reason` 和 `cache_size`,
+   让 capture/replay/fallback 与 operator report 可追溯.
+
+### 结果
+
+| path | p50 (ms) | mean (ms) |
+| --- | ---: | ---: |
+| native SDPA | `0.09111` | `0.09113` |
+| eager TileLang | `0.10028` | `0.10400` |
+| TileLang CUDA Graph | `0.01966` | `0.02113` |
+
+最终 run 中 graph replay 相对 eager TileLang 约 `5.1x`,相对 native SDPA 约
+`4.6x`. 两次 profiler-free run 的 graph p50 为 `0.0197-0.0229 ms`,小 shape
+下仍有 launch 和 clock 噪声.
+首次调用 metadata 为 `captured`,第二次为 `replayed`,两次输入的 graph 与
+eager 最大绝对误差均为 `0.0`.
+
+Nsight Systems 以 NVTX 区间拆分 steady-state. 首个 eager 区间含 500 次
+`cudaLaunchKernel` 和 400 次 `cuLaunchKernel`;首个 graph 区间含 100 次
+`cudaMemcpyAsync` 和 100 次 `cudaGraphLaunch`. graph node 在本机 Nsight
+Systems 版本中不会关联到 host NVTX filter,因此不从空的 graph kernel report
+推断 kernel 数量或 kernel 时间. NCU 因 `ERR_NVGPUCTRPERM` 阻断,没有写
+occupancy/cache/stall 结论.
+
+### 适用边界与回退
+
+- graph 仅在 CUDA 输入,FP16,`dropout_p=0` 且固定 shape/stride/dtype/device 时
+  可复用; shape 或布局变化会建立新的 graph entry.
+- 当前 facade wrapper 不新增 `attn_mask` / `key_padding_mask` 支持,动态 mask
+  仍需 reference/native 路径.
+- `auto` 在 Ada 上仍为 native SDPA; graph 需要 operator target 显式设置
+  `attention_fastpath="graph"`.
+- 该证据覆盖 `sm_89` 和一个小 prefill shape,不外推到 SM90/SM100 或生产
+  serving 的 paged KV / continuous batching.
+
+### 未采纳方案
+
+- 不继续调 `block_m/block_n` 来解决这个小 shape 的 eager 差距: Nsight Systems
+  已显示 launch/runtime integration 是主要差异层.
+- 不把 graph capture 仅缩小到 attention kernel: projection 和 reshape 的
+  host launch 会继续抵消 kernel 收益.
+- 不把 CUDA Graph steady-state 数字写成 kernel-only 性能,也不在 NCU 被阻断
+  时猜测 occupancy 或 memory bottleneck.
+
+### 验证落点
+
+- [XQT Attention wrapper](../../../xqt/operator_opt/wrappers/xqt_attention.py)
+- [CUDA graph runtime helpers](../../../xqt/operator_opt/runtime.py)
+- [CUDA regression tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [benchmark script](../../../research/xqt-gemm/bench_sm89_xqt_attention.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-04-sm89-xqt-attention-graph/summary.json)

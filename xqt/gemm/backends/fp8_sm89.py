@@ -6,6 +6,7 @@ import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import weakref
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +41,7 @@ _RESOURCE_QUERY_SYMBOL = "fp8_sm89_blockwise_resource_query"
 _BLOCKWISE_RESOURCE_FORMATS = {"fp8_e4m3": 0, "fp8_e5m2": 1}
 _BLOCKWISE_RESOURCE_OUTPUTS = {"fp16": 0, "bf16": 1}
 _BLOCKWISE_ALIGNMENT = (16, 8, 32)
+_TENSORWISE_SCALE_CACHE: dict[int, "_TensorwiseScaleCacheEntry"] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,62 @@ class Sm89Fp8BlockwiseResourceReport:
             "device_name": self.device_name,
             "capability": self.capability,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _TensorwiseScaleCacheEntry:
+    """A validated host scalar keyed by one static scale tensor."""
+
+    tensor_ref: weakref.ReferenceType[torch.Tensor]
+    version: int
+    data_ptr: int
+    scalar: float
+
+
+def _tensor_version(value: torch.Tensor) -> int | None:
+    """Return a tensor mutation version when PyTorch tracks one."""
+
+    try:
+        return int(value._version)
+    except RuntimeError:
+        # Inference tensors intentionally do not expose a version counter.  Do
+        # not cache them because an in-place mutation cannot be invalidated.
+        return None
+
+
+def _cached_tensorwise_scale(value: torch.Tensor, *, version: int) -> float | None:
+    """Return a valid cached scalar when tensor identity and storage still match."""
+
+    key = id(value)
+    entry = _TENSORWISE_SCALE_CACHE.get(key)
+    if entry is None:
+        return None
+    if (
+        entry.tensor_ref() is value
+        and entry.version == version
+        and entry.data_ptr == value.data_ptr()
+    ):
+        return entry.scalar
+    _TENSORWISE_SCALE_CACHE.pop(key, None)
+    return None
+
+
+def _cache_tensorwise_scale(value: torch.Tensor, *, version: int, scalar: float) -> None:
+    """Cache one validated static scale without retaining its tensor lifetime."""
+
+    key = id(value)
+
+    def _remove(dead_ref: weakref.ReferenceType[torch.Tensor]) -> None:
+        entry = _TENSORWISE_SCALE_CACHE.get(key)
+        if entry is not None and entry.tensor_ref is dead_ref:
+            _TENSORWISE_SCALE_CACHE.pop(key, None)
+
+    _TENSORWISE_SCALE_CACHE[key] = _TensorwiseScaleCacheEntry(
+        tensor_ref=weakref.ref(value, _remove),
+        version=version,
+        data_ptr=value.data_ptr(),
+        scalar=scalar,
+    )
 
 
 def _load_library(artifact: str | Path) -> ctypes.CDLL:
@@ -317,9 +375,17 @@ def _scale_scalar(value: torch.Tensor | None, *, name: str) -> float:
         raise XQTBackendError(
             f"native tensorwise FP8 requires {name} scalar or [1,1], got {tuple(value.shape)}"
         )
+    version = _tensor_version(value)
+    if version is not None:
+        cached = _cached_tensorwise_scale(value, version=version)
+        if cached is not None:
+            return cached
     if not bool(torch.isfinite(scalar).all()) or bool((scalar <= 0).any()):
         raise XQTBackendError(f"{name} must be finite and positive")
-    return float(scalar.item())
+    result = float(scalar.item())
+    if version is not None:
+        _cache_tensorwise_scale(value, version=version, scalar=result)
+    return result
 
 
 def _scale_blockwise(
