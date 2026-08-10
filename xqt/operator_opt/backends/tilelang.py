@@ -13,7 +13,7 @@ import torch
 from xqt.core.errors import XQTBackendError
 
 from ..kernels.tilelang.attention import (
-    build_tilelang_attention_design,
+    TILELANG_ATTENTION_KERNEL_METADATA,
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
 )
@@ -114,18 +114,8 @@ TILELANG_DTYPE_VALIDATION_THRESHOLDS: dict[str, dict[str, float]] = {
     "torch.float8_e5m2": {"atol": 1e-1, "rtol": 1e-1},
 }
 
-_ATTENTION_DESIGN = build_tilelang_attention_design()
-
 TILELANG_KERNEL_METADATA: dict[str, dict[str, Any]] = {
-    "attention": {
-        "kernel_name": "fused_attention_forward",
-        "block_m": _ATTENTION_DESIGN.default_block_m,
-        "block_n": _ATTENTION_DESIGN.default_block_n,
-        "threads": _ATTENTION_DESIGN.default_threads,
-        "num_stages": _ATTENTION_DESIGN.default_num_stages,
-        "baseline": "torch.nn.functional.scaled_dot_product_attention",
-        "design": _ATTENTION_DESIGN.to_dict(),
-    },
+    **TILELANG_ATTENTION_KERNEL_METADATA,
     **TILELANG_CONV_KERNEL_METADATA,
     **TILELANG_DEQUANT_GEMM_KERNEL_METADATA,
     **TILELANG_INT8_MMA_KERNEL_METADATA,

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import importlib.util
-
 import pytest
 import torch
 
+from xqt import nn as xqt_nn
+from xqt.core.errors import XQTBackendError
+from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
 from xqt.operator_opt.kernels.tilelang.attention import (
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
@@ -23,19 +24,49 @@ requires_tilelang = pytest.mark.skipif(
 )
 
 
+def test_tilelang_attention_metadata_declares_bf16_constraints() -> None:
+    metadata = get_tilelang_kernel_spec("attention").metadata
+
+    assert metadata["supported_dtypes"] == ["float16", "bfloat16"]
+    assert metadata["bfloat16_head_dim_multiple"] == 16
+    assert metadata["design"]["production_status"] == "runtime_kernel"
+
+
 @requires_cuda
 @requires_tilelang
-def test_tilelang_attention_cuda_kernel_matches_reference() -> None:
+@pytest.mark.parametrize(
+    ("dtype", "atol", "rtol"),
+    [
+        pytest.param(torch.float16, 1e-2, 1e-2, id="fp16"),
+        pytest.param(torch.bfloat16, 2e-2, 2e-2, id="bf16"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("seq_q", "seq_kv", "causal"),
+    [
+        pytest.param(64, 64, False, id="square-noncausal"),
+        pytest.param(64, 64, True, id="square-causal"),
+        pytest.param(1, 64, True, id="decode-lower-right-causal"),
+    ],
+)
+def test_tilelang_attention_cuda_kernel_matches_reference(
+    dtype: torch.dtype,
+    atol: float,
+    rtol: float,
+    seq_q: int,
+    seq_kv: int,
+    causal: bool,
+) -> None:
     torch.manual_seed(0)
-    q = torch.randn(1, 1, 64, 32, device="cuda", dtype=torch.float16)
-    k = torch.randn(1, 1, 64, 32, device="cuda", dtype=torch.float16)
-    v = torch.randn(1, 1, 64, 32, device="cuda", dtype=torch.float16)
+    q = torch.randn(1, 1, seq_q, 32, device="cuda", dtype=dtype)
+    k = torch.randn(1, 1, seq_kv, 32, device="cuda", dtype=dtype)
+    v = torch.randn(1, 1, seq_kv, 32, device="cuda", dtype=dtype)
 
     output = fused_attention_forward_tilelang(
         q,
         k,
         v,
-        causal=False,
+        causal=causal,
         dropout_p=0.0,
         block_m=64,
         block_n=64,
@@ -46,10 +77,95 @@ def test_tilelang_attention_cuda_kernel_matches_reference() -> None:
         q,
         k,
         v,
-        causal=False,
+        causal=causal,
         dropout_p=0.0,
     )
 
     assert output.shape == reference.shape
-    assert output.dtype == torch.float16
-    assert torch.allclose(output.float(), reference.float(), atol=1e-2, rtol=1e-2)
+    assert output.dtype == dtype
+    assert torch.allclose(output.float(), reference.float(), atol=atol, rtol=rtol)
+
+
+@requires_cuda
+def test_tilelang_attention_cuda_rejects_mixed_fp16_bf16_inputs() -> None:
+    q = torch.randn(1, 1, 8, 16, device="cuda", dtype=torch.float16)
+    k = torch.randn(1, 1, 8, 16, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(1, 1, 8, 16, device="cuda", dtype=torch.bfloat16)
+
+    with pytest.raises(
+        XQTBackendError,
+        match="requires matching float16 or bfloat16 tensors",
+    ):
+        fused_attention_forward_tilelang(q, k, v)
+
+
+@requires_cuda
+def test_tilelang_attention_cuda_rejects_float32_inputs() -> None:
+    q = torch.randn(1, 1, 8, 16, device="cuda", dtype=torch.float32)
+    k = torch.randn(1, 1, 8, 16, device="cuda", dtype=torch.float32)
+    v = torch.randn(1, 1, 8, 16, device="cuda", dtype=torch.float32)
+
+    with pytest.raises(
+        XQTBackendError,
+        match="requires matching float16 or bfloat16 tensors",
+    ):
+        fused_attention_forward_tilelang(q, k, v)
+
+
+@requires_cuda
+def test_tilelang_attention_cuda_rejects_unaligned_bf16_head_dim() -> None:
+    q = torch.randn(1, 1, 8, 8, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(1, 1, 8, 8, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(1, 1, 8, 8, device="cuda", dtype=torch.bfloat16)
+
+    with pytest.raises(
+        XQTBackendError,
+        match="bfloat16 attention requires head_dim divisible by 16",
+    ):
+        fused_attention_forward_tilelang(q, k, v)
+
+
+@requires_cuda
+def test_xqt_attention_facade_preserves_bf16_for_tilelang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_dtypes: list[tuple[torch.dtype, torch.dtype, torch.dtype]] = []
+
+    def fake_tilelang_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        causal: bool = False,
+        dropout_p: float = 0.0,
+        **_: object,
+    ) -> torch.Tensor:
+        observed_dtypes.append((q.dtype, k.dtype, v.dtype))
+        return fused_attention_forward_reference(
+            q,
+            k,
+            v,
+            causal=causal,
+            dropout_p=dropout_p,
+        )
+
+    from xqt.operator_opt.kernels import attention as attention_kernels
+
+    monkeypatch.setattr(
+        attention_kernels,
+        "fused_attention_forward_tilelang",
+        fake_tilelang_attention,
+    )
+    attention = xqt_nn.Attention(64, heads=4, engine="tilelang").to(
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    x = torch.randn(1, 16, 64, device="cuda", dtype=torch.bfloat16)
+
+    output = attention(x)
+
+    assert output.dtype == torch.bfloat16
+    assert observed_dtypes == [
+        (torch.bfloat16, torch.bfloat16, torch.bfloat16)
+    ]
+    assert attention.runtime_fallback is None

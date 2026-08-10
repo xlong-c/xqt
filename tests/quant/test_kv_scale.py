@@ -46,6 +46,19 @@ class _ToyLM(nn.Module):
         return hidden
 
 
+class _ToyFusedAttentionBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.qkv = nn.Linear(4, 12, bias=False)
+        with torch.no_grad():
+            self.qkv.weight[:4].fill_(0.25)
+            self.qkv.weight[4:8].fill_(0.5)
+            self.qkv.weight[8:].fill_(0.75)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.qkv(inputs)
+
+
 def test_discover_and_calibrate_kv_scales() -> None:
     model = _ToyLM().eval()
     layers = discover_kv_projection_modules(model)
@@ -65,6 +78,22 @@ def test_discover_and_calibrate_kv_scales() -> None:
         assert payload["attn.k_scale"] == payload["k_scale"]
         assert payload["attn.v_scale"] == payload["v_scale"]
         assert "attn.k_scale" in artifact.buffer_names()["k_scale"] or True
+
+
+def test_fused_qkv_calibration_observes_k_and_v_thirds() -> None:
+    model = _ToyFusedAttentionBlock().eval()
+    layers = discover_kv_projection_modules(model)
+    assert layers == {
+        "": {"k": "qkv", "v": "qkv", "fused_qkv": "qkv"}
+    }
+
+    inputs = torch.ones(1, 2, 4)
+    artifacts = calibrate_kv_scales(model, [inputs], qmax=127)
+
+    artifact = artifacts[""]
+    assert artifact.k_scale == 2.0 / 127.0
+    assert artifact.v_scale == 3.0 / 127.0
+    assert artifact.num_samples == 8
 
 
 def test_attach_buffers_and_quant_pair_lineage(tmp_path) -> None:

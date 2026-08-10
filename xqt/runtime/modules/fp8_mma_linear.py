@@ -1,7 +1,7 @@
 """Runtime W8A8-FP8 Linear backed by cuBLAS ``torch._scaled_mm`` (Ada sm_89+).
 
 Measured on consumer Ada (sm_89): per-tensor (``tensorwise``) FP8 GEMM reaches
-~1.8x fp16 at large M, while row-wise scaling is *slower* than fp16 — so this
+~1.8x fp16 at large M, while row-wise scaling is *slower* than fp16 - so this
 module is tensorwise only. The per-forward activation-quant ``amax`` reduction
 erases the win, so ``activation_scale_mode`` defaults to ``static`` (calibrated
 scale). Small-M shapes (decode) fall back to a dense fp16 GEMM via
@@ -97,6 +97,15 @@ class Fp8MmaLinear(nn.Module):
             initial = torch.as_tensor(activation_scale, dtype=torch.float32).reshape(())
         self.register_buffer("static_activation_scale", initial)
         self._dense_weight: torch.Tensor | None = None
+        self._dense_weight_signature: tuple[Any, ...] | None = None
+
+    def _apply(self, fn: Any) -> "Fp8MmaLinear":
+        """Move registered tensors and invalidate the dense fallback view."""
+
+        super()._apply(fn)
+        self._dense_weight = None
+        self._dense_weight_signature = None
+        return self
 
     @classmethod
     def from_linear(
@@ -178,13 +187,28 @@ class Fp8MmaLinear(nn.Module):
         return self.qweight.to(torch.float32) * self.weight_scale.to(torch.float32)
 
     def _dense_fp16_weight(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        signature = (
+            str(self.qweight.device),
+            int(getattr(self.qweight, "_version", 0)),
+            tuple(int(dim) for dim in self.qweight.shape),
+            str(self.weight_scale.device),
+            int(getattr(self.weight_scale, "_version", 0)),
+            str(device),
+            str(dtype),
+        )
         cached = self._dense_weight
-        if cached is not None and cached.device == device and cached.dtype == dtype:
+        if (
+            cached is not None
+            and cached.device == device
+            and cached.dtype == dtype
+            and self._dense_weight_signature == signature
+        ):
             return cached
         weight = (self.qweight.to(torch.float32) * self.weight_scale.to(torch.float32)).to(
             device=device, dtype=dtype
         )
         self._dense_weight = weight
+        self._dense_weight_signature = signature
         return weight
 
     def _run_fp16_fallback(self, inputs: torch.Tensor, reason: str) -> torch.Tensor:
@@ -218,7 +242,7 @@ class Fp8MmaLinear(nn.Module):
     def lean_forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Pure-tensor FP8 GEMM path for torch.compile fusion.
 
-        No metadata writes, no try/except, no fallback branch — a clean sequence
+        No metadata writes, no try/except, no fallback branch - a clean sequence
         of tensor ops so Inductor can fuse without graph breaks. The caller must
         guarantee the FP8 fast path applies (CUDA + sm_89 + rows adequate); use
         :meth:`forward` for the guarded/fallback path.

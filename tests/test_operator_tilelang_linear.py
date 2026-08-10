@@ -16,6 +16,7 @@ from xqt.operator_opt.execute import execute_operator_optimization_plan
 from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
 from xqt.operator_opt.tilelang_wrappers import build_tilelang_candidate_model
 from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.operator_opt.wrappers.linear import _TileLangLinearWrapper
 from xqt.pipeline.passes import LoadModelPass
 
 
@@ -173,6 +174,65 @@ def test_tilelang_linear_operator_stage_uses_cuda_kernel_entry() -> None:
     assert target["metadata"]["selected_fastpath"] == "tilelang_half_linear_kernel"
     assert target["metadata"]["settings"]["linear_runtime"] == "tilelang"
     assert target["metadata"]["settings"]["preferred_patterns"] == ["linear"]
+
+
+@requires_cuda
+@requires_tilelang
+def test_tilelang_bf16_linear_operator_stage_uses_direct_cuda_kernel() -> None:
+    config_dict = _tilelang_linear_operator_config(
+        "cuda",
+        linear_runtime="tilelang",
+    )
+    context = _runtime_context(
+        config_dict,
+        model=None,
+        example_inputs=torch.randn(64, 64, device="cuda", dtype=torch.bfloat16),
+    )
+    LoadModelPass().run(context)
+    context.model = context.require_model().to(device="cuda", dtype=torch.bfloat16)
+    plan = build_operator_optimization_plan(_operator_config(config_dict))
+    execution = execute_operator_optimization_plan(context, plan)
+
+    target = execution.reports[0].to_dict()
+    constraints = target["metadata"]["kernel_constraints"]
+    assert target["metadata"]["execution_mode"] == "cuda_tilelang_entry"
+    assert target["metadata"]["kernel_kind"] == "minimal_cuda_jit"
+    assert target["metadata"]["selected_fastpath"] == "tilelang_half_linear_kernel"
+    assert constraints["dtype"] == "bfloat16"
+    assert constraints["supported_dtypes"] == ["float16", "bfloat16"]
+    assert constraints["bfloat16_block_k_multiple"] == 16
+
+
+@requires_cuda
+@requires_tilelang
+def test_tilelang_bf16_decode_wrapper_reports_promoted_schedule() -> None:
+    torch.manual_seed(2)
+    linear = nn.Linear(64, 96, bias=True, device="cuda", dtype=torch.bfloat16)
+    wrapper = _TileLangLinearWrapper(
+        linear,
+        fallback="error",
+        settings={
+            "target_arch": "sm_89",
+            "linear_runtime": "tilelang",
+            "preferred_patterns": ["linear"],
+        },
+    )
+    x = torch.randn(1, 64, device="cuda", dtype=torch.bfloat16)
+
+    output = wrapper(x)
+    reference = linear(x)
+    metadata = wrapper.execution_metadata()
+
+    assert torch.allclose(output.float(), reference.float(), atol=1e-2, rtol=1e-2)
+    assert metadata["kernel_schedule"] == {
+        "block_m": 16,
+        "block_n": 64,
+        "block_k": 32,
+        "threads": 128,
+        "num_stages": 2,
+        "target_arch": "sm_89",
+        "preset": "sm89_bf16_decode_m_le_4",
+    }
 
 
 @requires_cuda

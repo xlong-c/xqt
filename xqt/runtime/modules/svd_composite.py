@@ -15,6 +15,36 @@ from xqt.runtime.modules.w4_storage_int8_mma_linear import W4StorageInt8MmaLinea
 
 _SUPPORTED_RESIDUAL_QUANT_DTYPES = frozenset({"fp4", "int4"})
 
+
+def _can_mutate_runtime_cache() -> bool:
+    """Return whether eager runtime caches may be mutated safely."""
+
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None:
+        is_compiling = getattr(compiler, "is_compiling", None)
+        if callable(is_compiling) and bool(is_compiling()):
+            return False
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None:
+        is_compiling = getattr(dynamo, "is_compiling", None)
+        if callable(is_compiling) and bool(is_compiling()):
+            return False
+    return not torch.jit.is_tracing()
+
+
+def _tilelang_runtime_usable() -> bool:
+    """Probe the optional TileLang runtime without importing it at module load."""
+
+    try:
+        from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+    except Exception:
+        return False
+    try:
+        return bool(tilelang_runtime_usable())
+    except Exception:
+        return False
+
+
 def _quantize_residual_int4(
     weight_res: torch.Tensor,
     group_size: int,
@@ -48,6 +78,7 @@ def _quantize_residual_int4(
     packed = _pack_int4(quantized.reshape(out_features, padded_in_features))
     return packed, scale.to(torch.float32), padded_in_features
 
+
 def _dequantize_residual_int4(
     packed_weight: torch.Tensor,
     scale: torch.Tensor,
@@ -68,8 +99,8 @@ class LowRankBranch(nn.Module):
     """Two-layer low-rank branch that absorbs weight outliers.
 
     W_lr = L2 @ L1, where:
-      L1: (r, in_features) — down-projection
-      L2: (out_features, r) — up-projection
+      L1: (r, in_features) - down-projection
+      L2: (out_features, r) - up-projection
 
     Forward: y = L2(L1(x)) = x @ L1.T @ L2.T
     """
@@ -101,7 +132,7 @@ class SVDQuantLinear(nn.Module):
     Shapes:
       - down_proj.weight: (r, in_features)       ← L1
       - up_proj.weight:   (out_features, r)       ← L2
-      - packed_residual:  (out_features, padded_in // 2) — uint8 packed INT4
+      - packed_residual:  (out_features, padded_in // 2) - uint8 packed INT4
       - residual_scale:   (out_features, num_groups)
       - bias (optional):  (out_features,)
 
@@ -147,6 +178,81 @@ class SVDQuantLinear(nn.Module):
             self.register_buffer("bias", bias.detach().clone().to(torch.float32))
         self._pending_activation_scale: torch.Tensor | float | None = None
         self._pending_activation_scale_mode: str = "dynamic"
+        self._dequantized_residual_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
+        self._cuda_fused_enabled = False
+        self._last_cuda_fused_used = False
+        self._last_cuda_fused_fallback_reason: str | None = None
+
+    def _clear_runtime_caches(self) -> None:
+        self._dequantized_residual_cache = None
+
+    def _apply(self, fn: Any) -> "SVDQuantLinear":
+        """Move registered tensors, then invalidate derived residual storage."""
+
+        super()._apply(fn)
+        self._clear_runtime_caches()
+        self._last_cuda_fused_used = False
+        self._last_cuda_fused_fallback_reason = None
+        return self
+
+    def enable_fusion(self, *, mode: str = "reduce-overhead") -> bool:
+        """Enable the optional direct CUDA fused residual + low-rank kernel."""
+
+        del mode
+        if not torch.cuda.is_available() or not _tilelang_runtime_usable():
+            return False
+        self._cuda_fused_enabled = True
+        return True
+
+    def disable_fusion(self) -> None:
+        self._cuda_fused_enabled = False
+
+    def _can_use_cuda_fused(self, inputs: torch.Tensor) -> bool:
+        allowed, _ = self._cuda_fused_gate(inputs)
+        return allowed
+
+    def _cuda_fused_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        """Return the runtime promotion decision and an inspectable reason."""
+
+        if not self._cuda_fused_enabled or not inputs.is_cuda:
+            return False, "CUDA SVD fusion is disabled or the input is not CUDA"
+        if inputs.dtype != torch.float16:
+            return False, "SVD fused CUDA requires float16 activations"
+        if self.down_proj.weight.dtype != torch.float16:
+            return False, "SVD fused CUDA requires float16 down-projection weights"
+        if self.up_proj.weight.dtype != torch.float16:
+            return False, "SVD fused CUDA requires float16 up-projection weights"
+        if inputs.ndim < 1 or inputs.shape[-1] != self.input_features:
+            return False, "SVD fused CUDA input trailing dimension is misaligned"
+        rows = int(inputs.reshape(-1, self.input_features).shape[0])
+        if rows % 64 != 0:
+            return False, "SVD fused CUDA requires M to be a multiple of 64"
+        if self.input_features % 64 != 0:
+            return False, "SVD fused CUDA requires K to be a multiple of 64"
+        if self.output_features % 64 != 0:
+            return False, "SVD fused CUDA requires N to be a multiple of 64"
+        if not self.packed_residual.is_cuda or not self.residual_scale.is_cuda:
+            return False, "SVD fused CUDA requires packed residual buffers on CUDA"
+
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        target_arch = f"sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.tilelang.svd_fused import (
+                resolve_svd_fused_schedule,
+            )
+
+            schedule, reason = resolve_svd_fused_schedule(
+                rows,
+                self.output_features,
+                self.input_features,
+                self.rank,
+                target_arch=target_arch,
+            )
+        except Exception as exc:
+            return False, f"SVD fused CUDA schedule resolution failed: {exc}"
+        if schedule is None:
+            return False, reason
+        return True, reason
 
     @classmethod
     def from_linear(
@@ -171,9 +277,10 @@ class SVDQuantLinear(nn.Module):
 
         # 3. Compute residual and quantize
         weight_res = decomp.residual_weight(weight_2d).to(torch.float32)
+        normalized_group_size = max(1, min(int(group_size), int(module.in_features)))
         if quant_dtype in _SUPPORTED_RESIDUAL_QUANT_DTYPES:
             packed_residual, residual_scale, padded_in = _quantize_residual_int4(
-                weight_res, group_size=group_size
+                weight_res, group_size=normalized_group_size
             )
         else:
             raise ValueError(
@@ -191,7 +298,7 @@ class SVDQuantLinear(nn.Module):
             bias=bias,
             input_features=module.in_features,
             output_features=module.out_features,
-            group_size=group_size,
+            group_size=normalized_group_size,
             padded_input_features=padded_in,
             quant_dtype=quant_dtype,
         )
@@ -293,13 +400,32 @@ class SVDQuantLinear(nn.Module):
                 raise RuntimeError(
                     "packed_residual and residual_scale must be tensors"
                 )
-            return _dequantize_residual_int4(
+            can_cache = _can_mutate_runtime_cache()
+            signature: tuple[Any, ...] | None = None
+            if can_cache:
+                signature = (
+                    str(packed.device),
+                    int(getattr(packed, "_version", 0)),
+                    tuple(int(dim) for dim in packed.shape),
+                    str(scale.device),
+                    int(getattr(scale, "_version", 0)),
+                    tuple(int(dim) for dim in scale.shape),
+                )
+                if self._dequantized_residual_cache is not None:
+                    cached_signature, cached_weight = self._dequantized_residual_cache
+                    if cached_signature == signature:
+                        return cached_weight
+            weight = _dequantize_residual_int4(
                 packed,
                 scale,
                 self.input_features,
                 self.group_size,
                 self.padded_input_features,
             )
+            weight = weight.detach()
+            if can_cache and signature is not None:
+                self._dequantized_residual_cache = (signature, weight)
+            return weight
         raise RuntimeError(f"Unsupported quant_dtype: {self.quant_dtype}")
 
     def low_rank_weight(self) -> torch.Tensor:
@@ -317,6 +443,46 @@ class SVDQuantLinear(nn.Module):
           - FUSE_DOWN: down_proj(x) + act_quantize(x) share input → single kernel
           - FUSE_UP: up_proj(h) + dequant_gemm_epilogue share accumulator → single kernel
         """
+        if x.ndim < 1 or int(x.shape[-1]) != self.input_features:
+            raise ValueError(
+                "SVDQuantLinear input trailing dimension does not match input_features"
+            )
+        fused_allowed, fused_gate_reason = self._cuda_fused_gate(x)
+        if fused_allowed:
+            try:
+                from xqt.runtime.svd_fusion import fused_svd_forward_cuda
+                from xqt.operator_opt.kernels.tilelang.svd_fused import (
+                    resolve_svd_fused_schedule,
+                )
+
+                original_shape = tuple(int(dim) for dim in x.shape[:-1])
+                flat = x.reshape(-1, self.input_features)
+                major, minor = torch.cuda.get_device_capability(flat.device)
+                schedule, schedule_reason = resolve_svd_fused_schedule(
+                    int(flat.shape[0]),
+                    self.output_features,
+                    self.input_features,
+                    self.rank,
+                    target_arch=f"sm_{major}{minor}",
+                )
+                if schedule is None:
+                    raise RuntimeError(schedule_reason)
+                fused, _ = fused_svd_forward_cuda(
+                    self,
+                    flat,
+                    **schedule.to_dict(),
+                )
+                self._last_cuda_fused_used = True
+                self._last_cuda_fused_fallback_reason = None
+                return fused.reshape(*original_shape, self.output_features)
+            except Exception as exc:
+                self._last_cuda_fused_used = False
+                self._last_cuda_fused_fallback_reason = str(exc)
+        elif self._cuda_fused_enabled:
+            self._last_cuda_fused_used = False
+            self._last_cuda_fused_fallback_reason = fused_gate_reason
+
+        self._last_cuda_fused_used = False
         device = x.device
         dtype = x.dtype
 
@@ -332,6 +498,17 @@ class SVDQuantLinear(nn.Module):
         if self.bias is not None:
             y = y + self.bias.to(device=device, dtype=dtype)
         return y
+
+    def execution_metadata(self) -> dict[str, Any]:
+        return {
+            "implementation": "reference_svd_low_rank_plus_dequant_residual",
+            "compute_contract": "composite_add",
+            "residual_storage": "packed_signed_int4_group_scale",
+            "residual_compute": "dequant_fp16",
+            "cuda_fusion_enabled": bool(self._cuda_fused_enabled),
+            "cuda_fused_used": bool(self._last_cuda_fused_used),
+            "cuda_fused_fallback_reason": self._last_cuda_fused_fallback_reason,
+        }
 
 class SVDQuantInt8MmaLinear(nn.Module):
     """SVDQuant Linear with packed 4-bit residual storage and W8A8 MMA execution.
@@ -378,6 +555,7 @@ class SVDQuantInt8MmaLinear(nn.Module):
                 f"Unsupported quant_dtype '{quant_dtype}' for SVDQuantInt8MmaLinear. "
                 f"Supported: {allowed}"
             )
+        self.output_dtype = output_dtype
         self.input_features = int(input_features)
         self.output_features = int(output_features)
         self.group_size = int(group_size)
@@ -426,6 +604,30 @@ class SVDQuantInt8MmaLinear(nn.Module):
             self.register_buffer("bias", None)
         else:
             self.register_buffer("bias", bias.detach().clone().to(torch.float32))
+        self._fused_forward: Any = None
+        self._last_fused_forward_used = False
+        self._last_fused_forward_fallback_reason: str | None = None
+
+    def _apply(self, fn: Any) -> "SVDQuantInt8MmaLinear":
+        """Move child runtime modules and discard device-specific compiled code."""
+
+        previous_weight_dtype = self.down_proj.weight.dtype
+        previous_output_dtype = self.output_dtype
+        super()._apply(fn)
+        # ``nn.Module._apply`` transforms Parameters and buffers, but not
+        # dtype-valued configuration fields.  When the caller uses the normal
+        # ``module.half()``/``module.bfloat16()`` API, keep an output dtype that
+        # previously followed the source weights in sync with the moved module;
+        # otherwise the sm_89 FP16 CUDA path is rejected and falls back to
+        # torch_int_mm even though all operands are half precision.
+        if previous_output_dtype == previous_weight_dtype:
+            self.output_dtype = self.down_proj.weight.dtype
+        if hasattr(self.residual_int8, "output_dtype"):
+            self.residual_int8.output_dtype = self.output_dtype
+        self._fused_forward = None
+        self._last_fused_forward_used = False
+        self._last_fused_forward_fallback_reason = None
+        return self
 
     @classmethod
     def from_linear(
@@ -501,27 +703,76 @@ class SVDQuantInt8MmaLinear(nn.Module):
             device=low_rank_weight.device,
         )
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Run W8A8 MMA on the residual and add the high-precision low-rank path."""
+    def enable_fusion(self, *, mode: str = "reduce-overhead") -> bool:
+        """Compile the split residual + low-rank data flow for large CUDA batches."""
 
-        if inputs.shape[-1] != self.input_features:
-            raise ValueError(
-                "SVDQuantInt8MmaLinear input trailing dimension does not match "
-                "input_features"
-            )
-        residual_output = self.residual_int8(inputs)
+        compile_fn = getattr(torch, "compile", None)
+        if not callable(compile_fn):
+            return False
+        try:
+            self._fused_forward = compile_fn(self._compute_lean, mode=mode)
+        except Exception:
+            self._fused_forward = None
+            return False
+        return True
+
+    def disable_fusion(self) -> None:
+        self._fused_forward = None
+
+    def _low_rank(self, inputs: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
         low_rank_inputs = inputs.to(
             device=self.down_proj.weight.device,
             dtype=self.down_proj.weight.dtype,
         )
-        low_rank_output = self.up_proj(self.down_proj(low_rank_inputs)).to(
-            device=residual_output.device,
-            dtype=residual_output.dtype,
+        return self.up_proj(self.down_proj(low_rank_inputs)).to(
+            device=reference.device,
+            dtype=reference.dtype,
         )
-        output = residual_output + low_rank_output
+
+    def _compute_lean(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Compile-friendly split path with no Python-side fallback decisions."""
+
+        residual_output = self.residual_int8(inputs)
+        output = residual_output + self._low_rank(inputs, residual_output)
         if self.bias is not None:
             output = output + self.bias.to(device=output.device, dtype=output.dtype)
         return output
+
+    def _compute_guarded(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Eager split path retaining residual engine fallback behavior."""
+
+        residual_output = self.residual_int8(inputs)
+        output = residual_output + self._low_rank(inputs, residual_output)
+        if self.bias is not None:
+            output = output + self.bias.to(device=output.device, dtype=output.dtype)
+        return output
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Run W8A8 MMA on the residual and add the high-precision low-rank path."""
+
+        if inputs.ndim < 1 or inputs.shape[-1] != self.input_features:
+            raise ValueError(
+                "SVDQuantInt8MmaLinear input trailing dimension does not match "
+                "input_features"
+            )
+        self._last_fused_forward_used = False
+        self._last_fused_forward_fallback_reason = None
+        rows = int(inputs.reshape(-1, self.input_features).shape[0])
+        residual = self.residual_int8
+        use_fused = (
+            self._fused_forward is not None
+            and inputs.is_cuda
+            and not (0 < residual.min_int8_rows and rows < residual.min_int8_rows)
+        )
+        if use_fused:
+            try:
+                output = self._fused_forward(inputs)
+                self._last_fused_forward_used = True
+                return output
+            except Exception as exc:
+                self._last_fused_forward_fallback_reason = str(exc)
+                self._fused_forward = None
+        return self._compute_guarded(inputs)
 
     def execution_metadata(self) -> dict[str, Any]:
         """Expose residual INT8 execution details with SVDQuant context."""
@@ -535,6 +786,9 @@ class SVDQuantInt8MmaLinear(nn.Module):
                 "residual_storage": "packed_signed_int4_group_scale",
                 "residual_compute": "w8a8_int8_mma",
                 "quant_dtype": self.quant_dtype,
+                "fusion_enabled": self._fused_forward is not None,
+                "fused_forward_used": bool(self._last_fused_forward_used),
+                "fused_forward_fallback_reason": self._last_fused_forward_fallback_reason,
             }
         )
         return metadata
@@ -596,10 +850,17 @@ class SVDQuantFp8Linear(nn.Module):
         )
         self._fused_forward: Any = None
 
+    def _apply(self, fn: Any) -> "SVDQuantFp8Linear":
+        """Move child runtime modules and discard device-specific compiled code."""
+
+        super()._apply(fn)
+        self._fused_forward = None
+        return self
+
     def enable_fusion(self, *, mode: str = "reduce-overhead") -> bool:
         """Fold the branch chain with torch.compile; return True on success.
 
-        Only the lean compute (clean tensor ops) is compiled — metadata writes
+        Only the lean compute (clean tensor ops) is compiled - metadata writes
         and the small-M fallback stay in eager ``forward`` so Inductor sees no
         graph breaks. Fusion recovers the low-rank overhead only in large-M
         (compute-bound) regimes and degrades gracefully to eager on failure.
@@ -646,7 +907,7 @@ class SVDQuantFp8Linear(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        if inputs.shape[-1] != self.input_features:
+        if inputs.ndim < 1 or inputs.shape[-1] != self.input_features:
             raise ValueError(
                 "SVDQuantFp8Linear input trailing dimension does not match "
                 "input_features"

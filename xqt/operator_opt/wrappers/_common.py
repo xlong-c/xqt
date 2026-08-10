@@ -11,6 +11,13 @@ from typing import Any
 import torch
 
 
+def _matching_tensor_dtype_name(*tensors: torch.Tensor) -> str:
+    dtypes = {tensor.dtype for tensor in tensors}
+    if len(dtypes) != 1:
+        return "mixed"
+    return str(next(iter(dtypes))).removeprefix("torch.")
+
+
 def _resolved_target_arch(settings: dict[str, Any], x: torch.Tensor) -> str | None:
     target_arch = settings.get("target_arch")
     if isinstance(target_arch, str) and target_arch:

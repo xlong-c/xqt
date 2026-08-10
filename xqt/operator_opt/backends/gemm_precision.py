@@ -71,10 +71,12 @@ _TRITON_DENSE_FAMILIES: dict[str, GemmKernelFamilySpec] = {
     "bf16": GemmKernelFamilySpec(
         family="dense_gemm_2d",
         mma="bf16",
-        engines={"triton": "gemm_bf16", "tilelang": "linear_marlin"},
-        engine_kwargs={"tilelang": {"precision": "bf16"}},
+        engines={"triton": "gemm_bf16", "tilelang": "dense_linear_epilogue"},
         engine_pattern_aliases={
             "tilelang": {
+                "dense_linear_epilogue": "dense_linear_epilogue",
+                "linear": "linear",
+                "half_linear": "linear",
                 "linear_marlin": "linear_marlin",
             },
         },
@@ -1504,6 +1506,29 @@ def _tilelang_dense_linear_dispatch(
             f"TileLang dense GEMM inner-dimension mismatch: a.shape[1]={int(a.shape[1])}, "
             f"b.shape[1]={int(b.shape[1])}"
         )
+    compute_dtype = _precision_name_to_dtype(precision.mma, role="mma")
+    if compute_dtype not in {torch.float16, torch.bfloat16}:
+        raise XQTBackendError(
+            f"TileLang dense GEMM supports only fp16 or bf16 MMA, got {precision.mma}"
+        )
+    named_tensors = [("activation", a), ("weight", b)]
+    if bias is not None:
+        named_tensors.append(("bias", bias))
+    mismatched = [
+        f"{name}={tensor.dtype}"
+        for name, tensor in named_tensors
+        if tensor.dtype != compute_dtype
+    ]
+    if mismatched:
+        raise XQTBackendError(
+            "TileLang dense GEMM requires activation, weight, and bias dtypes "
+            f"to match {compute_dtype}: {', '.join(mismatched)}"
+        )
+    output_dtype = _precision_name_to_dtype(precision.output, role="output")
+    if output_dtype != compute_dtype:
+        raise XQTBackendError(
+            "TileLang dense GEMM requires output precision to match the fp16/bf16 MMA dtype"
+        )
     weight = b
     runtime_kwargs = _shared_runtime_kwargs(
         precision,
@@ -1512,6 +1537,7 @@ def _tilelang_dense_linear_dispatch(
         include_output_dtype=False,
     )
     if pattern == "linear_marlin":
+        runtime_kwargs["precision"] = precision.mma
         return run_tilelang_kernel(
             pattern,
             a,

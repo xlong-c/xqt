@@ -1,5 +1,13 @@
 """Triton kernel references and CUDA entry points."""
 
+from .attention import (
+    TRITON_ATTENTION_KERNEL_METADATA,
+    TritonAttentionSchedule,
+    fused_attention_forward_reference,
+    fused_attention_forward_triton,
+    resolve_triton_attention_schedule,
+)
+
 from .pointwise import (
     TRITON_KERNEL_METADATA,
     fused_bias_gelu_reference,
@@ -17,8 +25,10 @@ from .pointwise import (
     fused_swiglu_reference,
     fused_swiglu_triton,
 )
+from .convrot import fused_norm_hadamard_static_quantize_triton
 from .gemm import (
     TRITON_GEMM_KERNEL_METADATA,
+    TritonGemmSchedule,
     dequantize_int4_weight_triton,
     dequantize_nvfp4_weight_triton,
     gemm_bf16_triton,
@@ -31,6 +41,8 @@ from .gemm import (
     gemm_nvfp4_packed_dequant_reference,
     gemm_nvfp4_packed_dequant_triton,
     gemm_reference,
+    resolve_triton_bf16_gemm_schedule,
+    resolve_triton_fp16_gemm_schedule,
 )
 from .mxfp_gemm import (
     MXFP_GEMM_KERNEL_METADATA,
@@ -59,8 +71,11 @@ from .linear import (
 )
 
 __all__ = [
+    "TRITON_ATTENTION_KERNEL_METADATA",
     "TRITON_KERNEL_METADATA",
     "TRITON_GEMM_KERNEL_METADATA",
+    "TritonAttentionSchedule",
+    "TritonGemmSchedule",
     "TRITON_LINEAR_KERNEL_METADATA",
     "MXFP_GEMM_KERNEL_METADATA",
     "dequantize_int4_weight_triton",
@@ -68,10 +83,13 @@ __all__ = [
     "dequantize_nvfp4_weight_triton",
     "fused_bias_gelu_reference",
     "fused_bias_gelu_triton",
+    "fused_attention_forward_reference",
+    "fused_attention_forward_triton",
     "fused_channel_first_l2norm_reference",
     "fused_channel_first_l2norm_triton",
     "fused_geglu_reference",
     "fused_geglu_triton",
+    "fused_norm_hadamard_static_quantize_triton",
     "fused_rope_reference",
     "fused_rope_triton",
     "fused_rmsnorm_reference",
@@ -94,6 +112,9 @@ __all__ = [
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",
+    "resolve_triton_bf16_gemm_schedule",
+    "resolve_triton_fp16_gemm_schedule",
+    "resolve_triton_attention_schedule",
     "linear_bf16_triton",
     "linear_fp16_triton",
     "linear_fp8_triton",

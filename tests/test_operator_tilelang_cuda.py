@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
-
 import pytest
 import torch
 
@@ -41,7 +39,7 @@ def _tilelang_cuda_operator_config(
         "model": {
             "target": "xqt.operator_opt.toy_models.build_toy_attention_classifier",
             "params": {
-                "hidden_dim": 32,
+                "hidden_dim": 64,
                 "num_heads": 4,
                 "num_classes": 4,
             },
@@ -73,17 +71,24 @@ def _tilelang_cuda_operator_config(
 
 @requires_cuda
 @requires_tilelang
-def test_tilelang_operator_executor_uses_cuda_kernel_entry() -> None:
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+    ids=["fp16", "bf16"],
+)
+def test_tilelang_operator_executor_uses_cuda_kernel_entry(
+    dtype: torch.dtype,
+) -> None:
     config_dict = _tilelang_cuda_operator_config(attention_fastpath="tilelang")
     context = operator_runtime_context(
         config_dict,
         model=None,
-        example_inputs=torch.randn(1, 64, 32, device="cuda", dtype=torch.float16),
+        example_inputs=torch.randn(1, 64, 64, device="cuda", dtype=dtype),
     )
     from xqt.pipeline.passes import LoadModelPass
 
     LoadModelPass().run(context)
-    context.model = context.require_model().to(device="cuda", dtype=torch.float16)
+    context.model = context.require_model().to(device="cuda", dtype=dtype)
     plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
@@ -97,12 +102,25 @@ def test_tilelang_operator_executor_uses_cuda_kernel_entry() -> None:
     assert report.metadata["selected_fastpath"] == "tilelang_attention_kernel"
     assert report.metadata["settings"]["attention_fastpath"] == "tilelang"
     assert report.metadata["settings"]["preferred_patterns"] == ["attention"]
-    assert report.metadata["kernel_constraints"]["dtype"] == "float16"
+    assert report.metadata["kernel_constraints"]["dtype"] == str(dtype).removeprefix(
+        "torch."
+    )
+    assert report.metadata["kernel_constraints"]["supported_dtypes"] == [
+        "float16",
+        "bfloat16",
+    ]
 
 
 @requires_cuda
 @requires_tilelang
-def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> None:
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+    ids=["fp16", "bf16"],
+)
+def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada(
+    dtype: torch.dtype,
+) -> None:
     config_dict = _tilelang_cuda_operator_config(
         attention_fastpath="auto",
         min_speedup=1.000001,
@@ -110,12 +128,12 @@ def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> N
     context = operator_runtime_context(
         config_dict,
         model=None,
-        example_inputs=torch.randn(1, 64, 32, device="cuda", dtype=torch.float16),
+        example_inputs=torch.randn(1, 64, 64, device="cuda", dtype=dtype),
     )
     from xqt.pipeline.passes import LoadModelPass
 
     LoadModelPass().run(context)
-    context.model = context.require_model().to(device="cuda", dtype=torch.float16)
+    context.model = context.require_model().to(device="cuda", dtype=dtype)
     plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
@@ -129,12 +147,21 @@ def test_tilelang_operator_executor_uses_native_attention_fastpath_on_ada() -> N
     assert report.metadata["selected_fastpath"] == "native_sdpa"
     assert report.metadata["settings"]["attention_fastpath"] == "auto"
     assert report.metadata["settings"]["preferred_patterns"] == ["attention"]
-    assert report.metadata["kernel_constraints"]["dtype"] == "float16"
+    assert report.metadata["kernel_constraints"]["dtype"] == str(dtype).removeprefix(
+        "torch."
+    )
 
 
 @requires_cuda
 @requires_tilelang
-def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath() -> None:
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+    ids=["fp16", "bf16"],
+)
+def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath(
+    dtype: torch.dtype,
+) -> None:
     config_dict = _tilelang_cuda_operator_config(
         attention_fastpath="graph",
         min_speedup=1.000001,
@@ -142,12 +169,12 @@ def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath() -> None
     context = operator_runtime_context(
         config_dict,
         model=None,
-        example_inputs=torch.randn(1, 64, 32, device="cuda", dtype=torch.float16),
+        example_inputs=torch.randn(1, 64, 64, device="cuda", dtype=dtype),
     )
     from xqt.pipeline.passes import LoadModelPass
 
     LoadModelPass().run(context)
-    context.model = context.require_model().to(device="cuda", dtype=torch.float16)
+    context.model = context.require_model().to(device="cuda", dtype=dtype)
     plan = build_operator_optimization_plan(operator_config_from_dict(config_dict))
 
     execution = execute_operator_optimization_plan(context, plan)
@@ -166,18 +193,29 @@ def test_tilelang_operator_executor_uses_cuda_graph_attention_fastpath() -> None
     assert "paired_ratio_p50" in report.metadata["speedup_statistics"]
     assert report.metadata["cuda_graph"]["state"] == "replayed"
     assert report.metadata["cuda_graph"]["cache_size"] >= 1
+    assert report.metadata["kernel_constraints"]["dtype"] == str(dtype).removeprefix(
+        "torch."
+    )
+    assert report.metadata["kernel_constraints"]["bfloat16_head_dim_multiple"] == 16
 
 
 @requires_cuda
 @requires_tilelang
-def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+    ids=["fp16", "bf16"],
+)
+def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call(
+    dtype: torch.dtype,
+) -> None:
     attention = torch.nn.MultiheadAttention(
-        32,
+        64,
         4,
         batch_first=True,
         dropout=0.0,
         device="cuda",
-        dtype=torch.float16,
+        dtype=dtype,
     )
     wrapper = _TileLangAttentionWrapper(
         attention,
@@ -187,7 +225,7 @@ def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
             "attention_fastpath": "graph",
             "preferred_patterns": ["attention"],
         },
-    ).to(device="cuda", dtype=torch.float16)
+    ).to(device="cuda", dtype=dtype)
     tilelang_wrapper = _TileLangAttentionWrapper(
         attention,
         fallback="eager",
@@ -196,8 +234,8 @@ def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
             "attention_fastpath": "tilelang",
             "preferred_patterns": ["attention"],
         },
-    ).to(device="cuda", dtype=torch.float16)
-    x = torch.randn(1, 64, 32, device="cuda", dtype=torch.float16)
+    ).to(device="cuda", dtype=dtype)
+    x = torch.randn(1, 64, 64, device="cuda", dtype=dtype)
 
     first_output, _ = wrapper(x, x, x, need_weights=False)
     first_output = first_output.clone()
@@ -208,18 +246,45 @@ def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
     ref_first, _ = tilelang_wrapper(x, x, x, need_weights=False)
     ref_second, _ = tilelang_wrapper(second_input, second_input, second_input, need_weights=False)
 
-    assert torch.allclose(first_output.float(), ref_first.float(), atol=1e-2, rtol=1e-2)
-    assert torch.allclose(second_output.float(), ref_second.float(), atol=1e-2, rtol=1e-2)
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
+    assert torch.allclose(
+        first_output.float(),
+        ref_first.float(),
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    assert torch.allclose(
+        second_output.float(),
+        ref_second.float(),
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    assert first_output.dtype == dtype
+    assert second_output.dtype == dtype
     assert first_metadata["cuda_graph"]["state"] == "captured"
     assert second_metadata["cuda_graph"]["state"] == "replayed"
+    assert first_metadata["kernel_constraints"]["dtype"] == str(dtype).removeprefix(
+        "torch."
+    )
+    assert second_metadata["kernel_constraints"]["supported_dtypes"] == [
+        "float16",
+        "bfloat16",
+    ]
 
 
 @requires_cuda
 @requires_tilelang
-def test_tilelang_xqt_attention_wrapper_replays_cuda_graph_on_second_call() -> None:
-    attention = xqt_nn.Attention(32, heads=4, engine="torch").to(
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+    ids=["fp16", "bf16"],
+)
+def test_tilelang_xqt_attention_wrapper_replays_cuda_graph_on_second_call(
+    dtype: torch.dtype,
+) -> None:
+    attention = xqt_nn.Attention(64, heads=4, engine="torch").to(
         device="cuda",
-        dtype=torch.float16,
+        dtype=dtype,
     )
     wrapper = _TileLangXqtAttentionWrapper(
         attention,
@@ -229,7 +294,7 @@ def test_tilelang_xqt_attention_wrapper_replays_cuda_graph_on_second_call() -> N
             "attention_fastpath": "graph",
             "preferred_patterns": ["attention"],
         },
-    ).to(device="cuda", dtype=torch.float16)
+    ).to(device="cuda", dtype=dtype)
     tilelang_wrapper = _TileLangXqtAttentionWrapper(
         attention,
         fallback="eager",
@@ -238,8 +303,8 @@ def test_tilelang_xqt_attention_wrapper_replays_cuda_graph_on_second_call() -> N
             "attention_fastpath": "tilelang",
             "preferred_patterns": ["attention"],
         },
-    ).to(device="cuda", dtype=torch.float16)
-    x = torch.randn(1, 64, 32, device="cuda", dtype=torch.float16)
+    ).to(device="cuda", dtype=dtype)
+    x = torch.randn(1, 64, 64, device="cuda", dtype=dtype)
 
     first_output = wrapper(x).clone()
     first_metadata = wrapper.execution_metadata()
@@ -249,7 +314,27 @@ def test_tilelang_xqt_attention_wrapper_replays_cuda_graph_on_second_call() -> N
     ref_first = tilelang_wrapper(x)
     ref_second = tilelang_wrapper(second_input)
 
-    assert torch.allclose(first_output.float(), ref_first.float(), atol=1e-2, rtol=1e-2)
-    assert torch.allclose(second_output.float(), ref_second.float(), atol=1e-2, rtol=1e-2)
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
+    assert torch.allclose(
+        first_output.float(),
+        ref_first.float(),
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    assert torch.allclose(
+        second_output.float(),
+        ref_second.float(),
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    assert first_output.dtype == dtype
+    assert second_output.dtype == dtype
     assert first_metadata["cuda_graph"]["state"] == "captured"
     assert second_metadata["cuda_graph"]["state"] == "replayed"
+    assert first_metadata["kernel_constraints"]["dtype"] == str(dtype).removeprefix(
+        "torch."
+    )
+    assert second_metadata["kernel_constraints"]["supported_dtypes"] == [
+        "float16",
+        "bfloat16",
+    ]

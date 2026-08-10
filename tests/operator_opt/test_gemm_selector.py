@@ -102,6 +102,18 @@ def test_dense_fp16_tilelang_candidate_caveat_when_unaligned() -> None:
     assert tilelang.caveats != ()
 
 
+def test_dense_bf16_tilelang_candidate_accepts_partial_m_n_when_k_is_aligned() -> None:
+    device = _cuda_device_or_skip()
+    selection = select_gemm_engine(
+        precision=PrecisionPolicy(mma="bf16"),
+        shape=GemmShape(m=1, n=96, k=64),
+        device=device,
+    )
+    tilelang = next(c for c in selection.candidates if c.engine == "tilelang")
+    assert tilelang.dispatchable_by_gemm_with_precision is True
+    assert tilelang.caveats == ()
+
+
 def test_int8_prequantized_aligned_selects_tilelang() -> None:
     # Phase 2: int8 with pre-quantized a/b (no activation_quant in fused_ops)
     # and shape aligned to 64 now dispatches to the real TileLang W8A8 kernel.

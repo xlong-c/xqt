@@ -1,5 +1,7 @@
 """TileLang Linear operator references and guarded entry points."""
 
+from dataclasses import dataclass
+
 import torch
 
 from xqt.core.errors import XQTBackendError
@@ -7,10 +9,77 @@ from xqt.gemm import dense_gemm_reference
 
 from xqt.operator_opt.kernels.tilelang._common import (
     require_cuda_tensors,
-    require_fp16_tensors,
+    require_fp16_or_bf16_tensors,
     require_tilelang,
 )
 from xqt.operator_opt.kernels.tilelang.gemm_builder import build_tilelang_gemm_kernel
+
+
+@dataclass(frozen=True)
+class TileLangLinearSchedule:
+    """Resolved direct TileLang Linear launch schedule."""
+
+    block_m: int
+    block_n: int
+    block_k: int
+    threads: int
+    num_stages: int
+    target_arch: str | None
+    preset: str
+
+    def to_dict(self) -> dict[str, int | str | None]:
+        return {
+            "block_m": self.block_m,
+            "block_n": self.block_n,
+            "block_k": self.block_k,
+            "threads": self.threads,
+            "num_stages": self.num_stages,
+            "target_arch": self.target_arch,
+            "preset": self.preset,
+        }
+
+
+def resolve_tilelang_linear_schedule(
+    x: torch.Tensor,
+    *,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
+    threads: int = 128,
+    num_stages: int = 2,
+    target_arch: str | None = None,
+) -> TileLangLinearSchedule:
+    """Resolve evidence-backed defaults while preserving explicit overrides."""
+
+    resolved_target_arch = target_arch
+    if resolved_target_arch is None and x.is_cuda:
+        major, minor = torch.cuda.get_device_capability(x.device)
+        resolved_target_arch = f"sm_{major}{minor}"
+
+    preset = "default"
+    default_block_m = 64
+    default_block_n = 64
+    default_block_k = 64
+    if (
+        x.ndim >= 1
+        and int(x.shape[0]) <= 4
+        and x.dtype == torch.bfloat16
+        and resolved_target_arch == "sm_89"
+    ):
+        preset = "sm89_bf16_decode_m_le_4"
+        default_block_m = 16
+        default_block_n = 64
+        default_block_k = 32
+
+    return TileLangLinearSchedule(
+        block_m=default_block_m if block_m is None else int(block_m),
+        block_n=default_block_n if block_n is None else int(block_n),
+        block_k=default_block_k if block_k is None else int(block_k),
+        threads=int(threads),
+        num_stages=int(num_stages),
+        target_arch=resolved_target_arch,
+        preset=preset,
+    )
 
 
 def dense_linear_epilogue_reference(
@@ -39,18 +108,18 @@ def dense_linear_epilogue_tilelang(
     bias: torch.Tensor | None = None,
     *,
     activation: str | None = None,
-    block_m: int = 64,
-    block_n: int = 64,
-    block_k: int = 64,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
     threads: int = 128,
     num_stages: int = 2,
     target_arch: str | None = None,
 ) -> torch.Tensor:
-    """CUDA-only dense Linear path that uses TileLang half GEMM on static weights."""
+    """CUDA-only dense Linear path using TileLang FP16/BF16 GEMM."""
 
     tensors = (x, weight) if bias is None else (x, weight, bias)
     require_cuda_tensors(*tensors)
-    require_fp16_tensors(*tensors)
+    require_fp16_or_bf16_tensors(*tensors)
     if x.ndim != 2 or weight.ndim != 2:
         raise XQTBackendError("dense Linear TileLang path expects 2D x and weight")
     if x.shape[1] != weight.shape[1]:
@@ -59,23 +128,38 @@ def dense_linear_epilogue_tilelang(
         raise XQTBackendError("dense Linear TileLang path expects bias shaped [out_features]")
     if activation not in {None, "gelu", "silu", "relu"}:
         raise XQTBackendError(f"unsupported activation: {activation}")
-    if x.shape[0] % int(block_m) != 0 or weight.shape[0] % int(block_n) != 0:
+    schedule = resolve_tilelang_linear_schedule(
+        x,
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+        threads=threads,
+        num_stages=num_stages,
+        target_arch=target_arch,
+    )
+    if min(schedule.block_m, schedule.block_n, schedule.block_k) <= 0:
+        raise XQTBackendError("dense Linear TileLang block sizes must be positive")
+    if any(
+        block % 16 != 0
+        for block in (schedule.block_m, schedule.block_n, schedule.block_k)
+    ):
         raise XQTBackendError(
-            "dense Linear TileLang path requires batch and out_features to be multiples of block sizes"
+            "dense Linear TileLang block_m, block_n, and block_k must be multiples of 16"
         )
-    if x.shape[1] % int(block_k) != 0:
+    if x.shape[1] % schedule.block_k != 0:
         raise XQTBackendError("dense Linear TileLang path requires in_features to be a multiple of block_k")
     require_tilelang()
     kernel = build_tilelang_gemm_kernel(
         m=int(x.shape[0]),
         n=int(weight.shape[0]),
         k=int(x.shape[1]),
-        block_m=int(block_m),
-        block_n=int(block_n),
-        block_k=int(block_k),
-        threads=int(threads),
-        num_stages=int(num_stages),
-        target_arch=target_arch,
+        input_dtype=("bfloat16" if x.dtype == torch.bfloat16 else "float16"),
+        block_m=schedule.block_m,
+        block_n=schedule.block_n,
+        block_k=schedule.block_k,
+        threads=schedule.threads,
+        num_stages=schedule.num_stages,
+        target_arch=schedule.target_arch,
         has_bias=bias is not None,
         activation=activation,
     )
@@ -104,14 +188,14 @@ def half_linear_tilelang(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     *,
-    block_m: int = 64,
-    block_n: int = 64,
-    block_k: int = 64,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
     threads: int = 128,
     num_stages: int = 2,
     target_arch: str | None = None,
 ) -> torch.Tensor:
-    """CUDA-only standalone half Linear path backed by TileLang GEMM."""
+    """CUDA-only standalone FP16/BF16 Linear path backed by TileLang GEMM."""
 
     return dense_linear_epilogue_tilelang(
         x,
@@ -126,8 +210,6 @@ def half_linear_tilelang(
         target_arch=target_arch,
     )
 
-
-
 TILELANG_LINEAR_KERNEL_METADATA = {
     "dense_linear_epilogue": {
         "kernel_name": "dense_linear_epilogue",
@@ -137,11 +219,17 @@ TILELANG_LINEAR_KERNEL_METADATA = {
         "threads": 128,
         "num_stages": 2,
         "baseline": "torch.nn.functional.linear + epilogue",
-        "usage": "Static-weight dense Linear path for Ada/Hopper half GEMM fastpaths after one-time dequant.",
-        "weight_encoding": "dense_fp16",
+        "usage": "Static-weight dense Linear path for Ada/Hopper FP16/BF16 GEMM fastpaths after one-time dequant.",
+        "supported_dtypes": ["float16", "bfloat16"],
+        "bfloat16_block_k_multiple": 16,
+        "weight_encoding": "dense_fp16_or_bf16",
         "unpack_stage": "one_time_eager_dequant_cache",
-        "fusion_status": "tilelang_dense_half_gemm_epilogue",
-        "epilogue_stage": "torch_bias_activation",
+        "fusion_status": "tilelang_dense_16bit_gemm_epilogue",
+        "epilogue_stage": "tilelang_fused_bias_activation",
+        "schedule_presets": {
+            "default": "bm64_bn64_bk64_t128_s2",
+            "sm89_bf16_decode_m_le_4": "bm16_bn64_bk32_t128_s2",
+        },
     },
     "linear": {
         "kernel_name": "half_linear",
@@ -151,17 +239,25 @@ TILELANG_LINEAR_KERNEL_METADATA = {
         "threads": 128,
         "num_stages": 2,
         "baseline": "torch.nn.functional.linear",
-        "usage": "Standalone half Linear path for direct TileLang operator benchmarking.",
-        "weight_encoding": "dense_fp16",
-        "fusion_status": "tilelang_half_gemm",
+        "usage": "Standalone FP16/BF16 Linear path for direct TileLang operator benchmarking.",
+        "supported_dtypes": ["float16", "bfloat16"],
+        "bfloat16_block_k_multiple": 16,
+        "weight_encoding": "dense_fp16_or_bf16",
+        "fusion_status": "tilelang_dense_16bit_gemm",
         "epilogue_stage": None,
+        "schedule_presets": {
+            "default": "bm64_bn64_bk64_t128_s2",
+            "sm89_bf16_decode_m_le_4": "bm16_bn64_bk32_t128_s2",
+        },
     },
 }
 
 __all__ = [
     "TILELANG_LINEAR_KERNEL_METADATA",
+    "TileLangLinearSchedule",
     "dense_linear_epilogue_reference",
     "dense_linear_epilogue_tilelang",
     "half_linear_reference",
     "half_linear_tilelang",
+    "resolve_tilelang_linear_schedule",
 ]

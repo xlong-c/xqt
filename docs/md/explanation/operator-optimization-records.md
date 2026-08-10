@@ -692,6 +692,8 @@ benchmark (CUDA event 平均, 实体级 forward):
 延迟被 host 侧 (projection launch, 量化 kernel launch) 主导; fused 路径
 每次 forward 多两次 `scale.item()` DtoH 同步, 约 0.03 ms, 是主要差距
 来源. 该记录只证明 fused kernel 编译, 执行和数值正确, 不宣传性能收益.
+R-019 已用 device-resident scale tensor ABI 消除这两次同步;本节数字保留为
+修改前基线,不再代表当前实现.
 
 ### 适用边界与回退
 
@@ -930,3 +932,2111 @@ occupancy/cache/stall 结论.
 - [CUDA regression tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
 - [benchmark script](../../../research/xqt-gemm/bench_sm89_xqt_attention.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-04-sm89-xqt-attention-graph/summary.json)
+
+## R-012: SM89 grouped W4A16 routed-token task grid
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `xqt.gemm` grouped W4A16 decode adapter |
+| backend | `custom_cuda`,显式 `sm_89` artifact |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER,`sm_89`,CUDA 13.0,torch 2.12.1+cu130 |
+| benchmark shape | expert rows `(0,1,2,4,8)`,`total_M=15`,`N=1024`,`K=4096` |
+| precision | INT4 weight-only,FP16 activation/FP16 output,group size 128 |
+
+### 基线与方法
+
+权重 prepack 和 routing schedule 在 benchmark 前一次性建立. 稳态窗口使用
+CUDA event,warmup 20,repeats 15,每次 1 iteration,`end.synchronize`.
+对照包括 Python per-expert reference,repeated single-expert fused W4A16,
+grouped direct task grid 和按 row bound 分桶的 grouped task grid. identity 与
+in-kernel reverse permutation 使用同一组 activation/weight 分别测量.
+
+### 实现
+
+1. `GroupedGemmProblem` 固定累计 `m_offsets`,允许空 expert,并要求
+   `output_rows` 是完整 permutation,避免 scatter 空洞或写冲突.
+2. `w4a16_grouped_sm89.cu` 以 device task table
+   `[expert,packed_row_base,row_count]` 覆盖所有 expert row tile. 编译了
+   row bound `1/2/4/8`,每个 `(task,N-column)` 是一个 CUDA work item.
+3. 静态 payload 为 `[E,N,padded_K/2]` qweight 与 `[E,N,G]` scale,可选
+   zero point/bias. output permutation 在同一 kernel 写回,不追加 scatter launch.
+4. `auto` 在 `N>=256` 的混合 row bound 选择 bucketed,小 `N` 选择 direct.
+   这是当前 SM89 形状的受测策略,不是 persistent scheduler 或 Tensor Core
+   MMA 的实现声明.
+
+### 结果
+
+正确性 gate 共 24 case (signed/unsigned x group 32/64/128 x bias/no-bias x
+identity/scatter),expert rows `(0,1,2,8,9)`,最大绝对误差 `0.015625`,
+`atol=0.125,rtol=0.02`,manifest 已 promotion 为 `executable`.
+
+| path | median (ms) |
+| --- | ---: |
+| Python per-expert reference | `0.901024` |
+| repeated single-expert fused,identity | `0.179936` |
+| grouped direct,identity | `0.286400` |
+| grouped bucketed,identity | `0.241664` |
+| grouped auto,identity | `0.266432` |
+| grouped bucketed,in-kernel scatter | `0.179200` |
+
+event 数据受本机 WSL2 时钟和 launch 噪声影响. `torch.profiler` 显示 bucketed
+路径使用四个 row-bound kernel 变体,而 direct 使用统一 bound=8;Nsight Systems
+auto trace 的 kernel/API 汇总与此一致. prepack/schedule CUDA event 为
+`0.818400`/`0.409376 ms`,不计入稳态. NCU 因
+`ERR_NVGPUCTRPERM` 返回 `counter_permission_denied`,没有从缺失 counter 推断
+occupancy,L2 或 warp stall.
+
+### 适用边界与回退
+
+- 只在 CUDA `sm_89`,FP16 activation/output,INT4 canonical
+  `xqt_int4_nk_v1`,group size 32/64/128 和共享 `N/K` expert contract 下启用.
+- artifact 必须有 correctness-promoted manifest;未 promotion 或架构不符时
+  executor 拒绝 dispatch,上层保留 `reference_grouped_gemm` fallback chain.
+- `direct` 是单 launch,`bucketed` 最多四个 row-bound launch;两者都不逐
+  expert Python dispatch. 当前没有 persistent scheduler,local/global 不同
+  `N/K` metadata 和 Tensor Core grouped MMA.
+- scatter 只允许完整 permutation,由 kernel 直接写目标行,
+  `scatter_launch_count=0`.
+
+### 未采纳方案
+
+- 没有把重复 single-expert fused 的更低 median 隐藏,因此 grouped 路径尚未
+  被标成该 shape 的默认性能赢家.
+- 没有把 SIMT task grid 命名为 persistent 或 CUTLASS Tensor Core grouped
+  kernel;这些属于后续独立 artifact.
+- NCU 权限恢复前不写硬件 counter 结论.
+
+### 可复用规则
+
+- grouped contract 先约束 offset/permutation,再设计 task scheduler;总和相等
+  不能替代逐 expert offset 校验.
+- 小 row bound 的 accumulator specialization 可能抵消额外 launch,但 auto
+  门控必须用同形状 event 和 profiler 双重验证.
+- prepack/schedule 生命周期应跨 routed-token batch 缓存,不能把一次性构建
+  成本混入 steady-state kernel latency.
+
+### 验证落点
+
+- [grouped CUDA kernel](../../../xqt/gemm/backends/w4a16_grouped_sm89.cu)
+- [grouped adapter](../../../xqt/gemm/backends/w4a16_grouped_sm89.py)
+- [SM89 build/manifest](../../../xqt/gemm/backends/sm89_build.py)
+- [grouped tests](../../../tests/xqt/gemm/test_grouped_w4a16_sm89.py)
+- [benchmark and profile script](../../../research/xqt-gemm/bench_sm89_grouped_w4a16.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-07-sm89-grouped-w4a16/)
+
+## R-013: SM89 grouped W8A8 native MMA task grid
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `xqt.gemm` grouped W8A8 decode adapter |
+| backend | `custom_cuda`,显式 `sm_89` artifact |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER,`sm_89`,CUDA 13.0,torch 2.12.1+cu130 |
+| benchmark shape | expert rows `(0,1,2,4,8)`,`total_M=15`,`N=1024`,`K=4096` |
+| precision | INT8 activation x INT8 weight,INT32 accumulator,FP16 output |
+| scale | per-token activation,per-channel expert weight |
+
+### 基线与方法
+
+权重 stack/prepack 和 routing schedule 在稳态窗口前完成. CUDA event 使用
+warmup 20,repeats 21,每个样本连续执行 10 次后取平均,以
+`end.synchronize()` 为同步边界. 同一输入比较 1/2/4/8 warp grouped 候选,
+`auto`,in-kernel scatter,逐 expert native launch 和显式 pad 到 `M=32` 的
+`torch._int_mm` true-INT8 reference. PyTorch 当前 runtime 拒绝 `M<=16` 的
+`_int_mm`,因此 reference 的 padding/copy/切片成本如实计入.
+
+正确性 gate 覆盖 3 个 N/K shape (`8x32`,`17x100`,`32x127`),per-tensor 与
+per-token activation scale,bias/no-bias,identity/reverse scatter,空 expert 和
+`M_i=(0,1,2,8,9)`. 每个逻辑 case 对 1/2/4/8 warp 都执行一次,共 96 次
+native run.
+
+### 瓶颈与实现
+
+初版一 warp CTA 每 8 个输出列重复加载同一 A tile. event sweep 显示该版本
+median `0.156467 ms`,且 resource API 只有 `0.5` occupancy. 新实现把 CTA
+参数化为 1/2/4/8 warp:
+
+1. 每个 warp 仍执行一个 `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`,
+   负责 8 个 N 列和最多 8 个有效 M 行;MMA 的其余行显式填零.
+2. 同一 CTA 的 warps 共用一个 swizzled A shared tile,每个 warp 保留独立的
+   `[8,32]` B staging,减少 A 重复读取和 CTA 数量.
+3. 权重静态布局为 `[expert,N,padded_K] int8`,weight scale 为
+   `[expert,N] float32`;task table 是
+   `[expert,packed_row_base,row_count]`. per-token activation scale,bias 和完整
+   output permutation 都在同一 kernel 应用,scatter 不追加 launch.
+4. A shared swizzle 的 XOR 地址会到达 byte offset 63,因此 row stride 固定为
+   64 bytes. 32-byte stride 会覆盖每个 task 的第 4/8 行,correctness gate 已
+   捕获并修正该错误.
+5. artifact 先以 `metadata_only` 编译,24-case gate 通过后才 promotion 为
+   `executable`. SASS 中四个模板均出现 `IMMA.16832.S8.S8`.
+
+### 结果
+
+correctness 最大绝对误差 `0.0009394`,`atol=0.0625,rtol=0.002`.
+
+| path | median (ms) | 相对 grouped auto |
+| --- | ---: | ---: |
+| grouped,1 warp | `0.156467` | `1.383x` slower |
+| grouped,2 warps | `0.123290` | `1.090x` slower |
+| grouped,4 warps | `0.111206` | measured winner |
+| grouped,8 warps | `0.119386` | `1.055x` slower |
+| grouped auto (4 warps) | `0.113152` | `1.000x` |
+| grouped auto,in-kernel scatter | `0.108032` | noise-equivalent |
+| repeated per-expert native | `0.390624` | `3.452x` slower |
+| padded-M `torch._int_mm` reference | `0.349459` | `3.088x` slower |
+
+resource API 对 1/2/4/8 warp 分别报告 occupancy
+`0.5/0.75/0.75/0.667`,registers/thread 都是 `56`,static shared
+`1280/1536/2048/3072 B`. 4 warp 在并列最高 occupancy 下保留更多 CTA,
+同时比 2 warp 少重复 A staging,与 event winner 一致.
+
+`torch.profiler` 的 4-warp kernel 平均约 `81.34 us/launch`: grouped 20 次
+forward 对应 20 次 kernel,逐 expert baseline 对应 80 次 kernel. Nsight
+Systems 中相应 NVTX 区间为 `2.807 ms` 和 `9.838 ms`;kernel 汇总 150 次
+实例平均约 `78.36 us`. NCU 返回 `ERR_NVGPUCTRPERM`,所以没有 L2,global
+load 或 warp-stall counter 结论.
+
+### 适用边界与回退
+
+- 只在 CUDA `sm_89`,对称 zero-point-free INT8,共享 N/K expert contract,
+  per-channel weight scale,per-token或 per-tensor activation scale和 FP16 output
+  下启用.
+- row task 固定最多 8 行,K 在 adapter 零填充到 32,N 尾 tile 在 kernel
+  predicate. 空 expert 保留 offset 但不产生 task.
+- `auto` 当前选择最多 4 warp,1/2/8 warp 仍可显式复测. 4 warp winner 只对当前
+  设备和 shape 成立,不外推到其他 SM,N/K 或 routed-token distribution.
+- manifest 未 correctness promotion,artifact 缺失或架构不符时 executor 显式
+  拒绝 native dispatch. T034 的统一 grouped reference dispatcher 仍未完成,
+  不在 Python 侧静默逐 expert 作为生产路径.
+
+### 未采纳方案与可复用规则
+
+- 8 warp 虽进一步减少 A staging,但 occupancy 降到 `0.667` 且 event 慢于
+  4 warp,因此不作为当前默认.
+- 不把逐 expert `torch._int_mm` 当公平的无 padding baseline;runtime 的
+  `M>16` 限制必须记录.
+- 不从 NCU 权限失败推断 cache 或 stall. resource API 只证明寄存器,shared
+  和理论 active-block 边界.
+- grouped 小 M kernel 应把共享 operand 提升到 CTA 级,但 warp 数必须结合
+  grid size,occupancy 和同形状 event sweep 决定.
+
+### 验证落点
+
+- [grouped INT8 CUDA kernel](../../../xqt/gemm/backends/w8a8_grouped_sm89.cu)
+- [grouped INT8 adapter](../../../xqt/gemm/backends/w8a8_grouped_sm89.py)
+- [SM89 build/manifest](../../../xqt/gemm/backends/sm89_build.py)
+- [grouped INT8 tests](../../../tests/xqt/gemm/test_grouped_w8a8_sm89.py)
+- [benchmark and profile script](../../../research/xqt-gemm/bench_sm89_grouped_w8a8.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-w8a8/)
+
+## R-014: SM89 grouped FP8 tensorwise/blockwise native MMA
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `xqt.gemm` grouped FP8 decode adapter |
+| backend | `custom_cuda`,CUTLASS FP8 warp MMA primitive,显式 `sm_89` artifact |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER,`sm_89`,CUDA 13.0,torch 2.12.1+cu130 |
+| benchmark shape | expert rows `(0,1,2,4,8)`,`total_M=15`,`N=1024`,`K=4096` |
+| precision | E4M3/E5M2 activation x weight,FP32 accumulation/scale,FP16 output |
+| scale | tensorwise `[E]`/`[E]`;blockwise `[total_M,Kb]`/`[E,N,Kb]` |
+
+### 基线与方法
+
+权重量化/prepack,routing schedule 和 artifact build 都在稳态窗口前完成.
+正确性以 FP8 storage 按声明 scale 解码后执行 FP32 accumulation 为 reference,
+不是拿原始未量化权重比较. CUDA event 的顺序 sweep 使用 warmup 20,repeats
+21,每个样本连续 10 次后取平均,显式 `end.synchronize()`. 同一输入比较
+1/2/4/8 warp,`auto`,in-kernel scatter,逐 expert native launch 和已经预解码
+为 FP32 的 matmul reference.
+
+顺序 sweep 的 4/8 warp winner 在不同运行间会翻转. 为避免把 WSL2 clock
+波动和候选顺序误当成调度收益,脚本另做 9 轮 x 31 对交错复测:相邻样本在
+`4 -> 8` 与 `8 -> 4` 之间交替,每个候选每个样本执行 50 次. 只有同一候选
+至少赢 7/9 轮且总中位数差距不小于 3%,才允许改变默认调度.
+
+正确性 gate 覆盖 E4M3/E5M2,tensorwise,blockwise 32/64/128,bias/no-bias,
+identity/reverse scatter,空 expert,小 expert,K/N 尾块和
+`M_i=(0,1,2,8,9)`. 32 个逻辑 case 加 4 个显式 warp 候选,共 36 次 native
+run.
+
+### 瓶颈与实现
+
+逐 expert 路径把 4 个非空 expert 拆成 4 次 native launch. grouped 实现将
+所有非空 expert 展开为 `[expert,packed_row_base,row_count]` task table,一次
+grid launch 完成计算和可选 output permutation:
+
+1. 每个 task 最多处理 8 个有效 row;1/2/4/8 个 warp 沿 N tile 协作,CTA 内
+   共享一个 swizzled A staging,每个 warp 保留自己的 B fragment.
+2. tensorwise activation/weight scale 分别固定为 `[E]`/`[E]`. blockwise
+   activation scale 为 `[total_M,Kb]`,weight scale 为 `[E,N,Kb]`,并在每个
+   K block 的 FP32 accumulator contribution 上应用,支持
+   `block_k=32/64/128`.
+3. K 在 adapter 零填充到 32,N 尾 tile 在 kernel predicate;空 expert 保留
+   offsets 但不产生 task,bias 和 scatter 都在同一 kernel 内执行.
+4. artifact 先以 `metadata_only` 构建,correctness gate 通过后 promotion 为
+   `executable`. SASS 共解析到 32 个 `QMMA.16832`:E4M3/E5M2 各 16 个.
+
+当前 profiler 证明主要差异是 launch 结构:grouped 每个 forward 只有一次
+目标 kernel,逐 expert 为 4 次. NCU counter 权限被拒绝,因此没有进一步把
+性能差异归因于 L2,shared bank conflict,eligible warp 或 tensor pipe 利用率.
+
+### 结果
+
+correctness 最大绝对误差 `0.0127106`,`atol=0.25,rtol=0.03`.
+
+| path | tensorwise median (ms) | blockwise-64 median (ms) |
+| --- | ---: | ---: |
+| grouped,1 warp | `0.180800` | `0.147530` |
+| grouped,2 warps | `0.122762` | `0.110387` |
+| grouped,4 warps | `0.102480` | `0.106906` |
+| grouped,8 warps | `0.103629` | `0.104550` |
+| grouped auto,4 warps | `0.099635` | `0.107930` |
+| grouped auto,in-kernel scatter | `0.101853` | `0.110368` |
+| repeated per-expert native | `0.403686` | `0.410298` |
+| predequantized FP32 reference | `0.132096` | `0.133606` |
+
+grouped auto 相对逐 expert native 分别为 `4.052x` 和 `3.802x`. 单个顺序
+sweep 中 tensorwise 4 warp 获胜,blockwise-64 8 warp 获胜,但交错复测不支持
+scale-mode-aware 默认:
+
+| mode | 4 warp (ms) | 8 warp (ms) | round wins (4:8) | 判定 |
+| --- | ---: | ---: | ---: | --- |
+| tensorwise | `0.095416` | `0.094920` | `3:6` | 差 `0.523%`,noise-equivalent |
+| blockwise-64 | `0.093385` | `0.093307` | `7:2` | 差 `0.084%`,noise-equivalent |
+
+blockwise 的总中位数轻微偏向 8 warp,但逐轮胜负反而偏向 4 warp;这正是
+不能从单个聚合统计量提升新默认的证据. 两种 mode 都保留 4 warp.
+
+`torch.profiler` 中 tensorwise grouped 20 次 launch 共 `1292.152 us`,约
+`64.61 us/launch`;逐 expert 80 次共 `4261.196 us`,约 `53.26 us/launch`.
+blockwise grouped 20 次共 `1069.435 us`,约 `53.47 us/launch`;逐 expert
+80 次共 `4214.092 us`,约 `52.68 us/launch`. grouped 的单次 kernel 不是
+更短,收益来自把完整 expert workload 合并成更少 launch.
+
+Nsight Systems 的 blockwise NVTX 区间为 grouped `2.213 ms`,逐 expert
+`9.408 ms`;150 个 grouped template 实例平均 `56.36 us`. NCU 返回
+`ERR_NVGPUCTRPERM`,状态保存为 `counter_permission_denied`.
+
+### 适用边界与回退
+
+- 仅在 CUDA `sm_89`,E4M3 或 E5M2,zero-point-free FP8,共享 N/K expert
+  contract,FP32 scale/accumulation 和 FP16 output 下启用.
+- tensorwise 和 blockwise 是两套显式 scale layout;不做隐式广播或把
+  blockwise scale 降为最终 epilogue scalar.
+- `auto` 当前最多选择 4 warp. 1/2/8 warp 保留为显式实验候选;本 shape 的
+  noise-equivalent 结果不能外推到其他 SM,N/K 或 routed-token distribution.
+- manifest 未 correctness promotion,artifact 缺失或架构不符时 executor
+  显式拒绝 native dispatch. T034 的统一 grouped reference dispatcher 仍未
+  完成,不在 Python 侧静默拆成逐 expert 生产路径.
+
+### 未采纳方案与可复用规则
+
+- 没有根据一次顺序 sweep 把 blockwise 默认改为 8 warp,也没有增加
+  scale-mode-aware auto. 跨轮差距不足 3%,收益不稳定.
+- 当前实现是普通 task-grid,不命名为 persistent scheduler;真正的
+  persistent grouped kernel 需要独立实现和 profiler 证据.
+- predequantized FP32 reference 已排除反量化成本,只用于定位数值和提供
+  库 matmul 对照,不伪装成同精度端到端 baseline.
+- 相近候选必须交错测量并同时检查相对差距,逐轮胜负和成对比值;单个
+  sequential median winner 不足以改变默认路由.
+- NCU 权限失败只记录 blocked reason,不能用 resource API 的理论 occupancy
+  替代 cache,stall 或 tensor-pipe counter 结论.
+
+### 验证落点
+
+- [grouped FP8 CUDA kernel](../../../xqt/gemm/backends/fp8_grouped_sm89.cu)
+- [grouped FP8 adapter](../../../xqt/gemm/backends/fp8_grouped_sm89.py)
+- [SM89 build/manifest](../../../xqt/gemm/backends/sm89_build.py)
+- [grouped FP8 tests](../../../tests/xqt/gemm/test_grouped_fp8_sm89.py)
+- [benchmark and profile script](../../../research/xqt-gemm/bench_sm89_grouped_fp8.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-fp8/)
+
+## R-015: SM89 TileLang FlashAttention tile/stage sweep
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `fused_attention_forward_tilelang`,生成 kernel 为 `main_kernel` |
+| backend | TileLang 0.1.12,显式 NVIDIA `sm_89` |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER,CUDA 13.0,torch 2.12.1+cu130 |
+| shapes | small/medium/long prefill,causal prefill 和 `Q=1,KV=1024` decode |
+| precision | FP16 Q/K/V,FP32 online-softmax accumulator,FP16 output |
+| candidates | 9 组 `block_m/block_n/threads/num_stages`,默认 `64/64/128/2` |
+
+### 基线与方法
+
+所有 candidate 和 SDPA reference 使用同一组 contiguous Q/K/V tensor.
+correctness 使用 `atol=0.02,rtol=0.02`. CUDA event 顺序 sweep 先 warmup 10,
+再取 15 个样本的中位数;每个样本按 shape 连续执行
+`100/40/10/20/40` 次,并用 event end synchronize. TileLang JIT,首次调用和
+输入分配均排除在稳态窗口外.
+
+如果顺序 winner 不是默认 candidate,脚本会把 winner 和默认做 7 轮 x 21 对
+交错复测,相邻样本在 `A -> B` 和 `B -> A` 间切换. 只有同一候选至少赢
+5/7 轮且总中位数领先不小于 3%,才允许改变默认. `torch.profiler` 对每个
+最终候选先 warmup 10,再记录 20 次调用. Nsight Systems workload 每个 shape
+把 10 次 warmup 放在 NVTX 外,把 20 次 measured call 放在独立 NVTX range.
+
+### 编译边界与取舍
+
+5 组 candidate 在所有 shape 都可编译并通过 correctness:
+
+- `64x32,128 threads,2 stages`.
+- `64x64,128 threads,1/2/3 stages`.
+- `128x64,256 threads,2 stages`.
+
+以下 4 组 candidate 在 5 个 shape 上都于 TileLang layout inference 阶段失败:
+
+- `32x32,128 threads,2 stages`.
+- `32x64,128 threads,2 stages`.
+- `64x64,256 threads,2 stages`.
+- `64x128,256 threads,2 stages`.
+
+失败均为 `acc_s` FP32 fragment 到 `acc_s_cast` FP16 fragment 的
+`T.Parallel` layout conflict. 这是当前 fragment/thread 映射的编译约束,
+不能把这些 candidate 当成已执行但性能落后的 schedule. 共 25 个可执行
+correctness case 全部通过,最大绝对误差 `0.0009765625`.
+
+### 结果
+
+| shape | 默认 TileLang median (ms) | SDPA median (ms) | 最终推荐 |
+| --- | ---: | ---: | --- |
+| `B1,H4,Q64,KV64,D32` | `0.011018` | `0.014272` | `64x64/128t/2s` |
+| `B1,H8,Q256,KV256,D64` | `0.012972` | `0.015202` | `64x64/128t/2s` |
+| `B1,H8,Q1024,KV1024,D64` | `0.036083` | `0.034406` | `64x64/128t/2s` |
+| `B1,H8,Q512,KV512,D64,causal` | `0.015058` | `0.021278` | `64x64/128t/2s` |
+| `B1,H8,Q1,KV1024,D64,causal` | `0.018606` | `0.030187` | `64x64/128t/2s` |
+
+Long prefill 上 SDPA 仍比默认 TileLang 快约 4.9%,因此不能把本轮结果写成
+TileLang 全 shape 胜出. 不同 shape 的默认 promotion 复测如下:
+
+| shape | 对手 | 默认/对手 median (ms) | round wins | 判定 |
+| --- | --- | ---: | ---: | --- |
+| small prefill | 1 stage | `0.010955/0.012235` | `7:0` | 默认领先 `11.68%`,stable |
+| medium prefill | 3 stages | `0.012830/0.012895` | `5:2` | 默认领先 `0.51%`,noise-equivalent |
+| long prefill | 1 stage | `0.035930/0.036378` | `7:0` | 默认领先 `1.25%`,noise-equivalent |
+| causal prefill | 1 stage | `0.013555/0.013494` | `4:3` | 1 stage 领先 `0.45%`,noise-equivalent |
+| decode | 3 stages | `0.018352/0.018758` | `6:1` | 默认领先 `2.21%`,noise-equivalent |
+
+只有 small prefill 跨过 3% 稳定性门槛,且 winner 本身就是默认 candidate.
+其他 shape 即使顺序或总中位数出现非默认 winner,差距也不足以 promotion.
+因此不新增 shape-aware preset,继续使用统一默认 `64x64/128t/2s`.
+
+`torch.profiler` 中 20 次调用对应的 `main_kernel` 平均时间为 small
+`1.809 us`,medium `5.485 us`,long `29.001 us`,causal `10.169 us`,decode
+`15.381 us`. Nsight Systems 全 trace 含 150 次 `main_kernel`,即 5 个 shape x
+`(10 warmup + 20 measured)`. 按 NVTX range 过滤后,每个 shape 都恰好包含
+20 次 `main_kernel` 和 20 次 `cuLaunchKernel`;kernel 平均时间分别为
+`1.788/5.430/30.986/10.110/16.375 us`.
+
+Profiler 数字用于确认 kernel identity,launch count 和 time distribution,
+不替代 CUDA event promotion gate. NVTX 内的 host API 时间还包含 profiler
+扰动和末尾 synchronize,不能写成稳态 wrapper latency. NCU 返回
+`ERR_NVGPUCTRPERM`,状态为 `counter_permission_denied`,没有 cache,occupancy,
+warp stall 或 tensor-pipe 结论.
+
+### 适用边界与回退
+
+- 本证据仅覆盖当前 RTX 4070 Ti SUPER `sm_89`,TileLang 0.1.12,FP16,
+  `head_dim=32/64` 和列出的 5 个 shape.
+- 当前 kernel 要求 `seq_kv >= seq_q`,`dropout_p=0`,不覆盖动态 mask,paged KV,
+  continuous batching 或其他 serving runtime.
+- 本轮不改变 wrapper/engine 既有 fallback,也不把编译失败 candidate 加入
+  dispatcher.
+- Long prefill 的 SDPA 优势和其他 SM 的未知行为都要求继续保留 native
+  reference,不能从本轮 Ada 数据外推统一 backend winner.
+
+### 未采纳方案与可复用规则
+
+- 不因低于 3% 的单次或聚合差距增加 shape-aware selector. 调度分支会扩大
+  compile/cache surface,必须由稳定收益支付复杂度.
+- 不在同一轮为 4 个 layout-conflict candidate 重写 fragment layout. 先保留
+  明确的 compile failure,后续若单独修复 layout,需要重新跑完整 correctness
+  和 promotion gate.
+- 不因为 decode 的 `Q=1` 就假设更小 `block_m` 更快;当前两个 32-row candidate
+  根本未完成 codegen,没有性能证据.
+- 不混用 CUDA event,`torch.profiler` 和 Nsight wall/API 时间. 三者分别承担
+  promotion,kernel attribution 和 launch/time-distribution 证据.
+- NCU 权限失败只记录 blocked reason,不能用理论 resource 上限替代真实 counter.
+
+### 验证落点
+
+- [TileLang Attention entry](../../../xqt/operator_opt/kernels/tilelang/attention.py)
+- [TileLang FlashAttention source](../../../learn/tilelang/flashatt.py)
+- [tile sweep and profile script](../../../research/xqt-gemm/bench_sm89_tilelang_attention_tiles.py)
+- [TileLang Attention CUDA tests](../../../tests/xqt/test_tilelang_attention_cuda.py)
+- [operator integration CUDA tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-attention-tiles/)
+
+## R-016: Unified grouped GEMM reference dispatch
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `dispatch_grouped_gemm` 和 `reference_packed_grouped_gemm` |
+| native bridges | SM89 grouped W4A16,W8A8 和 FP8 |
+| reference backend | Torch FP32 accumulation,显式 `grouped_reference` |
+| routed input | packed activation `[total_M,K]`,累计 `m_offsets`,可选 output permutation |
+| scale coverage | W4 groupwise,W8 per-tensor/per-token,FP8 tensorwise/blockwise |
+
+### 问题与基线
+
+三类 strict native executor 在 artifact 缺失,manifest 未 correctness promotion
+或架构不匹配时都会抛 `XQTBackendError`. 这是正确的 native 边界,但此前各自
+report 的 `fallback_chain` 只写了 `reference_grouped_gemm` 字符串,没有一个
+真实的统一 dispatcher 消费该链. 上层若自行捕获异常,很容易临时写出不带
+report 的 Python expert loop.
+
+本轮不把 reference 与 native 做 latency winner 比较. 验收基线是同一 packed
+activation,同一 expert weight/scale/bias 和同一 output permutation 下,
+strict native 不可执行时得到与声明 reference 一致的输出,同时 report 必须
+暴露降级原因和 Python group loop.
+
+### 实现
+
+1. `reference_packed_grouped_gemm` 按 `GroupedGemmProblem.m_offsets` 显式切分
+   activation. Per-tensor scale 支持 scalar 或 `[E]`;per-token 和 blockwise
+   scale 要求首维为 `total_M`,再按 expert row slice. 输出先按 packed row
+   拼接,最后用 `output_rows` 执行一次显式 permutation.
+2. `GroupedGemmNativeCandidate` 区分 `executable`,`metadata_only` 和 `planned`.
+   `dispatch_grouped_gemm` 只执行 executable candidate,只捕获
+   `XQTBackendError` 作为 runtime unavailable;shape,scale 或 contract 的
+   `ValueError` 不会被静默吞掉.
+3. 统一 report 写出 `selected_kernel`,`backend`,`maturity`,`execution_mode`,
+   `native`,`expert_rows`,`m_offsets`,`output_scatter`,`python_group_loop`,
+   `fallback_reason` 和 `fallback_chain`. Native bridge 的原始 report 保留在
+   `native_details`.
+4. 新增 `dispatch_sm89_grouped_w4a16`,`dispatch_sm89_grouped_w8a8` 和
+   `dispatch_sm89_grouped_fp8`. 原 `sm89_grouped_*_executor` 仍是 strict native
+   API,benchmark/profiler 可以继续直接调用,不会在内部隐式 fallback.
+5. 三个 bridge 的 reference weight view,scale tuple 和 PackedWeight metadata
+   都在惰性 `reference_executor` 中构造. Native candidate 成功时不会遍历
+   expert 来 materialize reference 输入,避免把 fallback 准备开销带回稳态
+   native forward.
+
+### 结果
+
+当 native candidate 成功时,report 为 `execution_mode=native_grouped`,
+`python_group_loop=false`,并保留 native scheduler/launch metadata. 当 artifact
+或 manifest 不可执行时,selected kernel 为 `grouped_reference`,report 为
+`execution_mode=reference_grouped`,`native=false`,`python_group_loop=true`,
+同时 `fallback_reason` 包含具体 native error.
+
+验证覆盖:
+
+- metadata-only candidate 被跳过,不会执行其 callable.
+- executable candidate 成功时惰性 reference executor 不会被调用.
+- native candidate 抛 `XQTBackendError` 时进入统一 reference;
+  `allow_reference=False` 时原异常继续抛出.
+- W4A16 signed/unsigned zero-point contract,bias 和 reverse scatter.
+- W8A8 per-tensor/per-token activation scale,bias 和 reverse scatter.
+- FP8 E4M3 tensorwise/blockwise-32 scale,bias 和 reverse scatter.
+- packed INT8 per-token scale 的 CPU reference 拆分和数值结果.
+
+### 适用边界与回退
+
+- `grouped_reference` 是 correctness 和可诊断保底路径,内部明确使用 Python
+  group loop 和逐 group Torch matmul. 它不命名为 native grouped kernel,
+  不参与 grouped latency winner 声明.
+- Production 可设置 `allow_reference=False`,要求 native unavailable 立即失败.
+- Dispatcher 只把 `XQTBackendError` 视为 candidate unavailable. 用户输入,
+  quant schema,shape 或 output permutation 错误仍显式报错.
+- 当前 bridge 只连接已验证的 SM89 W4A16/W8A8/FP8 payload. 其他 SM 或新
+  precision 需要新增显式 native candidate,不能借 reference report 冒充覆盖.
+
+### 未采纳方案与可复用规则
+
+- 没有修改 strict native executor 默认行为. 在低层 executor 内自动 fallback
+  会污染 kernel benchmark,掩盖 artifact promotion 和架构错误.
+- 没有让每个 backend 复制一套 reference loop. Scale 拆分,scatter 和 report
+  统一收敛到一个 grouped dispatcher/reference contract.
+- 没有在 native 尝试前预构造 reference expert views. Fallback 数据必须 lazy,
+  否则即使 CUDA event 不计 host 时间,operator-stage 仍会承担 Python 开销.
+- Reference fallback 的存在不证明 production 性能可接受;需要低延迟服务时
+  应关闭 reference 或在 report 层拒绝 `python_group_loop=true`.
+
+### 验证落点
+
+- [grouped dispatcher](../../../xqt/gemm/grouped_dispatch.py)
+- [grouped reference](../../../xqt/gemm/reference.py)
+- [W4A16 bridge](../../../xqt/gemm/backends/w4a16_grouped_sm89.py)
+- [W8A8 bridge](../../../xqt/gemm/backends/w8a8_grouped_sm89.py)
+- [FP8 bridge](../../../xqt/gemm/backends/fp8_grouped_sm89.py)
+- [dispatcher tests](../../../tests/xqt/gemm/test_grouped_dispatch.py)
+- [W4A16 grouped tests](../../../tests/xqt/gemm/test_grouped_w4a16_sm89.py)
+- [W8A8 grouped tests](../../../tests/xqt/gemm/test_grouped_w8a8_sm89.py)
+- [FP8 grouped tests](../../../tests/xqt/gemm/test_grouped_fp8_sm89.py)
+
+## R-017: SM89 grouped GEMM versioned offline tuning cache
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| schema | `xqt-gemm-tuning-v1` |
+| consumers | SM89 grouped W4A16,W8A8 和 FP8 bridge |
+| policy | 离线 correctness + CUDA event promotion,运行时只查表 |
+| runtime states | `hit`,`miss`,`expired`,`invalid`,`bypassed_explicit` |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-tuning-cache/` |
+
+### 问题与基线
+
+R-012 到 R-014 已经得到 grouped W4A16,W8A8 和 FP8 的确定性默认配置,
+但 event winner,resource query 和 cache-sensitivity 仍分散在 benchmark sidecar.
+Dispatcher 无法判断某个运行时 contract 是否真的有离线验证记录,也无法区分
+cache miss,过期记录和 artifact 被替换后的失效状态.
+
+不能用首次 forward autotune 填补这个缺口. 在线 candidate sweep 会把编译,
+同步和长尾延迟带入生产路径,并使 CUDA Graph capture 与稳态 benchmark
+不可预测. 本轮目标是让离线证据成为可校验 artifact,运行时只做 exact lookup,
+不新增 benchmark callable 或隐式编译.
+
+### 实现
+
+1. `GemmTuningKey` 绑定 kernel family,backend,`sm_*`,`M/N/K`,exact
+   `expert_rows`,weight/activation/compute/accum/output dtype,group axis/size,
+   scale mode,symmetric/zero-point,scale source,storage/pack version,persistent,
+   output scatter,bias,CUDA Graph 和 workspace bytes. Canonical JSON SHA256
+   在 key 构造时缓存,report 与 lookup 不重复序列化计算.
+2. `GemmTuningRecord` 保存 selected kernel/scheduler/warp,correctness gate,
+   CUDA event benchmark,runtime resource query,间接 cache-sensitivity,
+   artifact/manifest SHA256,evidence paths,source 和创建/过期时间. Cache envelope
+   对 canonical payload 再做 SHA256,重复 key,corrupt JSON 或 checksum mismatch
+   都显式失败. 持久化使用同目录临时文件,`fsync` 和 `os.replace` 原子替换.
+3. 只有 `scheduler="auto"` / `warps_per_block="auto"` 消费 cache. 显式配置
+   报告 `bypassed_explicit`;miss,expired,invalid 或 backend 不支持的 knob 都
+   使用原确定性默认值. W4 接受当前 kernel 的 direct/bucketed,或 persistent
+   加合法 `persistent_blocks_per_sm`;W8/FP8 只接受 direct 和 1/2/4/8 warp,
+   非法 record 不能改变 dispatch.
+4. `GroupedGemmDispatchReport` 统一暴露 `tuning_cache_status`,完整 key,
+   key SHA256,reason,source 和 record id.Native 与 reference fallback 都保留
+   这些字段,未命中不会被描述为 performance winner.
+5. Artifact identity 首次验证后按绝对路径 memoize,steady-state 不再做
+   `stat` 或文件 hash. 调用方可在 forward 前用 `prime_artifact()` 预热;
+   artifact 重建或替换后必须调用 `invalidate_artifact()` 再验证.
+
+### 结果
+
+当前 cache payload SHA256 为
+`207ea4ae89b91ffe65c2b59ffdf26aa0109a5f8cb3a3b95a32d093d268d78e80`,
+包含 8 条 record. 所有记录都限定在 RTX 4070 Ti SUPER `sm_89`,
+`M=15,N=1024,K=4096`,`expert_rows=(0,1,2,4,8)`,FP16 output,bias,
+`persistent=false`,`cuda_graph=false`,`workspace_bytes=0`:
+
+- W4A16 symmetric signed,groupwise-128,identity/scatter,选择
+  persistent/4 blocks per SM. Key 的 `persistent=false` 表示 auto 请求没有强制
+  persistent runtime contract;离线 selection 仍可选择已验证 persistent 候选.
+- W8A8 per-channel weight + per-token activation,identity/scatter,选择
+  direct/4 warp.
+- FP8 E4M3 tensorwise,identity/scatter,选择 direct/4 warp.
+- FP8 E4M3 blockwise-64,identity/scatter,选择 direct/4 warp.
+
+真实 CUDA dispatcher 验证中,8/8 cache 路径报告 `hit`,对应 empty cache
+路径报告 `miss`;所有 hit/miss 输出逐元素 bitwise equal,native scheduler/warp
+与 record 一致,惰性 reference 没有物化. 不存在首次 forward benchmark 或
+autotune callable.
+
+W8A8 公平交错测量得到:
+
+| 层级 | hit | miss | 结论 |
+| --- | ---: | ---: | --- |
+| CUDA event median | `0.154317 ms` | `0.148141 ms` | 同一 4-warp kernel,不把差值解释为 cache 加速 |
+| pre-synchronized host dispatch median | `140.878 us` | `128.985 us` | hit 包含 verified record lookup 开销 |
+| isolated in-memory lookup | `3.700 us` | `0.475 us` | hit 不是更快的 Python 分支 |
+
+`torch.profiler` 记录 40 次同一 `grouped_w8a8_kernel<4>` launch,hit/miss
+各 20 次.Nsight Systems 使用两个独立进程,两个 NVTX range 都恰好包含
+20 次该 kernel launch,避免相邻 range 边界污染. 256 MiB thrash 后 8 个
+case 的 cold/hot ratio 为 `1.072-1.322`;这只是间接 cache-sensitivity
+证据,不是 L2 hit-rate counter.
+
+NCU permission probe 返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 L2 hit rate,global/shared
+load efficiency,warp stall,tensor-pipe utilization 或 counter-derived occupancy.
+
+### 适用边界与回退
+
+- 当前只有上述 8 个 exact contract 是 performance-promoted record. W4
+  asymmetric,W8 per-tensor,FP8 E5M2,FP8 block 32/128,无 bias,其他 shape,
+  其他 SM,CUDA Graph 或 workspace 配置都继续 miss. 显式 persistent 配置绕过
+  cache;当前 record 只让 exact auto key 选择 persistent/4 blocks per SM.
+- Miss,expired 和 invalid 只表示没有可消费的离线 winner,不表示默认 kernel
+  失败. Dispatcher 保留既有确定性 scheduler/warp 和完整 fallback chain.
+- Cache object 应在 steady-state 前加载并复用. 每次 forward 从 JSON 加载,
+  对 artifact 做 `stat`/hash 或重新构造 cache 都不属于支持的快路径.
+- Artifact/manifest 视为 memoize 后不可变. 原地重建而不调用
+  `invalidate_artifact()` 会继续使用旧 snapshot,调用方必须遵守显式生命周期.
+- 本轮 cache 不证明 grouped kernel 是模型级吞吐赢家,也不覆盖 quantize,
+  routing,通信或 serving runtime 的端到端成本.
+
+### 未采纳方案与可复用规则
+
+- 不在 miss 时自动 benchmark. Offline evidence 缺失必须表现为可诊断 miss,
+  不能把生产首次请求变成调优任务.
+- 不因 cache hit 存在就宣传 wrapper 加速. 实测 hit 的 lookup 和 host dispatch
+  都高于 deterministic miss,cache 的价值是选择经验证配置.
+- 不在 NCU 无权限时用理论 occupancy 或 cold/hot ratio 替代硬件 counter.
+  Runtime resource query 可以保存,但必须与 counter-derived 结论分开命名.
+- 不接受 backend 未声明的 scheduler/warp. Persisted JSON 不是绕过 executor
+  contract 校验的入口.
+
+### 验证落点
+
+- [tuning cache](../../../xqt/gemm/tuning_cache.py)
+- [grouped dispatcher](../../../xqt/gemm/grouped_dispatch.py)
+- [W4A16 bridge](../../../xqt/gemm/backends/w4a16_grouped_sm89.py)
+- [W8A8 bridge](../../../xqt/gemm/backends/w8a8_grouped_sm89.py)
+- [FP8 bridge](../../../xqt/gemm/backends/fp8_grouped_sm89.py)
+- [tuning cache tests](../../../tests/xqt/gemm/test_tuning_cache.py)
+- [artifact generator](../../../research/xqt-gemm/bench_sm89_grouped_tuning_cache.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-tuning-cache/)
+
+## R-018: SM89 grouped W4A16 persistent scheduler
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `sm89_grouped_w4a16_executor` |
+| backend | `custom_cuda`,显式 `sm_89` artifact |
+| shape | expert rows `(0,1,2,4,8)`,`M=15,N=1024,K=4096` |
+| precision | symmetric signed W4A16,groupwise-128,FP32 accumulation,FP16 output,bias |
+| candidate | single-launch `persistent_grid_stride`,1/2/4/6 blocks per SM |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-w4a16-persistent/` |
+
+### 问题与基线
+
+R-012 的 bucketed scheduler 按实际 task row count 使用 1/2/4/8 四个模板,
+避免 direct 路径所有 task 都承担 8-row accumulator,但目标 shape 每次需要
+4 次 kernel launch. Fresh Nsight Systems 中四个 row-bound kernel 的 GPU time
+合计约 `85 us/call`;因此本轮假设不是单个 row-bound kernel 算得慢,而是四次
+launch 与 enqueue gap 没有被当前 grouped 调度摊薄.
+
+顺序单-call CUDA event sweep 对候选顺序和系统抖动敏感. 最终一次 sweep 的
+identity median 为 bucketed `0.204416 ms`,persistent bpsm4 `0.208896 ms`,
+bpsm6 `0.208704 ms`;scatter 为 `0.229376/0.205472/0.197632 ms`. 不同运行中
+顺序 winner 会翻转,所以这些数字只用于初筛,不作为 promotion gate.
+
+### 实现
+
+1. 新增 `persistent_grouped_w4a16_decode_kernel`. Grid 上限为
+   `SM_count * blocks_per_sm`,每个 CTA 用 grid-stride 循环消费
+   `(task,column)` work item. 每个 work item 根据实际 `row_count` 进入模板化
+   1/2/4/8-row device function,保持原 signed/unsigned nibble,group scale,bias
+   和 in-kernel output permutation 语义.
+2. Python adapter 新增显式 `scheduler="persistent"`,默认
+   `persistent_blocks_per_sm=4`,report 写出 requested blocks,实际 grid blocks,
+   单次 launch,row bounds 和 scatter 状态. Manifest 声明 direct,bucketed,
+   persistent 三种候选及 `[1,2,4,max_active]` 调参空间.
+3. CUDA resource query 报告 persistent kernel 为 256 threads,40 registers/thread,
+   256 B static shared,max active 6 blocks/SM. bpsm4 对应 4 resident blocks/SM
+   和 264-block grid. 这里的 `0.667` 只是 CUDA occupancy API 的理论 thread
+   residency,不是 profiler 采集的 achieved occupancy.
+4. Cache resolver 原子校验 scheduler 与 `persistent_blocks_per_sm`. Exact
+   SM89 W4A16 identity/scatter record 选择 persistent/4;cache miss 继续使用原
+   bucketed 默认,没有把单 shape 结论扩展成全局 `auto` heuristic.
+
+### 正确性与稳定性 gate
+
+24 个语义 case 覆盖 signed/unsigned,group size 32/64/128,bias/no-bias,
+identity/reverse scatter,空 expert 和 `M_i=(0,1,2,8,9)`. 另有 16 个
+1/2/4/6 blocks-per-SM case. 最大绝对误差 `0.015625`,最大相对误差
+`7.48e-4`,`atol=0.125,rtol=0.02`;四个 block-count 输出 bitwise equal.
+
+稳定性使用 9 轮 x 31 对交错测量,相邻样本交替候选顺序,每个 event sample
+连续执行 10 次:
+
+| 对比 | baseline | candidate | latency reduction | round wins |
+| --- | ---: | ---: | ---: | ---: |
+| identity | bucketed `0.166093 ms` | persistent bpsm4 `0.144384 ms` | `13.07%` | `0:9` |
+| scatter | bucketed `0.164454 ms` | persistent bpsm4 `0.144579 ms` | `12.09%` | `0:9` |
+
+bpsm4/bpsm6 的聚合 median 为 `0.144688/0.141722 ms`,轮次 `2:7`,但相对
+gap 只有 `2.09%`,低于 3% knob-promotion 门槛. 因此保留已有 bpsm4 默认,
+不增加动态 max-active 选择分支.
+
+### Profiler 归因
+
+`torch.profiler` 对 10 次 measured call 记录:
+
+- bucketed: 40 次 target launch,四个 row-bound kernel 合计约
+  `79.33 us/call`,`cudaLaunchKernel` host API 总计 `327.56 us`.
+- persistent bpsm4: 10 次 target launch,kernel 约 `80.50 us/call`,
+  `cudaLaunchKernel` host API 总计 `136.17 us`.
+
+Nsight Systems 使用两个独立进程. 20 次 bucketed call 对应 80 次 target
+launch,target GPU time 约 `85.39 us/call`;20 次 persistent call 对应 20 次
+target launch,target GPU time 约 `88.00 us/call`. Persistent kernel body 没有
+更快,甚至略慢;paired callable latency 的收益来自把每次 4 个 launch 压成
+1 个并减少 enqueue gap. 这与最初 launch-bound 假设一致,不写成算术吞吐提升.
+
+NCU permission probe 返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 achieved occupancy,L2 hit
+rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
+
+### 适用边界与回退
+
+- Promotion 只进入 exact tuning record: RTX 4070 Ti SUPER `sm_89`,上述 shape,
+  signed symmetric groupwise-128,bias,identity/scatter. 其他 shape,量化语义,
+  SM 或 workspace 继续 cache miss 并使用既有 deterministic scheduler.
+- `scheduler="persistent"` 仍可作为显式实验配置,但显式配置报告
+  `bypassed_explicit`,不会伪装成 cache winner.
+- Persistent 当前仍是 SIMT packed-dequant dot-product kernel,不是 Tensor Core
+  W4A16 MMA. 单 launch 也不代表所有 grouped W4A16 shape 都更快.
+- 资源 query 只能说明编译资源和理论 residency. NCU 权限恢复前,不能据此
+  解释 cache behavior,warp stalls 或 achieved occupancy.
+
+### 验证落点
+
+- [persistent CUDA source](../../../xqt/gemm/backends/w4a16_grouped_sm89.cu)
+- [W4A16 adapter](../../../xqt/gemm/backends/w4a16_grouped_sm89.py)
+- [build manifest](../../../xqt/gemm/backends/sm89_build.py)
+- [CUDA tests](../../../tests/xqt/gemm/test_grouped_w4a16_sm89.py)
+- [tuning cache tests](../../../tests/xqt/gemm/test_tuning_cache.py)
+- [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_grouped_w4a16_persistent.py)
+- [persistent evidence](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-w4a16-persistent/)
+- [updated tuning cache](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-tuning-cache/)
+
+## R-019: SM89 KV-int8 scale tensor runtime integration
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `KvScaleAttention` + `tilelang_kv_int8_fused_attention` |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`), CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| contract | FP16 Q, INT8 K/V, device-resident single-element FP32 K/V scale, FP16 output |
+| shapes | `batch=2`, `heads=4`, `head_dim=32`, `seq=128/1024`, causal/noncausal |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-scale-tensor/` |
+
+R-009 的 TileLang mainloop 已经完成 in-kernel dequant,但 runtime 每次 forward
+仍对两个 CUDA scale buffer 调用 `.item()`. 这会分别触发 DtoH copy 和 stream
+同步,使一个约 `2.5 us/call` 的 `main_kernel` 被 wrapper 同步成本淹没. 本轮只
+修改 scale ABI/runtime 接线,不改变 `64x64/128 threads/2 stages` mainloop.
+
+### 实现
+
+1. TileLang prim_func 的 `k_scale/v_scale` 从 host `T.float32` 标量改为
+   `T.Tensor([1], T.float32)`,dequant 使用 `scale[0]`. Python 入口要求 scale
+   为与 Q 同设备,dtype 为 FP32,`numel()==1` 的 tensor,只做 `reshape(1)`
+   视图后 launch,不读取标量值.
+2. `KvScaleAttention._try_fused_attention()` 直接传注册 buffer
+   `self.k_scale/self.v_scale`,不再调用 `.item()`. 因此 `fill_`,模型迁移和
+   `state_dict` 更新仍由原 buffer 语义承载,没有 Python float 缓存失效问题.
+3. CPU monkeypatch 测试断言 runtime dispatch 传递的是原 buffer 对象;
+   CUDA 测试覆盖 dtype,numel,device 契约和 fused/reference correctness.
+
+### Correctness 与稳定性 gate
+
+四个 shape 均满足 `torch.allclose(atol=0.01,rtol=0.01)`. 最大绝对误差为
+`2.4414e-4`,cosine 最低为 `0.99999976`,与 R-009 的 fp16 累加误差边界一致.
+
+稳定性使用 9 轮 x 31 paired sample,相邻样本交替
+`reference -> fused` / `fused -> reference`,每个 event sample 连续执行 10 次.
+Promotion gate 要求至少 7/9 轮胜出且相对 gap 不低于 3%:
+
+| shape | before reference/fused | after reference/fused | after latency reduction | round wins |
+| --- | ---: | ---: | ---: | ---: |
+| seq128 noncausal | `0.169174/0.224461 ms` | `0.196710/0.164234 ms` | `16.51%` | fused `9:0` |
+| seq128 causal | `0.175718/0.221043 ms` | `0.195008/0.165661 ms` | `15.05%` | fused `9:0` |
+| seq1024 noncausal | `0.178656/0.226509 ms` | `0.176435/0.162474 ms` | `7.91%` | fused `9:0` |
+| seq1024 causal | `0.176128/0.222714 ms` | `0.197427/0.169517 ms` | `14.14%` | fused `9:0` |
+
+同一 fused callable 的 before -> after 中位延迟下降 `23.89-28.27%`. Reference
+绝对延迟在两阶段间有系统抖动,所以性能 promotion 只使用各阶段内部交错 paired
+结果;before/after 绝对差仅用于验证同步移除的量级.
+
+### Profiler 归因
+
+修改前 10 次 fused forward 的 torch.profiler 记录 `aten::item` 和
+`aten::_local_scalar_dense` 各 20 次,`cudaStreamSynchronize` 和
+`cudaMemcpyAsync` 各 20 次;`main_kernel` 共 10 次,device time 合计约
+`25.032 us`. 修改后四类标量回读/同步事件均为 0,`main_kernel` 仍为 10 次,
+device time 合计约 `26.584 us`. Kernel body 没有变快,收益来自 runtime 同步消失.
+
+Nsight Systems 的独立 20-call measured range 给出同一结论: 修改前 40 次
+DtoH,40 次 `cudaStreamSynchronize`,20 次 `main_kernel`;修改后 DtoH 和
+`cudaStreamSynchronize` 均为 0,仍有 20 次 `main_kernel`. 修改后 trace 只保留
+测量边界的一次 `cudaDeviceSynchronize`,不属于每次 forward 的 hot path.
+
+NCU permission probe 返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 achieved occupancy,L2 hit
+rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
+
+### 路由边界
+
+- 已验证 contract 下,显式 `preferred_kernel="auto"|"tilelang"` 可以选择 fused
+  路径,且四个 shape 都通过稳定性门槛.
+- 构造器默认仍保留 `preferred_kernel="reference"`. 当前证据只覆盖单个 SM89,
+  模型侧 self-attention 和固定量化语义,不能泛化到其他 SM,动态 mask/shape 或
+  serving 级 KV cache.
+- XQT 仍不拥有 page table,KV block pool,cache eviction,continuous batching 或
+  serving scheduler;本记录只证明模型侧 KV-int8 attention kernel/runtime 接线.
+
+### 验证落点
+
+- [KV-int8 fused kernel](../../../xqt/operator_opt/kernels/tilelang/kv_int8_attention.py)
+- [runtime 接线](../../../xqt/runtime/modules/kv_attention.py)
+- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_scale_tensor.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-scale-tensor/)
+
+## R-020: SM89 KV-int8 quantize-layout and projection-I/O fusion
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `KvScaleAttention` + `tilelang_kv_int8_quantize_layout_kernel` + `tilelang_kv_int8_fused_attention_projection_io` |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`), CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| contract | contiguous FP16 Q/K/V projection `[B,S,H*D]`,INT8 K/V `[B,H,S,D]`,device-resident FP32 scale,FP16 BSI output |
+| shapes | `batch=2`, `heads=4`, `head_dim=32`, `seq=128/1024`, causal/noncausal |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-quant-layout/` |
+
+R-019 已消除 K/V scale 的 `.item()` DtoH 同步,但 fused attention 前仍由
+PyTorch eager 分别对 K 和 V 执行 `div -> round -> clamp -> int8 cast`,再各做
+一次 BSI -> BHSD `contiguous` layout copy. 初始 Nsight Systems 的 20-call
+measured range 共记录 340 个 GPU kernel,即每次 full-module forward 17 个
+launch. 第一阶段把 K/V quantize + layout 融为一个 kernel 后降到 8 launch;
+第二阶段继续让 attention 直接消费 Q projection BSI 并输出 BSI,删除剩余的
+Q/output layout copy,最终降到 6 launch. 两阶段都针对细粒度
+launch/materialization 开销,不改变 K/V dequant + online softmax mainloop.
+
+### 实现
+
+1. 新增双输出 TileLang kernel. 一个扁平线程映射同时读取连续 FP16 K/V
+   projection,执行 per-tensor static INT8 量化,并直接写入 BHSD INT8 K/V.
+   除法保持 PyTorch FP16 wrapped-scalar 语义,再提升到 FP32 执行 `round`,因此
+   `qmax=63/127` 的量化码与原 eager 路径逐元素 bitwise equal.
+2. Attention builder 新增编译期 `projection_io` 变体. Q tile 直接从
+   `[B,S,H*D]` 的对应 head slice 搬入 shared,attention accumulator 直接写回
+   同一 BSI layout. 旧 BHSD 入口保留为同层 benchmark baseline.
+3. `KvScaleAttention.forward()` 只在 fallback 前物化 Q BHSD. TileLang 成功
+   路径执行 quantize-layout + projection-I/O attention 两个 kernel,然后把 BSI
+   输出直接交给 `out_proj`. Report 同时保留 `selected_kernel` 和有序
+   `selected_kernels`.
+4. `fused_quant_block_size` 显式进入构造器和 kernel cache key. 对 128,256,512
+   threads 做同一 full-module sweep 后保留统一 256-thread 默认;没有增加 shape
+   heuristic.
+
+### Correctness 与稳定性 gate
+
+独立 quantize-layout 测试覆盖 `seq=100` 和 `qmax=63/127`,K/V INT8 code 均与
+eager 逐元素一致. Projection-I/O attention 在 `seq=100` 的 causal/noncausal
+输入上与旧 BHSD kernel + output layout copy bitwise equal. 128/256/512-thread
+layout-copy 候选和最终 projection-I/O 候选也都与 `eager quant + fused
+attention` full-module 输出 bitwise equal. 相对 torch SDPA reference,四个 shape
+全部满足 `torch.allclose(atol=0.01,rtol=0.01)`,最大绝对误差不超过
+`2.4414e-4`,cosine 最低为 `0.99999988`.
+
+稳定性使用 9 轮 x 31 rotating paired sample,每个 event sample 连续执行 10
+次. Promotion gate 要求至少 7/9 轮胜出且相对 gap 不低于 3%:
+
+| shape | eager | split TL | layout-copy b256 | projection-I/O | vs layout-copy | vs eager | vs split |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| seq128 noncausal | `0.153600 ms` | `0.113248 ms` | `0.086835 ms` | `0.078544 ms` | `9.55%`, `9:0` | `48.86%`, `9:0` | `30.64%`, `9:0` |
+| seq128 causal | `0.158106 ms` | `0.114774 ms` | `0.087962 ms` | `0.078925 ms` | `10.27%`, `9:0` | `50.08%`, `9:0` | `31.23%`, `9:0` |
+| seq1024 noncausal | `0.157712 ms` | `0.113869 ms` | `0.088141 ms` | `0.078790 ms` | `10.61%`, `9:0` | `50.04%`, `9:0` | `30.81%`, `9:0` |
+| seq1024 causal | `0.157789 ms` | `0.116429 ms` | `0.088749 ms` | `0.080282 ms` | `9.54%`, `9:0` | `49.12%`, `9:0` | `31.05%`, `9:0` |
+
+128/512-thread layout-copy 变体相对 256-thread 的差距都低于 3%
+knob-promotion gate,且 round wins 不满足统一晋级条件. Projection-I/O 则在四个
+shape 上都以 `9:0` 和 `9.54-10.61%` 稳定击败对应 256-thread layout-copy
+baseline. 因此最终 runtime 选择 projection-I/O + 256-thread quantize-layout;
+这仍只是当前 SM89 验证结论,不是跨 SM 最优声明.
+
+### Profiler 归因
+
+`seq128 noncausal` 的 `torch.profiler` 对 10 次 full-module call 记录:
+
+- eager quant: `aten::div`, `aten::round`, `aten::clamp`, `aten::_to_copy` 各
+  20 次,`aten::contiguous` 40 次,CUDA launch API 合计 170 次.
+- layout-copy b256: 上述四类量化 op 均为 0,`aten::contiguous` 为 20 次,
+  quantize-layout 和 attention 各 10 次,CUDA launch API 合计 80 次.
+- projection-I/O b256: `aten::contiguous` 降为 0,quantize-layout 和 attention
+  各 10 次,CUDA launch API 合计 60 次.
+
+同一 `seq128 noncausal` workload 的独立 20-call Nsight Systems measured range
+给出完整 progression:
+
+- eager quant: 340 个 GPU launch,即 `17/call`.
+- layout-copy b256: 160 个 GPU launch,即 `8/call`.
+- projection-I/O b256: 120 个 GPU launch,即 `6/call`.
+
+最终每次只保留 4 个 projection/output CUTLASS GEMM,1 个 quantize-layout kernel
+和 1 个 attention kernel. Layout-copy baseline 的 quantize/attention 分别为
+`1.132/2.819 us/call`;projection-I/O 为 `1.156/3.031 us/call`. 新 attention
+mainloop 因 strided BSI slice 略慢,但删除两次 copy 和 launch 后 full-module 仍
+稳定更快. 因此 profiler 归因是 intermediate materialization/launch 消失,不是
+attention mainloop 算术吞吐提升.
+
+NCU permission probe 仍返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 achieved occupancy,L2 hit
+rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
+
+### 路由边界
+
+- Promotion 仅覆盖 RTX 4070 Ti SUPER `sm_89`,FP16 连续 BSI projection,
+  per-tensor static INT8 scale 和上述四个 shape. 其他 dtype,layout,SM,动态 mask
+  或 shape 仍需独立验证.
+- 构造器默认仍为 `preferred_kernel="reference"`. Opt-in TileLang 路径失败时
+  回退到原 eager quant/dequant + torch SDPA,并记录 `fallback_reason`.
+- 这仍是模型侧 self-attention 实体. XQT 不拥有 page table,KV block pool,
+  cache eviction,continuous batching 或 serving scheduler.
+
+### 验证落点
+
+- [quantize-layout and attention kernels](../../../xqt/operator_opt/kernels/tilelang/kv_int8_attention.py)
+- [runtime pipeline](../../../xqt/runtime/modules/kv_attention.py)
+- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_quant_layout.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-quant-layout/)
+
+## R-021: SM89 KV-int8 packed QKV projection integration
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `KvScaleAttention` + `tilelang_kv_int8_packed_qkv_quantize_layout` + `tilelang_kv_int8_fused_attention_packed_qkv_io` |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`), CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| contract | contiguous FP16 packed QKV `[B,S,3*H*D]`,INT8 K/V `[B,H,S,D]`,device-resident FP32 scale,FP16 BSI output |
+| shapes | `batch=2`, `dim=128`, `heads=4`, `head_dim=32`, `seq=128/1024`, causal/noncausal |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-packed-qkv/` |
+
+R-020 已把 full-module forward 从 17 launch 经 quantize-layout 和
+projection-I/O 两阶段降到 6 launch,但 Q/K/V 仍由三个独立 projection GEMM
+产生. 本轮只合并 projection 参数和 GEMM,不改变 K/V 量化语义或 attention
+online-softmax mainloop. 目标流水线为:
+
+```text
+1 x packed QKV GEMM
+1 x packed-QKV K/V quantize-layout
+1 x packed-QKV attention
+1 x output projection GEMM
+= 4 launch/call
+```
+
+### 实现
+
+1. `KvScaleAttention` 删除 `q_proj/k_proj/v_proj`,只保留
+   `qkv = nn.Linear(dim,3 * inner_dim,bias=qkv_bias)`. Reference/fallback 从同一
+   packed 输出切分 Q/K/V view;TileLang fastpath 直接消费连续 packed tensor.
+   `state_dict` 只有 `qkv.weight[/bias]`,没有双参数源或隐式权重缓存. 这是 XQT
+   v0.x 的显式破坏性变更,旧三投影 key 不做兼容迁移.
+2. Packed quantize-layout kernel 按固定 offset 读取 K/V thirds,一次 launch 写出
+   两个 INT8 BHSD tensor. Packed attention kernel 直接从第一个 third 按 head
+   slice 读取 Q,并输出 BSI,不物化 `torch.split()` 产生的非连续 view.
+3. Report 的 `projection_mode="packed_qkv"`,最终 `selected_kernel` 和有序
+   `selected_kernels` 指向 packed quantize-layout + packed attention. Fallback
+   和 reference 仍复用同一次 packed projection.
+4. KV-scale calibration 修复 fused `qkv` 同一路径 K/V hook 覆盖问题,分别观察
+   packed 输出的第二和第三等宽区间. `qkv_bias=False/True` 和单一 state-dict
+   参数源均有测试覆盖.
+5. 公平 benchmark 保留 R-020 的历史候选语义:从 `qkv.weight/bias` 的三个 slice
+   手动执行三次 `F.linear`,因此 eager/split/layout-copy/projection-I/O 仍是三
+   projection baseline;只有 `packed_qkv_b256` 执行正式单 projection runtime.
+
+### Correctness 与稳定性 gate
+
+四个 shape 上,packed QKV projection 与三个 sliced `F.linear` 拼接逐元素
+bitwise equal,`max_abs=0`. Packed K/V quantize-layout 在 `qmax=63/127` 下与
+eager code bitwise equal;packed attention 在 causal/noncausal `seq=100` 下与
+projection-I/O attention bitwise equal. 所有 optimized full-module 输出均与
+同轮 eager candidate bitwise equal,并通过 torch SDPA reference
+`torch.allclose(atol=0.01,rtol=0.01)`.
+
+稳定性使用 9 轮 x 31 rotating paired sample,每个 event sample 连续执行 10
+次. Promotion gate 要求至少 7/9 轮胜出且相对 gap 不低于 3%:
+
+| shape | projection-I/O | packed QKV | latency reduction | round wins |
+| --- | ---: | ---: | ---: | ---: |
+| seq128 noncausal | `0.067440 ms` | `0.057446 ms` | `14.82%` | `9:0` |
+| seq128 causal | `0.068016 ms` | `0.059494 ms` | `12.53%` | `9:0` |
+| seq1024 noncausal | `0.069901 ms` | `0.061731 ms` | `11.69%` | `9:0` |
+| seq1024 causal | `0.068506 ms` | `0.061862 ms` | `9.70%` | `9:0` |
+
+四个 shape 都满足 promotion gate. R-020 和本轮 absolute latency 来自不同
+paired round,只在各自同轮候选内做性能结论,不做跨轮绝对值相减.
+
+### Profiler 归因
+
+`seq128 noncausal` 的 `torch.profiler` 对 10 次 full-module call 记录:
+
+- projection-I/O: 40 次 GEMM,10 次 quantize-layout,10 次 attention,合计 60 次
+  `cuLaunchKernel`.
+- packed QKV: 20 次 GEMM,10 次 packed quantize-layout,10 次 packed attention,
+  合计 40 次 `cuLaunchKernel`.
+
+独立 20-call Nsight Systems measured range 记录 projection-I/O 120 个 GPU
+launch (`6/call`),packed QKV 80 个 (`4/call`). Projection-I/O 的 80 个 GEMM
+实例对应每次 Q/K/V/output 四个 GEMM;packed 的两类 GEMM 各 20 个,对应每次
+packed QKV/output 两个 GEMM. Quantize-layout 和 attention 都保持每次一个
+launch.
+
+Nsight Systems 汇总的 target-kernel time 从约 `12.358 us/call` 降到
+`8.719 us/call`. Quantize-layout 约为 `1.155 -> 1.125 us/call`,attention 约为
+`2.959 -> 2.910 us/call`,基本不变;差异来自三个窄 projection GEMM 被一个宽
+projection GEMM 替代,并删除两次 launch/framework dispatch. 因此本轮归因是
+projection/runtime integration,不是 attention mainloop 吞吐提升.
+
+NCU permission probe 返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 achieved occupancy,L2 hit
+rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
+
+### 路由边界
+
+- Promotion 仅覆盖 RTX 4070 Ti SUPER `sm_89`,FP16 packed QKV,per-tensor
+  static INT8 K/V scale,默认无 QKV bias 的 benchmark shape. Bias true/false 的
+  参数与 reference 语义已测试,但 bias=true 性能未单独测量.
+- 构造器默认仍为 `preferred_kernel="reference"`. Opt-in
+  `preferred_kernel="auto"|"tilelang"` 才尝试 packed fastpath;CUDA,dtype,
+  dropout,head-dim,layout 或 TileLang 不满足契约时显式回退并记录原因.
+- 其他 SM,dtype,layout,动态 mask/shape 需要独立 benchmark 和 profiler.
+- 这仍是模型侧 self-attention 实体. XQT 不拥有 page table,KV block pool,
+  cache eviction,continuous batching 或 serving scheduler.
+
+### 验证落点
+
+- [packed quantize-layout and attention kernels](../../../xqt/operator_opt/kernels/tilelang/kv_int8_attention.py)
+- [runtime pipeline](../../../xqt/runtime/modules/kv_attention.py)
+- [KV-scale calibration](../../../xqt/quant/quantizers/kv_scale.py)
+- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [calibration tests](../../../tests/xqt/quant/test_kv_scale.py)
+- [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_quant_layout.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-packed-qkv/)
+
+## R-022: SM89 KV-int8 packed full-forward CUDA Graph
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `KvScaleAttention` packed TileLang full forward + shared CUDA Graph runtime helper |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`), CUDA 13.0, torch 2.12.1+cu130, TileLang 0.1.12 |
+| contract | FP16 BSI input/output,1 packed QKV GEMM,INT8 K/V BHSD,device-resident FP32 scale,fixed graph signature |
+| shapes | `batch=2`, `dim=128`, `heads=4`, `head_dim=32`, `seq=128/1024`, causal/noncausal |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-packed-graph/` |
+
+R-021 已把每次 full-module call 收敛为 4 个 GPU kernel,target-kernel active
+time 约 `8.719 us/call`,但模块 steady-state 仍约 `55-62 us`. 同层证据说明瓶颈
+已从 kernel body 转到 Python/wrapper/driver submission. 本轮不修改 TileLang
+quantize-layout 或 attention mainloop,只 capture 完整 packed fastpath:
+
+```text
+dynamic input D2D copy
+    -> packed QKV GEMM
+    -> packed-QKV K/V quantize-layout
+    -> packed-QKV attention
+    -> output projection GEMM
+    -> graph-owned output
+```
+
+### 实现
+
+1. `KvScaleAttention` 新增 `attention_fastpath="eager"|"graph"` 和
+   `cuda_graph_warmup`. `preferred_kernel` 继续只选择
+   `reference/auto/tilelang`,不把 kernel backend 与 runtime dispatch 混为一层.
+   默认仍是 `attention_fastpath="eager"`.
+2. Graph body 覆盖 `qkv(x)` 到 `out_proj(attn)` 的完整 packed forward. Capture
+   前执行固定 warmup并同步,steady-state replay 每次只把动态 input 复制到静态
+   storage,参数,bias 和 scale buffer 都保持静态.
+3. 完整 cache key 包含 input shape/stride/dtype/device,causal,dropout,heads,
+   head_dim,qmax,quant block,attention block,实际 compute capability 以及
+   QKV/output/scale storage. `.to()` 经 `_apply()` 清空旧 device/dtype graph.
+4. 首轮原型发现完整 eligibility probe,key 构造和 report 标记会把同一 graph
+   state 的 module replay 从约 `14.21 us` 拉到 `23.75 us`. 正式实现增加经过完整
+   key 验证的 last-state 热缓存;同签名只做紧凑 contract tuple 比较和共享 helper
+   replay,诊断中完整 module 收敛到约 `15.19 us`,共享 helper 约 `14.06 us`.
+5. Capture/replay 异常都记录 `cuda_graph.state="fallback_eager"` 和具体 reason,
+   然后回到现有 eager packed TileLang fastpath;若 TileLang 自身也不可用,再回到
+   torch SDPA reference. Kernel 选择和 graph 失败原因分开报告.
+6. Report 新增 `attention_fastpath`,`selected_fastpath` 和
+   `cuda_graph.state/reason/cache_size/output_storage`. 成功 replay 返回
+   graph-owned output storage,下一次 replay 会覆盖旧 view;需要跨 replay 保留结果
+   的调用者必须 clone.
+
+### Correctness 与稳定性 gate
+
+CUDA 测试覆盖首次 `captured`,第二次 `replayed`,同签名 cache size 保持 1,
+causal 切换新建独立 entry并可切回旧 entry,`.to()` 清缓存,capture error eager
+fallback,state-dict 不包含 graph 对象,以及 graph-owned output 覆盖语义.
+
+原始输入和动态 `x + 0.25` 输入在 causal/noncausal 下都与 eager packed full
+forward bitwise equal,`max_abs=0`. 正式稳定性使用 9 轮 x 31 alternating paired
+sample,每个 CUDA event sample 连续执行 20 次. 编译,warmup,allocation 和 graph
+capture 均排除在 measured window 外. Promotion gate 要求至少 7/9 轮胜出且
+latency reduction 不低于 3%:
+
+| shape | eager packed | CUDA Graph | latency reduction | graph round wins |
+| --- | ---: | ---: | ---: | ---: |
+| seq128 noncausal | `0.054878 ms` | `0.017139 ms` | `68.77%` | `9:0` |
+| seq128 causal | `0.055448 ms` | `0.017141 ms` | `69.09%` | `9:0` |
+| seq1024 noncausal | `0.054528 ms` | `0.034099 ms` | `37.46%` | `9:0` |
+| seq1024 causal | `0.054323 ms` | `0.032307 ms` | `40.53%` | `9:0` |
+
+四个 shape 全部满足 promotion gate. 长序列收益较低是因为每次 replay 仍需复制
+完整 FP16 input;这属于 graph runtime integration 成本,不是 attention mainloop
+回退.
+
+### Profiler 归因
+
+`seq128 noncausal` 的 `torch.profiler` 对 10 次 steady-state full-module call 记录:
+
+- eager packed: `40 x cuLaunchKernel`,即 4 次直接 kernel launch/call.
+- CUDA Graph: `10 x cudaMemcpyAsync + 10 x cudaGraphLaunch`. Profiler 仍观察到
+  40 个内部 kernel event,即 graph 内保持同样 4 kernel/call,没有删除计算.
+
+独立进程 Nsight Systems 对 20 次 call 记录 eager `80 x cuLaunchKernel`,graph
+`20 x cudaMemcpyAsync + 20 x cudaGraphLaunch`. Graph D2D input copy 的 GPU 时间
+中位数约 `1.001 us/call`. 当前 trace 配置的 graph kernel summary 不显示内部
+graph node;torch.profiler 的 40 个内部 event 和 bitwise-correct output 已证明
+执行,因此不能从空 kernel summary 推断 graph 没有运行 kernel.
+
+NCU permission probe 返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 achieved occupancy,L2 hit
+rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
+
+### 路由边界
+
+- Promotion 仅覆盖 RTX 4070 Ti SUPER `sm_89`,FP16 input/output,per-tensor static
+  INT8 K/V scale,dropout 0 和上述固定签名. 其他 SM,dtype,mask,dropout 或 shape
+  需要独立 capture,benchmark 和 profiler.
+- `attention_fastpath="graph"` 是显式 opt-in. CPU,非 FP16,dropout 或 TileLang
+  不满足要求时不错误进入 graph,并保留 eager/reference fallback.
+- Graph cache 支持多个固定签名,但单 entry 使用同一静态 input/output storage.
+  当前契约是顺序 replay,不声明同一 entry 的多流并发安全性.
+- Graph output 是借用 view,不是 caller-owned allocation. 调用者若跨 replay 保存
+  输出必须 clone;这是 latency 与 ownership 的显式取舍.
+- 这仍是模型侧 self-attention 实体. XQT 不拥有 page table,KV block pool,
+  cache eviction,continuous batching 或 serving scheduler.
+
+### 验证落点
+
+- [runtime pipeline](../../../xqt/runtime/modules/kv_attention.py)
+- [shared CUDA Graph helpers](../../../xqt/operator_opt/runtime.py)
+- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_packed_graph.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-packed-graph/)
+
+## R-023: SM89 TileLang BF16 FlashAttention coverage
+
+| 项 | 值 |
+| --- | --- |
+| backend | TileLang FlashAttention-style attention |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,TileLang 0.1.12 |
+| precision | BF16 Q/K/V input and output,FP32 score/online-softmax/output accumulation |
+| shapes | small/medium/long prefill,causal prefill,non-square lower-right causal decode |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-attention-bf16/` |
+
+### 目标和实现
+
+原 TileLang attention 生产入口只接受 FP16. 本轮不改变 attention 语义,只把同一
+fixed-shape JIT kernel 扩展到 BF16,并补齐 facade,wrapper,CUDA Graph 和
+operator-stage 的 dtype contract:
+
+1. `build_tilelang_flashatt(...)` 增加显式 `input_dtype`,只接受
+   `float16/bfloat16`. Shared-memory tile,输出和 score cast 使用输入 dtype,
+   score,在线 softmax 和 output accumulator 继续使用 FP32.
+2. Kernel cache key 增加 input dtype,避免 FP16/BF16 复用错误 JIT artifact.
+   Q/K/V 必须 dtype 完全匹配;FP32 和 mixed FP16/BF16 在 JIT 前显式失败.
+3. 当前 TileLang BF16 MMA lowering 要求 `head_dim % 16 == 0`. Operator wrapper
+   首轮使用 `head_dim=8` 时生成 BF16 `mma K=8` 并被 NVCC 的 unsupported
+   configuration static assertion 拒绝. `head_dim=16/32/64` 诊断均可编译,
+   因此正式入口前置 16 对齐校验,不让 backend compiler error 泄漏为能力边界.
+4. `xqt.nn.Attention.forward()` 不再把 BF16 Q/K/V 隐式降为 FP16. FP16/BF16
+   保持原 dtype,其他输入继续沿用已有显式 FP16 TileLang 尝试和 SDPA fallback.
+5. `_TileLangAttentionWrapper` 与 `_TileLangXqtAttentionWrapper` 记录投影后实际
+   Q/K/V dtype,report 同时声明 `supported_dtypes=[float16,bfloat16]` 和
+   `bfloat16_head_dim_multiple=16`. CUDA Graph cache 原本已包含 tensor dtype,
+   无需建立第二套 graph key.
+6. Backend registry 直接复用 attention kernel metadata,避免 kernel catalog 和
+   operator report 对 dtype 支持产生两份事实源.
+
+### Correctness 和 runtime integration
+
+CUDA kernel 测试覆盖 FP16/BF16 x 方阵非因果,方阵因果和非方阵 lower-right
+causal decode. BF16 output 保持 BF16,并与同语义 SDPA reference 在
+`atol=0.02,rtol=0.02` 内一致. 额外覆盖 mixed FP16/BF16,FP32 和 BF16
+`head_dim=8` 的明确拒绝.
+
+两个 wrapper 都覆盖 FP16/BF16 full-forward CUDA Graph 首次 `captured`,第二次
+`replayed`,graph output clone ownership,以及 graph/eager TileLang 数值一致.
+Operator-stage 测试覆盖显式 TileLang,native Ada `auto` 和 graph fastpath;
+BF16 report 的实际 dtype 为 `bfloat16`,而 `auto` 仍选择 `native_sdpa`.
+
+### Tile sweep 和 paired gate
+
+正式 sweep 对 5 个 shape 各尝试 9 个 tile/thread/stage candidate,共 45 case.
+25 case 可编译且通过 correctness,最大绝对误差为 `0.00390625`;没有 compiled
+candidate 发生 correctness failure. 另外 20 case 来自 4 个在所有 shape 都稳定
+失败的 layout 组合:
+
+- `32x32/128t/2s`.
+- `32x64/128t/2s`.
+- `64x64/256t/2s`.
+- `64x128/256t/2s`.
+
+它们都在 `acc_s -> acc_s_cast` 的 TileLang layout inference 阶段冲突,不进入
+性能候选. 5 个 shape 的 sequential winner 都是默认 `64x64/128t/2s`.
+Promotion 使用 9 轮 x 31 alternating paired sample,要求至少 7/9 轮胜出且
+gap 不低于 3%. 默认候选在 small/medium/causal/decode 相对最接近 schedule
+稳定胜出;long 虽为 `9:0`,gap 仅 `2.87%`,归为 noise-equivalent. 因此不增加
+BF16 shape-specific schedule.
+
+同一 paired 方法比较默认 TileLang 与 BF16 SDPA:
+
+| shape | TileLang | BF16 SDPA | TileLang latency reduction | round wins | classification |
+| --- | ---: | ---: | ---: | ---: | --- |
+| small prefill d32 | `0.011110 ms` | `0.010256 ms` | `-8.33%` | SDPA `9:0` | stable SDPA win |
+| medium prefill d64 | `0.012850 ms` | `0.014577 ms` | `11.85%` | TileLang `9:0` | stable TileLang win |
+| long prefill d64 | `0.033971 ms` | `0.034688 ms` | `2.07%` | TileLang `9:0` | noise-equivalent |
+| causal prefill d64 | `0.013576 ms` | `0.022210 ms` | `38.87%` | TileLang `9:0` | stable TileLang win |
+| decode q1/kv1024 d64 | `0.017396 ms` | `0.030070 ms` | `42.15%` | TileLang `9:0` | stable TileLang win |
+
+### Profiler 归因
+
+每个推荐 TileLang shape 的 `torch.profiler` measured window 都记录 20 个
+`main_kernel` event. TileLang 和 SDPA 使用独立 Nsight Systems 进程,每个 shape
+各有一个 20-call NVTX range:
+
+- TileLang 每个 range 有 20 次 launch API call,即 1 个 `main_kernel/call`.
+- Noncausal SDPA 每个 range 有 20 次 launch API call,即 1 个 `flash_fwd/call`.
+- Causal prefill 和 lower-right causal decode SDPA 每个 range 有 40 次 launch API
+  call,即 `flash_fwd_splitkv + splitkv_combine` 两个 launch/call.
+- Small prefill 中 TileLang `main_kernel` 的 Nsight median 低于 SDPA
+  `flash_fwd`,但 paired 端到端 latency 仍由 SDPA 胜出. 这证明 tiny shape 不能
+  只看 kernel duration,dispatch/launch 路径同样进入 measured latency.
+- Causal/decode 的稳定收益与 TileLang 单 launch,SDPA split-KV 双 launch 的
+  topology 一致. Nsight 只作 time-distribution 解释,不替代 CUDA-event gate.
+
+NCU permission probe 返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 occupancy,L2/cache hit,
+warp stall,scheduler,roofline,tensor-pipe utilization 等 counter-derived 指标.
+
+### 路由和适用边界
+
+- 显式 `attention_fastpath="tilelang"` 和 `"graph"` 可执行 BF16;Ada
+  `attention_fastpath="auto"` 仍选择 native SDPA. Kernel-level matrix 明确包含
+  stable loss 和 noise-equivalent shape,不足以支持全局 route 切换.
+- 当前证据只覆盖 `sm_89`,固定 layout,匹配 BF16 Q/K/V,dropout 0,
+  `seq_kv >= seq_q` 和 16 对齐 head_dim. 其他 SM,mask,dropout,shape 或 dtype
+  必须独立验证.
+- 该路径是模型侧 attention operator,不包含 paged KV cache,continuous batching
+  或 serving scheduler.
+
+### 验证落点
+
+- [TileLang attention kernel](../../../xqt/operator_opt/kernels/tilelang/attention.py)
+- [MHA wrapper](../../../xqt/operator_opt/wrappers/attention.py)
+- [xqt.nn.Attention wrapper](../../../xqt/operator_opt/wrappers/xqt_attention.py)
+- [kernel CUDA tests](../../../tests/xqt/test_tilelang_attention_cuda.py)
+- [operator/runtime CUDA tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [BF16 sweep entry](../../../research/xqt-gemm/bench_sm89_tilelang_attention_bf16.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-attention-bf16/)
+
+## R-024: ConvRot/SVDQuant 推理派生权重缓存与融合 gate
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| module | `ConvRotMixedPrecisionLinear`, `SVDQuantLinear`, `SVDQuantInt8MmaLinear` |
+| 目标 | 避免每次 forward 重复 unpack/dequant,并把已存在的 SVDQuant fused kernel 接入可控 runtime fastpath |
+| 低精度契约 | ConvRot W4A4/W4A16 保持 reference dequant + `F.linear`; SVDQuant split residual 仍保持 W4 storage -> W8A8 INT8 retarget |
+| GPU | CUDA/TileLang 条件路径,当前环境未采集 GPU latency |
+
+### 基线与方法
+
+基线是原有 eager forward: ConvRot 每次调用 `dequantized_weight()`,SVDQuant
+reference 每次调用 `dequantize_residual()`,split INT8 每次执行 residual runtime
+和两个低秩 GEMM. CPU 单测使用相同输入检查数值和 cache 失效;CUDA 路径只在
+`float16`,block 对齐且 TileLang runtime 可用时尝试,不把 kernel-only 数字当成端到端
+结果.
+
+### 瓶颈与实现
+
+1. ConvRot 缓存按 device,dtype,padding mode 复用 dequantized weight,签名包含
+   packed weight/scale 的 device,shape 和 tensor version. 旋转矩阵也按 device/version
+   复用. `.to()`/`.half()`/`.cuda()` 通过 `_apply()` 清空派生 cache;编译/tracing
+   状态不写 Python cache.
+2. SVDQuant reference shell 缓存 packed residual 的 dequant view,同样按 storage
+   version 失效. `SVDQuantInt8MmaLinear` 复用现有 split residual contract,并增加
+   guarded `torch.compile` composite path;小 batch,CPU 或 compile/runtime 异常回到
+   原 eager split path.
+3. 已有 `svd_fused_dequant_gemm_low_rank_tilelang` 只通过显式 CUDA gate 接入
+   `SVDQuantLinear.enable_fusion()`. 该 gate 要求 CUDA,FP16,`M/N/K` 对齐和 TileLang
+   可用,不把直接 W4 dequant kernel 冒充 W8A8 retarget.
+4. W4 storage 和 FP8 dense fallback view 增加 storage version/device 失效,避免
+   `load_state_dict()` 或原地 scale 更新后继续使用旧派生权重.
+5. ConvRot W8A8 增加显式 `policy.fuse_norm=true` 的邻接替换,只匹配
+   `Sequential(norm, linear)` 中的一维 RMSNorm/LayerNorm. `ConvRotNormInt8Linear`
+   的 Triton 输入 kernel 在同一 row 内完成 Norm,Hadamard 和静态 INT8 activation
+   quant,并通过 `Int8MmaLinear.run_quantized_activation()` 直接进入既有 GEMM,
+   避免二次量化和中间浮点激活. rotation group 不超过 32 时使用一次 Norm
+   统计的 row-per-program 变体;更宽 hidden size 保留 tiled 变体控制寄存器和编译体积.
+   CUDA scale 校验不再在每次 forward 调用 `.item()` 同步. `rot_size<8` 不再反复
+   尝试不满足 TileLang MMA 片段约束的 groupwise kernel.
+6. Norm fusion 的实际状态写入 `execution_metadata()`:
+   `norm_fused=true` 只表示本次 forward 的 fused kernel 成功;CPU,dynamic scale,
+   小 batch 或可选 kernel 不可用时保留参考路径并记录 `fused_norm_fallback_reason`.
+
+### 结果与边界
+
+CPU correctness,cache 生命周期和 ConvRot Norm fusion 测试已通过. 当前设备上的
+`M=32` input-only CUDA event smoke 显示 `K=64`/`K=1024` fused 输入路径有收益,
+`K=256` 接近且略慢;这不是完整模型端到端证据,因此不宣称普遍 latency speedup.
+不满足 dtype,shape,device,小 batch 或可选依赖条件时仍使用原有
+reference/INT8/FP8 fallback. 派生 cache 视图按推理约定只读,原地修改 packed
+storage 或 scale 会触发重建.
+
+### 未采纳方案
+
+- 没有把 SVDQuant W4 storage 的 residual 直接改成 TileLang dequant 输出,因为那会
+  改变现有 W8A8 INT8 retarget 的数值契约.
+- 没有在无 CUDA evidence 时默认开启 fused kernel,也没有把编译成功标成真实执行;
+  metadata 记录的是实际 fused use 和 fallback reason.
+
+### 可复用规则
+
+- 静态权重派生 cache 必须覆盖 source tensor version 和 device,并在 module `_apply`
+  后失效.
+- kernel fusion 先按语义契约分 gate;storage/compute contract 不同的路径不能仅因
+  共享 packed input 就合并.
+- wrapper,whole-module 和 operator-stage 必须用同一 warmup/sync/timing 方法分别
+  benchmark;本条改动尚缺目标 GPU 的三层 latency evidence.
+
+### 验证落点
+
+- [ConvRot runtime](../../../xqt/quant/quantizers/convrot_4bit.py)
+- [ConvRot INT8 runtime](../../../xqt/quant/quantizers/convrot_int8.py)
+- [SVDQuant runtime](../../../xqt/runtime/modules/svd_composite.py)
+- [W4 storage cache](../../../xqt/runtime/modules/w4_storage_int8_mma_linear.py)
+- [FP8 fallback cache](../../../xqt/runtime/modules/fp8_mma_linear.py)
+- [runtime cache tests](../../../tests/xqt/runtime/test_composite_runtime_caches.py)
+- [ConvRot Norm fusion tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
+
+## R-025: SM89 TileLang BF16 direct Linear coverage and decode schedule
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| backend | TileLang direct dense Linear / GEMM epilogue |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,TileLang 0.1.12 |
+| precision | BF16 activation/weight/bias/output,FP32 GEMM accumulator |
+| shapes | decode `M=1/4/8`,small/medium prefill,`1024^3`,`M256,N11008,K4096` projection |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-linear-bf16/` |
+
+原 direct Linear 生产入口只接受 FP16,且 builder 要求 M/N/K 都是 block 的整数倍.
+本轮把同一 TileLang GEMM 扩展到 BF16,允许 partial M/N,并用 XQT dispatcher 和
+wrapper 同层 gate 判断 schedule 能否进入默认路径.
+
+### 实现
+
+1. `build_tilelang_gemm_kernel(...)` 增加显式 `input_dtype`,只接受
+   `float16/bfloat16`. JIT cache key 和 generated kernel name 包含 dtype,避免
+   FP16/BF16 artifact 误复用;accumulator 保持 FP32,output 保持输入 dtype.
+2. M/N store 增加边界保护,block M/N/K 必须 16 对齐;K 仍必须被 `block_k`
+   整除. Direct `linear` / `dense_linear_epilogue` 要求 activation,weight,bias 和
+   output dtype 与 MMA dtype 完全匹配,bias/activation 继续在 kernel 内融合.
+3. BF16 统一 dispatcher 默认从 `linear_marlin` 改为
+   `dense_linear_epilogue`;`linear`,`half_linear`,`linear_marlin` 保留显式 alias.
+   `linear_marlin` 不消费本轮 direct dense schedule policy.
+4. `_TileLangLinearWrapper` 在 materialization 时绑定 resolved kernel callable,
+   rank-2 Linear 跳过无意义的 flatten/restore reshape,report 记录实际 dtype 和
+   resolved schedule. 这消除了每次 forward 的 registry/runtime preflight.
+5. 新增共享 schedule resolver. 仅在实际或显式 `sm_89`,BF16,flattened
+   `M<=4` 且调用方未覆盖对应 block 时,默认选择
+   `16x64x32/128 threads/2 stages`;其他 shape 继续使用 `64x64x64/128t/2s`.
+   `gemm_with_precision(engine="auto")` 和 wrapper `linear_runtime="auto"` 均不改.
+
+### Correctness 和测量方法
+
+数值 reference 是 FP32 Linear 和 activation 完成后只在输出处 cast 一次 BF16,
+不是 Torch BF16. 正式容差为 `atol=0.5,rtol=0.03`. 7 个推荐候选全部通过;
+最大 `mean_abs=0.0002595111`,最大 `max_abs=1.0`. Projection shape 上 TileLang
+对 FP32-cast reference 的 `mean_abs=0.0002595111`,Torch BF16 为
+`0.075785473`,因此后者只作为性能 baseline.
+
+每个 shape sweep 10 个 TileLang candidate. Promotion 使用 9 轮 x 31
+alternating paired sample,要求至少 7/9 轮胜出且 relative gap 不低于 3%.
+编译,首次调用,allocation 和一次性 weight layout 准备均排除在 steady-state
+window 外.
+
+### Schedule 和 dispatcher gate
+
+| shape | recommended | 相对旧 TileLang 默认 | 相对真实 XQT Torch dispatcher |
+| --- | --- | --- | --- |
+| `M1,N4096,K4096` | `16x64x32/128t/2s` | `9:0`,gap `84.85%` | `9:0`,gap `6.62%` |
+| `M4,N4096,K4096,bias` | `16x64x32/128t/2s` | `9:0`,gap `81.53%` | `9:0`,gap `34.43%` |
+| `M8,N11008,K4096,SiLU` | `64x64x64/128t/2s` | 保留默认 | `9:0`,gap `6.25%` |
+| `M64,N1024,K1024,bias` | `64x64x64/128t/2s` | 默认稳定胜 1-stage | `9:0`,gap `63.84%` |
+| `M256,N4096,K4096,GELU` | `64x64x64/128t/2s` | 最近候选 noise-equivalent | XQT 胜,gap `0.75%`,noise-equivalent |
+| `M1024,N1024,K1024` | `64x128x32/256t/2s` | `9:0`,gap `10.88%` | XQT `9:0`,gap `6.03%` |
+| `M256,N11008,K4096,bias` | `64x64x64/128t/2s` | 保留默认 | XQT 胜,gap `1.44%`,noise-equivalent |
+
+只有 `M=1/4` 同时具备改变旧 schedule 的稳定证据和 direct XQT dispatcher
+优势,因此只进入 `M<=4` preset. `1024^3` winner 虽优于旧 TileLang 默认,但同
+shape 仍输给真实 XQT Torch dispatcher,不建立全局 square heuristic.
+
+### Wrapper 和 profiler 归因
+
+Wrapper 对等 native `nn.Linear` 的 paired gate 中,`M=1` 以 `8:1` 和 `3.35%`
+gap 稳定胜出;`M=4/8` 的 `0.93%/2.36%` 低于 3% 阈值;M64,medium,square 和
+projection 都由 native 稳定胜出. 因此保留 Ada `linear_runtime="auto"` 的 native
+route,显式 TileLang 才消费本轮 schedule.
+
+独立进程 Nsight Systems 对每个 NVTX range 记录 20 次 call. Direct 与 wrapper
+运行相同 generated kernel: M1 kernel median 为 `16.952/17.139 us`,M4 为
+`17.504/18.242 us`;对应 launch API median 约为 `5.485/5.925 us` 和
+`5.354/5.910 us`. 这说明 wrapper 修复后 kernel body 已对齐,剩余差异位于
+kernel 外的 dispatch/launch 路径. 预转置 Triton 在 M1/M4 的 trace kernel
+median 为 `112.788/118.003 us`. 同轮 artifact 中 BF16 SiLU 因
+`tl.sigmoid` 接收 BF16 而 codegen 失败;GELU 可执行,但 reduction 后过早 cast
+BF16 使 medium shape 的 `mean_abs=0.0357372`. R-026 修复并重新验证该 epilogue.
+
+CUDA Graph probe 相对 eager direct TileLang 在 M1/M4/M8 分别慢约
+`6.9%/20.8%/2.2%`,未采纳. NCU permission probe 返回
+`ERR_NVGPUCTRPERM`,状态为 `counter_permission_denied`;本轮没有采集或推断
+occupancy,L2/cache hit,warp stall,scheduler,roofline,register 或 tensor-pipe
+指标.
+
+### 路由和适用边界
+
+- Promotion 仅覆盖 `sm_89`,BF16,direct dense Linear,flattened `M<=4`,匹配
+  input/weight/bias/output dtype 和 K divisible by `block_k`.
+- Partial M/N 可执行,K tail 不可执行. FP16,其他 SM 和未测 shape 保留旧默认或
+  调用方显式 schedule,不能从当前结果外推.
+- 显式 block 设置逐项优先于 preset. Wrapper report 保存实际 schedule 和
+  preset 名称,便于后续 artifact 对照.
+- Nsight Systems 只用于解释 time distribution,CUDA-event paired gate 才是
+  promotion 依据.
+
+### 验证落点
+
+- [TileLang GEMM builder](../../../xqt/operator_opt/kernels/tilelang/gemm_builder.py)
+- [TileLang Linear kernel](../../../xqt/operator_opt/kernels/tilelang/linear.py)
+- [unified GEMM dispatcher](../../../xqt/operator_opt/backends/gemm_precision.py)
+- [Linear wrapper](../../../xqt/operator_opt/wrappers/linear.py)
+- [kernel CUDA tests](../../../tests/xqt/test_tilelang_half_ops_cuda.py)
+- [operator/runtime tests](../../../tests/xqt/test_operator_tilelang_linear.py)
+- [benchmark and profiler entry](../../../research/xqt-gemm/bench_sm89_tilelang_linear_bf16.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-linear-bf16/)
+
+## R-026: SM89 Triton BF16 fused epilogue FP32 codegen and runtime boundary
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| backend | Triton dense BF16 GEMM |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,Triton 3.7.1 |
+| precision | BF16 activation/weight/bias/output,FP32 reduction 和 epilogue |
+| shapes | `M8,N11008,K4096,SiLU`;`M256,N4096,K4096,GELU`;`M64,N1024,K1024,bias` control |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-epilogue/` |
+
+R-025 暴露两类问题: BF16 SiLU 在 `tl.sigmoid` 处编译失败;GELU 和无 activation
+虽然可执行,但 `_gemm_kernel` 在 bias/activation 前已经把 FP32 accumulator cast
+到 BF16,不符合 XQT 的 FP32 epilogue 后单次 output cast reference.
+
+### 实现
+
+1. `_gemm_kernel` reduction 后统一保留 FP32 `c`;bias load 显式提升为 FP32.
+2. ReLU/GELU/SiLU 都在 FP32 epilogue 中执行,只在 `tl.store` 处显式转换为
+   `c_ptr.dtype.element_ty`. `ACC_TYPE` 仍控制 reduction dtype,没有改变公开参数.
+3. 新增 BF16+bias GELU/SiLU CUDA regression,同时检查 output dtype,
+   `max_abs`,`mean_abs` 和 `atol=0.5,rtol=0.03` allclose;FP16 GELU/SiLU 同步回归.
+4. `gemm_with_precision(engine="auto")`,TileLang schedule 和 Linear auto route
+   均保持不变. 本轮没有给无状态 dispatcher 增加隐式 weight cache.
+
+### Correctness
+
+数值 reference 是 FP32 Linear,bias 和 activation 完成后只 cast 一次 BF16.
+
+| shape | 修改前 | 修改后 max_abs | 修改后 mean_abs |
+| --- | --- | ---: | ---: |
+| `M8,N11008,K4096,SiLU` | `tl.sigmoid` BF16 codegen failure | `0.5` | `0.0000882435` |
+| `M256,N4096,K4096,GELU` | `max_abs=2.0`,`mean_abs=0.0357372` | `1.0` | `0.0001298454` |
+| `M64,N1024,K1024,bias` | `max_abs=1.0`,`mean_abs=0.0352439` | `0.25` | `0.0000089691` |
+
+三个 direct Triton case,真实 XQT Triton dispatcher,推荐 TileLang,Torch
+`F.linear` 和真实 XQT Torch dispatcher 全部通过同一容差. Triton direct 与
+TileLang 在三个 shape 上的输出误差基本一致,符合两者都采用 FP32 accumulator
+和 FP32 epilogue 的预期.
+
+### 测量方法和 paired gate
+
+所有 workload 使用相同输入,10 次 warmup,CUDA event end synchronization 和
+相同 shape-specific batched iteration. JIT,首次调用,input allocation 和 direct
+Triton 的一次性 K,N pretranspose 排除在 steady-state window 外. Promotion gate
+使用 9 轮 x 31 alternating paired sample,要求至少 7/9 轮胜出且 gap 不低于 3%.
+
+| shape | direct Triton | TileLang | Torch F.linear | XQT Torch | XQT Triton N,K |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `M8,N11008,K4096,SiLU` | `0.221757 ms` | `0.170926 ms` | `0.171213 ms` | `0.174264 ms` | `1.125171 ms` |
+| `M256,N4096,K4096,GELU` | `0.121094 ms` | `0.117613 ms` | `0.108877 ms` | `0.116467 ms` | `0.421370 ms` |
+| `M64,N1024,K1024,bias` | `0.030000 ms` | `0.014563 ms` | `0.009882 ms` | `0.022241 ms` | `0.047331 ms` |
+
+表中数字是顺序 sweep median,只用于量级展示. 路由判定使用 paired gate:
+
+- SiLU direct Triton 相对 TileLang/Torch F.linear/XQT Torch 分别稳定慢
+  `32.85%/26.70%/24.40%`,全部 `0:9`.
+- GELU direct Triton 相对 TileLang 的 gap 为 `2.27%`,低于门槛并归为
+  noise-equivalent;Torch F.linear 和 XQT Torch 分别稳定快 `10.67%/3.85%`.
+- Control direct Triton 相对 TileLang/Torch F.linear/XQT Torch 分别稳定慢
+  `112.00%/191.94%/32.38%`.
+- 预转置 direct Triton 相对真实 N,K Triton dispatcher 在三个 shape 均 `9:0`,
+  dispatcher 的 paired latency 分别高 `407.98%/249.27%/60.80%`.
+- 真实 XQT Torch dispatcher 相对真实 XQT Triton dispatcher 在三个 shape 均
+  `9:0`,gap 为 `534.23%/261.26%/114.59%`.
+
+因此本轮只修复 codegen 和数值契约,不把 Triton 提升为这些 shape 的默认性能
+winner,也不改变任何 auto route.
+
+### Profiler 归因
+
+torch.profiler 对每个 workload 记录 20 次 steady-state call. 独立进程 Nsight
+Systems 的激活 shape NVTX range 中,direct Triton 和 TileLang 各有 20 次单 kernel
+launch;Torch F.linear 为 GEMM 和单独 activation kernel. 关键 kernel median 为:
+
+| shape | direct Triton | TileLang | Torch GEMM + activation | XQT Triton copy + GEMM |
+| --- | ---: | ---: | ---: | ---: |
+| SiLU | `228.576 us` | `160.388 us` | `166.725 + 2.681 us` | `933.486 + 231.220 us` |
+| GELU | `120.551 us` | `118.473 us` | `108.346 + 3.318 us` | `331.203 + 120.701 us` |
+| control | `30.912 us` | `8.313 us` | `7.272 us` | `17.803 + 30.950 us` |
+
+真实 Triton N,K dispatcher 每次执行 `b.t().contiguous()`. SiLU torch.profiler
+中 20 次 direct-copy kernel 共约 `19.93 ms`,20 次 `_gemm_kernel` 共约
+`4.40 ms`;Nsight median 也显示 copy 为 `933.486 us/call`,高于 GEMM 的
+`231.220 us/call`. 这是明确的 runtime integration 成本,不是 epilogue kernel
+codegen 回归.
+
+NCU probe 仍返回 `ERR_NVGPUCTRPERM`,状态为 `counter_permission_denied`.
+本轮没有采集或推断 occupancy,L2/cache hit,warp stall,scheduler,roofline,
+register pressure 或 tensor-pipe utilization.
+
+### 路由和后续边界
+
+- 无状态 `gemm_with_precision(...)` 不拥有静态 weight 生命周期,不能在函数内部
+  建立无失效协议的隐藏 K,N cache. 仓库现有 selector 也明确记录该边界.
+- 若后续为 Triton Linear/FeedForward materialization 增加 pretranspose,必须在
+  stateful module 中缓存,覆盖 source tensor version,device/dtype 和 `_apply()`
+  失效,并分别验证 wrapper,whole-module 和 operator-stage.
+- 即使排除 layout copy,direct Triton 在当前 shape 也没有形成默认 route 证据.
+  后续 schedule sweep 必须作为独立 kernel-tuning 里程碑,不能把 cache 收益写成
+  kernel winner.
+- 当前证据只覆盖 `sm_89`,BF16 和三个声明 shape. 其他 SM,dtype,shape 或 layout
+  需要独立 correctness,paired gate 和 profiler.
+
+### 验证落点
+
+- [Triton GEMM kernel](../../../xqt/operator_opt/kernels/triton/gemm.py)
+- [unified GEMM dispatcher](../../../xqt/operator_opt/backends/gemm_precision.py)
+- [CUDA regression tests](../../../tests/operator_opt/test_gemm_precision.py)
+- [benchmark and profiler entry](../../../research/xqt-gemm/bench_sm89_triton_bf16_epilogue.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-epilogue/)
+
+## R-027: SM89 Triton BF16 exact-signature schedule resolver
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| backend | Triton dense BF16 GEMM |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,Triton 3.7.1 |
+| precision | BF16 activation/weight/bias/output,FP32 reduction 和 epilogue |
+| sweep | 5 shape x 22 个 tile/group/warp/stage 候选 |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-schedule/` |
+
+R-026 修复数值契约后,固定 `128x128x32,group_m=8,4 warps,3 stages`
+仍在 decode 和 small prefill 明显浪费 tile. 本轮只优化 K,N 已经预转置的 direct
+kernel schedule,并把真实 N,K dispatcher 的 per-call layout materialization 保持为
+独立 integration 对照.
+
+### 实现
+
+1. 新增 `TritonGemmSchedule` 和 `resolve_triton_bf16_gemm_schedule(...)`.
+   resolver 只在真实或显式 `sm_89` 和五个受测
+   `(M,N,K,has_bias,activation)` exact signature 上选择 preset.
+2. 五个 preset 分别为:
+   - `M1,N4096,K4096,no bias`: `16x64x64,group_m=4,4w,3s`.
+   - `M4,N4096,K4096,bias`: `16x64x64,group_m=4,4w,3s`.
+   - `M8,N11008,K4096,bias+SiLU`: `32x128x32,group_m=4,4w,3s`.
+   - `M64,N1024,K1024,bias`: `16x64x32,group_m=4,4w,3s`.
+   - `M256,N4096,K4096,bias+GELU`: `64x64x32,group_m=8,4w,3s`.
+3. `block_m/block_n/block_k/group_m/num_warps/num_stages` 改为可选参数,
+   调用方显式值逐字段覆盖 preset. 其他 shape,其他 SM 和 FP16 保持旧默认.
+4. 实际 CUDA device -> SM 查询使用 16-entry bounded cache,纯 schedule resolver
+   使用 256-entry bounded cache. 二者只缓存不可变标量/调度对象,不缓存 tensor 或
+   weight,不承担模型 artifact 失效协议.
+5. `gemm_with_precision(...)` 已经原样转发 Triton 调度参数,本轮只补 regression,
+   不改变 selector 或 `engine="auto"` 路由.
+
+### Correctness
+
+数值 reference 是 FP32 Linear,bias 和 activation 完成后只 cast 一次 BF16.
+22 个候选和实际 resolver workload 全部通过 `atol=0.5,rtol=0.03`.
+
+| shape | max_abs | mean_abs |
+| --- | ---: | ---: |
+| `M1,N4096,K4096,no bias` | `0.25` | `0.0002224334` |
+| `M4,N4096,K4096,bias` | `0.5` | `0.0003087092` |
+| `M8,N11008,K4096,SiLU` | `1.0` | `0.0000836799` |
+| `M64,N1024,K1024,bias` | `0.25` | `0.0000168676` |
+| `M256,N4096,K4096,GELU` | `1.0` | `0.0001300724` |
+
+CUDA regression 直接调用五个 no-override exact signature. CPU regression 覆盖
+exact preset,非 SM89/default fallback,bias/activation mismatch,逐字段显式覆盖,
+unified dispatcher forwarding,以及 CPU tensor 不查询 CUDA capability.
+
+### Paired gate
+
+方法仍为 10 次 warmup,shape-specific batched iteration,CUDA event end
+synchronization 和 9 轮 x 31 alternating paired sample. Promotion 要求至少 7/9
+轮胜出且 gap 不低于 3%. 实际 resolver 相对旧默认五个 shape 全部 `9:0`:
+
+| shape | resolver vs old default | vs TileLang | vs Torch F.linear | vs XQT Torch |
+| --- | ---: | --- | --- | --- |
+| `M1` | `541.80%`,9:0 | resolver `94.36%`,9:0 | resolver `245.71%`,9:0 | resolver `238.81%`,9:0 |
+| `M4` | `535.56%`,9:0 | resolver `75.29%`,9:0 | resolver `13.24%`,9:0 | resolver `32.15%`,9:0 |
+| `M8 SiLU` | `39.39%`,9:0 | resolver `7.81%`,9:0 | resolver `10.45%`,9:0 | resolver `13.37%`,9:0 |
+| `M64` | `63.05%`,9:0 | TileLang `30.35%`,9:0 | Torch `78.02%`,9:0 | resolver `15.86%`,9:0 |
+| `M256 GELU` | `5.31%`,9:0 | resolver `1.79%`,noise | Torch `5.69%`,9:0 | resolver `0.48%`,noise |
+
+实际 resolver 与当轮 sweep recommendation 在五个 shape 的 paired gap 全部低于
+3%. M1/M4 的候选集 winner 在最终 sweep 中稳定;M8/M64/M256 有多个
+noise-equivalent 候选. 因此后三个 preset 是受测平台上的代表 schedule,不是唯一
+全局最优声明.
+
+### Profiler 归因
+
+独立进程 Nsight Systems 的每个 NVTX range 配置 20 次 steady-state call. 个别
+filtered group 显示 21 个关联实例,因此只使用 median,不从该计数推断 launch 数.
+
+| shape | resolved Triton | old default | TileLang | Torch GEMM + activation | XQT Triton copy + GEMM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `M1` | `15.448 us` | `111.576 us` | `33.271 us` | `57.607 us` | `333.790 + 40.292 us` |
+| `M4` | `16.473 us` | `116.075 us` | `33.737 us` | `20.863 us` | `328.678 + 41.141 us` |
+| `M8 SiLU` | `150.807 us` | `226.213 us` | `159.441 us` | `165.923 + 2.633 us` | `942.480 + 188.739 us` |
+| `M64` | `6.351 us` | `30.632 us` | `8.243 us` | `7.332 us` | `17.682 + 6.360 us` |
+| `M256 GELU` | `112.534 us` | `119.036 us` | `117.927 us` | `107.915 + 3.300 us` | `328.329 + 114.949 us` |
+
+M64 的 Triton kernel 本体快于 TileLang/Torch kernel,但 actual Python entrypoint
+在 CUDA event operator gate 中仍慢于两者,说明剩余差异位于 wrapper/launch 边界.
+bounded resolver cache 已降低该 host 成本,且 actual entrypoint 相对真实 XQT Torch
+dispatcher 仍稳定快 `15.86%`.
+
+真实 N,K Triton dispatcher 相对预转置 resolver 的 paired gap 为
+`1959.55%/1855.18%/611.40%/76.59%/261.89%`,全部 `0:9`. Nsight 继续显示
+每次完整 transpose-copy;本轮 schedule 不掩盖该 integration 成本.
+
+NCU probe 返回 `ERR_NVGPUCTRPERM`,`status=counter_permission_denied`. 本轮没有
+推断 occupancy,L2/cache hit,warp stall,roofline,register pressure 或 tensor-pipe
+utilization.
+
+### 路由和边界
+
+- `gemm_with_precision(engine="auto")` 不改变. direct winner 假设 K,N weight 已在
+  steady-state 前准备,而 stateless N,K dispatcher 仍被每次 transpose 主导.
+- 不在 `gemm_with_precision(...)` 中增加隐藏 weight cache. 后续只能在 stateful
+  Linear/FeedForward materialization 中缓存,并覆盖 tensor version,device,dtype 和
+  module `_apply()` 失效.
+- 当前证据只覆盖 `sm_89`,BF16 和五个 exact signature. 其他 SM,dtype,shape,
+  bias/activation 或 layout 继续使用旧默认并需要独立 profile.
+
+### 验证落点
+
+- [Triton GEMM kernel and resolver](../../../xqt/operator_opt/kernels/triton/gemm.py)
+- [unified GEMM dispatcher](../../../xqt/operator_opt/backends/gemm_precision.py)
+- [resolver and CUDA regression tests](../../../tests/operator_opt/test_gemm_precision.py)
+- [schedule benchmark and profiler entry](../../../research/xqt-gemm/bench_sm89_triton_bf16_schedule.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-schedule/)
+
+## R-028: SM89 Triton half Linear zero-materialization layout and CUDA Graph runtime
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| backend | Triton direct FP16/BF16 Linear materialization |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,Triton 3.7.1 |
+| precision | FP16/BF16 input,weight,bias,output;FP32 accumulation |
+| layout evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-weight-layout/` |
+| wrapper/graph evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-linear-wrapper/` |
+
+R-026/R-027 已证明 direct kernel 的数值和 schedule,但真实 N,K dispatcher 仍被
+每次 `weight.t().contiguous()` 主导,且 eager wrapper 在短算子上仍承受 Python
+和 launch 开销. 本轮分别处理静态权重 layout 和 stateful Linear runtime,不把
+weight cache 塞进无状态 dispatcher,也不扩大 `engine="auto"` 路由.
+
+### 实现
+
+1. `gemm_fp16_triton(...,transpose_b=True)` 和 BF16 共用的 kernel launcher 不再
+   materialize K,N tensor,而是把原始 N,K weight 的逻辑 K/N stride 交换后直接
+   传给 Triton kernel. FP16/BF16 都获得零额外权重内存的 stateless 路径.
+2. Triton operator materializer 新增 `_TritonLinearWrapper`,覆盖
+   `linear`,`gemm_fp16`,`gemm_bf16`,支持 rank >= 1 flatten/restore 和 CPU eager
+   fallback. 默认 `weight_layout="transpose_stride"`;显式
+   `weight_layout="prepacked_kn"` 保存一次性 contiguous K,N 派生 buffer.
+3. Prepack buffer 为 `persistent=False`,不进入 `state_dict`;source Parameter
+   identity/version 改变时刷新,metadata 记录 `prepared_weight_bytes` 和
+   `prepack_refreshes`. 不存在全局 tensor/weight cache.
+4. 显式 `linear_fastpath="graph"` capture activation -> Triton Linear -> output
+   的完整固定签名分支. Replay 只复制动态 activation,weight,bias,layout 和
+   schedule 保持静态;默认仍为 `linear_fastpath="eager"`.
+5. Graph full key 覆盖 input shape/stride/dtype/device,kernel pattern,weight layout,
+   target SM,schedule 和 weight/bias identity/version. 同签名 last-state 使用专用
+   replay state;weight/bias 更新,prepack refresh 和 module `_apply()` 清空旧 graph.
+6. Metadata 新增 `execution_mode="cuda_graph_triton_entry"`,
+   `kernel_kind="cuda_graph_replay"`,`linear_fastpath` 以及
+   `cuda_graph.state/reason/cache_size/output_storage`. Capture/replay 失败记录具体
+   原因并先退回 eager Triton;错误不会静默.
+
+### Correctness 和失效协议
+
+专用测试覆盖 direct/nested materialization,deepcopy 参数绑定,CPU fallback,
+FP16/BF16,两种 weight layout,rank-3 input,graph capture/replay,shape/stride/dtype
+cache contract,weight/bias 更新重捕获,prepack refresh,`_apply()` 清理,capture
+失败降级,operator-stage metadata 以及在 `torch.inference_mode()` 中创建的
+Parameter. 全部 workload 对 FP32-cast reference 使用 `atol=0.5,rtol=0.03`.
+
+正式 graph-stride wrapper 的误差为:
+
+| shape | max_abs | mean_abs |
+| --- | ---: | ---: |
+| `M1,N4096,K4096,no bias` | `0.25` | `0.0002224334` |
+| `M4,N4096,K4096,bias` | `1.0` | `0.0002283696` |
+| `M64,N1024,K1024,bias` | `0.5` | `0.0000222794` |
+
+### Weight-layout gate
+
+Weight-layout benchmark 使用 5 个 R-027 shape,9 x 31 alternating paired gate.
+Legacy 对照在每次 measured call 内执行 `weight.t().contiguous()`. 新
+transpose-stride 相对 legacy 的 gap 为
+`1707.65%/1573.68%/261.18%/31.42%/222.83%`,五组均 `9:0`.
+
+显式 prepack 相对 eager transpose-stride 也在五组 `9:0`,gap 为
+`16.22%/15.26%/94.87%/19.36%/9.07%`,但分别增加
+`32/32/86/2/32 MiB` 派生权重. 因此 stateless/public 默认使用
+transpose-stride;prepack 只属于 stateful materializer 的显式 opt-in.
+
+### Wrapper,block 和 operator-stage gate
+
+正式 wrapper benchmark 使用 M1/M4/M64,10 warmup,CUDA event median 和同一
+9 x 31 promotion gate. 延迟单位为微秒:
+
+| shape | Torch | eager wrapper | graph stride | graph prepack | eager block | graph block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `M1` | `59.474` | `26.606` | `23.243` | `21.470` | `59.317` | `24.415` |
+| `M4` | `20.278` | `27.815` | `29.572` | `29.067` | `23.380` | `31.766` |
+| `M64` | `10.065` | `27.809` | `28.922` | `29.441` | `10.935` | `31.584` |
+
+- M1 graph stride 相对 eager wrapper 和 Torch 分别 `9:0`,gap
+  `21.26%/162.27%`;完整 graph block 相对 eager block `9:0`,gap `156.62%`.
+- M4/M64 graph 与 eager wrapper 的 gap 只有 `1.35%/1.77%`,均低于 3% 门槛;
+  Torch 分别以 `9:0`,gap `39.51%/179.23%` 稳定胜出.
+- Graph prepack 与 graph stride 在三组 gap 仅 `0.22%/0.39%/0.85%`,全部
+  noise-equivalent,不能用 graph 模式为额外权重内存辩护.
+
+Operator-stage 使用相同 full-block scope,100 inner calls 和
+`min_speedup=1.03`. M1 `61.834 -> 27.396 us`,speedup `2.257x`,applied;
+M4 `21.752 -> 35.151 us`,speedup `0.619x`,rejected;M64
+`12.560 -> 35.209 us`,speedup `0.357x`,rejected. Wrapper,完整 block 和
+operator-stage 对 route winner 的判断一致.
+
+### Profiler 归因
+
+Nsight Systems 使用 `--cuda-graph-trace=node`,每个 NVTX range 配置 20 次
+steady-state call. 个别 filtered group 显示 19 或 21 个关联实例,因此只使用
+median,不从该计数推断 launch 数.
+
+| shape | graph Triton | activation D2D | graph launch API | eager Triton | Torch kernel |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `M1` | `16.185 us` | `0.942 us` | `5.272 us` | `16.171 us` | `57.762 us` |
+| `M4` | `16.908 us` | `0.975 us` | `5.067 us` | `16.829 us` | `21.223 us` |
+| `M64` | `6.185 us` | `1.042 us` | `4.667 us` | `6.071 us` | `7.423 us` |
+
+Graph 和 eager wrapper 执行同一 Triton kernel body. Graph range 只有动态
+activation D2D copy,graph launch 和 GEMM node,没有 weight transpose/copy
+kernel. M4/M64 的 kernel 本体仍快于 Torch kernel,但 activation copy,graph
+launch 和 Python/module 边界使完整 wrapper 落后,所以不能把 kernel-only winner
+写成 operator winner.
+
+NCU probe 返回 `ERR_NVGPUCTRPERM`,`status=counter_permission_denied`. 本轮没有
+推断 occupancy,L2/cache hit,warp stall,roofline,register pressure 或
+tensor-pipe utilization.
+
+### 路由和边界
+
+- `gemm_with_precision(engine="auto")` 不变. 公共 stateless dispatcher 使用
+  零物化 transpose-stride,但不保存模型权重或 graph state.
+- Triton Linear materializer 默认 eager + transpose-stride. Graph 和 prepack 都
+  必须显式选择;当前只有受测 SM89 BF16 M1 通过 full-block 3% promotion gate.
+- Replay output 是 graph-owned storage;后续 replay 会覆盖旧 view,保留输出时必须
+  clone. 当前只验证固定 shape,顺序 inference,不支持并发 replay 或 autograd.
+- 当前证据只覆盖 `sm_89`,FP16/BF16 correctness 和上述 BF16 performance shape.
+  其他 SM,dtype,shape,bias/activation 或动态 layout 需要独立 gate.
+
+### 验证落点
+
+- [Triton GEMM launcher](../../../xqt/operator_opt/kernels/triton/gemm.py)
+- [Triton Linear wrapper and metadata](../../../xqt/operator_opt/triton_wrappers.py)
+- [candidate materializer](../../../xqt/operator_opt/materialize.py)
+- [wrapper tests](../../../tests/xqt/test_operator_triton_linear.py)
+- [weight-layout benchmark](../../../research/xqt-gemm/bench_sm89_triton_bf16_weight_layout.py)
+- [wrapper/graph benchmark](../../../research/xqt-gemm/bench_sm89_triton_bf16_linear_wrapper.py)
+- [weight-layout artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-weight-layout/)
+- [wrapper/graph artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-linear-wrapper/)
+
+## R-029: SM89 Triton FP16 layout-aware schedule and Linear promotion gate
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| backend | Triton dense FP16 GEMM and stateful Linear materializer |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,Triton 3.7.1 |
+| precision | FP16 activation,weight,bias,output;FP32 reduction 和 epilogue |
+| schedule evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-fp16-schedule/` |
+| wrapper evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-fp16-linear-wrapper/` |
+
+R-027/R-028 已建立 BF16 exact schedule,零物化 N,K stride 和 stateful Linear
+graph runtime. 本轮独立验证 FP16,并把 layout 纳入 schedule signature. Kernel
+promotion 和 Linear runtime promotion 分开判定,不从 direct K,N winner 直接外推
+wrapper 或 auto route.
+
+### 实现
+
+1. 新增 `resolve_triton_fp16_gemm_schedule(...)`,exact key 为
+   `(M,N,K,has_bias,activation,transpose_b)`. 六个显式 schedule 字段逐项优先.
+2. M1/M4/M8/M64 的受测 preset 同时覆盖 K,N 和 N,K. M256 GELU preset 只覆盖
+   prepacked K,N;N,K 的候选收益低于 3%,保留旧默认.
+3. `gemm_fp16_triton(...)` 解析逻辑 layout 后把 `transpose_b` 传给 resolver.
+   `_TritonLinearWrapper` 的 FP16 metadata/resolution 路径同步传递自身
+   `weight_layout`;BF16 resolver 签名和行为不变.
+4. 新增 5-shape x 28-candidate 双布局 benchmark,torch.profiler,10 个独立
+   NSYS workload,以及 M1/M4/M64 的 wrapper,完整 block,operator-stage 三层 gate.
+5. FP16 kernel registry metadata 明确标记 schedule policy 包含 layout. Resolver
+   和 SM cache 只保存不可变标量,不保存 tensor/weight.
+
+### Correctness
+
+数值 reference 是 FP32 Linear,bias 和 activation 完成后只 cast 一次 FP16.
+28 个候选,十个 resolved layout workload,六个 wrapper workload 和三个
+operator-stage workload 全部通过 `atol=0.25,rtol=0.03`.
+
+| shape | direct resolved max_abs | graph wrapper max_abs |
+| --- | ---: | ---: |
+| `M1,N4096,K4096,no bias` | `0.125` | `0.125` |
+| `M4,N4096,K4096,bias` | `0.125` | `0.125` |
+| `M8,N11008,K4096,SiLU` | `0.125` | - |
+| `M64,N1024,K1024,bias` | `0.0625` | `0.0625` |
+| `M256,N4096,K4096,GELU` | `0.125` | - |
+
+### Schedule 和 layout gate
+
+方法为 10 次 warmup,shape-specific batched iteration,CUDA event end
+synchronization 和 9 x 31 alternating paired sample. 稳定 promotion 要求至少
+7/9 轮胜出且 gap 不低于 3%.
+
+| shape | resolved schedule | K,N vs old default | N,K vs old default | K,N vs N,K |
+| --- | --- | ---: | ---: | --- |
+| `M1` | `16x64x64,gm4,4w,3s` | `530.30%`,9:0 | `563.45%`,9:0 | `0.05%`,noise |
+| `M4` | `16x64x64,gm4,4w,3s` | `527.80%`,9:0 | `519.08%`,9:0 | `0.46%`,noise |
+| `M8 SiLU` | `32x128x32,gm4,4w,3s` | `40.46%`,9:0 | `8.33%`,9:0 | K,N `93.69%`,9:0 |
+| `M64` | `16x128x32,gm4,4w,3s` | `71.49%`,9:0 | `73.58%`,9:0 | `0.40%`,noise |
+| `M256 GELU` | K,N `64x64x32,gm8,4w,3s`;N,K default | `4.71%`,9:0 | `0.14%`,noise | K,N `8.40%`,9:0 |
+
+Actual resolver 与当轮 recommendation 在所有 promoted layout 上都低于 3% gap.
+因此 preset 是受测平台上的代表 schedule,不声明跨 shape/SM 唯一最优.
+M1/M4/M64 的 layout 差异为 noise-equivalent;只有 M8/M256 对 K,N 有稳定收益,
+而 K,N 需要 stateful prepack 生命周期.
+
+### Wrapper,block 和 operator-stage gate
+
+三层 gate 覆盖 eager transpose-stride,graph transpose-stride,graph prepacked,
+完整 block 和真实 operator-stage. 正式 paired 结论为:
+
+| shape | graph vs eager wrapper | graph vs Torch | graph block vs eager block | operator-stage |
+| --- | --- | --- | --- | --- |
+| `M1` | graph `13.45%`,9:0 | graph `158.79%`,9:0 | graph `158.63%`,9:0 | `2.166x`,applied |
+| `M4` | eager `4.19%`,9:0 | Torch `64.50%`,9:0 | eager `80.28%`,9:0 | `0.552x`,rejected |
+| `M64` | eager `3.03%`,7:2 | Torch `190.18%`,9:0 | eager `168.05%`,9:0 | `0.392x`,rejected |
+
+Graph prepack 与 graph stride 的 gap 为 `1.01%/0.04%/0.50%`,全部
+noise-equivalent,但 prepack 分别额外占用 `32/32/2 MiB`. 只有 M1 在 wrapper,
+完整 block 和 `min_speedup=1.03` operator-stage 三层一致通过. M4/M64 是明确
+反例,因此整体 runtime action 为 `keep_explicit_opt_in`.
+
+### Profiler 归因
+
+Schedule artifact 包含 10 个 `.nsys-rep`,10 个 SQLite 和 150 个 CSV.
+五十个 direct layout memory report 全部为空,说明 measured range 内没有 weight
+copy. Resolved K,N/N,K kernel median 为:
+
+| shape | K,N | N,K | old K,N default | Torch kernel |
+| --- | ---: | ---: | ---: | ---: |
+| `M1` | `15.904 us` | `15.762 us` | `113.316 us` | `57.472 us` |
+| `M4` | `16.539 us` | `16.565 us` | `118.520 us` | `17.277 us` |
+| `M8 SiLU` | `151.553 us` | `274.959 us` | `229.486 us` | `162.171 + 2.678 us` |
+| `M64` | `7.551 us` | `7.989 us` | `31.057 us` | `6.127 us` |
+| `M256 GELU` | `113.731 us` | `125.896 us` | `121.291 us` | `108.667 + 3.248 us` |
+
+Wrapper artifact 使用 `--cuda-graph-trace=node`,包含 6 个 `.nsys-rep`,6 个
+SQLite 和 54 个 CSV. Graph range 只有 activation D2D,graph launch 和原 GEMM:
+
+| shape | graph Triton | activation D2D | graph launch API | eager Triton | Torch kernel |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `M1` | `16.276 us` | `0.975 us` | `5.021 us` | `15.873 us` | `57.120 us` |
+| `M4` | `16.830 us` | `0.975 us` | `4.874 us` | `16.593 us` | `17.753 us` |
+| `M64` | `8.071 us` | `1.042 us` | `6.069 us` | `8.045 us` | `6.141 us` |
+
+M1 的 kernel 优势足以覆盖 graph 固定开销.M4 kernel 近似持平,M64 Triton
+kernel 已慢于 Torch,所以 graph runtime 结论与三层 latency gate 一致.
+
+两组 NCU probe 都返回 `ERR_NVGPUCTRPERM`,状态为
+`counter_permission_denied`. 本轮没有采集或推断 occupancy,L2/cache hit,warp
+stall,roofline,register pressure 或 tensor-pipe utilization.
+
+### 路由和边界
+
+- `gemm_with_precision(engine="auto")` 的 selector 不变. 现有 stateless Triton
+  路径可消费 FP16 resolver,但不保存 weight 或 graph state.
+- `_TritonLinearWrapper` 默认继续为 eager + transpose-stride. Graph 和 prepack
+  都是显式 opt-in;不建立全 shape Linear auto route.
+- M1 只进入 future exact-signature route review,不因单个 shape 通过而改变通用
+  facade 默认语义.
+- Replay output 是 graph-owned storage;保留跨 replay 输出时必须 clone. 当前只
+  验证固定 shape,顺序 inference,不覆盖并发 replay,autograd,其他 SM 或动态 layout.
+
+### 验证落点
+
+- [Triton GEMM launcher](../../../xqt/operator_opt/kernels/triton/gemm.py)
+- [Triton Linear wrapper](../../../xqt/operator_opt/triton_wrappers.py)
+- [schedule regression](../../../tests/operator_opt/test_gemm_precision.py)
+- [wrapper regression](../../../tests/xqt/test_operator_triton_linear.py)
+- [schedule benchmark](../../../research/xqt-gemm/bench_sm89_triton_fp16_schedule.py)
+- [wrapper benchmark](../../../research/xqt-gemm/bench_sm89_triton_fp16_linear_wrapper.py)
+- [schedule artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-fp16-schedule/)
+- [wrapper artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-fp16-linear-wrapper/)
+
+## R-030: SM89 Triton forward FlashAttention engine and exact decode presets
+
+### 目标
+
+| 项 | 值 |
+| --- | --- |
+| backend | Triton forward-only FlashAttention-style attention |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`),CUDA 13.0,torch 2.12.1+cu130,Triton 3.7.1 |
+| precision | matching FP16/BF16 Q/K/V/output,FP32 score,online softmax 和 output accumulator |
+| layout | contiguous `[batch,heads,seq,head_dim]` |
+| evidence | `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-attention/` |
+
+TileLang attention 已有独立 FP16/BF16 kernel,但本轮需要一个可单独 profile 的
+Triton forward engine,用于比较 decode 和 causal prefill 的 kernel/runtime 边界.
+本轮只增加显式 Triton registry entry 和 exact schedule resolver,不把 Triton
+接入 attention `auto`.
+
+### 实现和 contract
+
+1. 新增 `xqt/operator_opt/kernels/triton/attention.py`,使用 online softmax
+   mainloop. score 先按 FP32 计算,`exp2` 使用 `log2(e)` 缩放,accumulator 保持
+   FP32,最终一次 cast 到 input/output dtype.
+2. kernel 入口要求 Q/K/V 为 contiguous BHSD,同 device,同 dtype,`head_dim` 为
+   16/32/64/128,并要求 `seq_kv >= seq_q`. `dropout_p` 只能为 0,不提供 backward.
+3. causal mask 对方形和非方形统一使用 lower-right 语义. CPU 或非 CUDA 输入经
+   registry fallback 调 SDPA reference,不静默把 CUDA contract 改成另一个 layout.
+4. backend registry 新增 `attention` Triton spec,metadata 明确 supported dtypes,
+   head dims,causal semantics,contiguous requirement 和 inference-only boundary.
+5. 默认 schedule 为 `64x64,4 warps,2 stages`;显式 `block_m/block_n/num_warps/
+   num_stages` 逐字段优先,SM cache 只保存不可变 scalar metadata,不保存 tensor.
+
+### Correctness 和 sweep
+
+Benchmark 覆盖 FP16/BF16 x small `64x64,D32`,medium `256x256,D64`,long
+`1024x1024,D64`,causal `512x512,D64` 和 decode `1x1024,D64`,共 19 个 Triton
+candidate. 10 次 warmup 后使用 CUDA-event median 和 9 x 31 A-B/B-A paired gate,
+promotion 门槛为至少 7/9 轮且 gap 至少 3%. 所有可执行候选对 SDPA reference
+通过 `atol=0.02,rtol=0.02`,最大绝对误差 `0.00390625`.
+
+SM89 resolver 最终只保留两个 decode preset:
+
+| dtype/shape | preset | independent exact audit |
+| --- | --- | --- |
+| FP16 `B1,H8,Sq1,Skv1024,D64,causal` | `sm89_fp16_decode_q1_kv1024_d64`: `16x64,4w,2s` | 5 seeds,每次 `9:0`,gap `21.87-24.94%` |
+| BF16 同 shape | `sm89_bf16_decode_q1_kv1024_d64`: `16x128,4w,2s` | 5 seeds,每次 `9:0`,gap `24.85-26.54%` |
+
+首轮 sweep 的 FP16 decode candidate `bm32_bn128_w4_s2` 与最终 resolver 的
+`bm16_bn64_w4_s2` 不同;正式 promotion 以
+`exact-preset-audit.json` 的 actual resolver-vs-default 结果为准. long prefill
+曾观察到 stages=3 略有优势,但 FP16/BF16 independent audit 的 gap 范围分别为
+`2.84-3.44%` 和 `2.82-3.44%`,至少一个 seed 低于门槛,所以仍使用 stages=2.
+
+### Backend gate 和路由
+
+初始 sweep 的 `triton_recommended` 与其他 backend 的 paired gate 全部稳定
+`9:0`:
+
+| workload | FP16 vs SDPA | FP16 vs TileLang | BF16 vs SDPA | BF16 vs TileLang |
+| --- | --- | --- | --- | --- |
+| small prefill | SDPA `51.83%` | TileLang `60.75%` | SDPA `16.22%` | TileLang `52.00%` |
+| medium prefill | SDPA `15.40%` | TileLang `52.84%` | SDPA `13.89%` | TileLang `50.39%` |
+| long prefill | SDPA `3.37%` | TileLang `6.75%` | SDPA `6.89%` | TileLang `10.74%` |
+| causal prefill | Triton `22.63%` | TileLang `48.53%` | Triton `21.01%` | TileLang `43.75%` |
+| decode | Triton `62.27%` | TileLang `13.58%` | Triton `67.02%` | TileLang `10.00%` |
+
+因此 Triton 在当前 SM89 上对 SDPA 的 causal/decode latency 有稳定收益,但
+TileLang 仍在全部五类 workload 胜出. Triton 作为显式 engine 可执行,不进入
+`auto`;native SDPA 和现有 TileLang route 保持不变. Exact resolver 的独立 audit
+只直接比较 resolver 与 Triton default,不能把上表 candidate gate 直接当成
+resolver 对 SDPA/TileLang 的 operator-stage 证明.
+
+### Nsight Systems 归因
+
+五个独立进程 report 分别覆盖 `triton_resolved`,`triton_recommended`,
+`triton_default`,`tilelang_default` 和 `sdpa`,每个 dtype/shape 通过 NVTX filter
+导出 `cuda_gpu_kern_sum`,`cuda_api_sum`,`cuda_gpu_mem_time_sum`.
+
+| dtype/shape | resolved Triton kernel median | TileLang kernel median | SDPA kernel medians | launch API calls per 20 calls |
+| --- | ---: | ---: | ---: | --- |
+| FP16 causal | `12.520 us` | `10.831 us` | `12.369 + 4.190 us` | `20/20/40` |
+| BF16 causal | `12.588 us` | `10.662 us` | `12.335 + 4.191 us` | `20/20/40` |
+| FP16 decode | `15.287 us` | `17.330 us` | `6.470 + 2.849 us` | `20/20/40` |
+| BF16 decode | `12.047 us` | `17.330 us` | `6.537 + 2.849 us` | `20/20/40` |
+
+Triton/TileLang 每次一个 launch,SDPA causal/decode 为 split-KV compute + combine
+两个 launch. `cuda_gpu_kern_sum` 只统计 GPU kernel body,不包含 launch 之间的
+host/API gap,因此端到端 winner 仍以 CUDA-event paired gate 为准. 过滤后的 kernel
+instance 可能显示 19/21,launch 结论只使用 API report 的 20/40 次.
+
+50 个逐区间 GPU memory report 均为空,不能据此写 DRAM bandwidth,L2 hit rate 或
+kernel 内存流量结论. NCU 返回 `ERR_NVGPUCTRPERM` (`counter_permission_denied`),
+本轮不推断 occupancy,warp stall,roofline,register pressure 或 tensor-pipe 指标.
+
+### 路由和边界
+
+- `run_triton_kernel("attention",...)` 和 direct Triton function 是显式 engine
+  入口;`attention_fastpath="auto"` 不变.
+- 当前实现是固定签名的模型侧 inference operator,不包含 backward,paged KV cache,
+  cache eviction,continuous batching 或 serving scheduler.
+- 其他 SM,dtype/shape,非 contiguous layout,动态 mask/shape 和真实模型 block 需要
+  独立 correctness,paired gate 和 profiler 证据,不能从本轮 SM89 结果外推.
+- exact preset 只服务已审计 decode signature;其余签名继续使用默认 schedule,
+  不建立全局 shape heuristic.
+
+### 验证落点
+
+- [Triton attention kernel](../../../xqt/operator_opt/kernels/triton/attention.py)
+- [Triton backend registry](../../../xqt/operator_opt/backends/triton.py)
+- [attention kernel exports](../../../xqt/operator_opt/kernels/attention.py)
+- [CUDA/CPU contract tests](../../../tests/xqt/test_operator_triton_attention.py)
+- [sweep and profiling entry](../../../research/xqt-gemm/bench_sm89_triton_attention.py)
+- [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-attention/)

@@ -153,10 +153,15 @@ class Attention(nn.Module, _SemanticModuleMixin):
                     fused_attention_forward_tilelang,
                 )
 
+                tilelang_dtype = (
+                    q.dtype
+                    if q.dtype in {torch.float16, torch.bfloat16}
+                    else torch.float16
+                )
                 attn = fused_attention_forward_tilelang(
-                    q.to(dtype=torch.float16),
-                    k.to(dtype=torch.float16),
-                    v.to(dtype=torch.float16),
+                    q.to(dtype=tilelang_dtype),
+                    k.to(dtype=tilelang_dtype),
+                    v.to(dtype=tilelang_dtype),
                     causal=self.causal,
                     dropout_p=0.0,
                 ).to(dtype=x.dtype)

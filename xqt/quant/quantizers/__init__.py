@@ -34,6 +34,7 @@ from .convrot_4bit import (
 )
 from .convrot_int8 import (
     ConvRotInt8Linear,
+    ConvRotNormInt8Linear,
     ConvRotInt8QuantizationResult,
     execute_convrot_int8_component,
     quantize_with_convrot_int8,
@@ -72,6 +73,7 @@ __all__ = [
     "AWQGPTQWeightOnlyQuantizationResult",
     "ConvRot4BitQuantizationResult",
     "ConvRotInt8Linear",
+    "ConvRotNormInt8Linear",
     "ConvRotInt8QuantizationResult",
     "ConvRotMixedPrecisionLinear",
     "FakeQDQSurrogateResult",

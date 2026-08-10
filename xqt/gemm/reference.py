@@ -518,6 +518,9 @@ def reference_grouped_gemm(
     quant_specs: Sequence[QuantSpec] | QuantSpec,
     weight_scales: Sequence[torch.Tensor | None] | None = None,
     activation_scales: Sequence[torch.Tensor | None] | None = None,
+    weight_zero_points: Sequence[torch.Tensor | None] | None = None,
+    activation_zero_points: Sequence[torch.Tensor | None] | None = None,
+    bias: Sequence[torch.Tensor | None] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Reference grouped GEMM; one output tensor is returned for each group."""
 
@@ -534,20 +537,193 @@ def reference_grouped_gemm(
         weight_scales = (None,) * count
     if activation_scales is None:
         activation_scales = (None,) * count
-    if len(weight_scales) != count or len(activation_scales) != count:
-        raise ValueError("scale sequences must match grouped_problem.group_count")
+    if weight_zero_points is None:
+        weight_zero_points = (None,) * count
+    if activation_zero_points is None:
+        activation_zero_points = (None,) * count
+    if bias is None:
+        bias = (None,) * count
+    grouped_values = {
+        "weight_scales": weight_scales,
+        "activation_scales": activation_scales,
+        "weight_zero_points": weight_zero_points,
+        "activation_zero_points": activation_zero_points,
+        "bias": bias,
+    }
+    for name, values in grouped_values.items():
+        if len(values) != count:
+            raise ValueError(
+                f"{name} must match grouped_problem.group_count"
+            )
     outputs: list[torch.Tensor] = []
     for index, problem in enumerate(grouped_problem.problems):
         outputs.append(
             reference_gemm(
                 activations[index],
                 weights[index],
-                spec=GemmSpec(problem=problem, quant=specs[index], epilogue=EpilogueSpec(output_dtype=specs[index].output_dtype)),
+                spec=GemmSpec(
+                    problem=problem,
+                    quant=specs[index],
+                    epilogue=EpilogueSpec(
+                        has_bias=bias[index] is not None,
+                        output_dtype=specs[index].output_dtype,
+                    ),
+                ),
                 weight_scales=weight_scales[index],
                 activation_scales=activation_scales[index],
+                weight_zero_points=weight_zero_points[index],
+                activation_zero_points=activation_zero_points[index],
+                bias=bias[index],
             )
         )
     return tuple(outputs)
+
+
+def _split_grouped_activation_artifact(
+    value: torch.Tensor | Sequence[torch.Tensor | None] | None,
+    *,
+    grouped_problem: GroupedGemmProblem,
+    quant_specs: tuple[QuantSpec, ...],
+    field_name: str,
+) -> tuple[torch.Tensor | None, ...]:
+    """Split one packed activation artifact into explicit per-group values."""
+
+    count = grouped_problem.group_count
+    if value is None:
+        return (None,) * count
+    if not isinstance(value, torch.Tensor):
+        values = tuple(value)
+        if len(values) != count:
+            raise ValueError(
+                f"{field_name} must match grouped_problem.group_count"
+            )
+        return values
+
+    granularities = {
+        quant.activation_granularity for quant in quant_specs
+    }
+    if len(granularities) != 1:
+        raise ValueError(
+            f"packed {field_name} requires one shared activation granularity"
+        )
+    granularity = granularities.pop()
+    if granularity == "per_tensor":
+        if int(value.numel()) == 1:
+            return tuple(value.reshape(()) for _ in range(count))
+        if value.ndim in {1, 2} and int(value.numel()) == count:
+            return tuple(value.reshape(count)[index] for index in range(count))
+        raise ValueError(
+            f"packed per_tensor {field_name} must be scalar or [group_count]"
+        )
+    if granularity in {"per_token", "blockwise"}:
+        if value.ndim == 0 or int(value.shape[0]) != grouped_problem.total_m:
+            raise ValueError(
+                f"packed {granularity} {field_name} must lead with total_M"
+            )
+        offsets = _grouped_offsets(grouped_problem)
+        return tuple(
+            value[offsets[index] : offsets[index + 1]]
+            for index in range(count)
+        )
+    if granularity in {"none", "per_channel"}:
+        return tuple(value for _ in range(count))
+    raise ValueError(
+        f"packed {field_name} does not support activation granularity "
+        f"{granularity!r}; pass an explicit per-group sequence"
+    )
+
+
+def _grouped_offsets(
+    grouped_problem: GroupedGemmProblem,
+) -> tuple[int, ...]:
+    """Return explicit cumulative offsets for a grouped problem."""
+
+    if grouped_problem.m_offsets is not None:
+        return grouped_problem.m_offsets
+    offsets = [0]
+    for problem in grouped_problem.problems:
+        offsets.append(offsets[-1] + problem.m)
+    return tuple(offsets)
+
+
+def reference_packed_grouped_gemm(
+    grouped_problem: GroupedGemmProblem,
+    activation: torch.Tensor,
+    weights: Sequence[torch.Tensor | PackedWeight],
+    *,
+    quant_specs: Sequence[QuantSpec] | QuantSpec,
+    weight_scales: Sequence[torch.Tensor | None] | None = None,
+    activation_scales: torch.Tensor
+    | Sequence[torch.Tensor | None]
+    | None = None,
+    weight_zero_points: Sequence[torch.Tensor | None] | None = None,
+    activation_zero_points: torch.Tensor
+    | Sequence[torch.Tensor | None]
+    | None = None,
+    bias: Sequence[torch.Tensor | None] | None = None,
+) -> torch.Tensor:
+    """Run the explicit reference fallback for one packed routed-token input."""
+
+    if not isinstance(activation, torch.Tensor) or activation.ndim != 2:
+        raise ValueError("grouped activation must be a rank-2 tensor [total_M,K]")
+    if tuple(activation.shape) != (
+        grouped_problem.total_m,
+        grouped_problem.k,
+    ):
+        raise ValueError(
+            "grouped activation shape must match "
+            f"[{grouped_problem.total_m},{grouped_problem.k}]"
+        )
+    count = grouped_problem.group_count
+    if len(weights) != count:
+        raise ValueError("weights must match grouped_problem.group_count")
+    if isinstance(quant_specs, QuantSpec):
+        specs = (quant_specs,) * count
+    else:
+        if len(quant_specs) != count:
+            raise ValueError(
+                "quant_specs must match grouped_problem.group_count"
+            )
+        specs = tuple(quant_specs)
+    offsets = _grouped_offsets(grouped_problem)
+    activations = tuple(
+        activation[offsets[index] : offsets[index + 1]]
+        for index in range(count)
+    )
+    grouped_activation_scales = _split_grouped_activation_artifact(
+        activation_scales,
+        grouped_problem=grouped_problem,
+        quant_specs=specs,
+        field_name="activation_scales",
+    )
+    grouped_activation_zero_points = _split_grouped_activation_artifact(
+        activation_zero_points,
+        grouped_problem=grouped_problem,
+        quant_specs=specs,
+        field_name="activation_zero_points",
+    )
+    outputs = reference_grouped_gemm(
+        grouped_problem,
+        activations,
+        weights,
+        quant_specs=specs,
+        weight_scales=weight_scales,
+        activation_scales=grouped_activation_scales,
+        weight_zero_points=weight_zero_points,
+        activation_zero_points=grouped_activation_zero_points,
+        bias=bias,
+    )
+    packed_output = torch.cat(outputs, dim=0)
+    if grouped_problem.output_rows is None:
+        return packed_output
+    output = torch.empty_like(packed_output)
+    destination = torch.tensor(
+        grouped_problem.output_rows,
+        dtype=torch.int64,
+        device=packed_output.device,
+    )
+    output.index_copy_(0, destination, packed_output)
+    return output
 
 
 reference_dense_gemm = reference_gemm
@@ -560,5 +736,6 @@ __all__ = [
     "reference_dense_gemm",
     "reference_gemm",
     "reference_grouped_gemm",
+    "reference_packed_grouped_gemm",
     "reference_w4a16_gemm",
 ]

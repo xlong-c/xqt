@@ -10,8 +10,9 @@ import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 
-from ..backends.tilelang import run_tilelang_kernel
-from ._common import _resolved_target_arch
+from ..backends.tilelang import get_tilelang_kernel_spec
+from ..kernels.tilelang.linear import resolve_tilelang_linear_schedule
+from ._common import _matching_tensor_dtype_name, _resolved_target_arch
 
 
 class _TileLangLinearWrapper(nn.Module):
@@ -32,20 +33,39 @@ class _TileLangLinearWrapper(nn.Module):
         self.last_execution_reason: str | None = None
         self.last_operator_family = "linear"
         self.last_fastpath = "none"
+        self.last_kernel_dtype: str | None = None
+        self.last_kernel_schedule: dict[str, int | str | None] | None = None
+        self._linear_runtime = str(self.settings.get("linear_runtime", "auto"))
+        patterns = self.settings.get("preferred_patterns")
+        self._kernel_pattern = (
+            "linear_marlin"
+            if isinstance(patterns, list) and "linear_marlin" in patterns
+            else "linear"
+        )
+        self._kernel = get_tilelang_kernel_spec(self._kernel_pattern).kernel
+        self._precision = str(self.settings.get("precision", "auto"))
+        self._block_m = (
+            int(self.settings["block_m"]) if "block_m" in self.settings else None
+        )
+        self._block_n = (
+            int(self.settings["block_n"]) if "block_n" in self.settings else None
+        )
+        self._block_k = (
+            int(self.settings["block_k"]) if "block_k" in self.settings else None
+        )
+        self._threads = int(self.settings.get("threads", 128))
+        self._num_stages = int(self.settings.get("num_stages", 2))
+        self._target_arch = self.settings.get("target_arch")
 
     def _prefer_native_linear_fastpath(self, x: torch.Tensor) -> bool:
-        mode = str(self.settings.get("linear_runtime", "auto"))
-        if mode == "native":
+        if self._linear_runtime == "native":
             return True
-        if mode == "tilelang":
+        if self._linear_runtime == "tilelang":
             return False
         return _resolved_target_arch(self.settings, x) == "sm_89"
 
     def _selected_linear_pattern(self) -> str:
-        patterns = self.settings.get("preferred_patterns")
-        if isinstance(patterns, list) and "linear_marlin" in patterns:
-            return "linear_marlin"
-        return "linear"
+        return self._kernel_pattern
 
     @staticmethod
     def _flatten_input(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
@@ -55,10 +75,14 @@ class _TileLangLinearWrapper(nn.Module):
             raise XQTBackendError(
                 "TileLang linear target requires a non-empty trailing feature dimension"
             )
+        if x.ndim == 2:
+            return x, (int(x.shape[0]),)
         return x.reshape(-1, int(x.shape[-1])), tuple(int(dim) for dim in x.shape[:-1])
 
     @staticmethod
     def _restore_output(output: torch.Tensor, prefix_shape: tuple[int, ...]) -> torch.Tensor:
+        if len(prefix_shape) == 1 and prefix_shape[0] == int(output.shape[0]):
+            return output
         return output.reshape(*prefix_shape, int(output.shape[-1]))
 
     def _run_tilelang_or_reference(
@@ -69,32 +93,50 @@ class _TileLangLinearWrapper(nn.Module):
         pattern = self._selected_linear_pattern()
         try:
             if pattern == "linear_marlin":
-                return run_tilelang_kernel(
-                    pattern,
+                block_m = 64 if self._block_m is None else self._block_m
+                block_n = 64 if self._block_n is None else self._block_n
+                block_k = 64 if self._block_k is None else self._block_k
+                self.last_kernel_schedule = {
+                    "block_m": block_m,
+                    "block_n": block_n,
+                    "block_k": block_k,
+                    "threads": self._threads,
+                    "num_stages": self._num_stages,
+                    "target_arch": self._target_arch,
+                    "preset": "linear_marlin_default_or_explicit",
+                }
+                return self._kernel(
                     flat_input,
                     self.linear.weight,
                     bias=self.linear.bias,
-                    precision=str(self.settings.get("precision", "auto")),
-                    block_m=int(self.settings.get("block_m", 64)),
-                    block_n=int(self.settings.get("block_n", 64)),
-                    block_k=int(self.settings.get("block_k", 64)),
-                    threads=int(self.settings.get("threads", 128)),
-                    num_stages=int(self.settings.get("num_stages", 2)),
-                    target_arch=self.settings.get("target_arch"),
-                    fallback=self.fallback,
+                    precision=self._precision,
+                    block_m=block_m,
+                    block_n=block_n,
+                    block_k=block_k,
+                    threads=self._threads,
+                    num_stages=self._num_stages,
+                    target_arch=self._target_arch,
                 )
-            return run_tilelang_kernel(
-                pattern,
+            schedule = resolve_tilelang_linear_schedule(
+                flat_input,
+                block_m=self._block_m,
+                block_n=self._block_n,
+                block_k=self._block_k,
+                threads=self._threads,
+                num_stages=self._num_stages,
+                target_arch=self._target_arch,
+            )
+            self.last_kernel_schedule = schedule.to_dict()
+            return self._kernel(
                 flat_input,
                 self.linear.weight,
                 self.linear.bias,
-                block_m=int(self.settings.get("block_m", 64)),
-                block_n=int(self.settings.get("block_n", 64)),
-                block_k=int(self.settings.get("block_k", 64)),
-                threads=int(self.settings.get("threads", 128)),
-                num_stages=int(self.settings.get("num_stages", 2)),
-                target_arch=self.settings.get("target_arch"),
-                fallback=self.fallback,
+                block_m=schedule.block_m,
+                block_n=schedule.block_n,
+                block_k=schedule.block_k,
+                threads=schedule.threads,
+                num_stages=schedule.num_stages,
+                target_arch=schedule.target_arch,
             )
         except Exception as exc:
             if self.fallback != "eager":
@@ -107,6 +149,12 @@ class _TileLangLinearWrapper(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         prefix_shape = tuple(int(dim) for dim in x.shape[:-1])
         flat_input, _ = self._flatten_input(x)
+        dtype_tensors = (
+            (flat_input, self.linear.weight)
+            if self.linear.bias is None
+            else (flat_input, self.linear.weight, self.linear.bias)
+        )
+        self.last_kernel_dtype = _matching_tensor_dtype_name(*dtype_tensors)
         self.last_execution_mode = (
             "cuda_native_fastpath"
             if x.is_cuda and self._prefer_native_linear_fastpath(x)
@@ -149,8 +197,16 @@ class _TileLangLinearWrapper(nn.Module):
             "kernel_kind": kernel_kind,
             "operator_family": self.last_operator_family,
             "selected_fastpath": self.last_fastpath,
+            "kernel_schedule": (
+                None
+                if self.last_kernel_schedule is None
+                else dict(self.last_kernel_schedule)
+            ),
             "kernel_constraints": {
-                "dtype": "float16",
+                "dtype": self.last_kernel_dtype or "unknown",
+                "supported_dtypes": ["float16", "bfloat16"],
+                "bfloat16_block_k_multiple": 16,
+                "requires_k_multiple_of_block_k": True,
                 "supported_precisions": ["fp16", "bf16", "int8", "int4"],
                 "supported_patterns": ["linear", "linear_marlin"],
                 "operator_families": ["linear"],

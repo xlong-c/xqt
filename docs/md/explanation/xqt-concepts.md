@@ -80,11 +80,31 @@ XQT model transform
 
 - `attention`
 - `conv`
-- direct half `linear`
+- direct FP16/BF16 `linear`
 - direct half `LayerNorm`
 - `dequant_gemm_epilogue` 及 packed FP4 / NVFP4 变体
 
-这些路径并不是同等成熟度. `attention` / direct half `linear` / dequant GEMM 路径已经进入受限的 TileLang operator coverage. `conv` 当前通过 `torch.unfold` / im2col lowered input 加 TileLang half GEMM 执行, 尚不是 fully fused conv kernel, 且只覆盖 fp16, CUDA, `groups=1` 的路径. direct half `LayerNorm` 已接入 TileLang `reduce_sum` kernel, 限制为 CUDA fp16 和 last-dim normalization. CPU 路径只使用 PyTorch eager fallback.
+这些路径并不是同等成熟度. `attention` 已进入受限的 CUDA FP16/BF16 TileLang operator coverage,要求 Q/K/V dtype 匹配,`dropout_p=0`,`seq_kv >= seq_q`,且 BF16 `head_dim` 必须 16 对齐. `sm_89` BF16 paired gate 表明收益依赖 shape,所以显式 TileLang 可执行,但 Ada `auto` 仍保留 native SDPA. Direct `linear` 接受匹配的 FP16/BF16 activation,weight,bias 和 output,使用 FP32 accumulator,允许 partial M/N,且 K 必须被 `block_k` 整除;`sm_89 + BF16 + flattened M<=4` 的显式 TileLang 默认使用经 paired gate 验证的 `16x64x32` schedule,但 Linear `auto` 路由不变. Dequant GEMM 也已进入受限 coverage. `conv` 当前通过 `torch.unfold` / im2col lowered input 加 TileLang half GEMM 执行,尚不是 fully fused conv kernel,且只覆盖 FP16,CUDA,`groups=1` 的路径. Direct half `LayerNorm` 已接入 TileLang `reduce_sum` kernel,限制为 CUDA FP16 和 last-dim normalization. CPU 路径只使用 PyTorch eager fallback.
+
+Triton attention 是独立的 forward-only engine,不是 TileLang attention 的 `auto` 替代. 当前入口要求 contiguous BHSD,匹配 FP16/BF16 Q/K/V,FP32 score/online softmax/output accumulator,`head_dim=16/32/64/128`,`seq_kv >= seq_q`,`dropout_p=0`,并对非方形 causal 使用 lower-right mask;不支持 backward. 在 `sm_89` 上完成 5-shape x 19-candidate sweep 后,只有 `B1,H8,Sq1,Skv1024,D64` 的 FP16/BF16 exact resolver preset 通过 5-seed `9:0` audit,分别为 `16x64/4w/2s` 和 `16x128/4w/2s`. Causal/decode 的初始 paired gate 相对 SDPA 稳定降低 FP16 `22.63%/62.27%` 和 BF16 `21.01%/67.02%`,但 TileLang 仍胜出;small/medium/long prefill 也不支持 Triton route promotion. CPU 仍使用 SDPA reference fallback,其他 SM,动态 shape/mask 和 serving 级 KV/cache 不在本覆盖内. 证据见 `research/xqt-gemm/artifacts/2026-08-09-sm89-triton-attention/`.
+
+Triton dense FP16/BF16 GEMM 的 FP32 epilogue 已覆盖 bias,GELU 和 SiLU. BF16
+no-override 入口在 `sm_89` 上为五个已 profile 的
+`(M,N,K,bias,activation)` exact signature 使用 evidence-backed schedule preset.
+FP16 resolver 进一步把 `transpose_b` 纳入 exact key:M1/M4/M8/M64 preset 同时
+覆盖 K,N 和 N,K,M256 GELU 只为证据充分的 K,N layout 启用 preset. 六个调度
+字段始终逐项显式优先;其他 shape/SM 保留旧默认. N,K weight 由逻辑 stride 交换
+直接传入 kernel,不再 per-call materialize transpose;无状态 dispatcher 仍不保存
+tensor 或 hidden weight cache,默认使用零额外权重内存的 `transpose_stride`.
+
+Stateful Triton Linear materializer 另提供显式 `prepacked_kn` 和
+`linear_fastpath="graph"`. Graph 只复制动态 activation,固定 weight,bias,layout 和
+schedule,按 tensor contract 与参数 identity/version 缓存,并在参数更新,prepack
+刷新或 `.to()` 后失效. Replay 返回 graph-owned output. SM89 BF16/FP16 三层 gate
+都只有 M1 通过 `min_speedup=1.03`;M4/M64 均被 operator-stage speedup 门槛拒绝.
+两种 dtype 的 prepack 与 stride graph 都没有稳定差异. 因此这些能力是显式
+materialization 选项,`gemm_with_precision(engine="auto")` 和全 shape Linear
+auto route 都不改变.
 
 ## 硬件与精度速记
 

@@ -676,6 +676,169 @@ class Int8MmaLinear(nn.Module):
         )
         return self._run_triton(qactivation, activation_scale, output_dtype)
 
+    def run_quantized_activation(
+        self,
+        qactivation: torch.Tensor,
+        activation_scale: torch.Tensor | float,
+        *,
+        activation_quant_engine: str = "prequantized",
+        execution_reason: str = "true_int8_mma_prequantized_activation",
+    ) -> torch.Tensor:
+        """Run the INT8 GEMM backend on an already-quantized activation.
+
+        Fused input kernels such as ConvRot Norm+Hadamard produce the INT8
+        activation themselves.  Calling :meth:`forward` here would quantize
+        that tensor a second time, so this narrow entry point shares only the
+        GEMM/dequantization dispatch and records the fused producer.
+        """
+
+        if qactivation.ndim != 2:
+            raise XQTBackendError(
+                "prequantized INT8 activation must be a 2D tensor"
+            )
+        if qactivation.dtype != torch.int8:
+            raise XQTBackendError(
+                "prequantized INT8 activation must have torch.int8 dtype"
+            )
+        if int(qactivation.shape[1]) != self.input_features:
+            raise XQTBackendError(
+                "prequantized INT8 activation trailing dimension does not match "
+                "input_features"
+            )
+        scale = torch.as_tensor(
+            activation_scale,
+            device=qactivation.device,
+            dtype=torch.float32,
+        ).reshape(())
+        # This entry point is used from a CUDA fused producer.  Calling
+        # ``.item()`` here would synchronize the stream on every inference
+        # invocation and erase the benefit of avoiding a second quantization.
+        # Public setters validate scales before they reach this path; retain
+        # the eager validation for CPU/reference calls where it is free.
+        if scale.device.type != "cuda":
+            if not bool(torch.isfinite(scale).item()) or float(scale.item()) <= 0.0:
+                raise XQTBackendError("prequantized activation scale must be positive")
+
+        selected_engine = self.engine
+        if selected_engine == "auto":
+            cache_key = (
+                qactivation.device.type,
+                qactivation.device.index,
+                int(qactivation.shape[0]),
+                self.activation_scale_mode,
+                bool(qactivation.is_cuda),
+                bool(self.qweight_t.is_cuda),
+            )
+            selected_engine = self._auto_engine_cache.get(cache_key)
+            if selected_engine is None:
+                resolved = resolve_int8_mma_engine(
+                    "auto",
+                    preferred_engines=self.preferred_engines,
+                    fallback=self.fallback_engine,
+                )
+                selected_engine = self._pick_auto_engine(
+                    qactivation,
+                    candidates=resolved.candidates,
+                    resolved_engine=resolved.engine,
+                )
+                self._auto_engine_cache[cache_key] = selected_engine
+
+        used_engine = str(selected_engine)
+        padded_rows = int(qactivation.shape[0])
+        target_arch = _target_arch_from_device(qactivation.device)
+        output: torch.Tensor
+        reason = str(execution_reason)
+        try:
+            if used_engine == "ptx_sm89":
+                allowed, availability_reason = self._can_use_ptx_sm89(qactivation)
+                if not allowed:
+                    raise XQTBackendError(availability_reason)
+                output = self._run_ptx_sm89(qactivation, scale, self.output_dtype)
+                reason = f"{execution_reason}_ptx_sm89"
+            elif used_engine == "cuda_sm89":
+                allowed, availability_reason = self._can_use_cuda_sm89(qactivation)
+                if not allowed:
+                    raise XQTBackendError(availability_reason)
+                output = self._run_cuda_sm89(qactivation, scale)
+                reason = f"{execution_reason}_cuda_sm89"
+            elif used_engine == "tilelang":
+                allowed, availability_reason = self._can_use_tilelang(qactivation)
+                if not allowed:
+                    raise XQTBackendError(availability_reason)
+                output, padded_rows, target_arch = self._run_tilelang(
+                    qactivation,
+                    scale,
+                    self.output_dtype,
+                )
+                reason = f"{execution_reason}_tilelang"
+            elif used_engine == "triton":
+                allowed, availability_reason = self._can_use_triton(qactivation)
+                if not allowed:
+                    raise XQTBackendError(availability_reason)
+                output, padded_rows, target_arch = self._run_triton(
+                    qactivation,
+                    scale,
+                    self.output_dtype,
+                )
+                reason = f"{execution_reason}_triton"
+            else:
+                used_engine = "torch_int_mm"
+                acc = self._run_torch_int_mm(qactivation)
+                output = acc.to(torch.float32) * (
+                    scale
+                    * self.weight_scale.to(
+                        device=acc.device,
+                        dtype=torch.float32,
+                    )
+                )
+                if self.bias is not None:
+                    output = output + self.bias.to(
+                        device=output.device,
+                        dtype=output.dtype,
+                    )
+                reason = f"{execution_reason}_torch_int_mm"
+        except Exception as exc:
+            if self.fallback_engine != "torch_int_mm":
+                raise
+            used_engine = "torch_int_mm"
+            reason = f"{execution_reason}_fallback: {exc}"
+            acc = self._run_torch_int_mm(qactivation)
+            output = acc.to(torch.float32) * (
+                scale
+                * self.weight_scale.to(
+                    device=acc.device,
+                    dtype=torch.float32,
+                )
+            )
+            if self.bias is not None:
+                output = output + self.bias.to(
+                    device=output.device,
+                    dtype=output.dtype,
+                )
+
+        self.last_execution = {
+            "engine": used_engine,
+            "reason": reason,
+            "true_int8_mma": bool(qactivation.is_cuda and self.qweight_t.is_cuda),
+            "activation_dtype": "int8",
+            "weight_dtype": "int8",
+            "accumulation_dtype": "int32",
+            "activation_scale_mode": self.activation_scale_mode,
+            "activation_quant_engine": str(activation_quant_engine),
+            "fused_static_status": "prequantized_activation_to_gemm",
+            "input_rows": int(qactivation.shape[0]),
+            "padded_rows": int(padded_rows),
+            "input_features": self.input_features,
+            "output_features": self.output_features,
+            "target_arch": target_arch,
+            "prepacked_b": (
+                self._qweight_prepacked_b is not None
+                if used_engine in {"ptx_sm89", "cuda_sm89"}
+                else False
+            ),
+        }
+        return output.to(self.output_dtype)
+
     def _can_use_tilelang_static_fused(self, flat_inputs: torch.Tensor) -> tuple[bool, str]:
         if not flat_inputs.is_cuda or not self.qweight_t.is_cuda:
             return False, "TileLang fused INT8 Linear requires CUDA tensors"

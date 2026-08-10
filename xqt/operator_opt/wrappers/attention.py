@@ -17,7 +17,7 @@ from ..runtime import (
     cuda_graph_tensor_signature,
     replay_cuda_graph_tensor_callable,
 )
-from ._common import _resolved_target_arch
+from ._common import _matching_tensor_dtype_name, _resolved_target_arch
 
 
 class _TileLangAttentionWrapper(nn.Module):
@@ -40,6 +40,7 @@ class _TileLangAttentionWrapper(nn.Module):
         self.last_fastpath = "none"
         self.last_graph_state = "disabled"
         self.last_graph_reason: str | None = None
+        self.last_kernel_dtype: str | None = None
         self._graph_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def _prefer_native_attention_fastpath(self, q: torch.Tensor) -> bool:
@@ -129,11 +130,13 @@ class _TileLangAttentionWrapper(nn.Module):
         value: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q_proj, k_proj, v_proj = self._project_qkv(query, key, value)
-        return (
+        q, k, v = (
             self._reshape_for_tilelang(q_proj),
             self._reshape_for_tilelang(k_proj),
             self._reshape_for_tilelang(v_proj),
         )
+        self.last_kernel_dtype = _matching_tensor_dtype_name(q, k, v)
+        return q, k, v
 
     def _finalize_attention_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         merged = self._merge_from_tilelang(attn_output)
@@ -403,7 +406,9 @@ class _TileLangAttentionWrapper(nn.Module):
             "operator_family": self.last_operator_family,
             "selected_fastpath": self.last_fastpath,
             "kernel_constraints": {
-                "dtype": "float16",
+                "dtype": self.last_kernel_dtype or "unknown",
+                "supported_dtypes": ["float16", "bfloat16"],
+                "bfloat16_head_dim_multiple": 16,
                 "dropout_p": 0.0,
                 "requires_seq_kv_gte_seq_q": True,
                 "supported_patterns": ["attention"],

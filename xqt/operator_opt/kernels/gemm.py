@@ -21,12 +21,15 @@ from .tilelang.gemm import (
     nvfp4_packed_dequant_gemm_epilogue_tilelang,
 )
 from .triton.gemm import (
+    TritonGemmSchedule,
     gemm_bf16_triton,
     gemm_fp16_triton,
     gemm_fp8_triton,
     gemm_int4_dequant_triton,
     gemm_int8_triton,
     gemm_reference,
+    resolve_triton_bf16_gemm_schedule,
+    resolve_triton_fp16_gemm_schedule,
 )
 from .triton.mxfp_gemm import (
     gemm_mxfp_reference,
@@ -38,6 +41,7 @@ from .triton.mxfp_gemm import (
 __all__ = [
     "cute_dsl_gemm_epilogue_reference",
     "cutlass_gemm_epilogue_reference",
+    "TritonGemmSchedule",
     "dequant_gemm_epilogue_reference",
     "dequant_gemm_epilogue_tilelang",
     "fp4_packed_dequant_gemm_epilogue_reference",
@@ -52,6 +56,8 @@ __all__ = [
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",
+    "resolve_triton_bf16_gemm_schedule",
+    "resolve_triton_fp16_gemm_schedule",
     "mxfp4_packed_dequant_gemm_epilogue_reference",
     "mxfp4_packed_dequant_gemm_epilogue_tilelang",
     "nvfp4_packed_dequant_gemm_epilogue_reference",

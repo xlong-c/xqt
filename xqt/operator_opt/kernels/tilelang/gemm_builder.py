@@ -8,6 +8,7 @@
 # pyright: reportAttributeAccessIssue=false
 
 from functools import lru_cache
+from typing import Any
 
 
 @lru_cache(maxsize=32)
@@ -16,6 +17,7 @@ def build_tilelang_gemm_kernel(
     n: int,
     k: int,
     *,
+    input_dtype: str = "float16",
     block_m: int = 64,
     block_n: int = 64,
     block_k: int = 64,
@@ -24,16 +26,18 @@ def build_tilelang_gemm_kernel(
     target_arch: str | None = None,
     has_bias: bool = False,
     activation: str | None = None,
-):
+) -> Any:
     import tilelang
     import tilelang.language as T
 
     if m <= 0 or n <= 0 or k <= 0:
         raise ValueError("m, n, k must be positive")
-    if m % block_m != 0 or n % block_n != 0:
-        raise ValueError(
-            "minimal TileLang GEMM builder currently requires m,n to be multiples of block sizes"
-        )
+    if input_dtype not in {"float16", "bfloat16"}:
+        raise ValueError("input_dtype must be float16 or bfloat16")
+    if block_m <= 0 or block_n <= 0 or block_k <= 0:
+        raise ValueError("block_m, block_n, and block_k must be positive")
+    if block_m % 16 != 0 or block_n % 16 != 0 or block_k % 16 != 0:
+        raise ValueError("TileLang GEMM block sizes must be multiples of 16")
     if k % block_k != 0:
         raise ValueError(
             "minimal TileLang GEMM builder currently requires k to be a multiple of block_k"
@@ -49,7 +53,7 @@ def build_tilelang_gemm_kernel(
     b_shape = [n, k]
     bias_shape = [n]
     c_shape = [m, n]
-    dtype = T.float16
+    dtype = T.float16 if input_dtype == "float16" else T.bfloat16
     accum_dtype = T.float32
 
     def _apply_activation(value):
@@ -66,7 +70,7 @@ def build_tilelang_gemm_kernel(
     else:
         out_idx = [2]
     shape_suffix = (
-        f"m{m}_n{n}_k{k}_bm{block_m}_bn{block_n}_bk{block_k}_"
+        f"{input_dtype}_m{m}_n{n}_k{k}_bm{block_m}_bn{block_n}_bk{block_k}_"
         f"t{threads}_s{num_stages}_{activation or 'none'}"
     )
 
@@ -109,9 +113,14 @@ def build_tilelang_gemm_kernel(
                     policy=T.GemmWarpPolicy.FullRow,
                 )
             for row, col in T.Parallel(block_m, block_n):
-                out[bx * block_m + row, by * block_n + col] = _apply_activation(
-                    acc_o[row, col] + bias[by * block_n + col]
-                )
+                if bx * block_m + row < m:
+                    if by * block_n + col < n:
+                        out[
+                            bx * block_m + row,
+                            by * block_n + col,
+                        ] = _apply_activation(
+                            acc_o[row, col] + bias[by * block_n + col]
+                        )
 
     tilelang_gemm_with_bias_main.__name__ = (
         f"tilelang_gemm_with_bias_main_{shape_suffix}"
@@ -156,9 +165,12 @@ def build_tilelang_gemm_kernel(
                     policy=T.GemmWarpPolicy.FullRow,
                 )
             for row, col in T.Parallel(block_m, block_n):
-                out[bx * block_m + row, by * block_n + col] = _apply_activation(
-                    acc_o[row, col]
-                )
+                if bx * block_m + row < m:
+                    if by * block_n + col < n:
+                        out[
+                            bx * block_m + row,
+                            by * block_n + col,
+                        ] = _apply_activation(acc_o[row, col])
 
     tilelang_gemm_without_bias_main.__name__ = (
         f"tilelang_gemm_without_bias_main_{shape_suffix}"

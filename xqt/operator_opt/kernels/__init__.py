@@ -12,13 +12,18 @@ Boundary reminders:
 """
 
 from .attention import (
+    TritonAttentionSchedule,
     TileLangAttentionDesign,
     build_tilelang_attention_design,
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
+    fused_attention_forward_triton,
+    resolve_triton_attention_schedule,
+    triton_attention_forward_reference,
 )
 from .conv import conv2d_reference, conv2d_tilelang
 from .gemm import (
+    TritonGemmSchedule,
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
     fp4_packed_dequant_gemm_epilogue_reference,
@@ -31,6 +36,8 @@ from .gemm import (
     gemm_mxfp_reference,
     gemm_mxfp_triton,
     gemm_reference,
+    resolve_triton_bf16_gemm_schedule,
+    resolve_triton_fp16_gemm_schedule,
     mxfp4_packed_dequant_gemm_epilogue_reference,
     mxfp4_packed_dequant_gemm_epilogue_tilelang,
     nvfp4_packed_dequant_gemm_epilogue_reference,
@@ -54,6 +61,7 @@ from .linear import (
     quantize_int4_weight,
     quantize_int8_weight,
 )
+from .triton.convrot import fused_norm_hadamard_static_quantize_triton
 
 KERNEL_GUIDANCE_TABLE = {
     "boundary": {
@@ -195,17 +203,17 @@ KERNEL_GUIDANCE_TABLE = {
             "engine_pattern": "triton/gemm_fp16",
             "entrypoint": "xqt.operator_opt.kernels.triton.gemm.gemm_fp16_triton",
             "public_dispatch_path": "xqt.operator_opt.backends.gemm_precision.gemm_with_precision(precision='fp16')",
-            "wrapper_or_materialize_path": "xqt.operator_opt.backends.triton.run_triton_kernel('gemm_fp16')",
+            "wrapper_or_materialize_path": "xqt.operator_opt.triton_wrappers._TritonLinearWrapper via build_triton_candidate_model; eager or explicit fixed-signature CUDA Graph replay",
             "status": "executable",
-            "notes": "Dense 2D GEMM with optional bias/activation.",
+            "notes": "Dense 2D GEMM with optional bias/activation; Linear materialization defaults to zero-extra-memory transpose strides and can explicitly prepack K,N weights.",
         },
         "gemm_bf16": {
             "engine_pattern": "triton/gemm_bf16",
             "entrypoint": "xqt.operator_opt.kernels.triton.gemm.gemm_bf16_triton",
             "public_dispatch_path": "xqt.operator_opt.backends.gemm_precision.gemm_with_precision(precision='bf16')",
-            "wrapper_or_materialize_path": "xqt.operator_opt.backends.triton.run_triton_kernel('gemm_bf16')",
+            "wrapper_or_materialize_path": "xqt.operator_opt.triton_wrappers._TritonLinearWrapper via build_triton_candidate_model; eager or explicit fixed-signature CUDA Graph replay",
             "status": "executable",
-            "notes": "BF16 dense GEMM.",
+            "notes": "BF16 dense GEMM with SM89 exact-signature schedules; graph replay remains shape-gated and explicit rather than an all-shape auto route.",
         },
         "gemm_int8": {
             "engine_pattern": "triton/gemm_int8",
@@ -322,18 +330,18 @@ KERNEL_GUIDANCE_TABLE = {
         "dense_linear_epilogue": {
             "engine_pattern": "tilelang/dense_linear_epilogue",
             "entrypoint": "xqt.operator_opt.kernels.tilelang.linear.dense_linear_epilogue_tilelang",
-            "public_dispatch_path": "xqt.operator_opt.backends.gemm_precision.gemm_with_precision(precision='fp16', engine='tilelang')",
-            "wrapper_or_materialize_path": "xqt.operator_opt.backends.tilelang.run_tilelang_kernel('dense_linear_epilogue')",
+            "public_dispatch_path": "xqt.operator_opt.backends.gemm_precision.gemm_with_precision(precision='fp16'|'bf16', engine='tilelang')",
+            "wrapper_or_materialize_path": "dispatcher resolves the registry entry; _TileLangLinearWrapper binds TileLangKernelSpec.kernel once",
             "status": "executable",
-            "notes": "Dense GEMM + optional epilogue.",
+            "notes": "FP16/BF16 dense GEMM + fused optional epilogue; sm_89 BF16 M<=4 uses the promoted 16x64x32 schedule unless explicitly overridden.",
         },
         "half_linear": {
             "engine_pattern": "tilelang/linear",
             "entrypoint": "xqt.operator_opt.kernels.tilelang.linear.half_linear_tilelang",
             "public_dispatch_path": "xqt.operator_opt.backends.gemm_precision.gemm_with_precision(..., engine='tilelang')",
-            "wrapper_or_materialize_path": "xqt.operator_opt.backends.tilelang.run_tilelang_kernel('linear')",
+            "wrapper_or_materialize_path": "dispatcher resolves the registry entry; _TileLangLinearWrapper binds TileLangKernelSpec.kernel once",
             "status": "executable",
-            "notes": "Half-precision linear path.",
+            "notes": "FP16/BF16 direct linear path with partial M/N support and an sm_89 BF16 M<=4 schedule preset.",
         },
         "dequant_gemm_epilogue": {
             "engine_pattern": "tilelang/dequant_gemm_epilogue",
@@ -864,6 +872,8 @@ KERNEL_GUIDANCE_TABLE = {
 
 __all__ = [
     "KERNEL_GUIDANCE_TABLE",
+    "TritonAttentionSchedule",
+    "TritonGemmSchedule",
     "TileLangAttentionDesign",
     "build_tilelang_attention_design",
     "conv2d_reference",
@@ -876,6 +886,8 @@ __all__ = [
     "fp4_packed_dequant_gemm_epilogue_tilelang",
     "fused_attention_forward_reference",
     "fused_attention_forward_tilelang",
+    "fused_attention_forward_triton",
+    "fused_norm_hadamard_static_quantize_triton",
     "gemm_bf16_triton",
     "gemm_fp16_triton",
     "gemm_fp8_triton",
@@ -884,6 +896,9 @@ __all__ = [
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",
+    "resolve_triton_bf16_gemm_schedule",
+    "resolve_triton_fp16_gemm_schedule",
+    "resolve_triton_attention_schedule",
     "half_linear_reference",
     "half_linear_tilelang",
     "linear_bf16_triton",
@@ -902,4 +917,5 @@ __all__ = [
     "quantize_int4_weight",
     "quantize_int8_weight",
     "unpack_mxfp",
+    "triton_attention_forward_reference",
 ]

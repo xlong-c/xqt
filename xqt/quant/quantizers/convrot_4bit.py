@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from functools import lru_cache
+import math
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import torch
@@ -54,7 +56,7 @@ from ..sensitivity import (
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
 from .fp4_weight_only import (
-    _normalize_group_size,
+    _can_mutate_runtime_cache,
     _pack_int4,
     _quantize_grouped_fp4_weight,
     _unpack_int4,
@@ -76,46 +78,99 @@ def _base_regular_hadamard4() -> torch.Tensor:
     )
 
 
+@lru_cache(maxsize=16)
+def _cached_regular_hadamard_matrix(order: int) -> torch.Tensor:
+    """Build one CPU matrix once; callers receive a clone before mutation."""
+
+    if order == 1:
+        return torch.ones((1, 1), dtype=torch.float32)
+    matrix = _base_regular_hadamard4()
+    current_order = 4
+    while current_order < order:
+        matrix = torch.kron(matrix, _base_regular_hadamard4())
+        current_order *= 4
+    return matrix.contiguous()
+
+
 def build_regular_hadamard_matrix(order: int) -> torch.Tensor:
     """Return the regular Hadamard matrix from ConvRot Theorem 3.3 for 4^k orders."""
 
     normalized_order = int(order)
     if normalized_order < 1:
         raise ValueError("order must be positive")
-    if normalized_order == 1:
-        return torch.ones((1, 1), dtype=torch.float32)
-    if normalized_order == 4:
-        return _base_regular_hadamard4()
-    value = normalized_order
-    while value % 4 == 0:
-        value //= 4
-    if value != 1:
-        raise ValueError("regular Hadamard order must be a power of four")
-    matrix = _base_regular_hadamard4()
-    current_order = 4
-    while current_order < normalized_order:
-        matrix = torch.kron(matrix, _base_regular_hadamard4())
-        current_order *= 4
-    return matrix
+    if normalized_order != 1:
+        value = normalized_order
+        while value % 4 == 0:
+            value //= 4
+        if value != 1:
+            raise ValueError("regular Hadamard order must be a power of four")
+    return _cached_regular_hadamard_matrix(normalized_order).clone()
 
 
 def _normalize_rot_size(rot_size: int, input_features: int) -> int:
-    """Pick the largest regular-Hadamard order <= rot_size that divides features."""
+    """Validate and retain the requested regular-Hadamard block size.
+
+    ``input_features`` is intentionally not used to downsize the block.  ConvRot
+    pads a short or non-divisible feature dimension internally so the configured
+    ``N0`` remains the actual rotation block described by the recipe.
+    """
 
     features = int(input_features)
     if features < 1:
         raise ValueError("input_features must be positive")
-    requested = max(1, min(int(rot_size), features))
-    best = 1
-    order = 1
-    while order <= requested:
-        if features % order == 0:
-            best = order
-        if order == 1:
-            order = 4
-        else:
-            order *= 4
-    return best
+    requested = int(rot_size)
+    if requested < 1:
+        raise ValueError("rot_size must be positive")
+    if requested != 1:
+        value = requested
+        while value % 4 == 0:
+            value //= 4
+        if value != 1:
+            raise ValueError("rot_size must be one or a power of four")
+    return requested
+
+
+def _normalize_convrot_group_size(group_size: int) -> int:
+    """Validate ConvRot's weight quantization group size without clamping it.
+
+    The generic weight-only quantizer clamps a group to the logical input width.
+    ConvRot instead pads the logical width to the requested group/block alignment,
+    so a default group such as 128 remains 128 even for a smaller Linear.
+    """
+
+    normalized = int(group_size)
+    if normalized < 1:
+        raise ValueError("group_size must be positive")
+    return normalized
+
+
+def _rotation_padded_features(
+    input_features: int,
+    rot_size: int,
+    *,
+    alignment: int = 1,
+) -> int:
+    """Return the internal K extent aligned for rotation and its consumer."""
+
+    features = int(input_features)
+    rotation = int(rot_size)
+    consumer_alignment = int(alignment)
+    if features < 1 or rotation < 1 or consumer_alignment < 1:
+        raise ValueError("feature and alignment sizes must be positive")
+    common = math.lcm(rotation, consumer_alignment)
+    return ((features + common - 1) // common) * common
+
+
+def _pad_last_dim(tensor: torch.Tensor, padded_features: int) -> torch.Tensor:
+    current = int(tensor.shape[-1])
+    target = int(padded_features)
+    if target < current:
+        raise ValueError(
+            f"padded feature extent {target} is smaller than tensor extent {current}"
+        )
+    if target == current:
+        return tensor
+    return F.pad(tensor, (0, target - current))
 
 
 def _normalized_regular_hadamard(order: int, *, device: torch.device) -> torch.Tensor:
@@ -128,22 +183,34 @@ def _apply_groupwise_rotation(
     *,
     rot_size: int,
     rotation_matrix: torch.Tensor | None = None,
+    return_padded: bool = False,
 ) -> torch.Tensor:
     if tensor.ndim < 1:
         raise ValueError("rotation tensor rank must be >= 1")
     feature_dim = int(tensor.shape[-1])
-    if feature_dim % int(rot_size) != 0:
-        raise ValueError(
-            f"feature dim {feature_dim} must be divisible by rot_size {int(rot_size)}"
-        )
+    normalized_rot_size = int(rot_size)
+    if normalized_rot_size < 1:
+        raise ValueError("rot_size must be positive")
+    _normalize_rot_size(normalized_rot_size, feature_dim)
+    padded_feature_dim = (
+        (feature_dim + normalized_rot_size - 1) // normalized_rot_size
+    ) * normalized_rot_size
     rotation = (
         rotation_matrix
         if rotation_matrix is not None
-        else _normalized_regular_hadamard(int(rot_size), device=tensor.device)
+        else _normalized_regular_hadamard(normalized_rot_size, device=tensor.device)
     )
-    reshaped = tensor.reshape(-1, feature_dim // int(rot_size), int(rot_size))
+    if tuple(rotation.shape) != (normalized_rot_size, normalized_rot_size):
+        raise ValueError("rotation_matrix shape must match rot_size")
+    padded = _pad_last_dim(tensor, padded_feature_dim)
+    reshaped = padded.reshape(
+        -1,
+        padded_feature_dim // normalized_rot_size,
+        normalized_rot_size,
+    )
     rotated = torch.matmul(reshaped, rotation.to(dtype=tensor.dtype, device=tensor.device))
-    return rotated.reshape(*tensor.shape)
+    rotated = rotated.reshape(*padded.shape)
+    return rotated if return_padded else rotated[..., :feature_dim]
 
 
 def _move_batch_to_device(batch: Any, device: torch.device) -> Any:
@@ -287,6 +354,24 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         self.group_size = int(group_size)
         self.padded_input_features = int(padded_input_features)
         self.rot_size = int(rot_size)
+        if self.input_features < 1 or self.output_features < 1:
+            raise ValueError("input_features and output_features must be positive")
+        self.rot_size = _normalize_rot_size(self.rot_size, self.input_features)
+        if self.group_size < 1 or self.rot_size < 1:
+            raise ValueError("group_size and rot_size must be positive")
+        if self.padded_input_features < self.input_features:
+            raise ValueError("padded_input_features must cover input_features")
+        if self.padded_input_features % self.rot_size != 0:
+            raise ValueError("padded_input_features must be divisible by rot_size")
+        if self.padded_input_features % self.group_size != 0:
+            raise ValueError("padded_input_features must be divisible by group_size")
+        if tuple(packed_weight.shape) != (
+            self.output_features,
+            (self.padded_input_features + 1) // 2,
+        ):
+            raise ValueError("packed_weight shape does not match padded_input_features")
+        if tuple(rotation_matrix.shape) != (self.rot_size, self.rot_size):
+            raise ValueError("rotation_matrix shape must match rot_size")
         self.register_buffer("packed_weight", packed_weight.to(torch.uint8).contiguous())
         self.register_buffer("weight_scale", weight_scale.to(torch.float32).contiguous())
         if bias is None:
@@ -301,10 +386,13 @@ class ConvRotMixedPrecisionLinear(nn.Module):
             "rotation_matrix",
             rotation_matrix.to(torch.float32).contiguous(),
         )
-        self.register_buffer(
-            "reference_weight",
-            reference_weight.detach().to(torch.float32).contiguous(),
-        )
+        reference = reference_weight.detach().to(torch.float32).contiguous()
+        if tuple(reference.shape) != (self.output_features, self.padded_input_features):
+            raise ValueError(
+                "reference_weight must have shape "
+                f"({self.output_features}, {self.padded_input_features})"
+            )
+        self.register_buffer("reference_weight", reference)
         axis = normalize_channel_axis(channel_hybrid_axis)
         dim_size = self.input_features if axis == "input" else self.output_features
         if high_precision_channel_mask is None:
@@ -327,8 +415,25 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         self.activation_scale_mode = scale_mode
         self.input_already_rotated = False
         self._int8_compute: Int8MmaLinear | None = None
+        self._dequantized_weight_cache: dict[
+            tuple[str, str, bool], tuple[tuple[Any, ...], torch.Tensor]
+        ] = {}
+        self._runtime_rotation_cache: dict[
+            tuple[str, int, int], torch.Tensor
+        ] = {}
         self.compute_precision = normalize_compute_precision(compute_precision)
         self._ensure_int8_compute()
+
+    def _clear_runtime_caches(self) -> None:
+        self._dequantized_weight_cache.clear()
+        self._runtime_rotation_cache.clear()
+
+    def _apply(self, fn: Any) -> "ConvRotMixedPrecisionLinear":
+        """Move registered tensors, then invalidate device/dtype-derived views."""
+
+        super()._apply(fn)
+        self._clear_runtime_caches()
+        return self
 
     @classmethod
     def from_linear(
@@ -349,32 +454,37 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         input_features = int(module.in_features)
         output_features = int(module.out_features)
         normalized_rot_size = _normalize_rot_size(rot_size, input_features)
-        if input_features % normalized_rot_size != 0:
-            raise ValueError(
-                "ConvRot mixed-precision linear requires input_features divisible by rot_size"
-            )
+        normalized_group_size = _normalize_convrot_group_size(group_size)
+        padded_input_features = _rotation_padded_features(
+            input_features,
+            normalized_rot_size,
+            alignment=normalized_group_size,
+        )
+        padded_weight = _pad_last_dim(weight, padded_input_features)
         rotation = _normalized_regular_hadamard(
             normalized_rot_size,
             device=weight.device,
         )
         rotated_weight = _apply_groupwise_rotation(
-            weight,
+            padded_weight,
             rot_size=normalized_rot_size,
             rotation_matrix=rotation,
+            return_padded=True,
         )
-        normalized_group_size = _normalize_group_size(group_size, input_features)
         packed_weight, weight_scale, padded_input_features = _quantize_grouped_fp4_weight(
             rotated_weight,
             group_size=normalized_group_size,
-            input_features=input_features,
+            input_features=padded_input_features,
             output_features=output_features,
         )
         bias = None if module.bias is None else module.bias.detach().to(torch.float32)
         axis = normalize_channel_axis(channel_hybrid_axis)
         dim_size = input_features if axis == "input" else output_features
+        selected_channels: Sequence[int] | torch.Tensor
+        selected_channels = () if high_precision_channels is None else high_precision_channels
         mask = build_channel_mask(
             dim_size,
-            high_precision_channels or (),
+            selected_channels,
             device=weight.device,
         )
         instance = cls(
@@ -411,17 +521,52 @@ class ConvRotMixedPrecisionLinear(nn.Module):
             :, : self.input_features
         ]
 
-    def dequantized_weight(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    def dequantized_weight(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        include_padding: bool = False,
+    ) -> torch.Tensor:
+        can_cache = _can_mutate_runtime_cache()
+        if not can_cache:
+            codes = _unpack_int4(self.packed_weight, self.padded_input_features).to(
+                device=device,
+                dtype=torch.float32,
+            )
+            grouped = codes.reshape(self.output_features, -1, self.group_size)
+            dequantized = grouped * self.weight_scale.to(
+                device=device, dtype=torch.float32
+            )
+            dense = dequantized.reshape(self.output_features, self.padded_input_features)
+            if not include_padding:
+                dense = dense[:, : self.input_features]
+            return dense.to(dtype=dtype)
+
+        cache_key = (str(device), str(dtype), bool(include_padding))
+        cache_signature = (
+            str(self.packed_weight.device),
+            int(getattr(self.packed_weight, "_version", 0)),
+            tuple(int(dim) for dim in self.packed_weight.shape),
+            str(self.weight_scale.device),
+            int(getattr(self.weight_scale, "_version", 0)),
+            tuple(int(dim) for dim in self.weight_scale.shape),
+        )
+        cached = self._dequantized_weight_cache.get(cache_key)
+        if cached is not None and cached[0] == cache_signature:
+            return cached[1]
         codes = _unpack_int4(self.packed_weight, self.padded_input_features).to(
             device=device,
             dtype=torch.float32,
         )
         grouped = codes.reshape(self.output_features, -1, self.group_size)
         dequantized = grouped * self.weight_scale.to(device=device, dtype=torch.float32)
-        dense = dequantized.reshape(self.output_features, self.padded_input_features)[
-            :, : self.input_features
-        ]
-        return dense.to(dtype=dtype)
+        dense = dequantized.reshape(self.output_features, self.padded_input_features)
+        if not include_padding:
+            dense = dense[:, : self.input_features]
+        result = dense.to(dtype=dtype).detach()
+        self._dequantized_weight_cache[cache_key] = (cache_signature, result)
+        return result
 
     def _bias_for(self, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor | None:
         if self.bias is None:
@@ -429,12 +574,39 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         return self.bias.to(device=device, dtype=dtype)
 
     def _rotate_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
+        padded = _pad_last_dim(inputs, self.padded_input_features)
         if self.input_already_rotated:
-            return inputs.to(torch.float32)
+            return padded.to(torch.float32)
+        can_cache = _can_mutate_runtime_cache()
+        if not can_cache:
+            return _apply_groupwise_rotation(
+                padded.to(torch.float32),
+                rot_size=self.rot_size,
+                rotation_matrix=self.rotation_matrix.to(
+                    device=inputs.device,
+                    dtype=torch.float32,
+                ),
+                return_padded=True,
+            )
+        rotation_version = int(getattr(self.rotation_matrix, "_version", 0))
+        rotation_key = (
+            str(inputs.device),
+            int(self.rotation_matrix.data_ptr()),
+            rotation_version,
+        )
+        rotation = None
+        rotation = self._runtime_rotation_cache.get(rotation_key)
+        if rotation is None:
+            rotation = self.rotation_matrix.to(
+                device=inputs.device,
+                dtype=torch.float32,
+            )
+            self._runtime_rotation_cache[rotation_key] = rotation
         return _apply_groupwise_rotation(
-            inputs.to(torch.float32),
+            padded.to(torch.float32),
             rot_size=self.rot_size,
-            rotation_matrix=self.rotation_matrix.to(device=inputs.device),
+            rotation_matrix=rotation,
+            return_padded=True,
         )
 
     def _ensure_int8_compute(self) -> None:
@@ -442,7 +614,11 @@ class ConvRotMixedPrecisionLinear(nn.Module):
             return
         dense_weight = self.reference_weight.to(torch.float32)
         dense_bias = None if self.bias is None else self.bias.to(torch.float32)
-        linear = nn.Linear(self.input_features, self.output_features, bias=dense_bias is not None)
+        linear = nn.Linear(
+            self.padded_input_features,
+            self.output_features,
+            bias=dense_bias is not None,
+        )
         linear.weight.data.copy_(dense_weight)
         if dense_bias is not None and linear.bias is not None:
             linear.bias.data.copy_(dense_bias)
@@ -513,7 +689,7 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         if self.activation_scale_mode == "static":
             scale = self.activation_scale.to(device=rotated.device, dtype=torch.float32)
             return torch.clamp(scale, min=1e-6)
-        amax = rotated.detach().abs().amax()
+        amax = rotated.detach().abs().amax(dim=-1, keepdim=True)
         return torch.clamp(amax / 7.0, min=1e-6)
 
     def _quantize_rotated_activation(self, rotated: torch.Tensor) -> torch.Tensor:
@@ -533,14 +709,24 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         rotated = self._rotate_inputs(inputs)
         low_activation = self._quantize_rotated_activation(rotated).to(dtype=dtype)
         high_activation = rotated.to(dtype=dtype)
-        low_weight = self.dequantized_weight(dtype=dtype, device=device)
+        low_weight = self.dequantized_weight(
+            dtype=dtype,
+            device=device,
+            include_padding=True,
+        )
         high_weight = self.reference_weight.to(device=device, dtype=dtype)
         axis = self.channel_hybrid_axis
         if axis == "input":
-            low_w = low_weight[:, ~mask]
-            high_w = high_weight[:, mask]
-            low_act = low_activation[..., ~mask]
-            high_act = high_activation[..., mask]
+            padded_mask = torch.zeros(
+                self.padded_input_features,
+                dtype=torch.bool,
+                device=device,
+            )
+            padded_mask[: self.input_features] = mask
+            low_w = low_weight[:, ~padded_mask]
+            high_w = high_weight[:, padded_mask]
+            low_act = low_activation[..., ~padded_mask]
+            high_act = high_activation[..., padded_mask]
         else:
             low_w = low_weight[~mask, :]
             high_w = high_weight[mask, :]
@@ -558,6 +744,13 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim < 1:
+            raise ValueError("ConvRotMixedPrecisionLinear input rank must be >= 1")
+        if int(inputs.shape[-1]) != self.input_features:
+            raise ValueError(
+                "ConvRotMixedPrecisionLinear input trailing dimension does not "
+                "match input_features"
+            )
         if self.channel_hybrid_enabled and bool(
             self.high_precision_channel_mask.any().item()
         ):
@@ -568,13 +761,21 @@ class ConvRotMixedPrecisionLinear(nn.Module):
 
         if precision == "w4a4":
             quantized_activation = self._quantize_activation(inputs)
-            weight = self.dequantized_weight(dtype=inputs.dtype, device=inputs.device)
+            weight = self.dequantized_weight(
+                dtype=inputs.dtype,
+                device=inputs.device,
+                include_padding=True,
+            )
             return F.linear(quantized_activation, weight, bias)
 
         rotated_inputs = self._rotate_inputs(inputs).to(dtype=inputs.dtype)
 
         if precision == "w4a16":
-            weight = self.dequantized_weight(dtype=inputs.dtype, device=inputs.device)
+            weight = self.dequantized_weight(
+                dtype=inputs.dtype,
+                device=inputs.device,
+                include_padding=True,
+            )
             return F.linear(rotated_inputs, weight, bias)
 
         if precision == "bf16":
@@ -601,6 +802,7 @@ def _collect_convrot_activation_stats(
     calibration_inputs: Iterable[Any] | None,
     sample_limit: int | None,
     rot_size: int,
+    padding_alignment: int = 1,
     quant_max: float = 7.0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """Collect per-tensor activation scales and per-channel abs-max scores."""
@@ -615,28 +817,48 @@ def _collect_convrot_activation_stats(
     channel_maxima: dict[str, torch.Tensor] = {}
     handles: list[Any] = []
     module_rot_sizes: dict[str, int] = {}
+    module_padded_features: dict[str, int] = {}
     for name in wanted:
         hook_module = model.get_submodule(name)
         in_features = int(getattr(hook_module, "in_features", 0) or 0)
         module_rot_sizes[name] = (
             _normalize_rot_size(rot_size, in_features) if in_features > 0 else int(rot_size)
         )
+        if in_features > 0:
+            module_padded_features[name] = _rotation_padded_features(
+                in_features,
+                module_rot_sizes[name],
+                alignment=int(padding_alignment),
+            )
 
     def _make_hook(name: str) -> Any:
         def _hook(module: nn.Module, inputs: tuple[Any, ...], _: Any) -> None:
             if not inputs or not isinstance(inputs[0], torch.Tensor):
                 return
             activation = inputs[0].detach().to(torch.float32)
-            if activation.shape[-1] != getattr(module, "in_features", activation.shape[-1]):
+            if activation.ndim < 1:
                 return
-            rotated = _apply_groupwise_rotation(
-                activation,
-                rot_size=module_rot_sizes.get(name, int(rot_size)),
-            )
-            current_max = float(rotated.abs().amax().item())
+            if activation.shape[-1] != getattr(
+                module, "in_features", activation.shape[-1]
+            ):
+                return
+            padded_features = module_padded_features.get(name)
+            if padded_features is None:
+                rotated = _apply_groupwise_rotation(
+                    activation,
+                    rot_size=module_rot_sizes.get(name, int(rot_size)),
+                )
+            else:
+                rotated = _apply_groupwise_rotation(
+                    _pad_last_dim(activation, padded_features),
+                    rot_size=module_rot_sizes.get(name, int(rot_size)),
+                    return_padded=True,
+                )
+            flattened = rotated.reshape(-1, rotated.shape[-1])
+            current_max = float(flattened.abs().amax().item())
             previous = maxima.get(name, 0.0)
             maxima[name] = max(previous, current_max)
-            channel_score = rotated.abs().amax(dim=tuple(range(rotated.ndim - 1)))
+            channel_score = flattened.abs().amax(dim=0)
             previous_channel = channel_maxima.get(name)
             if previous_channel is None:
                 channel_maxima[name] = channel_score.clone()
@@ -681,8 +903,14 @@ def quantize_with_convrot_4bit(
         else _policy_from_mapping(policy or {})
     )
     policy_mapping = dict(policy) if isinstance(policy, Mapping) else {}
-    configured_rot_size = int(policy_mapping.get("rot_size", 256) or 256)
-    configured_group_size = int(policy_mapping.get("group_size", 128) or 128)
+    configured_rot_size = int(
+        policy_mapping["rot_size"] if "rot_size" in policy_mapping else 256
+    )
+    configured_group_size = int(
+        policy_mapping["group_size"] if "group_size" in policy_mapping else 128
+    )
+    _normalize_rot_size(configured_rot_size, 1)
+    _normalize_convrot_group_size(configured_group_size)
     sample_limit = (
         int(policy_mapping["sample_limit"]) if "sample_limit" in policy_mapping else None
     )
@@ -729,6 +957,7 @@ def quantize_with_convrot_4bit(
         calibration_inputs=calibration_inputs,
         sample_limit=sample_limit,
         rot_size=configured_rot_size,
+        padding_alignment=configured_group_size,
     )
     if (
         activation_scales
@@ -738,6 +967,7 @@ def quantize_with_convrot_4bit(
         activation_scale_mode = "static"
     quantized_modules: list[str] = []
     channel_overrides: list[dict[str, Any]] = []
+    module_feature_shapes: dict[str, dict[str, int]] = {}
     for name, module in list(target_model.named_modules()):
         if name not in candidate_names:
             continue
@@ -771,6 +1001,12 @@ def quantize_with_convrot_4bit(
         else:
             target_model = replacement
         quantized_modules.append(name)
+        module_feature_shapes[name] = {
+            "logical_input_features": int(replacement.input_features),
+            "padded_input_features": int(replacement.padded_input_features),
+            "rotation_size": int(replacement.rot_size),
+            "group_size": int(replacement.group_size),
+        }
         if high_precision_channels:
             channel_overrides.append(
                 {
@@ -837,7 +1073,14 @@ def quantize_with_convrot_4bit(
             "quantization_nature": "pseudo",
             "quantization_nature_scope": "current_xqt_runtime_implementation",
             "weight_encoding": "packed_signed_int4",
-            "activation_encoding": "symmetric_int4_reference",
+            "activation_encoding": (
+                "symmetric_int4_per_token_reference"
+                if activation_scale_mode == "dynamic"
+                else "symmetric_int4_per_tensor_reference"
+            ),
+            "activation_granularity": (
+                "per_token" if activation_scale_mode == "dynamic" else "per_tensor"
+            ),
             "activation_scale_mode": activation_scale_mode,
             "default_compute_precision": default_compute_precision,
             "supported_compute_precisions": sorted(SUPPORTED_COMPUTE_PRECISIONS),
@@ -846,7 +1089,9 @@ def quantize_with_convrot_4bit(
                     "weight": "offline rotated and packed signed INT4 with group scales",
                     "activation": (
                         "not stored as an activation artifact; runtime uses "
-                        f"{activation_scale_mode} symmetric INT4 when compute_precision=w4a4"
+                        f"{activation_scale_mode} symmetric INT4 "
+                        f"({'per-token' if activation_scale_mode == 'dynamic' else 'per-tensor'}) "
+                        "when compute_precision=w4a4"
                     ),
                 },
                 "runtime": {
@@ -865,6 +1110,8 @@ def quantize_with_convrot_4bit(
             },
             "group_size": configured_group_size,
             "rot_size": configured_rot_size,
+            "feature_padding": "internal_to_rotation_and_weight_group_alignment",
+            "module_feature_shapes": module_feature_shapes,
             "channel_hybrid_ratio": float(channel_hybrid_ratio),
             "channel_hybrid_axis": channel_hybrid_axis,
             "algorithm_metadata": {
@@ -872,6 +1119,7 @@ def quantize_with_convrot_4bit(
                 "rotation_scope": "groupwise",
                 "rot_size": configured_rot_size,
                 "group_size": configured_group_size,
+                "feature_padding": "internal_to_rotation_and_weight_group_alignment",
                 "weight_bits": 4,
                 "activation_bits": 4,
                 "activation_scale_mode": activation_scale_mode,

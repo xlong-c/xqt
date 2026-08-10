@@ -121,6 +121,10 @@ def _aligned_to_block(shape: GemmShape, block: int = 64) -> bool:
     return shape.m % block == 0 and shape.n % block == 0 and shape.k % block == 0
 
 
+def _k_aligned_to_block(shape: GemmShape, block: int = 64) -> bool:
+    return shape.k % block == 0
+
+
 def select_gemm_engine(
     *,
     precision: PrecisionPolicy,
@@ -189,18 +193,18 @@ def select_gemm_engine(
             )
         )
         tilelang_caveats: tuple[str, ...] = ()
-        if not _aligned_to_block(shape):
+        if not _k_aligned_to_block(shape):
             tilelang_caveats = (
-                "kernels/tilelang/gemm_builder.py requires m, n, and k to each "
-                "be a multiple of the block size (default 64); this shape is "
-                "not aligned and would raise if dispatched to tilelang.",
+                "kernels/tilelang/gemm_builder.py requires k to be a multiple "
+                "of block_k (default 64); this shape would raise with the "
+                "default TileLang schedule.",
             )
         candidates.append(
             GemmEngineCandidate(
                 engine="tilelang",
                 maturity="executable",
                 dispatchable_by_gemm_with_precision=True,
-                rationale=f"real dense {mma} TileLang kernel exists as an alternative to triton.",
+                rationale=f"real direct dense {mma} TileLang kernel exists as an alternative to triton.",
                 caveats=tilelang_caveats,
             )
         )

@@ -8,16 +8,20 @@ It is a model-side *reference entity*: there is no page table, block pool,
 cache eviction, or serving scheduler here. ``selected_kernel`` and fallback
 reasons are recorded for every forward. The default path stays the torch SDPA
 reference; an opt-in CUDA fused path (``preferred_kernel="auto"|"tilelang"``)
-runs the TileLang KV-int8 fused attention kernel, which consumes int8 K/V
-storage and dequantizes inside the kernel. The fused path is only reported as
-verified after a fused forward actually ran on device; any unavailability or
-kernel error falls back to the reference path with an honest
-``fallback_reason``.
+runs one packed QKV projection followed by the TileLang KV-int8 quantize-layout
+and fused attention kernels. The attention kernel consumes int8 K/V storage,
+reads Q directly from the packed projection, and dequantizes inside the kernel.
+An independent ``attention_fastpath="graph"`` option captures the complete
+packed forward and replays it for matching fixed tensor contracts.
+The fused path is only reported as verified after a fused forward actually ran
+on device; any unavailability or kernel error falls back to the reference path
+with an honest ``fallback_reason``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 import torch
@@ -188,6 +192,9 @@ class KvScaleAttention(nn.Module):
         preferred_kernel: str = "reference",
         fused_block_m: int = 64,
         fused_block_n: int = 64,
+        fused_quant_block_size: int = 256,
+        attention_fastpath: str = "eager",
+        cuda_graph_warmup: int = 2,
     ) -> None:
         super().__init__()
         if dim <= 0 or heads <= 0:
@@ -206,8 +213,21 @@ class KvScaleAttention(nn.Module):
             raise ValueError(
                 "preferred_kernel must be one of 'reference', 'auto', 'tilelang'"
             )
-        if int(fused_block_m) <= 0 or int(fused_block_n) <= 0:
-            raise ValueError("fused_block_m and fused_block_n must be positive")
+        normalized_fastpath = str(attention_fastpath).strip().lower()
+        if normalized_fastpath not in {"eager", "graph"}:
+            raise ValueError(
+                "attention_fastpath must be one of 'eager', 'graph'"
+            )
+        if int(cuda_graph_warmup) < 0:
+            raise ValueError("cuda_graph_warmup must be non-negative")
+        if (
+            int(fused_block_m) <= 0
+            or int(fused_block_n) <= 0
+            or int(fused_quant_block_size) <= 0
+        ):
+            raise ValueError(
+                "fused_block_m, fused_block_n, and fused_quant_block_size must be positive"
+            )
 
         self.dim = int(dim)
         self.heads = int(heads)
@@ -226,13 +246,20 @@ class KvScaleAttention(nn.Module):
         self.preferred_kernel = normalized_kernel
         self._fused_block_m = int(fused_block_m)
         self._fused_block_n = int(fused_block_n)
+        self._fused_quant_block_size = int(fused_quant_block_size)
+        self.attention_fastpath = normalized_fastpath
+        self.cuda_graph_warmup = int(cuda_graph_warmup)
         self._fallback_reason: str | None = None
         self._selected_kernel = "torch_sdpa_kv_scale_reference"
+        self._selected_kernels = ("torch_sdpa_kv_scale_reference",)
+        self._selected_fastpath = "torch_sdpa_reference"
         self._cuda_fused_verified = False
+        self._cuda_graph_state = "disabled"
+        self._cuda_graph_reason: str | None = None
+        self._cuda_graph_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._cuda_graph_last_state: dict[str, Any] | None = None
 
-        self.q_proj = nn.Linear(self.dim, self.inner_dim, bias=qkv_bias)
-        self.k_proj = nn.Linear(self.dim, self.inner_dim, bias=qkv_bias)
-        self.v_proj = nn.Linear(self.dim, self.inner_dim, bias=qkv_bias)
+        self.qkv = nn.Linear(self.dim, 3 * self.inner_dim, bias=qkv_bias)
         self.out_proj = nn.Linear(self.inner_dim, self.dim, bias=out_bias)
         self.register_buffer(
             "k_scale",
@@ -250,6 +277,18 @@ class KvScaleAttention(nn.Module):
             "attn_v_scale",
             torch.tensor(float(v_scale), dtype=torch.float32),
         )
+
+    def _apply(
+        self,
+        fn: Callable[[torch.Tensor], torch.Tensor],
+        recurse: bool = True,
+    ) -> KvScaleAttention:
+        module = super()._apply(fn, recurse=recurse)
+        self._cuda_graph_cache.clear()
+        self._cuda_graph_last_state = None
+        self._cuda_graph_state = "disabled"
+        self._cuda_graph_reason = "module device or dtype changed"
+        return module
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -311,6 +350,14 @@ class KvScaleAttention(nn.Module):
             .reshape(batch, seq, self.heads * head_dim)
         )
 
+    def _split_qkv(
+        self,
+        qkv: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """将等宽 packed QKV projection 切分为 reference 路径所需的 views."""
+
+        return torch.split(qkv, self.inner_dim, dim=-1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(
@@ -320,13 +367,36 @@ class KvScaleAttention(nn.Module):
             raise ValueError(
                 f"input last dim {int(x.shape[-1])} does not match dim {self.dim}"
             )
-        q = self._reshape(self.q_proj(x))
-        k_int8 = self._quantize_kv_int8(self.k_proj(x), self.k_scale)
-        v_int8 = self._quantize_kv_int8(self.v_proj(x), self.v_scale)
+        use_graph = (
+            self.preferred_kernel != "reference"
+            and self.attention_fastpath == "graph"
+        )
+        if use_graph:
+            graph_output = self._try_graph_forward(x)
+            if graph_output is not None:
+                return graph_output
+        else:
+            self._cuda_graph_state = "disabled"
+            self._cuda_graph_reason = (
+                "preferred_kernel is reference"
+                if self.preferred_kernel == "reference"
+                else "attention_fastpath is eager"
+            )
+        qkv = self.qkv(x)
         if self.preferred_kernel != "reference":
-            fused_attn = self._try_fused_attention(q, k_int8, v_int8)
+            fused_attn = self._try_fused_attention(qkv)
             if fused_attn is not None:
-                return self.out_proj(self._merge_heads(fused_attn))
+                return self.out_proj(fused_attn)
+        else:
+            self._selected_kernel = "torch_sdpa_kv_scale_reference"
+            self._selected_kernels = ("torch_sdpa_kv_scale_reference",)
+            self._selected_fastpath = "torch_sdpa_reference"
+            self._cuda_fused_verified = False
+            self._fallback_reason = None
+        q, k, v = self._split_qkv(qkv)
+        q = self._reshape(q)
+        k_int8 = self._quantize_kv_int8(k, self.k_scale)
+        v_int8 = self._quantize_kv_int8(v, self.v_scale)
         k = self._reshape(self._dequantize_kv(k_int8, self.k_scale, x.dtype))
         v = self._reshape(self._dequantize_kv(v_int8, self.v_scale, x.dtype))
         attn = F.scaled_dot_product_attention(
@@ -343,7 +413,7 @@ class KvScaleAttention(nn.Module):
         tensor: torch.Tensor,
         scale: torch.Tensor,
     ) -> torch.Tensor:
-        """per-tensor int8 量化, reference 与 fused 路径共用同一份 int8."""
+        """reference 路径的 per-tensor INT8 量化."""
 
         return (
             torch.round(tensor / scale)
@@ -370,12 +440,12 @@ class KvScaleAttention(nn.Module):
             tensor.dtype,
         )
 
-    def _fused_unavailability_reason(self, q: torch.Tensor) -> str | None:
+    def _fused_unavailability_reason(self, qkv: torch.Tensor) -> str | None:
         """返回 fused 路径不可用的原因; 可用时返回 None."""
 
-        if not q.is_cuda:
+        if not qkv.is_cuda:
             return "cuda_unavailable"
-        if q.dtype != torch.float16:
+        if qkv.dtype != torch.float16:
             return "dtype_not_fp16"
         if self.dropout_p != 0.0:
             return "dropout_unsupported"
@@ -390,42 +460,260 @@ class KvScaleAttention(nn.Module):
             return tilelang_runtime_unavailability_reason() or "tilelang_unusable"
         return None
 
-    def _try_fused_attention(
-        self,
-        q: torch.Tensor,
-        k_int8: torch.Tensor,
-        v_int8: torch.Tensor,
-    ) -> torch.Tensor | None:
-        """尝试 TileLang KV-int8 fused 路径; 不可用时诚实记录并返回 None."""
+    def _run_packed_tilelang_attention(self, qkv: torch.Tensor) -> torch.Tensor:
+        """Run packed-QKV quantize-layout and attention without report mutation."""
 
-        reason = self._fused_unavailability_reason(q)
-        if reason is not None:
-            self._selected_kernel = "torch_sdpa_kv_scale_reference"
-            self._fallback_reason = reason
-            return None
         from xqt.operator_opt.kernels.tilelang.kv_int8_attention import (
-            KV_INT8_FUSED_KERNEL_NAME,
-            fused_kv_int8_attention_forward_tilelang,
+            fused_kv_int8_attention_packed_qkv_forward_tilelang,
+            quantize_packed_qkv_int8_layout_tilelang,
         )
 
-        try:
-            attn = fused_kv_int8_attention_forward_tilelang(
-                q,
-                self._reshape(k_int8),
-                self._reshape(v_int8),
-                float(self.k_scale.item()),
-                float(self.v_scale.item()),
-                causal=self.causal,
-                block_m=self._fused_block_m,
-                block_n=self._fused_block_n,
-            )
-        except (XQTBackendError, RuntimeError) as exc:
-            self._selected_kernel = "torch_sdpa_kv_scale_reference"
-            self._fallback_reason = f"tilelang_kernel_error:{type(exc).__name__}"
-            return None
-        self._selected_kernel = KV_INT8_FUSED_KERNEL_NAME
+        k_int8, v_int8 = quantize_packed_qkv_int8_layout_tilelang(
+            qkv,
+            self.k_scale,
+            self.v_scale,
+            heads=self.heads,
+            head_dim=self.head_dim,
+            qmax=self.qmax,
+            block_size=self._fused_quant_block_size,
+        )
+        return fused_kv_int8_attention_packed_qkv_forward_tilelang(
+            qkv,
+            k_int8,
+            v_int8,
+            self.k_scale,
+            self.v_scale,
+            heads=self.heads,
+            head_dim=self.head_dim,
+            causal=self.causal,
+            block_m=self._fused_block_m,
+            block_n=self._fused_block_n,
+        )
+
+    def _run_packed_tilelang_full_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run projection, packed TileLang attention, and output projection."""
+
+        return self.out_proj(self._run_packed_tilelang_attention(self.qkv(x)))
+
+    def _mark_packed_tilelang_success(self, *, graph: bool) -> None:
+        selected_fastpath = (
+            "packed_qkv_tilelang_cuda_graph"
+            if graph
+            else "packed_qkv_tilelang_eager"
+        )
+        if (
+            self._selected_fastpath == selected_fastpath
+            and self._cuda_fused_verified
+            and self._fallback_reason is None
+        ):
+            return
+        from xqt.operator_opt.kernels.tilelang.kv_int8_attention import (
+            KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME,
+            KV_INT8_PACKED_QKV_QUANTIZE_LAYOUT_KERNEL_NAME,
+        )
+
+        self._selected_kernel = KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME
+        self._selected_kernels = (
+            KV_INT8_PACKED_QKV_QUANTIZE_LAYOUT_KERNEL_NAME,
+            KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME,
+        )
+        self._selected_fastpath = selected_fastpath
         self._cuda_fused_verified = True
         self._fallback_reason = None
+
+    def _mark_reference_fallback(self, reason: str) -> None:
+        self._selected_kernel = "torch_sdpa_kv_scale_reference"
+        self._selected_kernels = ("torch_sdpa_kv_scale_reference",)
+        self._selected_fastpath = "torch_sdpa_reference_fallback"
+        self._cuda_fused_verified = False
+        self._fallback_reason = reason
+
+    @staticmethod
+    def _tensor_storage_signature(tensor: torch.Tensor | None) -> tuple[Any, ...]:
+        if tensor is None:
+            return (None,)
+        return (
+            int(tensor.data_ptr()),
+            tuple(int(dim) for dim in tensor.shape),
+            tuple(int(stride) for stride in tensor.stride()),
+            str(tensor.dtype),
+            str(tensor.device),
+        )
+
+    def _graph_cache_key(self, x: torch.Tensor) -> tuple[Any, ...]:
+        from xqt.operator_opt.runtime import cuda_graph_tensor_signature
+
+        device_index = x.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        compute_capability = tuple(
+            int(value) for value in torch.cuda.get_device_capability(device_index)
+        )
+        return (
+            cuda_graph_tensor_signature(x),
+            bool(self.causal),
+            float(self.dropout_p),
+            int(self.heads),
+            int(self.head_dim),
+            int(self.qmax),
+            int(self._fused_quant_block_size),
+            int(self._fused_block_m),
+            int(self._fused_block_n),
+            compute_capability,
+            self._tensor_storage_signature(self.qkv.weight),
+            self._tensor_storage_signature(self.qkv.bias),
+            self._tensor_storage_signature(self.out_proj.weight),
+            self._tensor_storage_signature(self.out_proj.bias),
+            self._tensor_storage_signature(self.k_scale),
+            self._tensor_storage_signature(self.v_scale),
+        )
+
+    def _capture_graph(self, x: torch.Tensor) -> dict[str, Any]:
+        from xqt.operator_opt.runtime import capture_cuda_graph_with_static_state
+
+        state = capture_cuda_graph_with_static_state(
+            (x,),
+            body=self._run_packed_tilelang_full_forward,
+            warmup=self.cuda_graph_warmup,
+        )
+        state["kind"] = "kv_int8_packed_qkv_full_forward"
+        state["output_storage"] = "graph_owned"
+        return state
+
+    def _annotate_graph_state(
+        self,
+        state: dict[str, Any],
+        x: torch.Tensor,
+        cache_key: tuple[Any, ...],
+    ) -> None:
+        from xqt.operator_opt.runtime import replay_cuda_graph_tensor_callable
+
+        state.update(
+            {
+                "cache_key": cache_key,
+                "fast_signature": self._graph_fast_signature(x),
+                "replay_callable": replay_cuda_graph_tensor_callable,
+            }
+        )
+
+    def _graph_fast_signature(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[Any, ...]:
+        return (
+            x.shape,
+            x.stride(),
+            x.dtype,
+            x.device,
+            self.causal,
+            self.dropout_p,
+            self.heads,
+            self.head_dim,
+            self.qmax,
+            self._fused_quant_block_size,
+            self._fused_block_m,
+            self._fused_block_n,
+            id(self.qkv.weight),
+            id(self.qkv.bias),
+            id(self.out_proj.weight),
+            id(self.out_proj.bias),
+            id(self.k_scale),
+            id(self.v_scale),
+        )
+
+    def _graph_state_matches(
+        self,
+        state: Mapping[str, Any],
+        x: torch.Tensor,
+    ) -> bool:
+        return state.get("fast_signature") == self._graph_fast_signature(x)
+
+    def _replay_graph_state(
+        self,
+        state: dict[str, Any],
+        x: torch.Tensor,
+        *,
+        graph_state: str,
+    ) -> torch.Tensor | None:
+        try:
+            replay_callable = state["replay_callable"]
+            output = replay_callable(state, (x,))
+        except Exception as exc:
+            cache_key = state.get("cache_key")
+            if isinstance(cache_key, tuple):
+                self._cuda_graph_cache.pop(cache_key, None)
+            if self._cuda_graph_last_state is state:
+                self._cuda_graph_last_state = None
+            self._cuda_graph_state = "fallback_eager"
+            self._cuda_graph_reason = (
+                f"CUDA Graph replay failed: {type(exc).__name__}: {exc}"
+            )
+            return None
+        self._cuda_graph_last_state = state
+        self._cuda_graph_state = graph_state
+        self._cuda_graph_reason = None
+        self._mark_packed_tilelang_success(graph=True)
+        return output
+
+    def _try_graph_forward(self, x: torch.Tensor) -> torch.Tensor | None:
+        last_state = self._cuda_graph_last_state
+        if last_state is not None and self._graph_state_matches(last_state, x):
+            return self._replay_graph_state(
+                last_state,
+                x,
+                graph_state="replayed",
+            )
+
+        reason = self._fused_unavailability_reason(x)
+        if reason is not None:
+            self._cuda_graph_state = "fallback_eager"
+            self._cuda_graph_reason = reason
+            return None
+
+        cache_key = self._graph_cache_key(x)
+        state = self._cuda_graph_cache.get(cache_key)
+        if state is None:
+            try:
+                state = self._capture_graph(x)
+            except Exception as exc:
+                self._cuda_graph_state = "fallback_eager"
+                self._cuda_graph_reason = (
+                    f"CUDA Graph capture failed: {type(exc).__name__}: {exc}"
+                )
+                return None
+            self._annotate_graph_state(state, x, cache_key)
+            self._cuda_graph_cache[cache_key] = state
+            return self._replay_graph_state(
+                state,
+                x,
+                graph_state="captured",
+            )
+        self._cuda_graph_last_state = state
+        return self._replay_graph_state(
+            state,
+            x,
+            graph_state="replayed",
+        )
+
+    def _try_fused_attention(
+        self,
+        qkv: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """尝试 packed-QKV TileLang 路径; 不可用时记录并返回 None."""
+
+        reason = self._fused_unavailability_reason(qkv)
+        if reason is not None:
+            self._mark_reference_fallback(reason)
+            return None
+
+        try:
+            attn = self._run_packed_tilelang_attention(qkv)
+        except (XQTBackendError, RuntimeError) as exc:
+            self._mark_reference_fallback(
+                f"tilelang_kernel_error:{type(exc).__name__}"
+            )
+            return None
+        self._mark_packed_tilelang_success(graph=False)
         return attn
 
     def prefill(self, x: torch.Tensor) -> torch.Tensor:
@@ -478,9 +766,23 @@ class KvScaleAttention(nn.Module):
             "entity": "kv_scale_attention_reference",
             "layer_path": self.layer_path,
             "preferred_kernel": self.preferred_kernel,
+            "attention_fastpath": self.attention_fastpath,
+            "projection_mode": "packed_qkv",
             "selected_kernel": self._selected_kernel,
+            "selected_kernels": list(self._selected_kernels),
+            "selected_fastpath": self._selected_fastpath,
             "cuda_fused_verified": self._cuda_fused_verified,
             "fallback_reason": self._fallback_reason,
+            "cuda_graph": {
+                "state": self._cuda_graph_state,
+                "reason": self._cuda_graph_reason,
+                "cache_size": len(self._cuda_graph_cache),
+                "output_storage": (
+                    "graph_owned"
+                    if self._cuda_graph_state in {"captured", "replayed"}
+                    else None
+                ),
+            },
             "contract_ok": consume.ok,
             "contract_errors": list(consume.errors),
             "contract_notes": list(consume.notes),

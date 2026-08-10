@@ -33,8 +33,11 @@ _SEED_SOURCE = (
 _DENSE_SOURCE = Path(__file__).resolve().with_name("dense_sm89.cu")
 _W4A16_SOURCE = Path(__file__).resolve().with_name("w4a16_sm89.cu")
 _W4A16_FUSED_SOURCE = Path(__file__).resolve().with_name("w4a16_cutlass_fused_sm89.cu")
+_W4A16_GROUPED_SOURCE = Path(__file__).resolve().with_name("w4a16_grouped_sm89.cu")
+_W8A8_GROUPED_SOURCE = Path(__file__).resolve().with_name("w8a8_grouped_sm89.cu")
 _FP8_PROBE_SOURCE = Path(__file__).resolve().with_name("fp8_cutlass_probe_sm89.cu")
 _FP8_SOURCE = Path(__file__).resolve().with_name("fp8_cutlass_sm89.cu")
+_FP8_GROUPED_SOURCE = Path(__file__).resolve().with_name("fp8_grouped_sm89.cu")
 _MIXED_INPUT_PROBE_SOURCE = Path(__file__).resolve().with_name("mixed_input_probe_sm89.cu")
 
 
@@ -97,6 +100,30 @@ class Sm89W4A16FusedBuildConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class Sm89GroupedW4A16BuildConfig:
+    """Inputs for the manifest-gated grouped W4A16 decode artifact."""
+
+    source: Path = _W4A16_GROUPED_SOURCE
+    output: Path = field(
+        default_factory=lambda: default_cache_dir() / "sm89" / "w4a16_grouped_sm89.so"
+    )
+    target_arch: str = "sm_89"
+    extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
+
+
+@dataclass(frozen=True, slots=True)
+class Sm89GroupedW8A8BuildConfig:
+    """Inputs for the manifest-gated grouped W8A8 native MMA artifact."""
+
+    source: Path = _W8A8_GROUPED_SOURCE
+    output: Path = field(
+        default_factory=lambda: default_cache_dir() / "sm89" / "w8a8_grouped_sm89.so"
+    )
+    target_arch: str = "sm_89"
+    extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
+
+
+@dataclass(frozen=True, slots=True)
 class Sm89Fp8ProbeBuildConfig:
     """Inputs for the non-production SM89 E4M3/E5M2 MMA capability probe."""
 
@@ -115,6 +142,18 @@ class Sm89Fp8BuildConfig:
     source: Path = _FP8_SOURCE
     output: Path = field(
         default_factory=lambda: default_cache_dir() / "sm89" / "fp8_cutlass_sm89.so"
+    )
+    target_arch: str = "sm_89"
+    extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
+
+
+@dataclass(frozen=True, slots=True)
+class Sm89GroupedFp8BuildConfig:
+    """Inputs for the manifest-gated grouped FP8 native MMA artifact."""
+
+    source: Path = _FP8_GROUPED_SOURCE
+    output: Path = field(
+        default_factory=lambda: default_cache_dir() / "sm89" / "fp8_grouped_sm89.so"
     )
     target_arch: str = "sm_89"
     extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
@@ -350,6 +389,138 @@ def build_sm89_w4a16_fused_artifact(
     return manifest
 
 
+def build_sm89_grouped_w4a16_artifact(
+    config: Sm89GroupedW4A16BuildConfig | None = None,
+) -> GemmArtifactManifest:
+    """Compile the grouped W4A16 decode kernel pending numeric promotion."""
+
+    resolved = config or Sm89GroupedW4A16BuildConfig()
+    report = probe_cuda_cutlass(resolved.target_arch, require_device=False)
+    if not report.ready_for_compile:
+        raise XQTBackendError(
+            "SM89 grouped W4A16 build preflight failed: " + "; ".join(report.reasons)
+        )
+    source = resolved.source.expanduser().resolve()
+    output = resolved.output.expanduser().resolve()
+    if not source.is_file():
+        raise XQTBackendError(f"SM89 grouped W4A16 CUDA source not found: {source}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    flags = build_compile_flags(
+        report,
+        source=source,
+        output=output,
+        extra_flags=resolved.extra_flags,
+    )
+    try:
+        subprocess.run(list(flags), check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise XQTBackendError(f"SM89 grouped W4A16 nvcc build failed: {exc}") from exc
+    if not output.is_file():
+        raise XQTBackendError(
+            f"nvcc completed without producing grouped W4A16 artifact: {output}"
+        )
+    manifest = GemmArtifactManifest(
+        kernel_name="sm89_w4a16_grouped_decode",
+        target_arch=report.target_arch,
+        maturity="metadata_only",
+        source=str(source),
+        artifact=str(output),
+        compile_flags=flags,
+        tile_shape=(8, 1, 16),
+        warp_count=8,
+        stage_count=1,
+        preflight=report,
+        metadata={
+            "build_status": "compiled_pending_correctness_gate",
+            "correctness_verified": False,
+            "kernel_role": "grouped_w4a16_decode",
+            "implementation": "custom_cuda_simt_task_grid",
+            "weight_layout": {
+                "qweight": "[expert,N,padded_K/2] uint8",
+                "scales": "[expert,N,G] float32",
+                "zero_points": "optional [expert,N,G] float32",
+                "bias": "optional [expert,N] float32",
+            },
+            "task_table": "int32 [task_count,3] = [expert,packed_row_base,row_count]",
+            "row_bounds": [1, 2, 4, 8],
+            "scheduler_candidates": [
+                "direct_task_grid",
+                "bucketed_direct_task_grid",
+                "persistent_grid_stride",
+            ],
+            "persistent_blocks_per_sm_candidates": [1, 2, 4, "max_active"],
+            "output_scatter": "in_kernel_permutation",
+            "scatter_launch_count": 0,
+            "tensor_core_mma": False,
+        },
+    )
+    manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))
+    return manifest
+
+
+def build_sm89_grouped_w8a8_artifact(
+    config: Sm89GroupedW8A8BuildConfig | None = None,
+) -> GemmArtifactManifest:
+    """Compile grouped W8A8 native MMA and keep it gated pending correctness."""
+
+    resolved = config or Sm89GroupedW8A8BuildConfig()
+    report = probe_cuda_cutlass(resolved.target_arch, require_device=False)
+    if not report.ready_for_compile:
+        raise XQTBackendError(
+            "SM89 grouped W8A8 build preflight failed: " + "; ".join(report.reasons)
+        )
+    source = resolved.source.expanduser().resolve()
+    output = resolved.output.expanduser().resolve()
+    if not source.is_file():
+        raise XQTBackendError(f"SM89 grouped W8A8 CUDA source not found: {source}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    flags = build_compile_flags(
+        report,
+        source=source,
+        output=output,
+        extra_flags=resolved.extra_flags,
+    )
+    try:
+        subprocess.run(list(flags), check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise XQTBackendError(f"SM89 grouped W8A8 nvcc build failed: {exc}") from exc
+    if not output.is_file():
+        raise XQTBackendError(f"nvcc completed without producing grouped W8A8 artifact: {output}")
+    manifest = GemmArtifactManifest(
+        kernel_name="sm89_w8a8_grouped_mma",
+        target_arch=report.target_arch,
+        maturity="metadata_only",
+        source=str(source),
+        artifact=str(output),
+        compile_flags=flags,
+        tile_shape=(16, 32, 32),
+        warp_count=4,
+        stage_count=1,
+        preflight=report,
+        metadata={
+            "build_status": "compiled_pending_correctness_gate",
+            "correctness_verified": False,
+            "kernel_role": "grouped_w8a8_decode",
+            "implementation": "custom_cuda_mma_task_grid",
+            "weight_layout": "[expert,N,padded_K] int8",
+            "weight_scale_layout": "[expert,N] float32 per_channel",
+            "activation_scale_layout": "[total_M] float32 per_token or [1] per_tensor",
+            "task_table": "int32 [task_count,3] = [expert,packed_row_base,row_count]",
+            "row_tile": 8,
+            "scheduler": "single_direct_task_grid",
+            "warp_candidates": [1, 2, 4, 8],
+            "default_warps_per_block": 4,
+            "shared_a_staging": True,
+            "output_scatter": "in_kernel_permutation",
+            "scatter_launch_count": 0,
+            "tensor_core_mma": True,
+            "instruction_shape": [16, 8, 32],
+        },
+    )
+    manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))
+    return manifest
+
+
 def build_sm89_fp8_probe_artifact(
     config: Sm89Fp8ProbeBuildConfig | None = None,
 ) -> GemmArtifactManifest:
@@ -484,6 +655,72 @@ def build_sm89_fp8_artifact(
     return manifest
 
 
+def build_sm89_grouped_fp8_artifact(
+    config: Sm89GroupedFp8BuildConfig | None = None,
+) -> GemmArtifactManifest:
+    """Compile grouped FP8 MMA and keep it gated pending correctness."""
+
+    resolved = config or Sm89GroupedFp8BuildConfig()
+    report = probe_cuda_cutlass(resolved.target_arch, require_device=False)
+    if not report.ready_for_compile:
+        raise XQTBackendError(
+            "SM89 grouped FP8 build preflight failed: " + "; ".join(report.reasons)
+        )
+    source = resolved.source.expanduser().resolve()
+    output = resolved.output.expanduser().resolve()
+    if not source.is_file():
+        raise XQTBackendError(f"SM89 grouped FP8 CUDA source not found: {source}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    flags = build_compile_flags(
+        report,
+        source=source,
+        output=output,
+        extra_flags=resolved.extra_flags,
+    )
+    try:
+        subprocess.run(list(flags), check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise XQTBackendError(f"SM89 grouped FP8 nvcc build failed: {exc}") from exc
+    if not output.is_file():
+        raise XQTBackendError(f"nvcc completed without producing grouped FP8 artifact: {output}")
+    manifest = GemmArtifactManifest(
+        kernel_name="sm89_fp8_grouped_mma",
+        target_arch=report.target_arch,
+        maturity="metadata_only",
+        source=str(source),
+        artifact=str(output),
+        compile_flags=flags,
+        tile_shape=(16, 32, 32),
+        warp_count=4,
+        stage_count=1,
+        preflight=report,
+        metadata={
+            "build_status": "compiled_pending_correctness_gate",
+            "correctness_verified": False,
+            "kernel_role": "grouped_fp8_decode",
+            "implementation": "custom_cuda_cutlass_warp_mma_task_grid",
+            "formats": ["fp8_e4m3", "fp8_e5m2"],
+            "output_dtype": "fp16",
+            "scale_modes": ["tensorwise", "blockwise"],
+            "block_k_values": [32, 64, 128],
+            "warp_candidates": [1, 2, 4, 8],
+            "default_warps_per_block": 4,
+            "shared_a_staging": True,
+            "weight_layout": "[expert,N,padded_K] canonical FP8 bytes",
+            "tensorwise_scales": "activation [expert], weight [expert]",
+            "blockwise_scales": (
+                "activation [total_M,Kb], weight [expert,N,Kb]"
+            ),
+            "task_table": "int32 [task_count,3] = [expert,packed_row_base,row_count]",
+            "output_scatter": "in_kernel_permutation",
+            "tensor_core_mma": True,
+            "instruction_shape": [16, 8, 32],
+        },
+    )
+    manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))
+    return manifest
+
+
 def build_sm89_mixed_input_probe_artifact(
     config: Sm89MixedInputProbeBuildConfig | None = None,
 ) -> GemmArtifactManifest:
@@ -545,14 +782,20 @@ __all__ = [
     "Sm89DenseBuildConfig",
     "Sm89W4A16BuildConfig",
     "Sm89W4A16FusedBuildConfig",
+    "Sm89GroupedW4A16BuildConfig",
+    "Sm89GroupedW8A8BuildConfig",
     "Sm89Fp8ProbeBuildConfig",
     "Sm89Fp8BuildConfig",
+    "Sm89GroupedFp8BuildConfig",
     "Sm89MixedInputProbeBuildConfig",
     "build_sm89_artifact",
     "build_sm89_dense_artifact",
     "build_sm89_w4a16_dequant_artifact",
     "build_sm89_w4a16_fused_artifact",
+    "build_sm89_grouped_w4a16_artifact",
+    "build_sm89_grouped_w8a8_artifact",
     "build_sm89_fp8_probe_artifact",
     "build_sm89_fp8_artifact",
+    "build_sm89_grouped_fp8_artifact",
     "build_sm89_mixed_input_probe_artifact",
 ]

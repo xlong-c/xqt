@@ -11,6 +11,7 @@ from xqt.runtime.svd_fusion import (
     fused_svd_forward_cuda,
     svd_fusion_report,
 )
+from xqt.operator_opt.kernels.tilelang.svd_fused import resolve_svd_fused_schedule
 
 
 def _make_svd_linear() -> SVDQuantLinear:
@@ -52,6 +53,35 @@ def test_fused_svd_forward_rejects_non_svd_module() -> None:
 
     with pytest.raises(TypeError, match="low-rank branch"):
         fused_svd_forward(module, torch.randn(2, 16))
+
+
+def test_svd_fused_sm89_schedule_promotes_short_prefill_only() -> None:
+    schedule, reason = resolve_svd_fused_schedule(
+        64,
+        1024,
+        1024,
+        32,
+        target_arch="sm_89",
+    )
+    assert schedule is not None
+    assert schedule.to_dict() == {
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 64,
+        "threads": 128,
+        "num_stages": 2,
+    }
+    assert reason == "promoted_svd_fused_schedule"
+
+    large_schedule, large_reason = resolve_svd_fused_schedule(
+        1024,
+        2048,
+        2048,
+        64,
+        target_arch="sm_89",
+    )
+    assert large_schedule is None
+    assert "cached-dequant reference" in large_reason
 
 
 def _tilelang_cuda_available() -> bool:

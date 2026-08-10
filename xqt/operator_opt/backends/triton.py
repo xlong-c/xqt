@@ -11,7 +11,10 @@ import torch
 from xqt.core.errors import XQTBackendError
 
 from ..kernels.triton import (
+    TRITON_ATTENTION_KERNEL_METADATA,
     TRITON_KERNEL_METADATA,
+    fused_attention_forward_reference,
+    fused_attention_forward_triton,
     fused_bias_gelu_reference,
     fused_bias_gelu_triton,
     fused_channel_first_l2norm_reference,
@@ -69,6 +72,12 @@ class TritonKernelSpec:
 
 
 TRITON_KERNEL_REGISTRY: dict[str, TritonKernelSpec] = {
+    "attention": TritonKernelSpec(
+        pattern="attention",
+        reference=fused_attention_forward_reference,
+        kernel=fused_attention_forward_triton,
+        metadata=dict(TRITON_ATTENTION_KERNEL_METADATA["attention"]),
+    ),
     "bias_gelu": TritonKernelSpec(
         pattern="bias_gelu",
         reference=fused_bias_gelu_reference,

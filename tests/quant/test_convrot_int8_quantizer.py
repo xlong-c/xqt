@@ -3,6 +3,7 @@ import pytest
 
 from xqt.quant import (
     ConvRotInt8Linear,
+    ConvRotNormInt8Linear,
     build_regular_hadamard_matrix,
     decode_comfy_quant_marker,
     encode_int8_tensorwise_marker,
@@ -68,6 +69,53 @@ def test_quantize_with_convrot_int8_replaces_linear_on_cpu() -> None:
     assert marker["convrot_groupsize"] == 4
 
 
+@pytest.mark.parametrize("norm_kind", ["rmsnorm", "layernorm"])
+def test_convrot_norm_fusion_is_cpu_equivalent_and_explicit(
+    norm_kind: str,
+) -> None:
+    torch.manual_seed(7)
+    norm = (
+        torch.nn.RMSNorm(16, eps=1e-5)
+        if norm_kind == "rmsnorm"
+        else torch.nn.LayerNorm(16, eps=1e-5)
+    )
+    linear = torch.nn.Linear(16, 32, bias=True).eval()
+    model = torch.nn.Sequential(norm, linear).eval()
+    result = quantize_with_convrot_int8(
+        model,
+        policy={
+            "dtype": "int8",
+            "scheme": "convrot_w8a8",
+            "include_module_names": ["1"],
+            "rot_size": 4,
+            "activation_scale_mode": "static",
+            "activation_scales": {"1": 0.05},
+            "fuse_norm": True,
+        },
+        inplace=False,
+        engine="torch_int_mm",
+        fallback_engine="torch_int_mm",
+    )
+    inputs = torch.randn(3, 16)
+    expected_linear = ConvRotInt8Linear.from_linear(
+        linear,
+        rot_size=4,
+        engine="torch_int_mm",
+        fallback_engine="torch_int_mm",
+        activation_scale_mode="static",
+        activation_scale=0.05,
+    )
+    expected = expected_linear(norm(inputs))
+    actual = result.model(inputs)
+
+    assert isinstance(result.model[0], ConvRotNormInt8Linear)
+    assert isinstance(result.model[1], torch.nn.Identity)
+    assert result.metadata["norm_fused_module_count"] == 1
+    assert result.metadata["norm_fused_modules"] == {"1": "0"}
+    assert result.model[0].execution_metadata()["norm_fused"] is False
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
 def test_convrot_int8_hadamard_matches_w4a4_base() -> None:
     matrix = build_regular_hadamard_matrix(4)
     expected = torch.tensor(
@@ -92,6 +140,91 @@ def test_convrot_int8_preserves_source_output_dtype() -> None:
     output = module(torch.randn(2, 16, dtype=torch.float16))
 
     assert output.dtype == torch.float16
+
+
+def test_convrot_int8_pads_to_mma_alignment_and_preserves_sequence_shape() -> None:
+    source = torch.nn.Linear(18, 11, bias=True).eval()
+    module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=16,
+        engine="torch_int_mm",
+        fallback_engine="torch_int_mm",
+    ).eval()
+    inputs = torch.randn(2, 3, 18)
+
+    output = module(inputs)
+    metadata = module.execution_metadata()
+
+    assert output.shape == (2, 3, 11)
+    assert metadata["logical_input_features"] == 18
+    assert metadata["padded_input_features"] == 64
+
+
+def test_convrot_int8_preserves_pre_rotated_input_marker() -> None:
+    source = torch.nn.Linear(16, 11, bias=False).eval()
+    source.input_already_rotated = True
+    module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=16,
+        engine="torch_int_mm",
+        fallback_engine="torch_int_mm",
+    ).eval()
+    inputs = torch.randn(2, 16)
+
+    rotated = module._rotate_inputs(inputs)
+
+    assert module.input_already_rotated is True
+    assert torch.equal(rotated[..., :16], inputs)
+    assert torch.count_nonzero(rotated[..., 16:]) == 0
+    assert module.execution_metadata()["input_already_rotated"] is True
+
+
+def test_convrot_int8_rejects_non_power_of_four_rotation_size() -> None:
+    with pytest.raises(ValueError, match="power of four"):
+        ConvRotInt8Linear.from_linear(
+            torch.nn.Linear(18, 11),
+            rot_size=8,
+            engine="torch_int_mm",
+        )
+
+
+def test_convrot_int8_validates_rotation_without_candidates() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(16, 32, bias=False)).eval()
+
+    with pytest.raises(ValueError, match="power of four"):
+        quantize_with_convrot_int8(
+            model,
+            policy={
+                "dtype": "int8",
+                "scheme": "convrot_w8a8",
+                "include_module_names": ["missing"],
+                "rot_size": 8,
+            },
+            inplace=False,
+            engine="torch_int_mm",
+        )
+
+
+def test_quantize_with_convrot_int8_reports_internal_feature_padding() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(18, 11, bias=False)).eval()
+    result = quantize_with_convrot_int8(
+        model,
+        policy={
+            "dtype": "int8",
+            "scheme": "convrot_w8a8",
+            "include_module_names": ["0"],
+            "rot_size": 16,
+        },
+        inplace=False,
+        engine="torch_int_mm",
+        fallback_engine="torch_int_mm",
+    )
+
+    assert result.metadata["module_feature_shapes"]["0"] == {
+        "logical_input_features": 18,
+        "padded_input_features": 64,
+        "rotation_size": 16,
+    }
 
 
 def test_convrot_int8_calibrates_static_activation_scale() -> None:
@@ -190,6 +323,39 @@ def test_convrot_int8_auto_static_uses_cuda_sm89_gemm_after_fused_rotation() -> 
     assert metadata["fused_static_status"] == "tilelang_rotation_quant_then_cuda_gemm"
     assert metadata["rotation_fused"] is True
     assert metadata["prepacked_b"] is True
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("rot_size", [4, 16])
+def test_convrot_norm_fusion_uses_fused_triton_input_path(rot_size: int) -> None:
+    model = torch.nn.Sequential(
+        torch.nn.RMSNorm(64, eps=1e-5, device="cuda", dtype=torch.float16),
+        torch.nn.Linear(64, 128, device="cuda", dtype=torch.float16),
+    ).eval()
+    result = quantize_with_convrot_int8(
+        model,
+        policy={
+            "dtype": "int8",
+            "scheme": "convrot_w8a8",
+            "include_module_names": ["1"],
+            "rot_size": rot_size,
+            "activation_scale_mode": "static",
+            "activation_scales": {"1": 0.05},
+            "fuse_norm": True,
+        },
+        inplace=False,
+        engine="triton",
+        fallback_engine="torch_int_mm",
+    )
+    output = result.model(torch.randn(32, 64, device="cuda", dtype=torch.float16))
+    torch.cuda.synchronize()
+    metadata = result.model[0].execution_metadata()
+
+    assert output.shape == (32, 128)
+    assert metadata["norm_fused"] is True
+    assert metadata["activation_quant_engine"] == "triton_norm_hadamard_static"
+    assert metadata["fused_static_status"] == "norm_hadamard_quant_then_gemm"
+    assert metadata["fused_norm_fallback_reason"] is None
 
 
 def test_session_quant_convrot_w8a8_replaces_linear(tmp_path) -> None:

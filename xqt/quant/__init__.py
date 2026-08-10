@@ -107,6 +107,7 @@ from .quantizers.convrot_4bit import (
 )
 from .quantizers.convrot_int8 import (
     ConvRotInt8Linear,
+    ConvRotNormInt8Linear,
     ConvRotInt8QuantizationResult,
     quantize_with_convrot_int8,
 )
@@ -191,6 +192,7 @@ __all__ = [
     "IterableCalibrationDataReader",
     "ConvRot4BitQuantizationResult",
     "ConvRotInt8Linear",
+    "ConvRotNormInt8Linear",
     "ConvRotInt8QuantizationResult",
     "ConvRotMixedPrecisionLinear",
     "DEFAULT_CONVROT_GROUP_SIZE",

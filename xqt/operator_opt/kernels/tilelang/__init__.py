@@ -31,10 +31,20 @@ from .gemm import (
 )
 from .kv_int8_attention import (
     KV_INT8_FUSED_KERNEL_NAME,
+    KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME,
+    KV_INT8_PACKED_QKV_QUANTIZE_LAYOUT_KERNEL_NAME,
+    KV_INT8_PROJECTION_IO_KERNEL_NAME,
+    KV_INT8_QUANTIZE_LAYOUT_KERNEL_NAME,
     TILELANG_KV_INT8_ATTENTION_KERNEL_METADATA,
     build_tilelang_kv_int8_attention_kernel,
+    build_tilelang_kv_int8_quantize_layout_kernel,
+    build_tilelang_packed_qkv_int8_quantize_layout_kernel,
     fused_kv_int8_attention_forward_tilelang,
+    fused_kv_int8_attention_packed_qkv_forward_tilelang,
+    fused_kv_int8_attention_projection_forward_tilelang,
     kv_int8_attention_dequant_reference,
+    quantize_kv_int8_layout_tilelang,
+    quantize_packed_qkv_int8_layout_tilelang,
 )
 from .int8_mma import (
     TILELANG_INT8_MMA_KERNEL_METADATA,
@@ -72,7 +82,9 @@ from .norm import (
 )
 from .svd_fused import (
     TILELANG_SVD_FUSED_KERNEL_METADATA,
+    SVDQuantFusedSchedule,
     build_tilelang_svd_fused_kernel,
+    resolve_svd_fused_schedule,
     svd_fused_dequant_gemm_low_rank_tilelang,
 )
 from .gemm_builder import (
@@ -125,6 +137,10 @@ TILELANG_KERNEL_METADATA = {
 
 __all__ = [
     "KV_INT8_FUSED_KERNEL_NAME",
+    "KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME",
+    "KV_INT8_PACKED_QKV_QUANTIZE_LAYOUT_KERNEL_NAME",
+    "KV_INT8_PROJECTION_IO_KERNEL_NAME",
+    "KV_INT8_QUANTIZE_LAYOUT_KERNEL_NAME",
     "TILELANG_KERNEL_METADATA",
     "TILELANG_CONV_KERNEL_METADATA",
     "TILELANG_DEQUANT_GEMM_KERNEL_METADATA",
@@ -134,6 +150,7 @@ __all__ = [
     "TILELANG_MARLIN_LINEAR_KERNEL_METADATA",
     "TILELANG_NORM_KERNEL_METADATA",
     "TILELANG_SVD_FUSED_KERNEL_METADATA",
+    "SVDQuantFusedSchedule",
     "TileLangAttentionDesign",
     "build_tilelang_attention_design",
     "build_tilelang_conv1x1_nchw_kernel",
@@ -145,12 +162,15 @@ __all__ = [
     "build_tilelang_int8_linear_static_activation_kernel",
     "build_tilelang_int8_mma_kernel",
     "build_tilelang_kv_int8_attention_kernel",
+    "build_tilelang_kv_int8_quantize_layout_kernel",
+    "build_tilelang_packed_qkv_int8_quantize_layout_kernel",
     "build_tilelang_marlin_linear_kernel",
     "build_tilelang_nvfp4_packed_activation_fused_gemm_kernel",
     "build_tilelang_nvfp4_unpack_dequant_kernel",
     "build_tilelang_nvfp4_fused_dequant_gemm_kernel",
     "build_tilelang_static_activation_quant_kernel",
     "build_tilelang_svd_fused_kernel",
+    "resolve_svd_fused_schedule",
     "conv2d_reference",
     "conv2d_tilelang",
     "conv3d_1x1x1_reference",
@@ -172,6 +192,8 @@ __all__ = [
     "fused_attention_forward_reference",
     "fused_attention_forward_tilelang",
     "fused_kv_int8_attention_forward_tilelang",
+    "fused_kv_int8_attention_packed_qkv_forward_tilelang",
+    "fused_kv_int8_attention_projection_forward_tilelang",
     "gqa_decode_attention_reference",
     "gqa_decode_attention_tilelang",
     "half_linear_reference",
@@ -189,6 +211,8 @@ __all__ = [
     "pad_rows_to_block",
     "quantize_int4_weight",
     "quantize_int8_weight",
+    "quantize_kv_int8_layout_tilelang",
+    "quantize_packed_qkv_int8_layout_tilelang",
     "residual_add_reference",
     "residual_add_tilelang",
     "residual_rmsnorm_reference",

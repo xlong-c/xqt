@@ -84,9 +84,20 @@ def require_fp16_tensors(*tensors: torch.Tensor) -> None:
         raise XQTBackendError("TileLang half-kernel paths currently support only float16 tensors")
 
 
+def require_fp16_or_bf16_tensors(*tensors: torch.Tensor) -> None:
+    dtypes = {tensor.dtype for tensor in tensors}
+    if len(dtypes) != 1 or not dtypes.issubset(
+        {torch.float16, torch.bfloat16}
+    ):
+        raise XQTBackendError(
+            "TileLang 16-bit kernel paths require matching float16 or bfloat16 tensors"
+        )
+
+
 __all__ = [
     "_ensure_tilelang_cache_dir",
     "require_cuda_tensors",
+    "require_fp16_or_bf16_tensors",
     "require_fp16_tensors",
     "require_tilelang",
     "tilelang_runtime_unavailability_reason",

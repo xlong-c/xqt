@@ -127,9 +127,18 @@ class W4StorageInt8MmaLinear(nn.Module):
         else:
             self.register_buffer("bias", bias.detach().to(torch.float32).contiguous())
         self._compute: Int8MmaLinear | None = None
+        self._compute_signature: tuple[Any, ...] | None = None
         self._activation_scale = activation_scale
         if self.cache_int8_compute_view:
             self._ensure_compute_view()
+
+    def _apply(self, fn: Any) -> "W4StorageInt8MmaLinear":
+        """Move storage tensors and invalidate derived INT8 compute state."""
+
+        super()._apply(fn)
+        self._compute = None
+        self._compute_signature = None
+        return self
 
     @classmethod
     def from_linear(
@@ -243,10 +252,26 @@ class W4StorageInt8MmaLinear(nn.Module):
 
     def release_int8_compute_view(self) -> None:
         self._compute = None
+        self._compute_signature = None
+
+    def _compute_cache_signature(self) -> tuple[Any, ...]:
+        return (
+            str(self.packed_weight.device),
+            int(getattr(self.packed_weight, "_version", 0)),
+            tuple(int(dim) for dim in self.packed_weight.shape),
+            str(self.group_scale.device),
+            int(getattr(self.group_scale, "_version", 0)),
+            tuple(int(dim) for dim in self.group_scale.shape),
+            str(self.bias.device) if self.bias is not None else None,
+            int(getattr(self.bias, "_version", 0)) if self.bias is not None else None,
+        )
 
     def _ensure_compute_view(self) -> Int8MmaLinear:
-        if self._compute is not None:
+        signature = self._compute_cache_signature()
+        if self._compute is not None and self._compute_signature == signature:
             return self._compute
+        self._compute = None
+        self._compute_signature = None
         weight = self.dequantize_weight()
         qweight_t, channel_scale = _channel_int8_from_float_weight(weight, eps=self.eps)
         compute = Int8MmaLinear(
@@ -272,6 +297,7 @@ class W4StorageInt8MmaLinear(nn.Module):
         compute.to(device=self.packed_weight.device)
         if self.cache_int8_compute_view:
             self._compute = compute
+            self._compute_signature = signature
         return compute
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:

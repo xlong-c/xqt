@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -471,13 +473,13 @@ def _gemm_kernel(
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
-    c = accumulator.to(c_ptr.dtype.element_ty)
+    c = accumulator.to(tl.float32)
 
     # Apply bias
     if has_bias:
         bias_offs = offs_n
         bias_mask = offs_n < N
-        bias = tl.load(bias_ptr + bias_offs, mask=bias_mask, other=0.0)
+        bias = tl.load(bias_ptr + bias_offs, mask=bias_mask, other=0.0).to(tl.float32)
         c = c + bias[None, :]
 
     # Apply activation
@@ -491,7 +493,7 @@ def _gemm_kernel(
     # Store output
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    tl.store(c_ptrs, c.to(c_ptr.dtype.element_ty), mask=c_mask)
 
 
 @triton.jit
@@ -578,6 +580,196 @@ def _gemm_int8_kernel(
 # ============================================================================
 
 
+@dataclass(frozen=True)
+class TritonGemmSchedule:
+    """Resolved Triton GEMM launch schedule."""
+
+    block_m: int
+    block_n: int
+    block_k: int
+    group_m: int
+    num_warps: int
+    num_stages: int
+    target_arch: str | None
+    preset: str
+
+    def to_dict(self) -> dict[str, int | str | None]:
+        return {
+            "block_m": self.block_m,
+            "block_n": self.block_n,
+            "block_k": self.block_k,
+            "group_m": self.group_m,
+            "num_warps": self.num_warps,
+            "num_stages": self.num_stages,
+            "target_arch": self.target_arch,
+            "preset": self.preset,
+        }
+
+
+_TRITON_FP16_DEFAULT_SCHEDULE = (128, 128, 32, 8, 4, 3)
+_TRITON_FP16_SM89_PRESETS: dict[
+    tuple[int, int, int, bool, str | None, bool],
+    tuple[str, tuple[int, int, int, int, int, int]],
+] = {
+    (1, 4096, 4096, False, None, True): (
+        "sm89_fp16_decode_m1",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    (1, 4096, 4096, False, None, False): (
+        "sm89_fp16_decode_m1",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    (4, 4096, 4096, True, None, True): (
+        "sm89_fp16_decode_m4_bias",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    (4, 4096, 4096, True, None, False): (
+        "sm89_fp16_decode_m4_bias",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    (8, 11008, 4096, True, "silu", True): (
+        "sm89_fp16_decode_m8_silu",
+        (32, 128, 32, 4, 4, 3),
+    ),
+    (8, 11008, 4096, True, "silu", False): (
+        "sm89_fp16_decode_m8_silu",
+        (32, 128, 32, 4, 4, 3),
+    ),
+    (64, 1024, 1024, True, None, True): (
+        "sm89_fp16_small_prefill_bias",
+        (16, 128, 32, 4, 4, 3),
+    ),
+    (64, 1024, 1024, True, None, False): (
+        "sm89_fp16_small_prefill_bias",
+        (16, 128, 32, 4, 4, 3),
+    ),
+    (256, 4096, 4096, True, "gelu", False): (
+        "sm89_fp16_medium_prefill_gelu_kn",
+        (64, 64, 32, 8, 4, 3),
+    ),
+}
+
+
+@lru_cache(maxsize=256)
+def resolve_triton_fp16_gemm_schedule(
+    *,
+    m: int,
+    n: int,
+    k: int,
+    has_bias: bool,
+    activation: str | None,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
+    group_m: int | None = None,
+    num_warps: int | None = None,
+    num_stages: int | None = None,
+    target_arch: str | None = None,
+    transpose_b: bool = True,
+) -> TritonGemmSchedule:
+    """Resolve evidence-backed SM89 FP16 defaults and explicit overrides."""
+
+    preset = "default"
+    defaults = _TRITON_FP16_DEFAULT_SCHEDULE
+    if target_arch == "sm_89":
+        resolved = _TRITON_FP16_SM89_PRESETS.get(
+            (
+                int(m),
+                int(n),
+                int(k),
+                bool(has_bias),
+                activation,
+                bool(transpose_b),
+            )
+        )
+        if resolved is not None:
+            preset, defaults = resolved
+
+    return TritonGemmSchedule(
+        block_m=defaults[0] if block_m is None else int(block_m),
+        block_n=defaults[1] if block_n is None else int(block_n),
+        block_k=defaults[2] if block_k is None else int(block_k),
+        group_m=defaults[3] if group_m is None else int(group_m),
+        num_warps=defaults[4] if num_warps is None else int(num_warps),
+        num_stages=defaults[5] if num_stages is None else int(num_stages),
+        target_arch=target_arch,
+        preset=preset,
+    )
+
+
+_TRITON_BF16_DEFAULT_SCHEDULE = (128, 128, 32, 8, 4, 3)
+_TRITON_BF16_SM89_PRESETS: dict[
+    tuple[int, int, int, bool, str | None],
+    tuple[str, tuple[int, int, int, int, int, int]],
+] = {
+    (1, 4096, 4096, False, None): (
+        "sm89_bf16_decode_m1",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    (4, 4096, 4096, True, None): (
+        "sm89_bf16_decode_m4_bias",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    (8, 11008, 4096, True, "silu"): (
+        "sm89_bf16_decode_m8_silu",
+        (32, 128, 32, 4, 4, 3),
+    ),
+    (64, 1024, 1024, True, None): (
+        "sm89_bf16_small_prefill_bias",
+        (16, 64, 32, 4, 4, 3),
+    ),
+    (256, 4096, 4096, True, "gelu"): (
+        "sm89_bf16_medium_prefill_gelu",
+        (64, 64, 32, 8, 4, 3),
+    ),
+}
+
+
+@lru_cache(maxsize=256)
+def resolve_triton_bf16_gemm_schedule(
+    *,
+    m: int,
+    n: int,
+    k: int,
+    has_bias: bool,
+    activation: str | None,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
+    group_m: int | None = None,
+    num_warps: int | None = None,
+    num_stages: int | None = None,
+    target_arch: str | None = None,
+) -> TritonGemmSchedule:
+    """Resolve evidence-backed SM89 BF16 defaults and explicit overrides."""
+
+    preset = "default"
+    defaults = _TRITON_BF16_DEFAULT_SCHEDULE
+    if target_arch == "sm_89":
+        resolved = _TRITON_BF16_SM89_PRESETS.get(
+            (int(m), int(n), int(k), bool(has_bias), activation)
+        )
+        if resolved is not None:
+            preset, defaults = resolved
+
+    return TritonGemmSchedule(
+        block_m=defaults[0] if block_m is None else int(block_m),
+        block_n=defaults[1] if block_n is None else int(block_n),
+        block_k=defaults[2] if block_k is None else int(block_k),
+        group_m=defaults[3] if group_m is None else int(group_m),
+        num_warps=defaults[4] if num_warps is None else int(num_warps),
+        num_stages=defaults[5] if num_stages is None else int(num_stages),
+        target_arch=target_arch,
+        preset=preset,
+    )
+
+
+@lru_cache(maxsize=16)
+def _cuda_target_arch(device: torch.device) -> str:
+    major, minor = torch.cuda.get_device_capability(device)
+    return f"sm_{major}{minor}"
+
+
 def gemm_fp16_triton(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -587,14 +779,15 @@ def gemm_fp16_triton(
     transpose_b: bool = True,
     accum_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype = torch.float16,
-    block_m: int = 128,
-    block_n: int = 128,
-    block_k: int = 32,
-    group_m: int = 8,
-    num_warps: int = 4,
-    num_stages: int = 3,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
+    group_m: int | None = None,
+    num_warps: int | None = None,
+    num_stages: int | None = None,
+    target_arch: str | None = None,
 ) -> torch.Tensor:
-    """FP16 GEMM using Triton."""
+    """FP16 GEMM using Triton with evidence-backed SM89 schedules."""
     _require_triton()
     _require_cuda_tensors(a, b)
 
@@ -605,16 +798,36 @@ def gemm_fp16_triton(
     if bias is not None and bias.dtype != output_dtype:
         bias = bias.to(output_dtype)
 
-    # Prepare dimensions
+    # Resolve the logical B layout through strides without materializing a transpose.
     assert a.dim() == 2 and b.dim() == 2
     M, K = a.shape
     if transpose_b:
         N, K_b = b.shape
         assert K == K_b, f"Inner dimensions must match: {K} vs {K_b}"
-        b = b.t().contiguous()
+        stride_bk, stride_bn = b.stride(1), b.stride(0)
     else:
         K_b, N = b.shape
         assert K == K_b
+        stride_bk, stride_bn = b.stride(0), b.stride(1)
+
+    resolved_target_arch = target_arch
+    if resolved_target_arch is None and a.is_cuda:
+        resolved_target_arch = _cuda_target_arch(a.device)
+    schedule = resolve_triton_fp16_gemm_schedule(
+        m=int(M),
+        n=int(N),
+        k=int(K),
+        has_bias=bias is not None,
+        activation=activation,
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+        group_m=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_arch=resolved_target_arch,
+        transpose_b=transpose_b,
+    )
 
     c = torch.empty((M, N), device=a.device, dtype=output_dtype)
 
@@ -636,17 +849,17 @@ def gemm_fp16_triton(
         bias if bias is not None else a,  # dummy pointer if no bias
         M, N, K,
         a.stride(0), a.stride(1),
-        b.stride(0), b.stride(1),
+        stride_bk, stride_bn,
         c.stride(0), c.stride(1),
         has_bias=bias is not None,
         activation=act_code,
         ACC_TYPE=_tl_dtype_from_torch(accum_dtype),
-        BLOCK_M=block_m,
-        BLOCK_N=block_n,
-        BLOCK_K=block_k,
-        GROUP_M=group_m,
-        num_warps=num_warps,  # type: ignore[call-arg]
-        num_stages=num_stages,  # type: ignore[call-arg]
+        BLOCK_M=schedule.block_m,
+        BLOCK_N=schedule.block_n,
+        BLOCK_K=schedule.block_k,
+        GROUP_M=schedule.group_m,
+        num_warps=schedule.num_warps,  # type: ignore[call-arg]
+        num_stages=schedule.num_stages,  # type: ignore[call-arg]
     )
 
     return c
@@ -661,14 +874,15 @@ def gemm_bf16_triton(
     transpose_b: bool = True,
     accum_dtype: torch.dtype = torch.float32,
     output_dtype: torch.dtype = torch.bfloat16,
-    block_m: int = 128,
-    block_n: int = 128,
-    block_k: int = 32,
-    group_m: int = 8,
-    num_warps: int = 4,
-    num_stages: int = 3,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
+    group_m: int | None = None,
+    num_warps: int | None = None,
+    num_stages: int | None = None,
+    target_arch: str | None = None,
 ) -> torch.Tensor:
-    """BF16 GEMM using Triton."""
+    """BF16 GEMM using Triton with evidence-backed SM89 schedules."""
     _require_triton()
     _require_cuda_tensors(a, b)
 
@@ -679,18 +893,42 @@ def gemm_bf16_triton(
     if bias is not None and bias.dtype != output_dtype:
         bias = bias.to(output_dtype)
 
+    resolved_target_arch = target_arch
+    if resolved_target_arch is None and a.is_cuda:
+        resolved_target_arch = _cuda_target_arch(a.device)
+    if a.dim() == 2 and b.dim() == 2:
+        m, k = int(a.shape[0]), int(a.shape[1])
+        n = int(b.shape[0]) if transpose_b else int(b.shape[1])
+    else:
+        m = n = k = 0
+    schedule = resolve_triton_bf16_gemm_schedule(
+        m=m,
+        n=n,
+        k=k,
+        has_bias=bias is not None,
+        activation=activation,
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+        group_m=group_m,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        target_arch=resolved_target_arch,
+    )
+
     result = gemm_fp16_triton(
         a, b, bias,
         activation=activation,
         transpose_b=transpose_b,
         accum_dtype=accum_dtype,
         output_dtype=output_dtype,
-        block_m=block_m,
-        block_n=block_n,
-        block_k=block_k,
-        group_m=group_m,
-        num_warps=num_warps,  # type: ignore[call-arg]
-        num_stages=num_stages,  # type: ignore[call-arg]
+        block_m=schedule.block_m,
+        block_n=schedule.block_n,
+        block_k=schedule.block_k,
+        group_m=schedule.group_m,
+        num_warps=schedule.num_warps,
+        num_stages=schedule.num_stages,
+        target_arch=resolved_target_arch,
     )
 
     return result
@@ -1048,6 +1286,16 @@ TRITON_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "group_m": 8,
         "num_warps": 4,
         "num_stages": 3,
+        "schedule_policy": (
+            "exact SM89 shape/bias/activation/layout presets with explicit override"
+        ),
+        "schedule_presets": [
+            "sm89_fp16_decode_m1",
+            "sm89_fp16_decode_m4_bias",
+            "sm89_fp16_decode_m8_silu",
+            "sm89_fp16_small_prefill_bias",
+            "sm89_fp16_medium_prefill_gelu_kn",
+        ],
         "supports_bias": True,
         "supports_activation": True,
         "activations": ["relu", "gelu", "silu"],
@@ -1062,6 +1310,14 @@ TRITON_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "group_m": 8,
         "num_warps": 4,
         "num_stages": 3,
+        "schedule_policy": "exact SM89 shape/bias/activation presets with explicit override",
+        "schedule_presets": [
+            "sm89_bf16_decode_m1",
+            "sm89_bf16_decode_m4_bias",
+            "sm89_bf16_decode_m8_silu",
+            "sm89_bf16_small_prefill_bias",
+            "sm89_bf16_medium_prefill_gelu",
+        ],
         "supports_bias": True,
         "supports_activation": True,
         "activations": ["relu", "gelu", "silu"],
@@ -1124,6 +1380,7 @@ TRITON_GEMM_KERNEL_METADATA: dict[str, dict[str, Any]] = {
 
 __all__ = [
     "TRITON_GEMM_KERNEL_METADATA",
+    "TritonGemmSchedule",
     "dequantize_int4_weight_triton",
     "dequantize_nvfp4_weight_triton",
     "gemm_reference",
@@ -1139,4 +1396,6 @@ __all__ = [
     "gemm_nvfp4_packed_activation_triton",
     "gemm_nvfp4_packed_dequant_reference",
     "gemm_nvfp4_packed_dequant_triton",
+    "resolve_triton_fp16_gemm_schedule",
+    "resolve_triton_bf16_gemm_schedule",
 ]

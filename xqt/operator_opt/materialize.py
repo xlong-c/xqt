@@ -24,6 +24,8 @@ _CONTRACT_PATTERNS: dict[str, frozenset[str]] = {
     "linear": frozenset(
         {
             "linear",
+            "gemm_fp16",
+            "gemm_bf16",
             "dense_linear_epilogue",
             "dequant_gemm_epilogue",
             "fp4_packed_dequant_gemm_epilogue",

@@ -86,11 +86,16 @@ class GemmProblem:
     cuda_graph: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("m", "n", "k", "batch", "group_count"):
+        for name in ("n", "k", "batch", "group_count"):
             value = getattr(self, name)
             if isinstance(value, bool) or int(value) != value or int(value) <= 0:
                 raise ValueError(f"GemmProblem.{name} must be a positive int")
             object.__setattr__(self, name, int(value))
+        # A zero-row expert is a real routing outcome for grouped MoE GEMM.
+        # N/K and all execution-count fields stay positive; only M can be zero.
+        if isinstance(self.m, bool) or int(self.m) != self.m or int(self.m) < 0:
+            raise ValueError("GemmProblem.m must be a non-negative int")
+        object.__setattr__(self, "m", int(self.m))
         if self.op not in _OPS:
             raise ValueError(f"GemmProblem.op must be one of {sorted(_OPS)}, got {self.op!r}")
         if self.phase not in _PHASES:
@@ -442,6 +447,7 @@ class GroupedGemmProblem:
 
     problems: tuple[GemmProblem, ...]
     m_offsets: tuple[int, ...] | None = None
+    output_rows: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.problems:
@@ -457,9 +463,22 @@ class GroupedGemmProblem:
                 raise ValueError("m_offsets must have group_count + 1 entries")
             if offsets[0] != 0 or any(right < left for left, right in zip(offsets, offsets[1:])):
                 raise ValueError("m_offsets must be monotonic and start at zero")
-            if offsets[-1] != sum(problem.m for problem in self.problems):
-                raise ValueError("m_offsets[-1] must equal total grouped M")
+            expected_offsets = [0]
+            for problem in self.problems:
+                expected_offsets.append(expected_offsets[-1] + problem.m)
+            if offsets != tuple(expected_offsets):
+                raise ValueError("m_offsets must match cumulative expert M offsets")
             object.__setattr__(self, "m_offsets", offsets)
+        total_m = sum(problem.m for problem in self.problems)
+        if self.output_rows is not None:
+            rows = tuple(int(item) for item in self.output_rows)
+            if len(rows) != total_m:
+                raise ValueError("output_rows must contain one destination row per grouped input row")
+            if any(item < 0 for item in rows):
+                raise ValueError("output_rows entries must be non-negative")
+            if set(rows) != set(range(total_m)):
+                raise ValueError("output_rows must be a permutation of [0, total_m)")
+            object.__setattr__(self, "output_rows", rows)
 
     @property
     def group_count(self) -> int:
@@ -473,10 +492,17 @@ class GroupedGemmProblem:
     def k(self) -> int:
         return self.problems[0].k
 
+    @property
+    def total_m(self) -> int:
+        """Return the packed activation row count, including no rows for empty experts."""
+
+        return sum(problem.m for problem in self.problems)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "problems": [problem.to_dict() for problem in self.problems],
             "m_offsets": None if self.m_offsets is None else list(self.m_offsets),
+            "output_rows": None if self.output_rows is None else list(self.output_rows),
         }
 
     @classmethod
@@ -486,6 +512,9 @@ class GroupedGemmProblem:
         return cls(
             problems=tuple(GemmProblem.from_dict(item) for item in payload["problems"]),
             m_offsets=None if payload.get("m_offsets") is None else tuple(payload["m_offsets"]),
+            output_rows=None
+            if payload.get("output_rows") is None
+            else tuple(payload["output_rows"]),
         )
 
 

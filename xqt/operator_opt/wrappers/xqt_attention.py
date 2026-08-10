@@ -17,7 +17,7 @@ from ..runtime import (
     cuda_graph_tensor_signature,
     replay_cuda_graph_tensor_callable,
 )
-from ._common import _resolved_target_arch
+from ._common import _matching_tensor_dtype_name, _resolved_target_arch
 
 if TYPE_CHECKING:
     from xqt import nn as xqt_nn
@@ -43,17 +43,20 @@ class _TileLangXqtAttentionWrapper(nn.Module):
         self.last_fastpath = "none"
         self.last_graph_state = "disabled"
         self.last_graph_reason: str | None = None
+        self.last_kernel_dtype: str | None = None
         self._graph_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def _project_qkv(
         self,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return (
+        q, k, v = (
             self.attention._reshape_qkv(self.attention.q_proj(x)),
             self.attention._reshape_qkv(self.attention.k_proj(x)),
             self.attention._reshape_qkv(self.attention.v_proj(x)),
         )
+        self.last_kernel_dtype = _matching_tensor_dtype_name(q, k, v)
+        return q, k, v
 
     def _run_tilelang_attention_kernel(
         self,
@@ -237,7 +240,9 @@ class _TileLangXqtAttentionWrapper(nn.Module):
             "operator_family": self.last_operator_family,
             "selected_fastpath": self.last_fastpath,
             "kernel_constraints": {
-                "dtype": "float16",
+                "dtype": self.last_kernel_dtype or "unknown",
+                "supported_dtypes": ["float16", "bfloat16"],
+                "bfloat16_head_dim_multiple": 16,
                 "dropout_p": 0.0,
                 "requires_seq_kv_gte_seq_q": True,
                 "supported_patterns": ["attention"],

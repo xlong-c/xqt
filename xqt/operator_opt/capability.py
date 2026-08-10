@@ -115,10 +115,12 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
         requires_cuda=True,
         notes=(
             "Built-in executor ships limited CUDA-only Triton fused kernels.",
-            "Current built-in execution covers standalone float16/bfloat16 RMSNorm, the xqt.nn.FeedForward Triton runtime composition, true W8A8 INT8 GEMM, and packed low-bit dequant GEMM wrappers for INT4/MXFP/NVFP4, all with eager reference fallback metadata where applicable.",
+            "Current built-in execution covers direct float16/bfloat16 Linear with zero-materialization transpose strides, explicit prepacked K,N weights, and an explicit fixed-signature CUDA Graph replay mode; standalone float16/bfloat16 RMSNorm; the xqt.nn.FeedForward Triton runtime composition; true W8A8 INT8 GEMM; and packed low-bit dequant GEMM wrappers for INT4/MXFP/NVFP4, all with eager reference fallback metadata where applicable.",
         ),
         limitations=(
-            "Current built-in materialization is limited to rmsnorm, xqt.nn.FeedForward, true W8A8 INT8 Linear, and low-bit linear dequant GEMM patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
+            "Current built-in materialization is limited to direct half Linear, rmsnorm, xqt.nn.FeedForward, true W8A8 INT8 Linear, and low-bit linear dequant GEMM patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
+            "Direct half Linear prepacked K,N weights duplicate the dense weight storage and are explicit opt-in; transpose-stride is the default zero-extra-memory layout.",
+            "Direct half Linear CUDA Graph replay is explicit opt-in, requires a fixed input/layout/parameter contract, returns graph-owned output storage, and is not promoted as an all-shape automatic route.",
             "Current low-bit Triton execution is a composed runtime: packed weights are unpacked and dequantized on device before dispatching to Triton dense GEMM, rather than a single fused tensor-core kernel.",
         ),
     ),
@@ -130,13 +132,15 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
         exportable=False,
         requires_cuda=True,
         notes=(
-            "Built-in executor ships operator-family routing for attention, conv, direct half linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
-            "Ada-class GPUs can use native runtime fastpaths under the TileLang engine for attention, conv, direct half linear, direct half norm, and one-time-dequantized dense Linear paths.",
+            "Built-in executor ships operator-family routing for attention, conv, direct FP16/BF16 linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
+            "Ada-class GPUs can use native runtime fastpaths under the TileLang engine for attention, conv, direct FP16/BF16 linear, direct half norm, and one-time-dequantized dense Linear paths.",
+            "Explicit TileLang attention accepts matching float16 or bfloat16 Q/K/V tensors; Ada auto routing remains on native SDPA because the validated BF16 result is shape-dependent.",
+            "Explicit TileLang dense Linear accepts matching float16 or bfloat16 activation, weight, bias, and output tensors with FP32 accumulation and partial M/N tiles. On sm_89, BF16 flattened M<=4 defaults to the validated 16x64x32 schedule; Linear auto routing remains unchanged.",
             "Packed FP4/MXFP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future low-bit fused GEMM extensions.",
         ),
         limitations=(
             "Current built-in execution is limited to the attention, conv, linear, norm, and dequant_gemm_epilogue operator families/patterns.",
-            "Current CUDA execution is limited to float16 attention with dropout_p=0 and seq_kv >= seq_q, direct half linear and half norm paths, dense/dequant GEMM shapes aligned to the minimal block constraints when TileLang kernels are used, and packed FP4 runtime correctness/performance still requiring real CUDA hardware validation.",
+            "Current CUDA attention execution is limited to matching float16/bfloat16 Q/K/V with dropout_p=0 and seq_kv >= seq_q; bfloat16 head_dim must be divisible by 16. Direct dense Linear requires matching float16/bfloat16 tensors and K divisible by block_k; the sm_89 BF16 decode preset is validated only for M<=4. Half norm paths, dequant GEMM constraints, and packed FP4 runtime correctness/performance keep their existing hardware-specific limits.",
         ),
     ),
     "cutile": OperatorOptimizationEngineCapability(

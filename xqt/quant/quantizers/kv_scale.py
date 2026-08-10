@@ -8,7 +8,7 @@ cache or attach a serving engine.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import torch
 from torch import nn
@@ -154,21 +154,32 @@ def calibrate_kv_scales(
     if not layers:
         return {}
 
-    hook_targets: dict[str, str] = {}
+    hook_targets: list[tuple[str, str, bool, str]] = []
     for layer_path, roles in layers.items():
-        hook_targets[roles["k"]] = f"{layer_path}|k"
-        hook_targets[roles["v"]] = f"{layer_path}|v"
+        fused_qkv = "fused_qkv" in roles
+        for role in ("k", "v"):
+            hook_targets.append(
+                (roles[role], f"{layer_path}|{role}", fused_qkv, role)
+            )
 
-    max_abs: dict[str, float] = {key: 0.0 for key in hook_targets.values()}
-    sample_counts: dict[str, int] = {key: 0 for key in hook_targets.values()}
+    max_abs: dict[str, float] = {
+        stat_key: 0.0 for _module_path, stat_key, _fused, _role in hook_targets
+    }
+    sample_counts: dict[str, int] = {
+        stat_key: 0 for _module_path, stat_key, _fused, _role in hook_targets
+    }
     modules = dict(model.named_modules())
     handles: list[Any] = []
 
     try:
-        for module_path, key in hook_targets.items():
+        for module_path, key, fused, role in hook_targets:
             module = modules[module_path]
 
-            def make_hook(stat_key: str, fused: bool, role: str):
+            def make_hook(
+                stat_key: str,
+                fused: bool,
+                role: str,
+            ) -> Callable[[nn.Module, tuple[Any, ...], Any], None]:
                 def hook(
                     _module: nn.Module,
                     _inputs: tuple[Any, ...],
@@ -196,10 +207,6 @@ def calibrate_kv_scales(
 
                 return hook
 
-            fused = "fused_qkv" in layers.get(_parent_path(module_path), {}) or (
-                _leaf_name(module_path) in {"qkv", "wqkv", "query_key_value"}
-            )
-            role = key.rsplit("|", 1)[-1]
             handles.append(
                 module.register_forward_hook(make_hook(key, fused, role))
             )

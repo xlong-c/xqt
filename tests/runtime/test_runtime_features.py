@@ -228,9 +228,10 @@ def _float_reference_attention(
             .contiguous()
         )
 
-    q = reshape(entity.q_proj(x))
-    k = reshape(entity.k_proj(x))
-    v = reshape(entity.v_proj(x))
+    q_projection, k_projection, v_projection = entity._split_qkv(entity.qkv(x))
+    q = reshape(q_projection)
+    k = reshape(k_projection)
+    v = reshape(v_projection)
     attn = torch.nn.functional.scaled_dot_product_attention(
         q,
         k,
@@ -246,8 +247,7 @@ def test_kv_scale_attention_reference_entity_runs_and_reports() -> None:
     x = torch.randn(2, 5, 8) * 0.1
     probe = KvScaleAttention(8, heads=2, k_scale=1.0, v_scale=1.0)
     with torch.no_grad():
-        k_probe = probe.k_proj(x)
-        v_probe = probe.v_proj(x)
+        _, k_probe, v_probe = probe._split_qkv(probe.qkv(x))
     k_scale = float(k_probe.abs().max().item()) / 127.0
     v_scale = float(v_probe.abs().max().item()) / 127.0
     entity = KvScaleAttention(

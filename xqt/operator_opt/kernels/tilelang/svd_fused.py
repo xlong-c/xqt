@@ -23,6 +23,7 @@ fp16 输出. rank 不足 16 倍数时在 host 侧零填充到 16 的倍数
 # pyright: reportArgumentType=false
 # pyright: reportAttributeAccessIssue=false
 
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 
 import torch
@@ -38,6 +39,68 @@ from xqt.operator_opt.kernels.tilelang._common import (
 # mma 片段对齐: 实测 TileLang 0.1.12 T.gemm 在 N/K 非 16 倍数时拒绝编译
 # (rank=4) 或数值错误 (rank=8), 因此 rank 统一零填充到 16 的倍数.
 _RANK_ALIGNMENT = 16
+
+
+@dataclass(frozen=True)
+class SVDQuantFusedSchedule:
+    """Launch parameters for the promoted SVDQuant CUDA path.
+
+    The schedule is deliberately a small immutable value object so runtime
+    dispatch can cache/inspect it without retaining tensors or compiled
+    TileLang handles.
+    """
+
+    block_m: int = 64
+    block_n: int = 64
+    block_k: int = 64
+    threads: int = 128
+    num_stages: int = 2
+
+    def to_dict(self) -> dict[str, int]:
+        """Return the launch parameters as a plain mapping."""
+
+        return {key: int(value) for key, value in asdict(self).items()}
+
+
+def resolve_svd_fused_schedule(
+    m: int,
+    n: int,
+    input_features: int,
+    rank: int,
+    *,
+    target_arch: str | None = None,
+) -> tuple[SVDQuantFusedSchedule | None, str]:
+    """Resolve the measured CUDA promotion gate for one SVD shape.
+
+    On the local Ada ``sm_89`` target, the fused dequant/low-rank kernel wins
+    for decode and short-prefill batches, while large prefill batches are
+    faster with the cached-dequant cuBLAS reference path.  Keep that choice
+    explicit instead of silently promoting a slower single kernel.  The
+    direct :func:`svd_fused_dequant_gemm_low_rank_tilelang` entry remains
+    available for explicit experiments on other shapes/architectures.
+    """
+
+    m_value = int(m)
+    n_value = int(n)
+    k_value = int(input_features)
+    rank_value = int(rank)
+    if min(m_value, n_value, k_value, rank_value) <= 0:
+        raise ValueError("m, n, input_features, and rank must be positive")
+
+    arch = None if target_arch is None else str(target_arch).lower()
+    if arch in {"sm_89", "sm89"}:
+        # R-008 evidence on RTX 4070 Ti SUPER: 64x64x64/128 threads is the
+        # winning short-prefill schedule; M=1024,N=2048,K=2048 regresses by
+        # about 31% because each CTA carries the fused low-rank accumulator.
+        if m_value > 256:
+            return None, "sm_89 promotion gate keeps M>256 on cached-dequant reference"
+        if n_value > 2048 and m_value > 128:
+            return None, (
+                "sm_89 promotion gate keeps wide N with M>128 on cached-dequant reference"
+            )
+
+    del rank_value
+    return SVDQuantFusedSchedule(), "promoted_svd_fused_schedule"
 
 TILELANG_SVD_FUSED_KERNEL_METADATA = {
     "svd_fused_dequant_gemm_low_rank": {
@@ -469,6 +532,8 @@ def svd_fused_dequant_gemm_low_rank_tilelang(
 
 __all__ = [
     "TILELANG_SVD_FUSED_KERNEL_METADATA",
+    "SVDQuantFusedSchedule",
     "build_tilelang_svd_fused_kernel",
+    "resolve_svd_fused_schedule",
     "svd_fused_dequant_gemm_low_rank_tilelang",
 ]

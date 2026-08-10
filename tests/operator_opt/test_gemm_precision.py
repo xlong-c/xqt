@@ -32,10 +32,13 @@ from xqt.operator_opt.kernels.tilelang.gemm import (
     nvfp4_packed_dequant_gemm_epilogue_reference,
 )
 from xqt.operator_opt.kernels.triton.gemm import (
+    TritonGemmSchedule,
     gemm_bf16_triton,
     gemm_fp16_triton,
     gemm_int8_triton,
     gemm_reference,
+    resolve_triton_bf16_gemm_schedule,
+    resolve_triton_fp16_gemm_schedule,
 )
 from xqt.operator_opt.kernels.triton.mxfp_gemm import pack_mxfp, unpack_mxfp
 
@@ -120,6 +123,111 @@ class TestTritonGEMMKernels:
         expected = torch.matmul(a_bf16, b_bf16.t()) + bias_bf16
         assert torch.allclose(output.float(), expected.float(), rtol=5e-2, atol=5e-2)
 
+    @pytest.mark.parametrize("activation", ["gelu", "silu"])
+    def test_bf16_bias_activation_epilogue_matches_fp32_reference(
+        self,
+        small_matrices: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        activation: str,
+    ) -> None:
+        a, b, bias = small_matrices
+        a_bf16 = a.to(torch.bfloat16)
+        b_bf16 = b.to(torch.bfloat16)
+        bias_bf16 = bias.to(torch.bfloat16)
+
+        output = gemm_bf16_triton(
+            a_bf16,
+            b_bf16,
+            bias_bf16,
+            activation=activation,
+            transpose_b=True,
+        )
+        reference = a_bf16.float() @ b_bf16.float().t() + bias_bf16.float()
+        reference = (
+            F.gelu(reference) if activation == "gelu" else F.silu(reference)
+        ).to(torch.bfloat16)
+        error = (output.float() - reference.float()).abs()
+
+        assert output.dtype == torch.bfloat16
+        assert error.max().item() <= 0.5
+        assert error.mean().item() <= 0.05
+        assert torch.allclose(output.float(), reference.float(), atol=0.5, rtol=0.03)
+
+    @pytest.mark.parametrize("activation", ["gelu", "silu"])
+    def test_fp16_bias_activation_epilogue_regression(
+        self,
+        small_matrices: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        activation: str,
+    ) -> None:
+        a, b, bias = small_matrices
+
+        output = gemm_fp16_triton(
+            a,
+            b,
+            bias,
+            activation=activation,
+            transpose_b=True,
+        )
+        reference = a.float() @ b.float().t() + bias.float()
+        reference = (
+            F.gelu(reference) if activation == "gelu" else F.silu(reference)
+        ).to(torch.float16)
+        error = (output.float() - reference.float()).abs()
+
+        assert output.dtype == torch.float16
+        assert error.max().item() <= 0.25
+        assert error.mean().item() <= 0.025
+        assert torch.allclose(output.float(), reference.float(), atol=0.25, rtol=0.03)
+
+    @pytest.mark.parametrize(
+        ("m", "n", "k", "has_bias", "activation"),
+        [
+            (1, 4096, 4096, False, None),
+            (4, 4096, 4096, True, None),
+            (8, 11008, 4096, True, "silu"),
+            (64, 1024, 1024, True, None),
+            (256, 4096, 4096, True, "gelu"),
+        ],
+    )
+    def test_bf16_sm89_schedule_shapes_match_fp32_reference(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        has_bias: bool,
+        activation: str | None,
+    ) -> None:
+        if torch.cuda.get_device_capability() != (8, 9):
+            pytest.skip("SM89 schedule regression requires sm_89")
+        torch.manual_seed(20260809)
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
+        b = torch.randn((k, n), device="cuda", dtype=torch.bfloat16)
+        bias = (
+            torch.randn((n,), device="cuda", dtype=torch.bfloat16)
+            if has_bias
+            else None
+        )
+
+        output = gemm_bf16_triton(
+            a,
+            b,
+            bias,
+            activation=activation,
+            transpose_b=False,
+        )
+        reference = a.float() @ b.float()
+        if bias is not None:
+            reference = reference + bias.float()
+        if activation == "gelu":
+            reference = F.gelu(reference)
+        elif activation == "silu":
+            reference = F.silu(reference)
+        reference = reference.to(torch.bfloat16)
+        error = (output.float() - reference.float()).abs()
+
+        assert output.dtype == torch.bfloat16
+        assert error.mean().item() <= 0.001
+        assert torch.allclose(output.float(), reference.float(), atol=0.5, rtol=0.03)
+
     def test_int8_true_w8a8_basic(self):
         torch.manual_seed(11)
         a = torch.randint(-16, 16, (64, 128), device="cuda", dtype=torch.int8)
@@ -145,6 +253,411 @@ class TestTritonGEMMKernels:
 
         assert output.dtype == torch.float16
         assert torch.allclose(output.float(), reference, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    (
+        "m",
+        "n",
+        "k",
+        "has_bias",
+        "activation",
+        "transpose_b",
+        "expected",
+        "preset",
+    ),
+    [
+        (
+            1,
+            4096,
+            4096,
+            False,
+            None,
+            True,
+            (16, 64, 64, 4, 4, 3),
+            "sm89_fp16_decode_m1",
+        ),
+        (
+            1,
+            4096,
+            4096,
+            False,
+            None,
+            False,
+            (16, 64, 64, 4, 4, 3),
+            "sm89_fp16_decode_m1",
+        ),
+        (
+            4,
+            4096,
+            4096,
+            True,
+            None,
+            True,
+            (16, 64, 64, 4, 4, 3),
+            "sm89_fp16_decode_m4_bias",
+        ),
+        (
+            4,
+            4096,
+            4096,
+            True,
+            None,
+            False,
+            (16, 64, 64, 4, 4, 3),
+            "sm89_fp16_decode_m4_bias",
+        ),
+        (
+            8,
+            11008,
+            4096,
+            True,
+            "silu",
+            True,
+            (32, 128, 32, 4, 4, 3),
+            "sm89_fp16_decode_m8_silu",
+        ),
+        (
+            8,
+            11008,
+            4096,
+            True,
+            "silu",
+            False,
+            (32, 128, 32, 4, 4, 3),
+            "sm89_fp16_decode_m8_silu",
+        ),
+        (
+            64,
+            1024,
+            1024,
+            True,
+            None,
+            True,
+            (16, 128, 32, 4, 4, 3),
+            "sm89_fp16_small_prefill_bias",
+        ),
+        (
+            64,
+            1024,
+            1024,
+            True,
+            None,
+            False,
+            (16, 128, 32, 4, 4, 3),
+            "sm89_fp16_small_prefill_bias",
+        ),
+        (
+            256,
+            4096,
+            4096,
+            True,
+            "gelu",
+            False,
+            (64, 64, 32, 8, 4, 3),
+            "sm89_fp16_medium_prefill_gelu_kn",
+        ),
+    ],
+)
+def test_triton_fp16_sm89_schedule_presets_are_exact_signature_scoped(
+    m: int,
+    n: int,
+    k: int,
+    has_bias: bool,
+    activation: str | None,
+    transpose_b: bool,
+    expected: tuple[int, int, int, int, int, int],
+    preset: str,
+) -> None:
+    schedule = resolve_triton_fp16_gemm_schedule(
+        m=m,
+        n=n,
+        k=k,
+        has_bias=has_bias,
+        activation=activation,
+        target_arch="sm_89",
+        transpose_b=transpose_b,
+    )
+
+    assert isinstance(schedule, TritonGemmSchedule)
+    assert (
+        schedule.block_m,
+        schedule.block_n,
+        schedule.block_k,
+        schedule.group_m,
+        schedule.num_warps,
+        schedule.num_stages,
+    ) == expected
+    assert schedule.preset == preset
+
+
+@pytest.mark.parametrize(
+    ("target_arch", "m", "has_bias", "activation", "transpose_b"),
+    [
+        ("sm_90", 1, False, None, True),
+        ("sm_89", 2, False, None, True),
+        ("sm_89", 1, True, None, True),
+        ("sm_89", 1, False, "silu", True),
+        ("sm_89", 256, True, "gelu", True),
+    ],
+)
+def test_triton_fp16_schedule_keeps_default_outside_exact_presets(
+    target_arch: str,
+    m: int,
+    has_bias: bool,
+    activation: str | None,
+    transpose_b: bool,
+) -> None:
+    schedule = resolve_triton_fp16_gemm_schedule(
+        m=m,
+        n=4096,
+        k=4096,
+        has_bias=has_bias,
+        activation=activation,
+        target_arch=target_arch,
+        transpose_b=transpose_b,
+    )
+
+    assert (
+        schedule.block_m,
+        schedule.block_n,
+        schedule.block_k,
+        schedule.group_m,
+        schedule.num_warps,
+        schedule.num_stages,
+    ) == (128, 128, 32, 8, 4, 3)
+    assert schedule.preset == "default"
+
+
+def test_triton_fp16_schedule_preserves_per_field_explicit_overrides() -> None:
+    schedule = resolve_triton_fp16_gemm_schedule(
+        m=64,
+        n=1024,
+        k=1024,
+        has_bias=True,
+        activation=None,
+        block_m=32,
+        block_n=256,
+        block_k=16,
+        group_m=2,
+        num_warps=8,
+        num_stages=2,
+        target_arch="sm_89",
+        transpose_b=True,
+    )
+
+    assert schedule.to_dict() == {
+        "block_m": 32,
+        "block_n": 256,
+        "block_k": 16,
+        "group_m": 2,
+        "num_warps": 8,
+        "num_stages": 2,
+        "target_arch": "sm_89",
+        "preset": "sm89_fp16_small_prefill_bias",
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "m",
+        "n",
+        "k",
+        "has_bias",
+        "activation",
+        "expected",
+        "preset",
+    ),
+    [
+        (
+            1,
+            4096,
+            4096,
+            False,
+            None,
+            (16, 64, 64, 4, 4, 3),
+            "sm89_bf16_decode_m1",
+        ),
+        (
+            4,
+            4096,
+            4096,
+            True,
+            None,
+            (16, 64, 64, 4, 4, 3),
+            "sm89_bf16_decode_m4_bias",
+        ),
+        (
+            8,
+            11008,
+            4096,
+            True,
+            "silu",
+            (32, 128, 32, 4, 4, 3),
+            "sm89_bf16_decode_m8_silu",
+        ),
+        (
+            64,
+            1024,
+            1024,
+            True,
+            None,
+            (16, 64, 32, 4, 4, 3),
+            "sm89_bf16_small_prefill_bias",
+        ),
+        (
+            256,
+            4096,
+            4096,
+            True,
+            "gelu",
+            (64, 64, 32, 8, 4, 3),
+            "sm89_bf16_medium_prefill_gelu",
+        ),
+    ],
+)
+def test_triton_bf16_sm89_schedule_presets_are_exact_signature_scoped(
+    m: int,
+    n: int,
+    k: int,
+    has_bias: bool,
+    activation: str | None,
+    expected: tuple[int, int, int, int, int, int],
+    preset: str,
+) -> None:
+    schedule = resolve_triton_bf16_gemm_schedule(
+        m=m,
+        n=n,
+        k=k,
+        has_bias=has_bias,
+        activation=activation,
+        target_arch="sm_89",
+    )
+
+    assert isinstance(schedule, TritonGemmSchedule)
+    assert (
+        schedule.block_m,
+        schedule.block_n,
+        schedule.block_k,
+        schedule.group_m,
+        schedule.num_warps,
+        schedule.num_stages,
+    ) == expected
+    assert schedule.preset == preset
+
+
+@pytest.mark.parametrize(
+    ("target_arch", "m", "has_bias", "activation"),
+    [
+        ("sm_90", 1, False, None),
+        ("sm_89", 2, False, None),
+        ("sm_89", 1, True, None),
+        ("sm_89", 1, False, "silu"),
+    ],
+)
+def test_triton_bf16_schedule_keeps_default_outside_exact_presets(
+    target_arch: str,
+    m: int,
+    has_bias: bool,
+    activation: str | None,
+) -> None:
+    schedule = resolve_triton_bf16_gemm_schedule(
+        m=m,
+        n=4096,
+        k=4096,
+        has_bias=has_bias,
+        activation=activation,
+        target_arch=target_arch,
+    )
+
+    assert (
+        schedule.block_m,
+        schedule.block_n,
+        schedule.block_k,
+        schedule.group_m,
+        schedule.num_warps,
+        schedule.num_stages,
+    ) == (128, 128, 32, 8, 4, 3)
+    assert schedule.preset == "default"
+
+
+def test_triton_bf16_schedule_preserves_per_field_explicit_overrides() -> None:
+    schedule = resolve_triton_bf16_gemm_schedule(
+        m=1,
+        n=4096,
+        k=4096,
+        has_bias=False,
+        activation=None,
+        block_m=32,
+        block_n=256,
+        block_k=16,
+        group_m=2,
+        num_warps=8,
+        num_stages=2,
+        target_arch="sm_89",
+    )
+
+    assert schedule.to_dict() == {
+        "block_m": 32,
+        "block_n": 256,
+        "block_k": 16,
+        "group_m": 2,
+        "num_warps": 8,
+        "num_stages": 2,
+        "target_arch": "sm_89",
+        "preset": "sm89_bf16_decode_m1",
+    }
+
+
+def test_gemm_with_precision_forwards_triton_schedule_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_triton_kernel(
+        pattern: str,
+        *args: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        captured["pattern"] = pattern
+        captured["kwargs"] = dict(kwargs)
+        return torch.empty(
+            (int(args[0].shape[0]), int(args[1].shape[0])),
+            dtype=kwargs["output_dtype"],
+        )
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.backends.gemm_precision.run_triton_kernel",
+        fake_run_triton_kernel,
+    )
+    a = torch.randn(4, 16, dtype=torch.bfloat16)
+    b = torch.randn(12, 16, dtype=torch.bfloat16)
+
+    output = gemm_with_precision(
+        a,
+        b,
+        precision="bf16",
+        engine="triton",
+        target_arch="sm_89",
+        block_m=16,
+        block_n=64,
+        block_k=64,
+        group_m=4,
+        num_warps=4,
+        num_stages=3,
+    )
+
+    assert output.shape == (4, 12)
+    assert captured["pattern"] == "gemm_bf16"
+    forwarded = captured["kwargs"]
+    assert isinstance(forwarded, dict)
+    assert forwarded["target_arch"] == "sm_89"
+    assert forwarded["block_m"] == 16
+    assert forwarded["block_n"] == 64
+    assert forwarded["block_k"] == 64
+    assert forwarded["group_m"] == 4
+    assert forwarded["num_warps"] == 4
+    assert forwarded["num_stages"] == 3
 
 
 class TestMXFPPacking:
@@ -215,6 +728,81 @@ class TestUnifiedGEMMInterface:
         )
         expected = torch.matmul(a_bf16, b_bf16.t()) + bias_bf16
         assert torch.allclose(output.float(), expected.float(), rtol=5e-2, atol=5e-2)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    def test_bf16_tilelang_unified_uses_direct_dense_gemm(self, small_matrices):
+        a, b, bias = small_matrices
+        a_bf16 = a.to(torch.bfloat16)
+        b_bf16 = b.to(torch.bfloat16)
+        bias_bf16 = bias.to(torch.bfloat16)
+
+        output = gemm_with_precision(
+            a_bf16,
+            b_bf16,
+            bias_bf16,
+            precision="bf16",
+            engine="tilelang",
+            transpose_b=True,
+            target_arch="sm_89",
+        )
+        expected = torch.matmul(a_bf16, b_bf16.t()) + bias_bf16
+
+        assert output.dtype == torch.bfloat16
+        assert torch.allclose(output.float(), expected.float(), rtol=5e-2, atol=5e-2)
+
+    def test_bf16_tilelang_dispatch_defaults_to_dense_linear_epilogue(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run_tilelang_kernel(
+            pattern: str,
+            *args: torch.Tensor,
+            **kwargs: object,
+        ) -> torch.Tensor:
+            captured["pattern"] = pattern
+            captured["kwargs"] = dict(kwargs)
+            return torch.empty(
+                (int(args[0].shape[0]), int(args[1].shape[0])),
+                dtype=args[0].dtype,
+            )
+
+        monkeypatch.setattr(
+            "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+            fake_run_tilelang_kernel,
+        )
+        a = torch.randn(1, 64, dtype=torch.bfloat16)
+        b = torch.randn(96, 64, dtype=torch.bfloat16)
+        bias = torch.randn(96, dtype=torch.bfloat16)
+
+        output = gemm_with_precision(
+            a,
+            b,
+            bias,
+            precision="bf16",
+            engine="tilelang",
+            transpose_b=True,
+            block_m=16,
+            block_n=32,
+            block_k=32,
+        )
+
+        assert output.shape == (1, 96)
+        assert captured["pattern"] == "dense_linear_epilogue"
+
+    def test_bf16_tilelang_dispatch_rejects_fp16_inputs(self, small_matrices) -> None:
+        a, b, bias = small_matrices
+
+        with pytest.raises(Exception, match="to match torch.bfloat16"):
+            gemm_with_precision(
+                a,
+                b,
+                bias,
+                precision="bf16",
+                engine="tilelang",
+                transpose_b=True,
+            )
 
     def test_torch_fallback(self, small_matrices):
         a, b, bias = small_matrices
@@ -892,9 +1480,56 @@ def test_gemm_fp16_triton_forwards_accum_and_output_dtype_to_kernel(
     assert output.dtype == torch.float32
     assert captured["kwargs"]["ACC_TYPE"] == tl.float16
     assert captured["kwargs"]["has_bias"] is True
+    assert captured["args"][1] is b
+    assert captured["args"][9] == b.stride(1)
+    assert captured["args"][10] == b.stride(0)
     launched_bias = captured["args"][3]
     assert isinstance(launched_bias, torch.Tensor)
     assert launched_bias.dtype == torch.float32
+
+
+def test_gemm_fp16_triton_applies_resolved_sm89_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeKernelLaunch:
+        def __getitem__(self, grid):
+            captured["grid"] = grid
+
+            def runner(*args, **kwargs):
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+
+            return runner
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "xqt.operator_opt.kernels.triton.gemm._gemm_kernel",
+        FakeKernelLaunch(),
+    )
+    a = torch.empty((1, 4096), dtype=torch.float16)
+    b = torch.empty((4096, 4096), dtype=torch.float16, device="meta")
+
+    output = gemm_fp16_triton(
+        a,
+        b,
+        transpose_b=True,
+        target_arch="sm_89",
+    )
+
+    assert output.shape == (1, 4096)
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["BLOCK_M"] == 16
+    assert kwargs["BLOCK_N"] == 64
+    assert kwargs["BLOCK_K"] == 64
+    assert kwargs["GROUP_M"] == 4
+    assert kwargs["num_warps"] == 4
+    assert kwargs["num_stages"] == 3
 
 
 def test_gemm_bf16_triton_preserves_bf16_inputs_and_forwards_precision_kwargs(
@@ -939,6 +1574,88 @@ def test_gemm_bf16_triton_preserves_bf16_inputs_and_forwards_precision_kwargs(
     assert captured["kwargs"]["output_dtype"] == torch.bfloat16
 
 
+def test_gemm_bf16_triton_applies_resolved_sm89_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fp16_entry(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        bias: torch.Tensor | None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        captured["kwargs"] = dict(kwargs)
+        return torch.empty((int(a.shape[0]), int(b.shape[0])), dtype=torch.bfloat16)
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "xqt.operator_opt.kernels.triton.gemm.gemm_fp16_triton",
+        fake_fp16_entry,
+    )
+    a = torch.empty((1, 4096), dtype=torch.bfloat16)
+    b = torch.empty((4096, 4096), dtype=torch.bfloat16, device="meta")
+
+    output = gemm_bf16_triton(
+        a,
+        b,
+        transpose_b=True,
+        target_arch="sm_89",
+    )
+
+    assert output.shape == (1, 4096)
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["block_m"] == 16
+    assert kwargs["block_n"] == 64
+    assert kwargs["block_k"] == 64
+    assert kwargs["group_m"] == 4
+    assert kwargs["num_warps"] == 4
+    assert kwargs["num_stages"] == 3
+
+
+def test_gemm_bf16_triton_does_not_query_cuda_capability_for_cpu_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fp16_entry(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        bias: torch.Tensor | None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        captured["kwargs"] = dict(kwargs)
+        return torch.empty((int(a.shape[0]), int(b.shape[0])), dtype=torch.bfloat16)
+
+    def fail_capability_query(device: torch.device | None = None) -> tuple[int, int]:
+        raise AssertionError(f"unexpected CUDA capability query for {device}")
+
+    monkeypatch.setattr(
+        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "xqt.operator_opt.kernels.triton.gemm.gemm_fp16_triton",
+        fake_fp16_entry,
+    )
+    monkeypatch.setattr(torch.cuda, "get_device_capability", fail_capability_query)
+    a = torch.empty((8, 16), dtype=torch.bfloat16)
+    b = torch.empty((12, 16), dtype=torch.bfloat16)
+
+    output = gemm_bf16_triton(a, b, transpose_b=True)
+
+    assert output.shape == (8, 12)
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["block_m"] == 128
+    assert kwargs["block_n"] == 128
+    assert kwargs["block_k"] == 32
+
+
 def test_triton_registry_exposes_mxfp_gemm_families() -> None:
     for pattern in ("gemm_mxfp8", "gemm_mxfp6", "gemm_mxfp4"):
         spec = get_triton_kernel_spec(pattern)
@@ -964,8 +1681,17 @@ def test_tilelang_registry_exposes_mxfp4_packed_gemm_family() -> None:
     assert "mxfp4" in spec.pattern
 
 
-def test_gemm_with_precision_tilelang_bf16_uses_marlin_registry(
+@pytest.mark.parametrize(
+    ("pattern", "expected_pattern"),
+    [
+        (None, "dense_linear_epilogue"),
+        ("linear_marlin", "linear_marlin"),
+    ],
+)
+def test_gemm_with_precision_tilelang_bf16_registry_selection(
     monkeypatch: pytest.MonkeyPatch,
+    pattern: str | None,
+    expected_pattern: str,
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -993,12 +1719,14 @@ def test_gemm_with_precision_tilelang_bf16_uses_marlin_registry(
         bias,
         precision="bf16",
         engine="tilelang",
+        pattern=pattern,
         transpose_b=True,
     )
 
     assert output.dtype == torch.bfloat16
-    assert captured["pattern"] == "linear_marlin"
-    assert captured["kwargs"]["precision"] == "bf16"
+    assert captured["pattern"] == expected_pattern
+    if expected_pattern == "linear_marlin":
+        assert captured["kwargs"]["precision"] == "bf16"
 
 
 def test_gemm_with_precision_tilelang_int8_static_activation_uses_fused_family(

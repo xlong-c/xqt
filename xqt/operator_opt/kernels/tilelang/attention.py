@@ -11,7 +11,7 @@ from xqt.core.errors import XQTBackendError
 
 from xqt.operator_opt.kernels.tilelang._common import (
     require_cuda_tensors,
-    require_fp16_tensors,
+    require_fp16_or_bf16_tensors,
     require_tilelang,
 )
 
@@ -35,11 +35,12 @@ class TileLangAttentionDesign:
     default_threads: int = 128
     default_num_stages: int = 2
     source: str = "learn/tilelang/flashatt.py"
-    production_status: str = "design_extracted_reference_guarded"
+    production_status: str = "runtime_kernel"
     limitations: tuple[str, ...] = (
         "Only CUDA tensors are accepted by the guarded TileLang entry point.",
-        "The current production entry uses SDPA reference fallback until TileLang JIT is wired and validated.",
-        "The extracted learning design assumes fp16 and seq_kv >= seq_q for non-square causal cases.",
+        "The production entry JIT-compiles a fixed-shape TileLang kernel and keeps SDPA as the reference/fallback path.",
+        "The extracted learning design supports fp16/bf16 and assumes seq_kv >= seq_q for non-square causal cases.",
+        "Bfloat16 inputs require head_dim to be divisible by 16 for the current TileLang MMA lowering.",
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,6 +86,10 @@ def _validate_attention_inputs(
         raise XQTBackendError("TileLang attention requires matching key/value sequence length")
     if k.shape[3] != v.shape[3]:
         raise XQTBackendError("TileLang attention requires matching key/value head_dim")
+    if q.dtype == torch.bfloat16 and int(q.shape[3]) % 16 != 0:
+        raise XQTBackendError(
+            "TileLang bfloat16 attention requires head_dim divisible by 16"
+        )
     if k.shape[2] < q.shape[2]:
         raise XQTBackendError("TileLang attention currently requires seq_kv >= seq_q")
     if dropout_p != 0.0:
@@ -104,6 +109,7 @@ def _build_tilelang_flashatt_kernel(
     block_n: int,
     num_stages: int,
     threads: int,
+    input_dtype: str,
 ) -> Any:
     require_tilelang()
     from learn.tilelang.flashatt import build_tilelang_flashatt
@@ -119,6 +125,7 @@ def _build_tilelang_flashatt_kernel(
         block_n=block_n,
         num_stages=num_stages,
         threads=threads,
+        input_dtype=input_dtype,
     )
 
 
@@ -182,8 +189,11 @@ def fused_attention_forward_tilelang(
     """CUDA-only TileLang attention entry point."""
 
     require_cuda_tensors(q, k, v)
-    require_fp16_tensors(q, k, v)
+    require_fp16_or_bf16_tensors(q, k, v)
     _validate_attention_inputs(q, k, v, dropout_p=dropout_p)
+    input_dtype = (
+        "float16" if q.dtype == torch.float16 else "bfloat16"
+    )
     kernel = _build_tilelang_flashatt_kernel(
         batch=int(q.shape[0]),
         heads=int(q.shape[1]),
@@ -195,6 +205,7 @@ def fused_attention_forward_tilelang(
         block_n=int(block_n),
         num_stages=int(num_stages),
         threads=int(threads),
+        input_dtype=input_dtype,
     )
     return kernel(q, k, v)
 
@@ -209,6 +220,8 @@ TILELANG_ATTENTION_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "block_n": _ATTENTION_DESIGN.default_block_n,
         "threads": _ATTENTION_DESIGN.default_threads,
         "num_stages": _ATTENTION_DESIGN.default_num_stages,
+        "supported_dtypes": ["float16", "bfloat16"],
+        "bfloat16_head_dim_multiple": 16,
         "baseline": "torch.nn.functional.scaled_dot_product_attention",
         "design": _ATTENTION_DESIGN.to_dict(),
     },
