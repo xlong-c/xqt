@@ -89,9 +89,7 @@ def require_fp16_or_bf16_tensors(*tensors: torch.Tensor) -> None:
     if len(dtypes) != 1 or not dtypes.issubset(
         {torch.float16, torch.bfloat16}
     ):
-        raise XQTBackendError(
-            "TileLang 16-bit kernel paths require matching float16 or bfloat16 tensors"
-        )
+        raise XQTBackendError("TileLang requires matching float16 or bfloat16 tensors")
 
 
 __all__ = [

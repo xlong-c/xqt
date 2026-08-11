@@ -17,7 +17,11 @@ from ..runtime import (
     cuda_graph_tensor_signature,
     replay_cuda_graph_tensor_callable,
 )
-from ._common import _matching_tensor_dtype_name, _resolved_target_arch
+from ._common import (
+    _matching_tensor_dtype_name,
+    _resolved_target_arch,
+    _scaled_dot_product_attention_with_causal_semantics,
+)
 
 
 class _TileLangAttentionWrapper(nn.Module):
@@ -236,12 +240,12 @@ class _TileLangAttentionWrapper(nn.Module):
         is_causal: bool,
     ) -> torch.Tensor:
         q, k, v = self._project_qkv_for_tilelang(query, key, value)
-        attn_output = F.scaled_dot_product_attention(
+        attn_output = _scaled_dot_product_attention_with_causal_semantics(
             q,
             k,
             v,
             dropout_p=float(self.attention.dropout),
-            is_causal=is_causal,
+            causal=is_causal,
         )
         return self._finalize_attention_output(attn_output)
 

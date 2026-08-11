@@ -78,10 +78,12 @@ def _reference_entry(
 ) -> GemmKernelRegistration | None:
     for entry in matches:
         if entry.implementation == "reference" and entry.maturity == "reference_guarded":
-            if entry.kernel_family == "w4a16_reference":
+            if entry.kernel_family in {"w4a16_reference", "w8a16_reference"}:
                 if not isinstance(weight, PackedWeight):
                     continue
-                if weight.metadata.storage_layout != "xqt_int4_nk_v1":
+                if entry.kernel_family == "w4a16_reference" and weight.metadata.storage_layout != "xqt_int4_nk_v1":
+                    continue
+                if entry.kernel_family == "w8a16_reference" and weight.metadata.storage_layout != "xqt_int8_nk_v1":
                     continue
             return entry
     return None
@@ -104,6 +106,20 @@ def _run_reference(
         if not isinstance(weight, PackedWeight):
             raise TypeError("w4a16_reference requires a PackedWeight")
         return reference_w4a16_gemm(
+            activation,
+            weight,
+            spec=spec,
+            weight_scales=weight_scales,
+            activation_scales=activation_scales,
+            weight_zero_points=weight_zero_points,
+            activation_zero_points=activation_zero_points,
+            bias=bias,
+            residual=residual,
+        )
+    if entry.kernel_family == "w8a16_reference":
+        if not isinstance(weight, PackedWeight):
+            raise TypeError("w8a16_reference requires a PackedWeight")
+        return reference_w8a16_gemm(
             activation,
             weight,
             spec=spec,

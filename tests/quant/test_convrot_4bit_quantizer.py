@@ -306,6 +306,46 @@ def test_convrot_w4a16_and_set_compute_precision_paths() -> None:
     assert "w4a16" in result.metadata["supported_compute_precisions"]
 
 
+def test_convrot_w4a4_runtime_backend_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="w4a4_runtime_backend must be one of"):
+        ConvRotMixedPrecisionLinear.from_linear(
+            torch.nn.Linear(16, 32, bias=False),
+            rot_size=4,
+            group_size=4,
+            w4a4_runtime_backend="unknown",
+        )
+
+
+def test_convrot_w4a4_auto_preserves_grouped_artifact_semantics() -> None:
+    grouped = ConvRotMixedPrecisionLinear.from_linear(
+        torch.nn.Linear(16, 32, bias=False),
+        rot_size=4,
+        group_size=4,
+        w4a4_runtime_backend="auto",
+    )
+    rowwise = ConvRotMixedPrecisionLinear.from_linear(
+        torch.nn.Linear(16, 32, bias=False),
+        rot_size=4,
+        group_size=16,
+        w4a4_runtime_backend="auto",
+    )
+
+    assert grouped._rowwise_w4a4_requested() is False
+    assert rowwise._rowwise_w4a4_requested() is True
+
+
+def test_convrot_w4a4_explicit_rowwise_overrides_grouped_artifact_policy() -> None:
+    module = ConvRotMixedPrecisionLinear.from_linear(
+        torch.nn.Linear(16, 32, bias=False),
+        rot_size=4,
+        group_size=4,
+        w4a4_runtime_backend="rowwise",
+    )
+
+    assert module._rowwise_w4a4_requested() is True
+    assert module.w4a4_runtime_backend == "rowwise"
+
+
 def test_session_quant_convrot_w4a4_replaces_linear(tmp_path) -> None:
     session = XQTOptimizationSession(
         project={
@@ -341,3 +381,184 @@ def test_session_quant_convrot_w4a4_replaces_linear(tmp_path) -> None:
     assert stage.metrics["algorithm_executable"] is True
     assert stage.metrics["metadata"]["execution_state"] == "convrot_4bit"
     assert stage.metrics["metadata"]["recommended_high_precision_modules"] == ["fc"]
+
+
+def _rowwise_convrot_w4a4_cuda_available() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    if torch.cuda.get_device_capability() != (8, 9):
+        return False
+    try:
+        from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+            native_rowwise_convrot_w4a4_available,
+        )
+    except Exception:
+        return False
+    return native_rowwise_convrot_w4a4_available(build=False)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_convrot_rowwise_w4a4_cuda_matches_packed_reference(
+    dtype: torch.dtype,
+) -> None:
+    if not _rowwise_convrot_w4a4_cuda_available():
+        pytest.skip("rowwise sm_89 ConvRot W4A4 backend unavailable")
+
+    from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+        allocate_convrot_w4a4_rowwise_workspace,
+        convrot_w4a4_rowwise_linear,
+        pack_convrot_w4a4_rowwise_weight,
+    )
+    from xqt.quant.quantizers.convrot_4bit import _apply_groupwise_rotation
+    from xqt.quant.quantizers.fp4_weight_only import _unpack_int4
+
+    torch.manual_seed(101)
+    rows = 7
+    features = 1024
+    storage = torch.randn(rows, features * 2, device="cuda", dtype=dtype)
+    inputs = storage[:, ::2]
+    rotated_weight = torch.randn(
+        features,
+        features,
+        device="cuda",
+        dtype=dtype,
+    )
+    bias = torch.randn(features, device="cuda", dtype=dtype)
+    packed = pack_convrot_w4a4_rowwise_weight(rotated_weight, bias)
+    workspace = allocate_convrot_w4a4_rowwise_workspace(rows, packed)
+
+    output = convrot_w4a4_rowwise_linear(inputs, packed, workspace=workspace)
+    torch.cuda.synchronize()
+
+    activation_codes = _unpack_int4(
+        workspace.quantized_activation.view(torch.uint8),
+        features,
+    )
+    weight_codes = _unpack_int4(packed.qweight.view(torch.uint8), features)
+    accumulator = activation_codes @ weight_codes.t()
+    expected = (
+        accumulator
+        * workspace.activation_scales[:, None]
+        * packed.weight_scales[None, :]
+        + packed.bias
+    ).to(dtype)
+    rotated = _apply_groupwise_rotation(inputs, rot_size=256)
+    reference_scales = torch.clamp(
+        rotated.float().abs().amax(dim=1) / 7.0,
+        min=1.0e-10,
+    )
+    reference_codes = torch.clamp(
+        torch.round(rotated.float() / reference_scales[:, None]),
+        min=-7,
+        max=7,
+    )
+
+    assert not inputs.is_contiguous()
+    torch.testing.assert_close(output, expected, rtol=0.0, atol=1.0e-2)
+    assert int((activation_codes - reference_codes).abs().max().item()) <= 1
+    torch.testing.assert_close(
+        workspace.activation_scales,
+        reference_scales,
+        rtol=5.0e-3,
+        atol=5.0e-3,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_convrot_rowwise_w4a4_cuda_runtime_cache_and_mutation(
+    dtype: torch.dtype,
+) -> None:
+    if not _rowwise_convrot_w4a4_cuda_available():
+        pytest.skip("rowwise sm_89 ConvRot W4A4 backend unavailable")
+
+    torch.manual_seed(103)
+    source = torch.nn.Linear(
+        1024,
+        1024,
+        bias=True,
+        device="cuda",
+        dtype=dtype,
+    ).eval()
+    module = ConvRotMixedPrecisionLinear.from_linear(
+        source,
+        rot_size=256,
+        group_size=128,
+        compute_precision="w4a4",
+        activation_scale_mode="dynamic",
+        w4a4_runtime_backend="rowwise",
+    ).eval()
+    storage = torch.randn(2, 3, 2048, device="cuda", dtype=dtype)
+    inputs = storage[..., ::2]
+
+    first = module(inputs)
+    second = module(inputs)
+    first_runner_cache = module._rowwise_w4a4_runner_cache
+    assert first_runner_cache is not None
+    first_runner = first_runner_cache[-1]
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        stream_output = module(inputs)
+    stream.synchronize()
+    torch.cuda.synchronize()
+
+    with torch.no_grad():
+        module.weight_scale.mul_(1.25)
+    after_scale = module(inputs)
+    scale_runner_cache = module._rowwise_w4a4_runner_cache
+    assert scale_runner_cache is not None
+
+    before_bias = module(inputs)
+    with torch.no_grad():
+        assert module.bias is not None
+        module.bias.add_(0.25)
+    after_bias = module(inputs)
+    bias_runner_cache = module._rowwise_w4a4_runner_cache
+    assert bias_runner_cache is not None
+    torch.cuda.synchronize()
+
+    metadata = module.execution_metadata()
+    assert not inputs.is_contiguous()
+    assert first.shape == (2, 3, 1024)
+    assert torch.equal(first, second)
+    assert torch.equal(first, stream_output)
+    assert first_runner.workspace_count() == 2
+    assert scale_runner_cache[-1] is not first_runner
+    assert bias_runner_cache[-1] is not scale_runner_cache[-1]
+    assert not torch.equal(first, after_scale)
+    torch.testing.assert_close(
+        (after_bias - before_bias).float(),
+        torch.full_like(after_bias.float(), 0.25),
+        rtol=0.0,
+        atol=2.0e-2,
+    )
+    assert metadata["implementation"] == "native_convrot_w4a4_rowwise_dynamic_runner"
+    assert metadata["rowwise_w4a4_used"] is True
+    assert metadata["runtime_weight_layout"] == "row_major_signed_int4_rowwise"
+    assert metadata["fused_epilogue"] == "activation_scale_weight_scale_bias"
+    assert metadata["norm_fused"] is False
+
+    module.to(dtype=torch.bfloat16 if dtype == torch.float16 else torch.float16)
+    assert module._rowwise_w4a4_packed_cache is None
+    assert module._rowwise_w4a4_runner_cache is None
+
+
+def test_convrot_rowwise_w4a4_gate_rejects_static_activation_scale() -> None:
+    if not _rowwise_convrot_w4a4_cuda_available():
+        pytest.skip("rowwise sm_89 ConvRot W4A4 backend unavailable")
+
+    module = ConvRotMixedPrecisionLinear.from_linear(
+        torch.nn.Linear(1024, 1024, bias=False, device="cuda", dtype=torch.float16),
+        rot_size=256,
+        group_size=128,
+        compute_precision="w4a4",
+        activation_scale_mode="static",
+        w4a4_runtime_backend="rowwise",
+    ).eval()
+    allowed, reason = module._rowwise_w4a4_gate(
+        torch.randn(2, 1024, device="cuda", dtype=torch.float16)
+    )
+
+    assert allowed is False
+    assert "dynamic activation scales" in reason

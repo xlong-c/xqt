@@ -290,7 +290,7 @@ def test_grouped_w4a16_persistent_resource_query() -> None:
     assert report.capability == "sm_89"
 
 
-@pytest.mark.parametrize("blocks_per_sm", [0, 9])
+@pytest.mark.parametrize("blocks_per_sm", [-1, 9])
 def test_grouped_w4a16_persistent_resource_query_rejects_invalid_blocks(
     blocks_per_sm: int,
 ) -> None:
@@ -299,6 +299,24 @@ def test_grouped_w4a16_persistent_resource_query_rejects_invalid_blocks(
             "unused.so",
             blocks_per_sm=blocks_per_sm,
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_grouped_w4a16_persistent_max_active_blocks() -> None:
+    major, minor = torch.cuda.get_device_capability()
+    if (major, minor) != (8, 9):
+        pytest.skip(f"requires SM89, got sm_{major}{minor}")
+    artifact = Path.home() / ".cache/xqt/gemm/sm89/w4a16_grouped_sm89.so"
+    if not artifact.is_file():
+        pytest.skip("grouped SM89 W4A16 artifact is not built")
+
+    report = query_sm89_grouped_w4a16_persistent_resources(
+        artifact,
+        blocks_per_sm=0,
+    )
+    assert report.requested_blocks_per_sm == 0
+    assert report.resident_blocks_per_sm == report.max_active_blocks_per_sm
+    assert report.resident_blocks_per_sm > 0
 
 
 def test_grouped_w4a16_persistent_resource_query_rejects_bool_blocks() -> None:

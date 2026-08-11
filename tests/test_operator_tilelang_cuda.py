@@ -6,6 +6,9 @@ import torch
 from xqt import nn as xqt_nn
 from xqt.operator_opt.execute import execute_operator_optimization_plan
 from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.operator_opt.kernels.tilelang.attention import (
+    fused_attention_forward_reference,
+)
 from xqt.operator_opt.tilelang_wrappers import (
     _TileLangAttentionWrapper,
     _TileLangXqtAttentionWrapper,
@@ -270,6 +273,84 @@ def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call(
         "float16",
         "bfloat16",
     ]
+
+
+@requires_cuda
+@requires_tilelang
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float16, torch.bfloat16],
+    ids=["fp16", "bf16"],
+)
+def test_tilelang_attention_wrapper_native_path_preserves_lower_right_causal_cross_attention(
+    dtype: torch.dtype,
+) -> None:
+    attention = torch.nn.MultiheadAttention(
+        64,
+        4,
+        batch_first=True,
+        dropout=0.0,
+        device="cuda",
+        dtype=dtype,
+    ).eval()
+    tilelang_wrapper = _TileLangAttentionWrapper(
+        attention,
+        fallback="error",
+        settings={
+            "target_arch": "sm_89",
+            "attention_fastpath": "tilelang",
+        },
+    ).to(device="cuda", dtype=dtype)
+    native_wrapper = _TileLangAttentionWrapper(
+        attention,
+        fallback="error",
+        settings={
+            "target_arch": "sm_89",
+            "attention_fastpath": "native",
+        },
+    ).to(device="cuda", dtype=dtype)
+    query = torch.randn(1, 1, 64, device="cuda", dtype=dtype)
+    key = torch.randn(1, 64, 64, device="cuda", dtype=dtype)
+    value = torch.randn_like(key)
+
+    q, k, v = tilelang_wrapper._project_qkv_for_tilelang(query, key, value)
+    reference = tilelang_wrapper._finalize_attention_output(
+        fused_attention_forward_reference(
+            q,
+            k,
+            v,
+            causal=True,
+            dropout_p=0.0,
+        )
+    )
+    tilelang_output, _ = tilelang_wrapper(
+        query,
+        key,
+        value,
+        need_weights=False,
+        is_causal=True,
+    )
+    native_output, _ = native_wrapper(
+        query,
+        key,
+        value,
+        need_weights=False,
+        is_causal=True,
+    )
+
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
+    assert torch.allclose(
+        tilelang_output.float(),
+        reference.float(),
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    assert torch.allclose(
+        native_output.float(),
+        reference.float(),
+        atol=tolerance,
+        rtol=tolerance,
+    )
 
 
 @requires_cuda

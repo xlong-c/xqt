@@ -391,3 +391,228 @@ def test_session_quant_convrot_w8a8_replaces_linear(tmp_path) -> None:
     assert stage.metrics["strategy"] == "w8a8_int8"
     assert stage.metrics["algorithm_executable"] is True
     assert stage.metrics["metadata"]["execution_state"] == "convrot_int8"
+
+
+def _native_convrot_w8a8_test_available(dtype: torch.dtype) -> bool:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
+        return False
+    try:
+        from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+            native_convrot_w8a8_available,
+        )
+    except Exception:
+        return False
+    return native_convrot_w8a8_available(dtype, build=False)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_convrot_dynamic_native_sm89_route_cache_and_stream(
+    dtype: torch.dtype,
+) -> None:
+    if not _native_convrot_w8a8_test_available(dtype):
+        pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
+
+    from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+        allocate_convrot_w8a8_workspace,
+        convrot_w8a8_linear,
+    )
+
+    torch.manual_seed(41)
+    source = torch.nn.Linear(256, 256, bias=True, device="cuda", dtype=dtype).eval()
+    module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=256,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ).eval()
+    inputs = torch.randn(37, 256, device="cuda", dtype=dtype)
+
+    first = module(inputs)
+    packed_first = module._native_w8a8_packed_cache
+    second = module(inputs)
+    packed_second = module._native_w8a8_packed_cache
+    assert packed_first is not None and packed_second is not None
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream_output = module(inputs)
+    stream.synchronize()
+    after_stream = module(inputs)
+    torch.cuda.synchronize()
+
+    packed = packed_first[1]
+    split_workspace = allocate_convrot_w8a8_workspace(int(inputs.shape[0]), packed)
+    rotated = module._rotate_inputs(inputs).reshape(
+        -1,
+        module.padded_input_features,
+    )
+    split = convrot_w8a8_linear(
+        rotated,
+        packed,
+        rotated_input_features=module.padded_input_features,
+        rot_size=1,
+        workspace=split_workspace,
+    )
+    torch.cuda.synchronize()
+
+    metadata = module.execution_metadata()
+    assert first.shape == (37, 256)
+    assert first.dtype == dtype
+    assert torch.equal(first, second)
+    assert torch.equal(first, after_stream)
+    assert torch.equal(first, stream_output)
+    torch.testing.assert_close(first, split, rtol=3e-2, atol=3e-2)
+    assert packed_first[1] is packed_second[1]
+    assert len(module._native_w8a8_workspace_cache) == 2
+    assert metadata["implementation"] == "native_convrot_w8a8_dynamic"
+    assert metadata["native_w8a8_used"] is True
+    assert metadata["rotation_quant_fused"] is True
+    assert metadata["activation_quant_fused"] is True
+    assert metadata["activation_granularity"] == "per_token"
+    assert metadata["norm_fused"] is False
+    assert metadata["native_w8a8_fallback_reason"] is None
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_convrot_dynamic_native_hot_cache_invalidates_after_scale_mutation(
+    dtype: torch.dtype,
+) -> None:
+    if not _native_convrot_w8a8_test_available(dtype):
+        pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
+
+    module = ConvRotInt8Linear.from_linear(
+        torch.nn.Linear(256, 256, bias=True).eval(),
+        rot_size=256,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ).to(device="cuda", dtype=dtype).eval()
+    inputs = torch.randn(17, 256, device="cuda", dtype=dtype)
+
+    before = module(inputs)
+    module(inputs)
+    first_cache = module._native_w8a8_packed_cache
+    assert first_cache is not None
+
+    with torch.no_grad():
+        module.int8_compute.weight_scale.mul_(2.0)
+    after = module(inputs)
+    torch.cuda.synchronize()
+    second_cache = module._native_w8a8_packed_cache
+
+    assert second_cache is not None
+    assert second_cache[1] is not first_cache[1]
+    assert not torch.equal(before, after)
+
+
+def test_convrot_dynamic_native_sm89_prerotated_route() -> None:
+    if not _native_convrot_w8a8_test_available(torch.float16):
+        pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
+
+    source = torch.nn.Linear(
+        64,
+        80,
+        bias=False,
+        device="cuda",
+        dtype=torch.float16,
+    ).eval()
+    source.input_already_rotated = True
+    module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=16,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ).eval()
+
+    output = module(torch.randn(13, 64, device="cuda", dtype=torch.float16))
+    torch.cuda.synchronize()
+    metadata = module.execution_metadata()
+
+    assert output.shape == (13, 80)
+    assert metadata["implementation"] == "native_w8a8_dynamic_prerotated"
+    assert metadata["native_w8a8_used"] is True
+    assert metadata["rotation_quant_fused"] is False
+    assert metadata["activation_quant_fused"] is True
+
+
+def test_convrot_dynamic_native_sm89_pads_mnk() -> None:
+    if not _native_convrot_w8a8_test_available(torch.float16):
+        pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
+
+    source = torch.nn.Linear(
+        300,
+        132,
+        bias=True,
+        device="cuda",
+        dtype=torch.float16,
+    ).eval()
+    module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=256,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ).eval()
+
+    output = module(torch.randn(19, 300, device="cuda", dtype=torch.float16))
+    torch.cuda.synchronize()
+    cached = module._native_w8a8_packed_cache
+    assert cached is not None
+    packed = cached[1]
+    workspace = next(iter(module._native_w8a8_workspace_cache.values()))
+
+    assert output.shape == (19, 132)
+    assert module.padded_input_features == 512
+    assert packed.padded_input_features == 512
+    assert packed.padded_output_features == 256
+    assert tuple(packed.qweight.shape) == (256, 512)
+    assert workspace.padded_rows == 256
+
+
+def test_convrot_native_dynamic_gate_keeps_explicit_fallbacks() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    source = torch.nn.Linear(
+        256,
+        256,
+        bias=False,
+        device="cuda",
+        dtype=torch.float16,
+    ).eval()
+    inputs = torch.randn(32, 256, device="cuda", dtype=torch.float16)
+    static_module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=256,
+        engine="auto",
+        activation_scale_mode="static",
+        activation_scale=0.02,
+    ).eval()
+    explicit_engine = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=256,
+        engine="torch_int_mm",
+        activation_scale_mode="dynamic",
+    ).eval()
+    unsupported_rotation = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=64,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ).eval()
+
+    static_allowed, static_reason = static_module._native_w8a8_gate(inputs)
+    engine_allowed, engine_reason = explicit_engine._native_w8a8_gate(inputs)
+    rotation_allowed, rotation_reason = unsupported_rotation._native_w8a8_gate(inputs)
+
+    assert static_allowed is False
+    assert "dynamic activation scales" in static_reason
+    assert engine_allowed is False
+    assert "auto or cuda_sm89" in engine_reason
+    assert rotation_allowed is False
+    assert "unsupported" in rotation_reason
+
+    from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+        native_convrot_w8a8_shape_supported,
+    )
+
+    assert native_convrot_w8a8_shape_supported(300, 512, 132, 256) is True
+    assert native_convrot_w8a8_shape_supported(300, 512, 130, 256) is False

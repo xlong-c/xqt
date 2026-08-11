@@ -115,6 +115,38 @@ def test_tilelang_bf16_sm89_schedule_promotion_is_decode_scoped(
     assert schedule.preset == expected_preset
 
 
+@pytest.mark.parametrize(
+    ("m", "k", "out_features", "activation", "expected_preset"),
+    [
+        (1, 4096, 4096, None, "sm89_fp16_decode_m_le_4_n4096"),
+        (4, 4096, 4096, None, "sm89_fp16_decode_m_le_4_n4096"),
+        (8, 4096, 4096, None, "default"),
+        (1, 4096, 11008, None, "default"),
+        (1, 4096, 4096, "silu", "default"),
+        (1, 2048, 4096, None, "default"),
+    ],
+)
+def test_tilelang_fp16_sm89_schedule_promotion_is_exact_signature_scoped(
+    m: int,
+    k: int,
+    out_features: int,
+    activation: str | None,
+    expected_preset: str,
+) -> None:
+    x = torch.empty(m, k, dtype=torch.float16)
+
+    schedule = resolve_tilelang_linear_schedule(
+        x,
+        out_features=out_features,
+        activation=activation,
+        target_arch="sm_89",
+    )
+
+    expected_blocks = (16, 64, 32) if expected_preset != "default" else (64, 64, 64)
+    assert (schedule.block_m, schedule.block_n, schedule.block_k) == expected_blocks
+    assert schedule.preset == expected_preset
+
+
 def test_tilelang_linear_schedule_preserves_explicit_overrides() -> None:
     x = torch.empty(1, 64, dtype=torch.bfloat16)
 

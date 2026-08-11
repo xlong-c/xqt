@@ -726,7 +726,41 @@ def reference_packed_grouped_gemm(
     return output
 
 
-reference_dense_gemm = reference_gemm
+def reference_w8a16_gemm(
+    activation: torch.Tensor,
+    weight: PackedWeight,
+    *,
+    spec: GemmSpec,
+    weight_scales: torch.Tensor | None = None,
+    activation_scales: torch.Tensor | None = None,
+    weight_zero_points: torch.Tensor | None = None,
+    activation_zero_points: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reference contract for canonical packed W8A16 weights (per-channel/groupwise)."""
+    validate_logical_shapes(
+        activation,
+        torch.empty((weight.metadata.logical_shape[0], weight.metadata.logical_shape[1]), device=activation.device),
+        m=spec.problem.m,
+        n=spec.problem.n,
+        k=spec.problem.k,
+    )
+    if weight_scales is not None and not torch.equal(weight_scales, weight.scales):
+        raise ValueError("external weight_scales disagree with PackedWeight.scales")
+    if weight_zero_points is not None and not torch.equal(weight_zero_points, weight.zero_points):
+        raise ValueError("external weight_zero_points disagree with PackedWeight.zero_points")
+    return reference_gemm(
+        activation,
+        weight,
+        spec=spec,
+        weight_scales=weight.scales,
+        activation_scales=activation_scales,
+        weight_zero_points=weight.zero_points,
+        activation_zero_points=activation_zero_points,
+        bias=bias,
+        residual=residual,
+    )
 
 
 __all__ = [
@@ -738,4 +772,5 @@ __all__ = [
     "reference_grouped_gemm",
     "reference_packed_grouped_gemm",
     "reference_w4a16_gemm",
+    "reference_w8a16_gemm",
 ]

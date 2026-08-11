@@ -16,6 +16,13 @@ from xqt.runtime.modules.w4_storage_int8_mma_linear import W4StorageInt8MmaLinea
 _SUPPORTED_RESIDUAL_QUANT_DTYPES = frozenset({"fp4", "int4"})
 
 
+def _current_cuda_stream_id(device: torch.device) -> int:
+    raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if callable(raw_stream):
+        return int(raw_stream(device.index))
+    return int(torch.cuda.current_stream(device).cuda_stream)
+
+
 def _can_mutate_runtime_cache() -> bool:
     """Return whether eager runtime caches may be mutated safely."""
 
@@ -179,12 +186,21 @@ class SVDQuantLinear(nn.Module):
         self._pending_activation_scale: torch.Tensor | float | None = None
         self._pending_activation_scale_mode: str = "dynamic"
         self._dequantized_residual_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
+        self._native_w4a4_packed_cache: tuple[tuple[Any, ...], Any] | None = None
+        self._native_w4a4_workspace_cache: dict[tuple[Any, ...], Any] = {}
+        self._native_w4a4_hot_cache: dict[
+            tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any]
+        ] = {}
         self._cuda_fused_enabled = False
         self._last_cuda_fused_used = False
+        self._last_cuda_fused_backend: str | None = None
         self._last_cuda_fused_fallback_reason: str | None = None
 
     def _clear_runtime_caches(self) -> None:
         self._dequantized_residual_cache = None
+        self._native_w4a4_packed_cache = None
+        self._native_w4a4_workspace_cache.clear()
+        self._native_w4a4_hot_cache.clear()
 
     def _apply(self, fn: Any) -> "SVDQuantLinear":
         """Move registered tensors, then invalidate derived residual storage."""
@@ -192,6 +208,7 @@ class SVDQuantLinear(nn.Module):
         super()._apply(fn)
         self._clear_runtime_caches()
         self._last_cuda_fused_used = False
+        self._last_cuda_fused_backend = None
         self._last_cuda_fused_fallback_reason = None
         return self
 
@@ -199,7 +216,18 @@ class SVDQuantLinear(nn.Module):
         """Enable the optional direct CUDA fused residual + low-rank kernel."""
 
         del mode
-        if not torch.cuda.is_available() or not _tilelang_runtime_usable():
+        if not torch.cuda.is_available():
+            return False
+        native_usable = False
+        try:
+            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+                native_w4a4_available,
+            )
+
+            native_usable = bool(native_w4a4_available(build=False))
+        except Exception:
+            native_usable = False
+        if not native_usable and not _tilelang_runtime_usable():
             return False
         self._cuda_fused_enabled = True
         return True
@@ -207,9 +235,187 @@ class SVDQuantLinear(nn.Module):
     def disable_fusion(self) -> None:
         self._cuda_fused_enabled = False
 
+    def _native_w4a4_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        if not self._cuda_fused_enabled or not inputs.is_cuda:
+            return False, "native W4A4 fusion is disabled or the input is not CUDA"
+        if inputs.dtype not in {torch.float16, torch.bfloat16}:
+            return False, "native W4A4 requires float16 or bfloat16 activations"
+        if self.down_proj.weight.dtype != inputs.dtype:
+            return False, "native W4A4 down-projection dtype must match activations"
+        if self.up_proj.weight.dtype != inputs.dtype:
+            return False, "native W4A4 up-projection dtype must match activations"
+        if inputs.ndim < 1 or int(inputs.shape[-1]) != self.input_features:
+            return False, "native W4A4 input trailing dimension is invalid"
+        if self.rank < 1 or self.rank > 1024:
+            return False, "native W4A4 supports ranks from 1 through 1024"
+        if not self.packed_residual.is_cuda or not self.residual_scale.is_cuda:
+            return False, "native W4A4 requires residual buffers on CUDA"
+        if inputs.device != self.packed_residual.device:
+            return False, "native W4A4 input and residual buffers must share a device"
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        if (major, minor) != (8, 9):
+            return False, f"native W4A4 currently targets sm_89, got sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+                native_w4a4_available,
+                native_w4a4_shape_supported,
+            )
+
+            if not native_w4a4_shape_supported(
+                self.input_features,
+                self.output_features,
+            ):
+                return False, "native W4A4 requires N and K to be multiples of 4"
+            if not native_w4a4_available(build=False):
+                return False, "native W4A4 backend is unavailable"
+        except Exception as exc:
+            return False, f"native W4A4 capability check failed: {exc}"
+        return True, "native Nunchaku two-stage W4A4 fusion is available"
+
+    def _native_w4a4_state_signature(self) -> tuple[Any, ...]:
+        packed_residual = self.packed_residual
+        residual_scale = self.residual_scale
+        down_weight = self.down_proj.weight
+        up_weight = self.up_proj.weight
+        bias = self.bias
+        return (
+            id(packed_residual),
+            int(packed_residual._version),
+            id(residual_scale),
+            int(residual_scale._version),
+            id(down_weight),
+            int(down_weight._version),
+            id(up_weight),
+            int(up_weight._version),
+            0 if bias is None else id(bias),
+            0 if bias is None else int(bias._version),
+        )
+
+    @staticmethod
+    def _native_w4a4_hot_key(inputs: torch.Tensor) -> tuple[Any, ...]:
+        stream_id = _current_cuda_stream_id(inputs.device)
+        return (
+            inputs.device.index,
+            inputs.dtype,
+            int(inputs.shape[0]),
+            stream_id,
+        )
+
+    def _native_w4a4_hot_forward(self, inputs: torch.Tensor) -> torch.Tensor | None:
+        if not self._cuda_fused_enabled or not inputs.is_cuda:
+            return None
+        flat = (
+            inputs
+            if inputs.ndim == 2
+            else inputs.reshape(-1, self.input_features)
+        )
+        key = self._native_w4a4_hot_key(flat)
+        cached = self._native_w4a4_hot_cache.get(key)
+        if cached is None:
+            return None
+        state_signature, packed, workspace, native_forward = cached
+        output = native_forward(flat)
+        if state_signature != self._native_w4a4_state_signature():
+            self._native_w4a4_hot_cache.pop(key, None)
+            return None
+        if not self._last_cuda_fused_used:
+            self._last_cuda_fused_used = True
+            self._last_cuda_fused_backend = "native_w4a4_dynamic"
+            self._last_cuda_fused_fallback_reason = None
+        if inputs.ndim == 2:
+            return output
+        original_shape = inputs.shape[:-1]
+        return output.reshape(*original_shape, self.output_features)
+
+    def _native_w4a4_packed(self, inputs: torch.Tensor) -> Any:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            pack_svdq_w4a4_linear,
+        )
+
+        tensors = (
+            self.packed_residual,
+            self.residual_scale,
+            self.down_proj.weight,
+            self.up_proj.weight,
+            self.bias,
+        )
+        signature = (
+            inputs.device.index,
+            inputs.dtype,
+            self.input_features,
+            self.output_features,
+            self.rank,
+            self.group_size,
+            *(
+                None
+                if tensor is None
+                else (
+                    tensor.device.index,
+                    tensor.dtype,
+                    int(tensor.data_ptr()),
+                    int(getattr(tensor, "_version", 0)),
+                )
+                for tensor in tensors
+            ),
+        )
+        cached = self._native_w4a4_packed_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        residual = self.dequantize_residual().to(
+            device=inputs.device,
+            dtype=inputs.dtype,
+        )
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=inputs.device, dtype=inputs.dtype)
+        packed = pack_svdq_w4a4_linear(
+            residual,
+            self.down_proj.weight,
+            self.up_proj.weight,
+            bias,
+        )
+        self._native_w4a4_packed_cache = (signature, packed)
+        self._native_w4a4_workspace_cache.clear()
+        return packed
+
+    def _native_w4a4_workspace(
+        self,
+        inputs: torch.Tensor,
+        packed: Any,
+    ) -> Any:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            allocate_w4a4_workspace,
+        )
+
+        rows = int(inputs.shape[0])
+        padded_rows = ((rows + 255) // 256) * 256
+        stream_id = _current_cuda_stream_id(inputs.device)
+        key = (
+            str(inputs.device),
+            str(inputs.dtype),
+            padded_rows,
+            int(packed.padded_rank),
+            stream_id,
+        )
+        workspace = self._native_w4a4_workspace_cache.get(key)
+        if workspace is not None:
+            return workspace
+        workspace = allocate_w4a4_workspace(
+            rows,
+            packed,
+            with_lora_rank=int(packed.padded_rank),
+        )
+        if len(self._native_w4a4_workspace_cache) >= 8:
+            self._native_w4a4_workspace_cache.clear()
+        self._native_w4a4_workspace_cache[key] = workspace
+        return workspace
+
     def _can_use_cuda_fused(self, inputs: torch.Tensor) -> bool:
-        allowed, _ = self._cuda_fused_gate(inputs)
-        return allowed
+        native_allowed, _ = self._native_w4a4_gate(inputs)
+        if native_allowed:
+            return True
+        tilelang_allowed, _ = self._cuda_fused_gate(inputs)
+        return tilelang_allowed
 
     def _cuda_fused_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
         """Return the runtime promotion decision and an inspectable reason."""
@@ -447,6 +653,47 @@ class SVDQuantLinear(nn.Module):
             raise ValueError(
                 "SVDQuantLinear input trailing dimension does not match input_features"
             )
+        hot_output = self._native_w4a4_hot_forward(x)
+        if hot_output is not None:
+            return hot_output
+        self._last_cuda_fused_used = False
+        self._last_cuda_fused_backend = None
+        self._last_cuda_fused_fallback_reason = None
+        native_allowed, native_gate_reason = self._native_w4a4_gate(x)
+        if native_allowed:
+            try:
+                from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+                    bind_svdq_w4a4_linear,
+                )
+
+                original_shape = tuple(int(dim) for dim in x.shape[:-1])
+                flat = x if x.ndim == 2 else x.reshape(-1, self.input_features)
+                packed = self._native_w4a4_packed(flat)
+                workspace = self._native_w4a4_workspace(flat, packed)
+                native_forward = bind_svdq_w4a4_linear(
+                    packed,
+                    workspace,
+                    rows=int(flat.shape[0]),
+                )
+                fused = native_forward(flat)
+                if len(self._native_w4a4_hot_cache) >= 8:
+                    self._native_w4a4_hot_cache.clear()
+                self._native_w4a4_hot_cache[
+                    self._native_w4a4_hot_key(flat)
+                ] = (
+                    self._native_w4a4_state_signature(),
+                    packed,
+                    workspace,
+                    native_forward,
+                )
+                self._last_cuda_fused_used = True
+                self._last_cuda_fused_backend = "native_w4a4_dynamic"
+                self._last_cuda_fused_fallback_reason = None
+                if x.ndim == 2:
+                    return fused
+                return fused.reshape(*original_shape, self.output_features)
+            except Exception as exc:
+                native_gate_reason = f"native W4A4 execution failed: {exc}"
         fused_allowed, fused_gate_reason = self._cuda_fused_gate(x)
         if fused_allowed:
             try:
@@ -473,16 +720,24 @@ class SVDQuantLinear(nn.Module):
                     **schedule.to_dict(),
                 )
                 self._last_cuda_fused_used = True
+                self._last_cuda_fused_backend = "tilelang_dequant_fp16"
                 self._last_cuda_fused_fallback_reason = None
                 return fused.reshape(*original_shape, self.output_features)
             except Exception as exc:
                 self._last_cuda_fused_used = False
-                self._last_cuda_fused_fallback_reason = str(exc)
+                self._last_cuda_fused_backend = None
+                self._last_cuda_fused_fallback_reason = (
+                    f"{native_gate_reason}; TileLang execution failed: {exc}"
+                )
         elif self._cuda_fused_enabled:
             self._last_cuda_fused_used = False
-            self._last_cuda_fused_fallback_reason = fused_gate_reason
+            self._last_cuda_fused_backend = None
+            self._last_cuda_fused_fallback_reason = (
+                f"{native_gate_reason}; {fused_gate_reason}"
+            )
 
         self._last_cuda_fused_used = False
+        self._last_cuda_fused_backend = None
         device = x.device
         dtype = x.dtype
 
@@ -500,13 +755,19 @@ class SVDQuantLinear(nn.Module):
         return y
 
     def execution_metadata(self) -> dict[str, Any]:
+        implementation = "reference_svd_low_rank_plus_dequant_residual"
+        if self._last_cuda_fused_backend == "native_w4a4_dynamic":
+            implementation = "native_svdq_w4a4_dynamic_lora"
+        elif self._last_cuda_fused_backend == "tilelang_dequant_fp16":
+            implementation = "tilelang_svd_dequant_low_rank_fused"
         return {
-            "implementation": "reference_svd_low_rank_plus_dequant_residual",
+            "implementation": implementation,
             "compute_contract": "composite_add",
             "residual_storage": "packed_signed_int4_group_scale",
             "residual_compute": "dequant_fp16",
             "cuda_fusion_enabled": bool(self._cuda_fused_enabled),
             "cuda_fused_used": bool(self._last_cuda_fused_used),
+            "cuda_fused_backend": self._last_cuda_fused_backend,
             "cuda_fused_fallback_reason": self._last_cuda_fused_fallback_reason,
         }
 
@@ -561,6 +822,7 @@ class SVDQuantInt8MmaLinear(nn.Module):
         self.group_size = int(group_size)
         self.padded_input_features = int(padded_input_features)
         self.quant_dtype = residual_dtype
+        self.rank = int(down_weight.shape[0])
         self.down_proj = nn.Linear(
             self.input_features,
             int(down_weight.shape[0]),
@@ -605,6 +867,14 @@ class SVDQuantInt8MmaLinear(nn.Module):
         else:
             self.register_buffer("bias", bias.detach().clone().to(torch.float32))
         self._fused_forward: Any = None
+        self._native_w8a8_fusion_enabled = False
+        self._native_w8a8_packed_cache: tuple[tuple[Any, ...], Any] | None = None
+        self._native_w8a8_workspace_cache: dict[tuple[Any, ...], Any] = {}
+        self._native_w8a8_hot_cache: dict[
+            tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any]
+        ] = {}
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_fallback_reason: str | None = None
         self._last_fused_forward_used = False
         self._last_fused_forward_fallback_reason: str | None = None
 
@@ -625,6 +895,12 @@ class SVDQuantInt8MmaLinear(nn.Module):
         if hasattr(self.residual_int8, "output_dtype"):
             self.residual_int8.output_dtype = self.output_dtype
         self._fused_forward = None
+        self._native_w8a8_fusion_enabled = False
+        self._native_w8a8_packed_cache = None
+        self._native_w8a8_workspace_cache.clear()
+        self._native_w8a8_hot_cache.clear()
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_fallback_reason = None
         self._last_fused_forward_used = False
         self._last_fused_forward_fallback_reason = None
         return self
@@ -704,7 +980,32 @@ class SVDQuantInt8MmaLinear(nn.Module):
         )
 
     def enable_fusion(self, *, mode: str = "reduce-overhead") -> bool:
-        """Compile the split residual + low-rank data flow for large CUDA batches."""
+        """Enable native W8A8 two-stage fusion or the compiled split fallback."""
+
+        self._native_w8a8_fusion_enabled = False
+        try:
+            from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+                native_svdq_w8a8_available,
+                native_svdq_w8a8_shape_supported,
+            )
+
+            native_contract = (
+                self.output_dtype == torch.bfloat16
+                and self.down_proj.weight.dtype == torch.bfloat16
+                and self.up_proj.weight.dtype == torch.bfloat16
+                and self.residual_int8.activation_scale_mode == "dynamic"
+                and native_svdq_w8a8_shape_supported(
+                    self.input_features,
+                    self.output_features,
+                    self.rank,
+                )
+            )
+            if native_contract and native_svdq_w8a8_available(build=False):
+                self._native_w8a8_fusion_enabled = True
+                self._fused_forward = None
+                return True
+        except Exception:
+            self._native_w8a8_fusion_enabled = False
 
         compile_fn = getattr(torch, "compile", None)
         if not callable(compile_fn):
@@ -717,7 +1018,226 @@ class SVDQuantInt8MmaLinear(nn.Module):
         return True
 
     def disable_fusion(self) -> None:
+        self._native_w8a8_fusion_enabled = False
+        self._native_w8a8_hot_cache.clear()
         self._fused_forward = None
+
+    def _native_w8a8_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        if not self._native_w8a8_fusion_enabled or not inputs.is_cuda:
+            return False, "native SVDQuant W8A8 fusion is disabled or input is not CUDA"
+        if inputs.dtype != torch.bfloat16:
+            return False, "native SVDQuant W8A8 follows the official BF16 contract"
+        if self.output_dtype != torch.bfloat16:
+            return False, "native SVDQuant W8A8 output dtype must be bfloat16"
+        if self.down_proj.weight.dtype != torch.bfloat16:
+            return False, "native SVDQuant W8A8 down-projection must be bfloat16"
+        if self.up_proj.weight.dtype != torch.bfloat16:
+            return False, "native SVDQuant W8A8 up-projection must be bfloat16"
+        if self.residual_int8.activation_scale_mode != "dynamic":
+            return False, "native SVDQuant W8A8 requires dynamic activation scales"
+        if inputs.ndim < 1 or int(inputs.shape[-1]) != self.input_features:
+            return False, "native SVDQuant W8A8 input trailing dimension is invalid"
+        rows = int(inputs.reshape(-1, self.input_features).shape[0])
+        if 0 < self.residual_int8.min_int8_rows and rows < self.residual_int8.min_int8_rows:
+            return False, "input rows are below min_int8_rows"
+        native_tensors = (
+            self.residual_int8.packed_weight,
+            self.residual_int8.group_scale,
+            self.down_proj.weight,
+            self.up_proj.weight,
+        )
+        if any(not tensor.is_cuda for tensor in native_tensors):
+            return False, "native SVDQuant W8A8 requires all weights on CUDA"
+        if any(tensor.device != inputs.device for tensor in native_tensors):
+            return False, "native SVDQuant W8A8 inputs and weights must share a device"
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        if (major, minor) != (8, 9):
+            return False, f"native SVDQuant W8A8 currently targets sm_89, got sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+                native_svdq_w8a8_available,
+                native_svdq_w8a8_shape_supported,
+            )
+
+            if not native_svdq_w8a8_shape_supported(
+                self.input_features,
+                self.output_features,
+                self.rank,
+            ):
+                return False, "native SVDQuant W8A8 requires N/K multiples of 4 and rank <= 1024"
+            if not native_svdq_w8a8_available(build=False):
+                return False, "native SVDQuant W8A8 backend is unavailable"
+        except Exception as exc:
+            return False, f"native SVDQuant W8A8 capability check failed: {exc}"
+        return True, "native SVDQuant dynamic W8A8 plus LoRA fusion is available"
+
+    def _native_w8a8_packed(self, inputs: torch.Tensor) -> Any:
+        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+            pack_svdq_w8a8_linear,
+        )
+
+        tensors = (
+            self.residual_int8.packed_weight,
+            self.residual_int8.group_scale,
+            self.down_proj.weight,
+            self.up_proj.weight,
+            self.bias,
+        )
+        signature = (
+            str(inputs.device),
+            self.input_features,
+            self.output_features,
+            self.rank,
+            self.group_size,
+            *(
+                None
+                if tensor is None
+                else (
+                    str(tensor.device),
+                    str(tensor.dtype),
+                    int(tensor.data_ptr()),
+                    int(getattr(tensor, "_version", 0)),
+                    tuple(int(dim) for dim in tensor.shape),
+                )
+                for tensor in tensors
+            ),
+        )
+        cached = self._native_w8a8_packed_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        residual = self.dequantize_residual().to(
+            device=inputs.device,
+            dtype=torch.bfloat16,
+        )
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=inputs.device, dtype=torch.bfloat16)
+        packed = pack_svdq_w8a8_linear(
+            residual,
+            self.down_proj.weight,
+            self.up_proj.weight,
+            bias,
+        )
+        self._native_w8a8_packed_cache = (signature, packed)
+        self._native_w8a8_workspace_cache.clear()
+        self._native_w8a8_hot_cache.clear()
+        return packed
+
+    def _native_w8a8_state_signature(self) -> tuple[Any, ...]:
+        packed_weight = self.residual_int8.packed_weight
+        group_scale = self.residual_int8.group_scale
+        down_weight = self.down_proj.weight
+        up_weight = self.up_proj.weight
+        bias = self.bias
+        return (
+            self.output_dtype,
+            self.residual_int8.activation_scale_mode,
+            int(self.residual_int8.min_int8_rows),
+            id(packed_weight),
+            int(packed_weight._version),
+            id(group_scale),
+            int(group_scale._version),
+            id(down_weight),
+            int(down_weight._version),
+            id(up_weight),
+            int(up_weight._version),
+            0 if bias is None else id(bias),
+            0 if bias is None else int(bias._version),
+        )
+
+    @staticmethod
+    def _native_w8a8_hot_key(inputs: torch.Tensor) -> tuple[Any, ...]:
+        stream_id = _current_cuda_stream_id(inputs.device)
+        return (
+            inputs.device.index,
+            inputs.dtype,
+            int(inputs.shape[0]),
+            stream_id,
+        )
+
+    def _native_w8a8_hot_forward(self, inputs: torch.Tensor) -> torch.Tensor | None:
+        if not self._native_w8a8_fusion_enabled or not inputs.is_cuda:
+            return None
+        flat = (
+            inputs
+            if inputs.ndim == 2
+            else inputs.reshape(-1, self.input_features)
+        )
+        key = self._native_w8a8_hot_key(flat)
+        cached = self._native_w8a8_hot_cache.get(key)
+        if cached is None:
+            return None
+        state_signature, packed, workspace, native_forward = cached
+        output = native_forward(flat)
+        if state_signature != self._native_w8a8_state_signature():
+            self._native_w8a8_hot_cache.pop(key, None)
+            return None
+        if not self._last_native_w8a8_used:
+            self._last_fused_forward_used = False
+            self._last_fused_forward_fallback_reason = None
+            self._last_native_w8a8_used = True
+            self._last_native_w8a8_fallback_reason = None
+        if inputs.ndim == 2:
+            return output
+        original_shape = inputs.shape[:-1]
+        return output.reshape(*original_shape, self.output_features)
+
+    def _native_w8a8_workspace(self, inputs: torch.Tensor, packed: Any) -> Any:
+        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+            allocate_svdq_w8a8_workspace,
+        )
+
+        rows = int(inputs.shape[0])
+        padded_rows = ((rows + 255) // 256) * 256
+        stream_id = _current_cuda_stream_id(inputs.device)
+        key = (
+            str(inputs.device),
+            padded_rows,
+            int(packed.padded_input_features),
+            int(packed.padded_rank),
+            stream_id,
+        )
+        workspace = self._native_w8a8_workspace_cache.get(key)
+        if workspace is not None:
+            return workspace
+        workspace = allocate_svdq_w8a8_workspace(rows, packed)
+        if len(self._native_w8a8_workspace_cache) >= 8:
+            self._native_w8a8_workspace_cache.clear()
+        self._native_w8a8_workspace_cache[key] = workspace
+        return workspace
+
+    def _native_w8a8_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+            bind_svdq_w8a8_linear,
+        )
+
+        original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
+        flat = (
+            inputs
+            if inputs.ndim == 2
+            else inputs.reshape(-1, self.input_features)
+        )
+        packed = self._native_w8a8_packed(flat)
+        workspace = self._native_w8a8_workspace(flat, packed)
+        native_forward = bind_svdq_w8a8_linear(
+            packed,
+            workspace,
+            rows=int(flat.shape[0]),
+        )
+        output = native_forward(flat)
+        if len(self._native_w8a8_hot_cache) >= 8:
+            self._native_w8a8_hot_cache.clear()
+        self._native_w8a8_hot_cache[self._native_w8a8_hot_key(flat)] = (
+            self._native_w8a8_state_signature(),
+            packed,
+            workspace,
+            native_forward,
+        )
+        self._last_native_w8a8_used = True
+        self._last_native_w8a8_fallback_reason = None
+        if inputs.ndim == 2:
+            return output
+        return output.reshape(*original_shape, self.output_features)
 
     def _low_rank(self, inputs: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
         low_rank_inputs = inputs.to(
@@ -755,10 +1275,27 @@ class SVDQuantInt8MmaLinear(nn.Module):
                 "SVDQuantInt8MmaLinear input trailing dimension does not match "
                 "input_features"
             )
+        rows = (
+            int(inputs.shape[0])
+            if inputs.ndim == 2
+            else int(inputs.numel() // self.input_features)
+        )
+        residual = self.residual_int8
+        hot_output = self._native_w8a8_hot_forward(inputs)
+        if hot_output is not None:
+            return hot_output
         self._last_fused_forward_used = False
         self._last_fused_forward_fallback_reason = None
-        rows = int(inputs.reshape(-1, self.input_features).shape[0])
-        residual = self.residual_int8
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_fallback_reason = None
+        native_allowed, native_reason = self._native_w8a8_gate(inputs)
+        if native_allowed:
+            try:
+                return self._native_w8a8_forward(inputs)
+            except Exception as exc:
+                native_reason = f"native SVDQuant W8A8 execution failed: {exc}"
+        if self._native_w8a8_fusion_enabled:
+            self._last_native_w8a8_fallback_reason = native_reason
         use_fused = (
             self._fused_forward is not None
             and inputs.is_cuda
@@ -780,13 +1317,25 @@ class SVDQuantInt8MmaLinear(nn.Module):
         metadata = self.residual_int8.execution_metadata()
         metadata.update(
             {
-                "implementation": "composite_add_svd_w4_residual_int8_mma",
+                "implementation": (
+                    "native_svdq_w8a8_dynamic_lora"
+                    if self._last_native_w8a8_used
+                    else "composite_add_svd_w4_residual_int8_mma"
+                ),
                 "compute_contract": "composite_add",
                 "low_rank_branch": "source_precision",
                 "residual_storage": "packed_signed_int4_group_scale",
                 "residual_compute": "w8a8_int8_mma",
                 "quant_dtype": self.quant_dtype,
-                "fusion_enabled": self._fused_forward is not None,
+                "fusion_enabled": (
+                    self._native_w8a8_fusion_enabled
+                    or self._fused_forward is not None
+                ),
+                "native_w8a8_fusion_enabled": bool(
+                    self._native_w8a8_fusion_enabled
+                ),
+                "native_w8a8_used": bool(self._last_native_w8a8_used),
+                "native_w8a8_fallback_reason": self._last_native_w8a8_fallback_reason,
                 "fused_forward_used": bool(self._last_fused_forward_used),
                 "fused_forward_fallback_reason": self._last_fused_forward_fallback_reason,
             }

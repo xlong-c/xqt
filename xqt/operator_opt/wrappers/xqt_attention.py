@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 
@@ -17,7 +16,11 @@ from ..runtime import (
     cuda_graph_tensor_signature,
     replay_cuda_graph_tensor_callable,
 )
-from ._common import _matching_tensor_dtype_name, _resolved_target_arch
+from ._common import (
+    _matching_tensor_dtype_name,
+    _resolved_target_arch,
+    _scaled_dot_product_attention_with_causal_semantics,
+)
 
 if TYPE_CHECKING:
     from xqt import nn as xqt_nn
@@ -90,12 +93,12 @@ class _TileLangXqtAttentionWrapper(nn.Module):
 
     def _run_sdpa_attention_forward(self, x: torch.Tensor) -> torch.Tensor:
         q, k, v = self._project_qkv(x)
-        attn_output = F.scaled_dot_product_attention(
+        attn_output = _scaled_dot_product_attention_with_causal_semantics(
             q,
             k,
             v,
             dropout_p=float(self.attention.dropout_p),
-            is_causal=bool(self.attention.causal),
+            causal=bool(self.attention.causal),
         )
         merged = self.attention._merge_heads(attn_output)
         return self.attention.out_proj(merged)

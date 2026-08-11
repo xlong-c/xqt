@@ -98,6 +98,19 @@ def test_tilelang_capability_keeps_static_support_when_runtime_is_incompatible()
     assert "TileLang test ABI incompatibility" in capability.notes
 
 
+def test_tilelang_capability_reports_fp16_exact_linear_schedule_boundary() -> None:
+    capability = describe_operator_engine_capability("tilelang")
+
+    assert any(
+        "exact FP16 M<=4,K=N=4096,activation=None" in note
+        for note in capability.notes
+    )
+    assert any(
+        "N=11008 and fused activation keep the default schedule" in limitation
+        for limitation in capability.limitations
+    )
+
+
 @requires_cuda
 def test_tilelang_runtime_guard_rejects_cuda_kernel_invocation() -> None:
     x = torch.empty(1, 1, 1, 1, device="cuda", dtype=torch.float16)

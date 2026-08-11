@@ -64,6 +64,15 @@ from .fp4_weight_only import (
 from .int8_mma import Int8MmaLinear
 
 _ACTIVATION_SCALE_MODES = frozenset({"dynamic", "static"})
+_W4A4_RUNTIME_BACKENDS = frozenset({"auto", "rowwise", "nunchaku", "reference"})
+
+
+def _normalize_w4a4_runtime_backend(value: str) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in _W4A4_RUNTIME_BACKENDS:
+        allowed = ", ".join(sorted(_W4A4_RUNTIME_BACKENDS))
+        raise ValueError(f"w4a4_runtime_backend must be one of: {allowed}")
+    return normalized
 
 
 def _base_regular_hadamard4() -> torch.Tensor:
@@ -342,6 +351,7 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         rotation_matrix: torch.Tensor,
         compute_precision: str = "w4a4",
         activation_scale_mode: str = "dynamic",
+        w4a4_runtime_backend: str = "auto",
         high_precision_channel_mask: torch.Tensor | None = None,
         channel_hybrid_axis: str = "input",
         channel_high_precision: str = "bf16",
@@ -413,6 +423,9 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         if scale_mode not in _ACTIVATION_SCALE_MODES:
             raise ValueError("activation_scale_mode must be dynamic or static")
         self.activation_scale_mode = scale_mode
+        self.w4a4_runtime_backend = _normalize_w4a4_runtime_backend(
+            w4a4_runtime_backend
+        )
         self.input_already_rotated = False
         self._int8_compute: Int8MmaLinear | None = None
         self._dequantized_weight_cache: dict[
@@ -421,18 +434,38 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         self._runtime_rotation_cache: dict[
             tuple[str, int, int], torch.Tensor
         ] = {}
+        self._rowwise_w4a4_packed_cache: tuple[tuple[Any, ...], Any] | None = None
+        self._rowwise_w4a4_runner_cache: tuple[
+            int | None, torch.dtype, tuple[int, int, int], Any, Any
+        ] | None = None
+        self._native_w4a4_packed_cache: tuple[tuple[Any, ...], Any] | None = None
+        self._native_w4a4_workspace_cache: dict[tuple[Any, ...], Any] = {}
+        self._native_w4a4_hot_cache: dict[
+            tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any]
+        ] = {}
+        self._last_native_w4a4_used = False
+        self._last_native_w4a4_backend: str | None = None
+        self._last_native_w4a4_fallback_reason: str | None = None
         self.compute_precision = normalize_compute_precision(compute_precision)
         self._ensure_int8_compute()
 
     def _clear_runtime_caches(self) -> None:
         self._dequantized_weight_cache.clear()
         self._runtime_rotation_cache.clear()
+        self._rowwise_w4a4_packed_cache = None
+        self._rowwise_w4a4_runner_cache = None
+        self._native_w4a4_packed_cache = None
+        self._native_w4a4_workspace_cache.clear()
+        self._native_w4a4_hot_cache.clear()
 
     def _apply(self, fn: Any) -> "ConvRotMixedPrecisionLinear":
         """Move registered tensors, then invalidate device/dtype-derived views."""
 
         super()._apply(fn)
         self._clear_runtime_caches()
+        self._last_native_w4a4_used = False
+        self._last_native_w4a4_backend = None
+        self._last_native_w4a4_fallback_reason = None
         return self
 
     @classmethod
@@ -445,6 +478,7 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         activation_scale: torch.Tensor | float = 1.0,
         activation_scale_mode: str = "dynamic",
         compute_precision: str = "w4a4",
+        w4a4_runtime_backend: str = "auto",
         high_precision_channels: Sequence[int] | torch.Tensor | None = None,
         channel_hybrid_axis: str = "input",
         channel_high_precision: str = "bf16",
@@ -501,6 +535,7 @@ class ConvRotMixedPrecisionLinear(nn.Module):
             rotation_matrix=rotation,
             compute_precision=compute_precision,
             activation_scale_mode=activation_scale_mode,
+            w4a4_runtime_backend=w4a4_runtime_backend,
             high_precision_channel_mask=mask,
             channel_hybrid_axis=axis,
             channel_high_precision=channel_high_precision,
@@ -701,6 +736,334 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         rotated = self._rotate_inputs(inputs)
         return self._quantize_rotated_activation(rotated).to(dtype=inputs.dtype)
 
+    def _w4a4_compute_view_signature(self, inputs: torch.Tensor) -> tuple[Any, ...]:
+        tensors = (self.packed_weight, self.weight_scale, self.bias)
+        return (
+            str(inputs.device),
+            str(inputs.dtype),
+            self.padded_input_features,
+            self.output_features,
+            self.group_size,
+            *(
+                None
+                if tensor is None
+                else (
+                    str(tensor.device),
+                    str(tensor.dtype),
+                    int(tensor.data_ptr()),
+                    int(getattr(tensor, "_version", 0)),
+                    tuple(int(dim) for dim in tensor.shape),
+                )
+                for tensor in tensors
+            ),
+        )
+
+    def _rowwise_w4a4_requested(self) -> bool:
+        return self.w4a4_runtime_backend == "rowwise" or (
+            self.w4a4_runtime_backend == "auto"
+            and self.group_size == self.padded_input_features
+        )
+
+    def _rowwise_w4a4_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        if not self._rowwise_w4a4_requested():
+            return False, (
+                "rowwise W4A4 requires w4a4_runtime_backend=rowwise or an "
+                "auto-selected whole-row weight scale"
+            )
+        if self.compute_precision != "w4a4":
+            return False, "rowwise W4A4 requires w4a4 compute precision"
+        if self.activation_scale_mode != "dynamic":
+            return False, "rowwise W4A4 requires dynamic activation scales"
+        if self.input_already_rotated:
+            return False, "rowwise ConvRot requires an unrotated activation input"
+        if self.input_features != self.padded_input_features:
+            return False, "rowwise ConvRot does not materialize padded activation features"
+        if not _can_mutate_runtime_cache():
+            return False, "rowwise W4A4 eager cache is unavailable while compiling or tracing"
+        if not inputs.is_cuda:
+            return False, "rowwise W4A4 requires CUDA activations"
+        if inputs.dtype not in {torch.float16, torch.bfloat16}:
+            return False, "rowwise W4A4 requires float16 or bfloat16 activations"
+        if inputs.ndim < 1 or int(inputs.shape[-1]) != self.input_features:
+            return False, "rowwise W4A4 input trailing dimension is invalid"
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        if (major, minor) != (8, 9):
+            return False, f"rowwise W4A4 currently targets sm_89, got sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+                native_rowwise_convrot_w4a4_available,
+                native_rowwise_convrot_w4a4_shape_supported,
+            )
+
+            if not native_rowwise_convrot_w4a4_shape_supported(
+                self.input_features,
+                self.output_features,
+                self.rot_size,
+            ):
+                return False, "rowwise ConvRot W4A4 shape or rotation size is unsupported"
+            if not native_rowwise_convrot_w4a4_available(build=False):
+                return False, "rowwise ConvRot W4A4 backend is unavailable"
+        except Exception as exc:
+            return False, f"rowwise ConvRot W4A4 capability check failed: {exc}"
+        return True, "warp-FHT rowwise INT4 quantization and CUTLASS W4A4 are available"
+
+    def _rowwise_w4a4_packed(self, inputs: torch.Tensor) -> Any:
+        from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+            pack_convrot_w4a4_rowwise_weight,
+        )
+
+        signature = self._w4a4_compute_view_signature(inputs)
+        cached = self._rowwise_w4a4_packed_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        weight = self.dequantized_weight(
+            dtype=inputs.dtype,
+            device=inputs.device,
+            include_padding=True,
+        )
+        bias = self._bias_for(dtype=inputs.dtype, device=inputs.device)
+        packed = pack_convrot_w4a4_rowwise_weight(weight, bias)
+        self._rowwise_w4a4_packed_cache = (signature, packed)
+        self._rowwise_w4a4_runner_cache = None
+        return packed
+
+    def _rowwise_w4a4_hot_forward(self, inputs: torch.Tensor) -> torch.Tensor | None:
+        if (
+            self.compute_precision != "w4a4"
+            or not self._rowwise_w4a4_requested()
+            or self.activation_scale_mode != "dynamic"
+            or self.input_already_rotated
+            or self.channel_hybrid_enabled
+            or not inputs.is_cuda
+        ):
+            return None
+        cached = self._rowwise_w4a4_runner_cache
+        if cached is None:
+            return None
+        device_index, dtype, source_ids, _packed, native_forward = cached
+        if (
+            device_index != inputs.device.index
+            or dtype != inputs.dtype
+            or source_ids
+            != (id(self.packed_weight), id(self.weight_scale), id(self.bias))
+        ):
+            self._rowwise_w4a4_runner_cache = None
+            return None
+        try:
+            output = native_forward(inputs)
+        except RuntimeError as exc:
+            if "XQT_ROWWISE_W4A4_STALE_STATE" not in str(exc):
+                raise
+            self._rowwise_w4a4_runner_cache = None
+            return None
+        backend = "native_convrot_w4a4_rowwise_dynamic_runner"
+        if self._last_native_w4a4_backend != backend:
+            self._last_native_w4a4_used = True
+            self._last_native_w4a4_backend = backend
+            self._last_native_w4a4_fallback_reason = None
+        return output
+
+    def _rowwise_w4a4_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+            bind_dynamic_convrot_w4a4_rowwise_linear,
+        )
+
+        packed = self._rowwise_w4a4_packed(inputs)
+        native_forward = bind_dynamic_convrot_w4a4_rowwise_linear(
+            packed,
+            source_weight=self.packed_weight,
+            source_weight_scales=self.weight_scale,
+            source_bias=self.bias,
+            expected_dtype=inputs.dtype,
+        )
+        output = native_forward(inputs)
+        self._rowwise_w4a4_runner_cache = (
+            inputs.device.index,
+            inputs.dtype,
+            (id(self.packed_weight), id(self.weight_scale), id(self.bias)),
+            packed,
+            native_forward,
+        )
+        self._last_native_w4a4_used = True
+        self._last_native_w4a4_backend = "native_convrot_w4a4_rowwise_dynamic_runner"
+        self._last_native_w4a4_fallback_reason = None
+        return output
+
+    def _native_w4a4_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        if self.w4a4_runtime_backend == "reference":
+            return False, "native W4A4 is disabled by w4a4_runtime_backend=reference"
+        if self.compute_precision != "w4a4":
+            return False, "native W4A4 requires w4a4 compute precision"
+        if self.activation_scale_mode != "dynamic":
+            return False, "native W4A4 requires dynamic activation scales"
+        if not _can_mutate_runtime_cache():
+            return False, "native W4A4 eager cache is unavailable while compiling or tracing"
+        if not inputs.is_cuda:
+            return False, "native W4A4 requires CUDA activations"
+        if inputs.dtype not in {torch.float16, torch.bfloat16}:
+            return False, "native W4A4 requires float16 or bfloat16 activations"
+        if inputs.ndim < 1 or int(inputs.shape[-1]) != self.input_features:
+            return False, "native W4A4 input trailing dimension is invalid"
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        if (major, minor) != (8, 9):
+            return False, f"native W4A4 currently targets sm_89, got sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+                native_convrot_w4a4_shape_supported,
+                native_w4a4_available,
+                native_w4a4_shape_supported,
+            )
+
+            if self.input_already_rotated:
+                shape_supported = native_w4a4_shape_supported(
+                    self.padded_input_features,
+                    self.output_features,
+                )
+            else:
+                shape_supported = native_convrot_w4a4_shape_supported(
+                    self.input_features,
+                    self.padded_input_features,
+                    self.output_features,
+                    self.rot_size,
+                )
+            if not shape_supported:
+                return False, "native ConvRot W4A4 shape or rotation size is unsupported"
+            if not native_w4a4_available(build=False):
+                return False, "native W4A4 backend is unavailable"
+        except Exception as exc:
+            return False, f"native W4A4 capability check failed: {exc}"
+        return True, "native ConvRot rotation plus dynamic W4A4 quantization is available"
+
+    def _native_w4a4_packed(self, inputs: torch.Tensor) -> Any:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import pack_w4a4_linear
+
+        signature = self._w4a4_compute_view_signature(inputs)
+        cached = self._native_w4a4_packed_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        weight = self.dequantized_weight(
+            dtype=inputs.dtype,
+            device=inputs.device,
+            include_padding=True,
+        )
+        bias = self._bias_for(dtype=inputs.dtype, device=inputs.device)
+        packed = pack_w4a4_linear(weight, bias)
+        self._native_w4a4_packed_cache = (signature, packed)
+        self._native_w4a4_workspace_cache.clear()
+        return packed
+
+    def _native_w4a4_workspace(self, inputs: torch.Tensor, packed: Any) -> Any:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            allocate_w4a4_workspace,
+        )
+
+        rows = int(inputs.shape[0])
+        padded_rows = ((rows + 255) // 256) * 256
+        stream_id = int(torch.cuda.current_stream(inputs.device).cuda_stream)
+        key = (
+            str(inputs.device),
+            str(inputs.dtype),
+            padded_rows,
+            int(packed.padded_input_features),
+            stream_id,
+        )
+        workspace = self._native_w4a4_workspace_cache.get(key)
+        if workspace is not None:
+            return workspace
+        workspace = allocate_w4a4_workspace(rows, packed)
+        if len(self._native_w4a4_workspace_cache) >= 8:
+            self._native_w4a4_workspace_cache.clear()
+        self._native_w4a4_workspace_cache[key] = workspace
+        return workspace
+
+    def _native_w4a4_state_signature(self) -> tuple[Any, ...]:
+        tensors = (self.packed_weight, self.weight_scale, self.bias)
+        return tuple(
+            item
+            for tensor in tensors
+            for item in (
+                0 if tensor is None else id(tensor),
+                0 if tensor is None else int(getattr(tensor, "_version", 0)),
+            )
+        )
+
+    @staticmethod
+    def _native_w4a4_hot_key(inputs: torch.Tensor) -> tuple[Any, ...]:
+        stream_id = int(torch.cuda.current_stream(inputs.device).cuda_stream)
+        return (
+            inputs.device.index,
+            inputs.dtype,
+            int(inputs.shape[0]),
+            stream_id,
+        )
+
+    def _native_w4a4_hot_forward(self, inputs: torch.Tensor) -> torch.Tensor | None:
+        if (
+            self.compute_precision != "w4a4"
+            or self.w4a4_runtime_backend == "reference"
+            or self.activation_scale_mode != "dynamic"
+            or self.input_already_rotated
+            or self.channel_hybrid_enabled
+            or not inputs.is_cuda
+        ):
+            return None
+        flat = inputs if inputs.ndim == 2 else inputs.reshape(-1, self.input_features)
+        key = self._native_w4a4_hot_key(flat)
+        cached = self._native_w4a4_hot_cache.get(key)
+        if cached is None:
+            return None
+        state_signature, _packed, _workspace, native_forward = cached
+        if state_signature != self._native_w4a4_state_signature():
+            self._native_w4a4_hot_cache.pop(key, None)
+            return None
+        output = native_forward(flat)
+        backend = "native_convrot_w4a4_dynamic_bound"
+        if self._last_native_w4a4_backend != backend:
+            self._last_native_w4a4_used = True
+            self._last_native_w4a4_backend = backend
+            self._last_native_w4a4_fallback_reason = None
+        if inputs.ndim == 2:
+            return output
+        return output.reshape(*inputs.shape[:-1], self.output_features)
+
+    def _native_w4a4_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            bind_convrot_w4a4_linear,
+            w4a4_linear,
+        )
+
+        original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
+        flat = inputs.reshape(-1, self.input_features)
+        packed = self._native_w4a4_packed(flat)
+        workspace = self._native_w4a4_workspace(flat, packed)
+        if self.input_already_rotated:
+            padded = _pad_last_dim(flat, self.padded_input_features)
+            output = w4a4_linear(padded, packed, workspace=workspace)
+            backend = "native_w4a4_dynamic_pre_rotated"
+        else:
+            native_forward = bind_convrot_w4a4_linear(
+                packed,
+                workspace,
+                rows=int(flat.shape[0]),
+                logical_input_features=self.input_features,
+                rotated_input_features=self.padded_input_features,
+                rot_size=self.rot_size,
+            )
+            output = native_forward(flat)
+            if len(self._native_w4a4_hot_cache) >= 8:
+                self._native_w4a4_hot_cache.clear()
+            self._native_w4a4_hot_cache[self._native_w4a4_hot_key(flat)] = (
+                self._native_w4a4_state_signature(),
+                packed,
+                workspace,
+                native_forward,
+            )
+            backend = "native_convrot_w4a4_dynamic_bound"
+        self._last_native_w4a4_used = True
+        self._last_native_w4a4_backend = backend
+        self._last_native_w4a4_fallback_reason = None
+        return output.reshape(*original_shape, self.output_features)
+
     def _channel_hybrid_forward(self, inputs: torch.Tensor) -> torch.Tensor:
         dtype = inputs.dtype
         device = inputs.device
@@ -751,15 +1114,45 @@ class ConvRotMixedPrecisionLinear(nn.Module):
                 "ConvRotMixedPrecisionLinear input trailing dimension does not "
                 "match input_features"
             )
+        hot_output = self._rowwise_w4a4_hot_forward(inputs)
+        if hot_output is not None:
+            return hot_output
+        hot_output = self._native_w4a4_hot_forward(inputs)
+        if hot_output is not None:
+            return hot_output
+        self._last_native_w4a4_used = False
+        self._last_native_w4a4_backend = None
+        self._last_native_w4a4_fallback_reason = None
         if self.channel_hybrid_enabled and bool(
             self.high_precision_channel_mask.any().item()
         ):
+            self._last_native_w4a4_fallback_reason = (
+                "native full-tensor W4A4 is disabled for channel-hybrid execution"
+            )
             return self._channel_hybrid_forward(inputs)
 
         precision = self.compute_precision
         bias = self._bias_for(dtype=inputs.dtype, device=inputs.device)
 
         if precision == "w4a4":
+            fallback_reasons: list[str] = []
+            rowwise_allowed, rowwise_reason = self._rowwise_w4a4_gate(inputs)
+            if rowwise_allowed:
+                try:
+                    return self._rowwise_w4a4_forward(inputs)
+                except Exception as exc:
+                    rowwise_reason = f"rowwise ConvRot W4A4 execution failed: {exc}"
+            fallback_reasons.append(f"rowwise: {rowwise_reason}")
+            native_allowed, native_reason = self._native_w4a4_gate(inputs)
+            if native_allowed:
+                try:
+                    return self._native_w4a4_forward(inputs)
+                except Exception as exc:
+                    native_reason = f"native ConvRot W4A4 execution failed: {exc}"
+            fallback_reasons.append(f"nunchaku: {native_reason}")
+            self._last_native_w4a4_used = False
+            self._last_native_w4a4_backend = None
+            self._last_native_w4a4_fallback_reason = "; ".join(fallback_reasons)
             quantized_activation = self._quantize_activation(inputs)
             weight = self.dequantized_weight(
                 dtype=inputs.dtype,
@@ -793,6 +1186,57 @@ class ConvRotMixedPrecisionLinear(nn.Module):
 
         allowed = ", ".join(sorted(SUPPORTED_COMPUTE_PRECISIONS))
         raise ValueError(f"unsupported compute_precision {precision!r}; expected {allowed}")
+
+    def execution_metadata(self) -> dict[str, Any]:
+        rowwise_backend = (
+            self._last_native_w4a4_backend
+            == "native_convrot_w4a4_rowwise_dynamic_runner"
+        )
+        return {
+            "implementation": (
+                self._last_native_w4a4_backend
+                if self._last_native_w4a4_used
+                else "convrot_pytorch_reference"
+            ),
+            "method": "convrot",
+            "strategy": "w4a4_int4",
+            "compute_precision": self.compute_precision,
+            "w4a4_runtime_backend": self.w4a4_runtime_backend,
+            "resolved_w4a4_runtime_backend": (
+                "rowwise"
+                if rowwise_backend
+                else "nunchaku"
+                if self._last_native_w4a4_used
+                else "reference"
+            ),
+            "rotation_kind": "regular_hadamard",
+            "rotation_scope": "groupwise",
+            "rot_size": self.rot_size,
+            "logical_input_features": self.input_features,
+            "padded_input_features": self.padded_input_features,
+            "input_already_rotated": bool(self.input_already_rotated),
+            "rotation_quant_fused": bool(self._last_native_w4a4_used),
+            "native_w4a4_used": bool(self._last_native_w4a4_used),
+            "rowwise_w4a4_used": rowwise_backend,
+            "native_w4a4_backend": self._last_native_w4a4_backend,
+            "native_w4a4_fallback_reason": self._last_native_w4a4_fallback_reason,
+            "runtime_weight_layout": (
+                "row_major_signed_int4_rowwise"
+                if rowwise_backend
+                else "nunchaku_packed_int4"
+                if self._last_native_w4a4_used
+                else "grouped_artifact"
+            ),
+            "runtime_weight_requantized_from_artifact": bool(
+                self._last_native_w4a4_used
+            ),
+            "fused_epilogue": (
+                "activation_scale_weight_scale_bias"
+                if rowwise_backend
+                else None
+            ),
+            "norm_fused": False,
+        }
 
 
 def _collect_convrot_activation_stats(
@@ -933,6 +1377,9 @@ def quantize_with_convrot_4bit(
     default_compute_precision = normalize_compute_precision(
         str(policy_mapping.get("default_compute_precision", "w4a4") or "w4a4")
     )
+    w4a4_runtime_backend = _normalize_w4a4_runtime_backend(
+        str(policy_mapping.get("w4a4_runtime_backend", "auto") or "auto")
+    )
     selected_strategy = (
         normalize_quant_strategy(
             strategy,
@@ -991,6 +1438,7 @@ def quantize_with_convrot_4bit(
             activation_scale=activation_scale,
             activation_scale_mode=activation_scale_mode,
             compute_precision=default_compute_precision,
+            w4a4_runtime_backend=w4a4_runtime_backend,
             high_precision_channels=high_precision_channels,
             channel_hybrid_axis=channel_hybrid_axis,
             channel_high_precision=channel_high_precision,
@@ -1083,6 +1531,7 @@ def quantize_with_convrot_4bit(
             ),
             "activation_scale_mode": activation_scale_mode,
             "default_compute_precision": default_compute_precision,
+            "w4a4_runtime_backend": w4a4_runtime_backend,
             "supported_compute_precisions": sorted(SUPPORTED_COMPUTE_PRECISIONS),
             "precision_description": {
                 "quantization_time": {
@@ -1096,8 +1545,10 @@ def quantize_with_convrot_4bit(
                 },
                 "runtime": {
                     "w4a4": (
-                        "W4 and A4 are quantized then dequantized into F.linear; "
-                        "this is not native W4A4 MMA"
+                        "auto preserves grouped-artifact semantics through the native "
+                        "Nunchaku layout unless the artifact has one whole-row scale; "
+                        "rowwise explicitly selects warp-FHT rowwise INT4 plus CUTLASS "
+                        "INT4 Tensor Core GEMM; reference uses dequantized F.linear"
                     ),
                     "w4a16": "packed W4 is dequantized; activation stays in the input float dtype",
                     "bf16": "uses the retained floating-point reference weight",
@@ -1124,6 +1575,7 @@ def quantize_with_convrot_4bit(
                 "activation_bits": 4,
                 "activation_scale_mode": activation_scale_mode,
                 "compute_precisions": sorted(SUPPORTED_COMPUTE_PRECISIONS),
+                "w4a4_runtime_backend": w4a4_runtime_backend,
                 "channel_hybrid": {
                     "axis": channel_hybrid_axis,
                     "ratio": float(channel_hybrid_ratio),
@@ -1158,6 +1610,7 @@ def quantize_with_convrot_4bit(
                 "channel_hybrid_axis": channel_hybrid_axis,
                 "activation_scale_mode": activation_scale_mode,
                 "default_compute_precision": default_compute_precision,
+                "w4a4_runtime_backend": w4a4_runtime_backend,
             },
         },
     )

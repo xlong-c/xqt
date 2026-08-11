@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
-from xqt.runtime.modules import SVDQuantLinear
+from xqt.runtime.modules import SVDQuantInt8MmaLinear, SVDQuantLinear
 from xqt.runtime.svd_fusion import (
     fused_svd_forward,
     fused_svd_forward_cuda,
@@ -201,3 +201,272 @@ def test_fused_svd_forward_cuda_rejects_misaligned_dims() -> None:
 
     with pytest.raises(XQTBackendError, match="multiples of block sizes"):
         fused_svd_forward_cuda(module, x)
+
+
+def _native_svdq_w8a8_test_available() -> bool:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
+        return False
+    try:
+        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+            native_svdq_w8a8_available,
+        )
+    except Exception:
+        return False
+    return native_svdq_w8a8_available(build=False)
+
+
+def test_svdq_w4a4_native_metadata_reports_real_backend() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
+        pytest.skip("native sm_89 W4A4 backend unavailable")
+    try:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            native_w4a4_available,
+        )
+    except Exception:
+        pytest.skip("native sm_89 W4A4 backend unavailable")
+    if not native_w4a4_available(build=False):
+        pytest.skip("native sm_89 W4A4 backend unavailable")
+
+    module = SVDQuantLinear.from_linear(
+        nn.Linear(128, 128, bias=True).eval(),
+        rank=16,
+        group_size=128,
+        quant_dtype="int4",
+    ).half().cuda().eval()
+    assert module.enable_fusion() is True
+
+    output = module(torch.randn(13, 128, device="cuda", dtype=torch.float16))
+    torch.cuda.synchronize()
+    metadata = module.execution_metadata()
+
+    assert output.shape == (13, 128)
+    assert metadata["implementation"] == "native_svdq_w4a4_dynamic_lora"
+    assert metadata["cuda_fused_backend"] == "native_w4a4_dynamic"
+    assert metadata["cuda_fused_used"] is True
+
+
+def test_svdq_w4a4_hot_cache_rebuilds_after_residual_scale_mutation() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
+        pytest.skip("native sm_89 W4A4 backend unavailable")
+    try:
+        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            native_w4a4_available,
+        )
+    except Exception:
+        pytest.skip("native sm_89 W4A4 backend unavailable")
+    if not native_w4a4_available(build=False):
+        pytest.skip("native sm_89 W4A4 backend unavailable")
+
+    module = SVDQuantLinear.from_linear(
+        nn.Linear(128, 128, bias=True).eval(),
+        rank=16,
+        group_size=128,
+        quant_dtype="int4",
+    ).half().cuda().eval()
+    assert module.enable_fusion() is True
+    inputs = torch.randn(13, 128, device="cuda", dtype=torch.float16)
+
+    before = module(inputs)
+    first_cache = module._native_w4a4_packed_cache
+    module(inputs)
+    assert first_cache is not None
+
+    with torch.no_grad():
+        module.residual_scale.mul_(2.0)
+    after = module(inputs)
+    torch.cuda.synchronize()
+    second_cache = module._native_w4a4_packed_cache
+
+    assert second_cache is not None
+    assert second_cache[1] is not first_cache[1]
+    assert not torch.equal(before, after)
+
+
+def _make_native_w8_svd(rank: int) -> SVDQuantInt8MmaLinear:
+    torch.manual_seed(53 + int(rank))
+    source = nn.Linear(128, 128, bias=True).eval()
+    return SVDQuantInt8MmaLinear.from_linear(
+        source,
+        rank=rank,
+        group_size=128,
+        quant_dtype="int4",
+        engine="torch_int_mm",
+        activation_scale_mode="dynamic",
+    ).bfloat16().cuda().eval()
+
+
+def test_svdq_w8a8_native_route_cache_stream_and_fair_split() -> None:
+    if not _native_svdq_w8a8_test_available():
+        pytest.skip("native sm_89 SVDQuant W8A8 backend unavailable")
+
+    from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+        allocate_svdq_w8a8_workspace,
+        w8a8_linear,
+    )
+
+    module = _make_native_w8_svd(16)
+    assert module.enable_fusion() is True
+    inputs = torch.randn(37, 128, device="cuda", dtype=torch.bfloat16)
+
+    first = module(inputs)
+    packed_first = module._native_w8a8_packed_cache
+    second = module(inputs)
+    packed_second = module._native_w8a8_packed_cache
+    assert packed_first is not None and packed_second is not None
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream_output = module(inputs)
+    stream.synchronize()
+    after_stream = module(inputs)
+
+    packed = packed_first[1]
+    split_workspace = allocate_svdq_w8a8_workspace(int(inputs.shape[0]), packed)
+    residual = w8a8_linear(inputs, packed, workspace=split_workspace)
+    split = residual + module._low_rank(inputs, residual)
+    torch.cuda.synchronize()
+
+    metadata = module.execution_metadata()
+    assert first.shape == (37, 128)
+    assert first.dtype == torch.bfloat16
+    assert torch.equal(first, second)
+    assert torch.equal(first, stream_output)
+    assert torch.equal(first, after_stream)
+    torch.testing.assert_close(first, split, rtol=4e-2, atol=4e-2)
+    assert packed_first[1] is packed_second[1]
+    assert len(module._native_w8a8_workspace_cache) == 2
+    assert metadata["implementation"] == "native_svdq_w8a8_dynamic_lora"
+    assert metadata["native_w8a8_fusion_enabled"] is True
+    assert metadata["native_w8a8_used"] is True
+    assert metadata["native_w8a8_fallback_reason"] is None
+
+
+def test_svdq_w8a8_native_hot_cache_invalidates_after_scale_mutation() -> None:
+    if not _native_svdq_w8a8_test_available():
+        pytest.skip("native sm_89 SVDQuant W8A8 backend unavailable")
+
+    module = _make_native_w8_svd(16)
+    assert module.enable_fusion() is True
+    inputs = torch.randn(19, 128, device="cuda", dtype=torch.bfloat16)
+
+    before = module(inputs)
+    module(inputs)
+    first_cache = module._native_w8a8_packed_cache
+    assert first_cache is not None
+
+    with torch.no_grad():
+        module.residual_int8.group_scale.mul_(2.0)
+    after = module(inputs)
+    torch.cuda.synchronize()
+    second_cache = module._native_w8a8_packed_cache
+
+    assert second_cache is not None
+    assert second_cache[1] is not first_cache[1]
+    assert not torch.equal(before, after)
+
+
+@pytest.mark.parametrize("rank", [16, 32, 48, 64, 80])
+def test_svdq_w8a8_native_specialized_and_generic_rank_reset(rank: int) -> None:
+    if not _native_svdq_w8a8_test_available():
+        pytest.skip("native sm_89 SVDQuant W8A8 backend unavailable")
+
+    module = _make_native_w8_svd(rank)
+    assert module.enable_fusion() is True
+    inputs = torch.randn(13, 128, device="cuda", dtype=torch.bfloat16)
+
+    first = module(inputs)
+    second = module(inputs)
+    torch.cuda.synchronize()
+
+    assert torch.equal(first, second)
+    assert module.execution_metadata()["native_w8a8_used"] is True
+
+
+def test_svdq_w8a8_native_pads_mnk_and_rank() -> None:
+    if not _native_svdq_w8a8_test_available():
+        pytest.skip("native sm_89 SVDQuant W8A8 backend unavailable")
+
+    module = SVDQuantInt8MmaLinear.from_linear(
+        nn.Linear(132, 132, bias=True).eval(),
+        rank=17,
+        group_size=132,
+        quant_dtype="int4",
+        engine="torch_int_mm",
+        activation_scale_mode="dynamic",
+    ).bfloat16().cuda().eval()
+    assert module.enable_fusion() is True
+
+    output = module(torch.randn(19, 132, device="cuda", dtype=torch.bfloat16))
+    torch.cuda.synchronize()
+    cached = module._native_w8a8_packed_cache
+    assert cached is not None
+    packed = cached[1]
+
+    assert output.shape == (19, 132)
+    assert packed.padded_input_features == 256
+    assert packed.padded_output_features == 256
+    assert packed.padded_rank == 32
+    assert tuple(packed.qweight.shape) == (256, 256)
+    workspace = next(iter(module._native_w8a8_workspace_cache.values()))
+    assert workspace.padded_rows == 256
+
+
+def test_svdq_w8a8_native_rejects_non_vector_aligned_features() -> None:
+    from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+        native_svdq_w8a8_shape_supported,
+    )
+
+    assert native_svdq_w8a8_shape_supported(128, 128, 16) is True
+    assert native_svdq_w8a8_shape_supported(130, 128, 16) is False
+    assert native_svdq_w8a8_shape_supported(128, 130, 16) is False
+    assert native_svdq_w8a8_shape_supported(128, 128, 1025) is False
+
+
+def test_svdq_w8a8_native_contract_falls_back_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    monkeypatch.setattr(torch, "compile", lambda function, mode: function)
+    fp16_module = SVDQuantInt8MmaLinear.from_linear(
+        nn.Linear(128, 128, bias=False).eval(),
+        rank=16,
+        group_size=128,
+        engine="torch_int_mm",
+        activation_scale_mode="dynamic",
+    ).half().cuda().eval()
+    static_bf16_module = SVDQuantInt8MmaLinear.from_linear(
+        nn.Linear(128, 128, bias=False).eval(),
+        rank=16,
+        group_size=128,
+        engine="torch_int_mm",
+        activation_scale_mode="static",
+        activation_scale=0.02,
+    ).bfloat16().cuda().eval()
+    misaligned_module = SVDQuantInt8MmaLinear.from_linear(
+        nn.Linear(130, 126, bias=False).eval(),
+        rank=16,
+        group_size=130,
+        engine="torch_int_mm",
+        activation_scale_mode="dynamic",
+    ).bfloat16().cuda().eval()
+
+    assert fp16_module.enable_fusion() is True
+    assert static_bf16_module.enable_fusion() is True
+    assert misaligned_module.enable_fusion() is True
+    assert fp16_module._native_w8a8_fusion_enabled is False
+    assert static_bf16_module._native_w8a8_fusion_enabled is False
+    assert misaligned_module._native_w8a8_fusion_enabled is False
+    assert fp16_module._fused_forward is not None
+    assert static_bf16_module._fused_forward is not None
+    assert misaligned_module._fused_forward is not None
+
+    native_module = _make_native_w8_svd(16)
+    assert native_module.enable_fusion() is True
+    native_module.residual_int8.min_int8_rows = 64
+    allowed, reason = native_module._native_w8a8_gate(
+        torch.randn(13, 128, device="cuda", dtype=torch.bfloat16)
+    )
+    assert allowed is False
+    assert reason == "input rows are below min_int8_rows"

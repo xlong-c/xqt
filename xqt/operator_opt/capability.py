@@ -135,12 +135,12 @@ _BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
             "Built-in executor ships operator-family routing for attention, conv, direct FP16/BF16 linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
             "Ada-class GPUs can use native runtime fastpaths under the TileLang engine for attention, conv, direct FP16/BF16 linear, direct half norm, and one-time-dequantized dense Linear paths.",
             "Explicit TileLang attention accepts matching float16 or bfloat16 Q/K/V tensors; Ada auto routing remains on native SDPA because the validated BF16 result is shape-dependent.",
-            "Explicit TileLang dense Linear accepts matching float16 or bfloat16 activation, weight, bias, and output tensors with FP32 accumulation and partial M/N tiles. On sm_89, BF16 flattened M<=4 defaults to the validated 16x64x32 schedule; Linear auto routing remains unchanged.",
+            "Explicit TileLang dense Linear accepts matching float16 or bfloat16 activation, weight, bias, and output tensors with FP32 accumulation and partial M/N tiles. On sm_89, BF16 flattened M<=4 and the exact FP16 M<=4,K=N=4096,activation=None signature default to the validated 16x64x32 schedule; Linear auto routing remains unchanged.",
             "Packed FP4/MXFP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future low-bit fused GEMM extensions.",
         ),
         limitations=(
             "Current built-in execution is limited to the attention, conv, linear, norm, and dequant_gemm_epilogue operator families/patterns.",
-            "Current CUDA attention execution is limited to matching float16/bfloat16 Q/K/V with dropout_p=0 and seq_kv >= seq_q; bfloat16 head_dim must be divisible by 16. Direct dense Linear requires matching float16/bfloat16 tensors and K divisible by block_k; the sm_89 BF16 decode preset is validated only for M<=4. Half norm paths, dequant GEMM constraints, and packed FP4 runtime correctness/performance keep their existing hardware-specific limits.",
+            "Current CUDA attention execution is limited to matching float16/bfloat16 Q/K/V with dropout_p=0 and seq_kv >= seq_q; bfloat16 head_dim must be divisible by 16. Direct dense Linear requires matching float16/bfloat16 tensors and K divisible by block_k; the sm_89 BF16 decode preset is validated only for M<=4, while the FP16 preset additionally requires K=N=4096 and activation=None. N=11008 and fused activation keep the default schedule. Half norm paths, dequant GEMM constraints, and packed FP4 runtime correctness/performance keep their existing hardware-specific limits.",
         ),
     ),
     "cutile": OperatorOptimizationEngineCapability(

@@ -52,6 +52,7 @@ _KERNEL_NAME = "sm89_w4a16_grouped_decode"
 _ROW_BOUNDS = (1, 2, 4, 8)
 _DEFAULT_PERSISTENT_BLOCKS_PER_SM = 4
 _MAX_PERSISTENT_BLOCKS_PER_SM = 8
+_MAX_ACTIVE_PERSISTENT_BLOCKS = 0  # sentinel: query device max_active_blocks
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +249,7 @@ class Sm89GroupedW4A16DispatchReport:
     scatter_mode: str
     scatter_launch_count: int
     workspace_bytes: int
+    shape_variant: str
     fallback_chain: tuple[str, ...]
     fallback_reason: str | None
     native: bool
@@ -274,6 +276,7 @@ class Sm89GroupedW4A16DispatchReport:
             "scatter_mode": self.scatter_mode,
             "scatter_launch_count": self.scatter_launch_count,
             "workspace_bytes": self.workspace_bytes,
+            "shape_variant": self.shape_variant,
             "fallback_chain": list(self.fallback_chain),
             "fallback_reason": self.fallback_reason,
             "native": self.native,
@@ -705,7 +708,10 @@ def query_sm89_grouped_w4a16_persistent_resources(
         )
     properties = torch.cuda.get_device_properties(cuda_device)
     max_threads_per_sm = int(properties.max_threads_per_multi_processor)
-    resident_blocks = min(blocks_per_sm, int(max_blocks.value))
+    if blocks_per_sm == _MAX_ACTIVE_PERSISTENT_BLOCKS:
+        resident_blocks = int(max_blocks.value)
+    else:
+        resident_blocks = min(blocks_per_sm, int(max_blocks.value))
     active_threads = resident_blocks * 256
     occupancy = (
         float(active_threads) / float(max_threads_per_sm)
@@ -732,10 +738,13 @@ def query_sm89_grouped_w4a16_persistent_resources(
 def _validate_persistent_blocks_per_sm(blocks_per_sm: int) -> None:
     if isinstance(blocks_per_sm, bool) or not isinstance(blocks_per_sm, int):
         raise TypeError("persistent_blocks_per_sm must be int")
-    if not 1 <= blocks_per_sm <= _MAX_PERSISTENT_BLOCKS_PER_SM:
+    if not blocks_per_sm == _MAX_ACTIVE_PERSISTENT_BLOCKS and not (
+        1 <= blocks_per_sm <= _MAX_PERSISTENT_BLOCKS_PER_SM
+    ):
         raise ValueError(
             "persistent_blocks_per_sm must be in "
-            f"[1,{_MAX_PERSISTENT_BLOCKS_PER_SM}]"
+            f"[1,{_MAX_PERSISTENT_BLOCKS_PER_SM}] "
+            f"or {_MAX_ACTIVE_PERSISTENT_BLOCKS} (max_active)"
         )
 
 
@@ -801,7 +810,10 @@ def _resolve_cached_configuration(
             cached_scheduler == "persistent"
             and isinstance(cached_blocks, int)
             and not isinstance(cached_blocks, bool)
-            and 1 <= cached_blocks <= _MAX_PERSISTENT_BLOCKS_PER_SM
+            and (
+                cached_blocks == _MAX_ACTIVE_PERSISTENT_BLOCKS
+                or 1 <= cached_blocks <= _MAX_PERSISTENT_BLOCKS_PER_SM
+            )
         ):
             return "persistent", cached_blocks, lookup
     return (
@@ -852,6 +864,24 @@ def sm89_grouped_w4a16_executor(
     if schedule.grouped_problem.n != weights.n or schedule.grouped_problem.k != weights.k:
         raise XQTBackendError("grouped W4A16 schedule N/K does not match packed weights")
     _validate_persistent_blocks_per_sm(persistent_blocks_per_sm)
+    effective_blocks_per_sm = persistent_blocks_per_sm
+    if persistent_blocks_per_sm == _MAX_ACTIVE_PERSISTENT_BLOCKS:
+        library_check = _load_library(artifact)
+        if hasattr(library_check, _PERSISTENT_RESOURCE_QUERY_SYMBOL):
+            reg = ctypes.c_int()
+            shm = ctypes.c_int()
+            max_blocks = ctypes.c_int()
+            err = getattr(library_check, _PERSISTENT_RESOURCE_QUERY_SYMBOL)(
+                ctypes.byref(reg), ctypes.byref(shm), ctypes.byref(max_blocks),
+            )
+            if err == 0:
+                effective_blocks_per_sm = int(max_blocks.value)
+                if effective_blocks_per_sm < 1:
+                    effective_blocks_per_sm = _DEFAULT_PERSISTENT_BLOCKS_PER_SM
+            else:
+                effective_blocks_per_sm = _DEFAULT_PERSISTENT_BLOCKS_PER_SM
+        else:
+            effective_blocks_per_sm = _DEFAULT_PERSISTENT_BLOCKS_PER_SM
     major, minor = torch.cuda.get_device_capability(activation.device)
     if (major, minor) != (8, 9):
         raise XQTBackendError(f"SM89 grouped W4A16 received sm_{major}{minor}")
@@ -890,6 +920,7 @@ def sm89_grouped_w4a16_executor(
                 scatter_mode="in_kernel_permutation" if schedule.output_rows is not None else "identity",
                 scatter_launch_count=0,
                 workspace_bytes=0,
+                shape_variant="empty",
                 fallback_chain=(native_candidate_name, "grouped_reference"),
                 fallback_reason=None,
                 native=False,
@@ -913,7 +944,7 @@ def sm89_grouped_w4a16_executor(
         work_items = schedule.task_count * weights.n
         persistent_grid_blocks = min(
             work_items,
-            schedule.multiprocessor_count * persistent_blocks_per_sm,
+            schedule.multiprocessor_count * effective_blocks_per_sm,
         )
         error = getattr(library, _PERSISTENT_SYMBOL)(
             activation_exec.data_ptr(),
@@ -971,6 +1002,16 @@ def sm89_grouped_w4a16_executor(
                 )
             launches += 1
             selected_bounds.append(row_bound)
+    shape_variant: str
+    if selected_scheduler == "persistent_grid_stride":
+        shape_variant = "persistent_grid_stride_max_rows_8"
+    elif selected_scheduler == "direct_task_grid":
+        shape_variant = "direct_max_rows_8"
+    elif selected_scheduler == "bucketed_direct_task_grid":
+        max_bound = max(selected_bounds) if selected_bounds else 8
+        shape_variant = f"bucketed_max_rows_{max_bound}"
+    else:
+        shape_variant = "empty"
     return Sm89GroupedW4A16DispatchResult(
         output=output,
         report=Sm89GroupedW4A16DispatchReport(
@@ -983,7 +1024,7 @@ def sm89_grouped_w4a16_executor(
             task_count=schedule.task_count,
             row_bounds=tuple(selected_bounds),
             persistent_blocks_per_sm=(
-                persistent_blocks_per_sm
+                effective_blocks_per_sm
                 if selected_scheduler == "persistent_grid_stride"
                 else None
             ),
@@ -996,6 +1037,7 @@ def sm89_grouped_w4a16_executor(
             scatter_mode="in_kernel_permutation" if schedule.output_rows is not None else "identity",
             scatter_launch_count=0,
             workspace_bytes=0,
+            shape_variant=shape_variant,
             fallback_chain=(native_candidate_name, "grouped_reference"),
             fallback_reason=None,
             native=True,
@@ -1135,6 +1177,7 @@ __all__ = [
     "Sm89GroupedW4A16PersistentResourceReport",
     "Sm89GroupedW4A16ResourceReport",
     "Sm89GroupedW4A16Schedule",
+    "_MAX_ACTIVE_PERSISTENT_BLOCKS",
     "build_sm89_grouped_w4a16_schedule",
     "dispatch_sm89_grouped_w4a16",
     "pack_sm89_grouped_w4a16_weights",

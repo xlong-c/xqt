@@ -57,6 +57,20 @@ def test_convrot_int8_fallback_weight_cache_rebuilds_after_scale_mutation() -> N
     assert not torch.equal(updated, first)
 
 
+def test_convrot_int8_dtype_conversion_updates_output_contract() -> None:
+    module = ConvRotInt8Linear.from_linear(
+        nn.Linear(256, 256, bias=False).eval(),
+        rot_size=256,
+        engine="auto",
+    ).eval()
+
+    module.half()
+    assert module.int8_compute.output_dtype is torch.float16
+
+    module.bfloat16()
+    assert module.int8_compute.output_dtype is torch.bfloat16
+
+
 def test_svd_reference_residual_cache_reuses_and_invalidates() -> None:
     module = SVDQuantLinear.from_linear(
         nn.Linear(16, 12, bias=False).eval(),

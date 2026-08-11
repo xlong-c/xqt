@@ -42,6 +42,8 @@ class TileLangLinearSchedule:
 def resolve_tilelang_linear_schedule(
     x: torch.Tensor,
     *,
+    out_features: int | None = None,
+    activation: str | None = None,
     block_m: int | None = None,
     block_n: int | None = None,
     block_k: int | None = None,
@@ -61,6 +63,19 @@ def resolve_tilelang_linear_schedule(
     default_block_n = 64
     default_block_k = 64
     if (
+        x.ndim == 2
+        and int(x.shape[0]) <= 4
+        and int(x.shape[1]) == 4096
+        and out_features == 4096
+        and activation is None
+        and x.dtype == torch.float16
+        and resolved_target_arch == "sm_89"
+    ):
+        preset = "sm89_fp16_decode_m_le_4_n4096"
+        default_block_m = 16
+        default_block_n = 64
+        default_block_k = 32
+    elif (
         x.ndim >= 1
         and int(x.shape[0]) <= 4
         and x.dtype == torch.bfloat16
@@ -130,6 +145,8 @@ def dense_linear_epilogue_tilelang(
         raise XQTBackendError(f"unsupported activation: {activation}")
     schedule = resolve_tilelang_linear_schedule(
         x,
+        out_features=int(weight.shape[0]),
+        activation=activation,
         block_m=block_m,
         block_n=block_n,
         block_k=block_k,
@@ -228,6 +245,7 @@ TILELANG_LINEAR_KERNEL_METADATA = {
         "epilogue_stage": "tilelang_fused_bias_activation",
         "schedule_presets": {
             "default": "bm64_bn64_bk64_t128_s2",
+            "sm89_fp16_decode_m_le_4_n4096": "bm16_bn64_bk32_t128_s2",
             "sm89_bf16_decode_m_le_4": "bm16_bn64_bk32_t128_s2",
         },
     },
@@ -247,6 +265,7 @@ TILELANG_LINEAR_KERNEL_METADATA = {
         "epilogue_stage": None,
         "schedule_presets": {
             "default": "bm64_bn64_bk64_t128_s2",
+            "sm89_fp16_decode_m_le_4_n4096": "bm16_bn64_bk32_t128_s2",
             "sm89_bf16_decode_m_le_4": "bm16_bn64_bk32_t128_s2",
         },
     },

@@ -69,6 +69,13 @@ def _target_arch_from_device(device: torch.device) -> str | None:
     return f"sm_{major}{minor}"
 
 
+def _current_cuda_stream_id(device: torch.device) -> int:
+    raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if callable(raw_stream):
+        return int(raw_stream(device.index))
+    return int(torch.cuda.current_stream(device).cuda_stream)
+
+
 class ConvRotInt8Linear(nn.Module):
     """Rotated-weight INT8 Linear with online activation rotation + W8A8 GEMM."""
 
@@ -162,16 +169,34 @@ class ConvRotInt8Linear(nn.Module):
         self._runtime_rotation_cache: dict[
             tuple[str, int, int], torch.Tensor
         ] = {}
+        self._native_w8a8_packed_cache: tuple[tuple[Any, ...], Any] | None = None
+        self._native_w8a8_workspace_cache: dict[tuple[Any, ...], Any] = {}
+        self._native_w8a8_hot_cache: dict[
+            tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any, str]
+        ] = {}
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_backend: str | None = None
+        self._last_native_w8a8_fallback_reason: str | None = None
 
     def _apply(self, fn: Any) -> "ConvRotInt8Linear":
         """Move child runtime tensors and invalidate dense/rotation views."""
 
+        previous_runtime_dtype = self.runtime_rotation_matrix.dtype
+        previous_output_dtype = self.int8_compute.output_dtype
         super()._apply(fn)
+        if previous_output_dtype == previous_runtime_dtype:
+            self.int8_compute.output_dtype = self.runtime_rotation_matrix.dtype
         self._unrotated_dense_weight = None
         self._unrotated_dense_weight_signature = None
         self._rotated_dense_weight = None
         self._rotated_dense_weight_signature = None
         self._runtime_rotation_cache.clear()
+        self._native_w8a8_packed_cache = None
+        self._native_w8a8_workspace_cache.clear()
+        self._native_w8a8_hot_cache.clear()
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_backend = None
+        self._last_native_w8a8_fallback_reason = None
         return self
 
     def _dense_unrotated_weight(
@@ -430,6 +455,257 @@ class ConvRotInt8Linear(nn.Module):
             return allowed
         return True
 
+    def _native_w8a8_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        compute = self.int8_compute
+        if not _can_mutate_runtime_cache():
+            return False, "native ConvRot W8A8 cache is unavailable while compiling"
+        if compute.activation_scale_mode != "dynamic":
+            return False, "native ConvRot W8A8 fastpath requires dynamic activation scales"
+        if compute.engine not in {"auto", "cuda_sm89"}:
+            return False, "native ConvRot W8A8 requires the auto or cuda_sm89 engine"
+        if not inputs.is_cuda or inputs.dtype not in {torch.float16, torch.bfloat16}:
+            return False, "native ConvRot W8A8 requires FP16 or BF16 CUDA activations"
+        if compute.output_dtype != inputs.dtype:
+            return False, "native ConvRot W8A8 output dtype must match activations"
+        if inputs.ndim < 1 or int(inputs.shape[-1]) != self.input_features:
+            return False, "native ConvRot W8A8 input trailing dimension is invalid"
+        tensors = (compute.qweight_t, compute.weight_scale, compute.bias)
+        if any(tensor is not None and not tensor.is_cuda for tensor in tensors):
+            return False, "native ConvRot W8A8 requires weight buffers on CUDA"
+        if any(
+            tensor is not None and tensor.device != inputs.device
+            for tensor in tensors
+        ):
+            return False, "native ConvRot W8A8 inputs and weights must share a device"
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        if (major, minor) != (8, 9):
+            return False, f"native ConvRot W8A8 currently targets sm_89, got sm_{major}{minor}"
+        try:
+            from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+                native_convrot_w8a8_available,
+                native_convrot_w8a8_shape_supported,
+                native_prerotated_w8a8_shape_supported,
+            )
+
+            if self.input_already_rotated:
+                shape_supported = native_prerotated_w8a8_shape_supported(
+                    self.padded_input_features,
+                    self.output_features,
+                )
+            else:
+                shape_supported = native_convrot_w8a8_shape_supported(
+                    self.input_features,
+                    self.padded_input_features,
+                    self.output_features,
+                    self.rot_size,
+                )
+            if not shape_supported:
+                return False, "native ConvRot W8A8 shape or rotation size is unsupported"
+            if not native_convrot_w8a8_available(inputs.dtype, build=False):
+                return False, "native ConvRot W8A8 backend is unavailable"
+        except Exception as exc:
+            return False, f"native ConvRot W8A8 capability check failed: {exc}"
+        return True, "native ConvRot rotation plus dynamic per-token W8 packing is available"
+
+    def _native_w8a8_packed(self, inputs: torch.Tensor) -> Any:
+        from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+            pack_convrot_w8a8_linear,
+        )
+
+        compute = self.int8_compute
+        tensors = (compute.qweight_t, compute.weight_scale, compute.bias)
+        signature = (
+            str(inputs.device),
+            str(inputs.dtype),
+            self.padded_input_features,
+            self.output_features,
+            *(
+                None
+                if tensor is None
+                else (
+                    str(tensor.device),
+                    str(tensor.dtype),
+                    int(tensor.data_ptr()),
+                    int(getattr(tensor, "_version", 0)),
+                    tuple(int(dim) for dim in tensor.shape),
+                )
+                for tensor in tensors
+            ),
+        )
+        cached = self._native_w8a8_packed_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        packed = pack_convrot_w8a8_linear(
+            compute.qweight_t,
+            compute.weight_scale,
+            compute.bias,
+            dtype=inputs.dtype,
+        )
+        self._native_w8a8_packed_cache = (signature, packed)
+        self._native_w8a8_workspace_cache.clear()
+        self._native_w8a8_hot_cache.clear()
+        return packed
+
+    def _native_w8a8_state_signature(self) -> tuple[Any, ...]:
+        compute = self.int8_compute
+        qweight = compute.qweight_t
+        weight_scale = compute.weight_scale
+        bias = compute.bias
+        return (
+            compute.activation_scale_mode,
+            compute.engine,
+            compute.output_dtype,
+            int(compute.min_int8_rows),
+            bool(self.input_already_rotated),
+            self.rot_size,
+            self.padded_input_features,
+            self.output_features,
+            id(qweight),
+            int(qweight._version),
+            id(weight_scale),
+            int(weight_scale._version),
+            0 if bias is None else id(bias),
+            0 if bias is None else int(bias._version),
+        )
+
+    @staticmethod
+    def _native_w8a8_hot_key(inputs: torch.Tensor) -> tuple[Any, ...]:
+        stream_id = _current_cuda_stream_id(inputs.device)
+        return (
+            inputs.device.index,
+            inputs.dtype,
+            int(inputs.shape[0]),
+            stream_id,
+        )
+
+    def _record_native_w8a8_execution(
+        self,
+        flat: torch.Tensor,
+        workspace: Any,
+        backend: str,
+    ) -> None:
+        self._last_native_w8a8_used = True
+        self._last_native_w8a8_backend = backend
+        self._last_native_w8a8_fallback_reason = None
+        self._last_fused_static_fallback_reason = None
+        self.int8_compute.last_execution = {
+            "engine": "native_convrot_w8a8_sm89",
+            "reason": "rotation_dynamic_per_token_quant_then_nunchaku_w8a8_gemm",
+            "true_int8_mma": True,
+            "activation_dtype": "int8",
+            "weight_dtype": "int8",
+            "accumulation_dtype": "int32",
+            "activation_scale_mode": "dynamic",
+            "activation_granularity": "per_token",
+            "activation_quant_engine": "native_hadamard_dynamic_per_token",
+            "rotation_fused": not self.input_already_rotated,
+            "input_rows": int(flat.shape[0]),
+            "padded_rows": int(workspace.padded_rows),
+            "input_features": self.input_features,
+            "output_features": self.output_features,
+            "target_arch": "sm_89",
+            "native_packed_weight": True,
+        }
+
+    def _native_w8a8_hot_forward(self, inputs: torch.Tensor) -> torch.Tensor | None:
+        if not inputs.is_cuda:
+            return None
+        if self.input_already_rotated:
+            flat = self._pad_inputs(inputs).reshape(-1, self.padded_input_features)
+        else:
+            flat = (
+                inputs
+                if inputs.ndim == 2
+                else inputs.reshape(-1, self.input_features)
+            )
+        key = self._native_w8a8_hot_key(flat)
+        cached = self._native_w8a8_hot_cache.get(key)
+        if cached is None:
+            return None
+        state_signature, packed, workspace, native_forward, backend = cached
+        output = native_forward(flat)
+        if state_signature != self._native_w8a8_state_signature():
+            self._native_w8a8_hot_cache.pop(key, None)
+            return None
+        last_execution = self.int8_compute.last_execution
+        if (
+            not self._last_native_w8a8_used
+            or self._last_native_w8a8_backend != backend
+            or last_execution.get("input_rows") != int(flat.shape[0])
+            or last_execution.get("padded_rows") != int(workspace.padded_rows)
+        ):
+            self._record_native_w8a8_execution(flat, workspace, backend)
+        if inputs.ndim == 2:
+            return output
+        original_shape = inputs.shape[:-1]
+        return output.reshape(*original_shape, self.output_features)
+
+    def _native_w8a8_workspace(self, inputs: torch.Tensor, packed: Any) -> Any:
+        from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+            allocate_convrot_w8a8_workspace,
+        )
+
+        rows = int(inputs.shape[0])
+        padded_rows = ((rows + 255) // 256) * 256
+        stream_id = _current_cuda_stream_id(inputs.device)
+        key = (
+            str(inputs.device),
+            str(inputs.dtype),
+            padded_rows,
+            int(packed.padded_input_features),
+            stream_id,
+        )
+        workspace = self._native_w8a8_workspace_cache.get(key)
+        if workspace is not None:
+            return workspace
+        workspace = allocate_convrot_w8a8_workspace(rows, packed)
+        if len(self._native_w8a8_workspace_cache) >= 8:
+            self._native_w8a8_workspace_cache.clear()
+        self._native_w8a8_workspace_cache[key] = workspace
+        return workspace
+
+    def _native_w8a8_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+            bind_convrot_w8a8_linear,
+        )
+
+        original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
+        if self.input_already_rotated:
+            flat = self._pad_inputs(inputs).reshape(-1, self.padded_input_features)
+            native_rot_size = 1
+            backend = "native_w8a8_dynamic_prerotated"
+        else:
+            flat = (
+                inputs
+                if inputs.ndim == 2
+                else inputs.reshape(-1, self.input_features)
+            )
+            native_rot_size = self.rot_size
+            backend = "native_convrot_w8a8_dynamic"
+        packed = self._native_w8a8_packed(flat)
+        workspace = self._native_w8a8_workspace(flat, packed)
+        native_forward = bind_convrot_w8a8_linear(
+            packed,
+            workspace,
+            rows=int(flat.shape[0]),
+            rotated_input_features=self.padded_input_features,
+            rot_size=native_rot_size,
+        )
+        output = native_forward(flat)
+        if len(self._native_w8a8_hot_cache) >= 8:
+            self._native_w8a8_hot_cache.clear()
+        self._native_w8a8_hot_cache[self._native_w8a8_hot_key(flat)] = (
+            self._native_w8a8_state_signature(),
+            packed,
+            workspace,
+            native_forward,
+            backend,
+        )
+        self._record_native_w8a8_execution(flat, workspace, backend)
+        if inputs.ndim == 2:
+            return output
+        return output.reshape(*original_shape, self.output_features)
+
     def _forward_tilelang_hadamard_static(
         self,
         flat_inputs: torch.Tensor,
@@ -511,11 +787,28 @@ class ConvRotInt8Linear(nn.Module):
             raise ValueError(
                 "ConvRotInt8Linear input trailing dimension does not match input_features"
             )
+        min_rows = self.int8_compute.min_int8_rows
+        rows = int(inputs.numel() // self.input_features)
+        if 0 < min_rows and rows < min_rows:
+            self._last_native_w8a8_used = False
+            self._last_native_w8a8_backend = None
+            self._last_native_w8a8_fallback_reason = None
+            return self._forward_float_fallback(inputs)
+        hot_output = self._native_w8a8_hot_forward(inputs)
+        if hot_output is not None:
+            return hot_output
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_backend = None
+        self._last_native_w8a8_fallback_reason = None
+        native_allowed, native_reason = self._native_w8a8_gate(inputs)
+        if native_allowed:
+            try:
+                return self._native_w8a8_forward(inputs)
+            except Exception as exc:
+                native_reason = f"native ConvRot W8A8 execution failed: {exc}"
+        self._last_native_w8a8_fallback_reason = native_reason
         original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
         flat_inputs = self._pad_inputs(inputs).reshape(-1, self.padded_input_features)
-        min_rows = self.int8_compute.min_int8_rows
-        if 0 < min_rows and int(flat_inputs.shape[0]) < min_rows:
-            return self._forward_float_fallback(inputs)
         if self._can_use_tilelang_hadamard_static_quant(flat_inputs):
             try:
                 self._last_fused_static_fallback_reason = None
@@ -532,6 +825,11 @@ class ConvRotInt8Linear(nn.Module):
         base = self.int8_compute.execution_metadata()
         return {
             **base,
+            "implementation": (
+                self._last_native_w8a8_backend
+                if self._last_native_w8a8_used
+                else "convrot_rotation_then_int8_mma"
+            ),
             "rotation_kind": "regular_hadamard",
             "rotation_scope": "groupwise",
             "rot_size": self.rot_size,
@@ -540,7 +838,15 @@ class ConvRotInt8Linear(nn.Module):
             "method": "convrot",
             "strategy": "w8a8_int8",
             "input_already_rotated": bool(self.input_already_rotated),
+            "rotation_quant_fused": bool(
+                self._last_native_w8a8_used and not self.input_already_rotated
+            ),
+            "activation_quant_fused": bool(self._last_native_w8a8_used),
+            "native_w8a8_used": bool(self._last_native_w8a8_used),
+            "native_w8a8_backend": self._last_native_w8a8_backend,
+            "native_w8a8_fallback_reason": self._last_native_w8a8_fallback_reason,
             "fused_rotation_quant_fallback_reason": self._last_fused_static_fallback_reason,
+            "norm_fused": bool(base.get("norm_fused", False)),
         }
 
 

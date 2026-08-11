@@ -328,7 +328,7 @@ def repack_gptq_int4(
     )
 
 
-def repack_awq_int4(
+def repack_w8a8_int8(
     qweight: torch.Tensor,
     *,
     logical_shape: tuple[int, int],
@@ -336,29 +336,22 @@ def repack_awq_int4(
     zero_points: torch.Tensor | None = None,
     group_size: int = 128,
     g_idx: torch.Tensor | None = None,
-    pack_version: str = "xqt-w4a16-awq-v1",
+    pack_version: str = "xqt-w8a8-int8-v1",
 ) -> PackedWeight:
-    """Convert AWQ reverse-order int32 words to unsigned canonical W4 storage."""
-
+    """Convert int8 weights to canonical XQT W8 storage (per-channel/groupwise)."""
     n, k = (int(logical_shape[0]), int(logical_shape[1]))
+    if zero_points is not None:
+        raise ValueError("W8A8 does not support zero_points")
     _validate_sequential_g_idx(g_idx, logical_k=k, group_size=group_size)
-    codes = _source_int4_codes(qweight, logical_shape=(n, k), method="awq")
-    padded_k = ((k + group_size - 1) // group_size) * group_size
-    groups = padded_k // group_size
-    if zero_points is None:
-        zero_points = torch.full(
-            (n, groups), 8.0, device=scales.device, dtype=torch.float32
-        )
-    return _build_canonical_w4(
-        codes,
+    return _build_canonical_w8(
+        qweight,
         logical_shape=(n, k),
         scales=scales,
         zero_points=zero_points,
         group_size=group_size,
-        signed=False,
-        symmetric=False,
+        symmetric=True,
         pack_version=pack_version,
-        storage_layout="xqt_int4_nk_v1",
+        storage_layout="xqt_int8_nk_v1",
     )
 
 

@@ -528,30 +528,29 @@ def default_registry() -> GemmKernelRegistry:
             priority=70,
             implementation="cuda_artifact_pending",
         ),
-        GemmKernelRegistration(
-            name="sm89_w4a16_triton_dequant",
-            backend="triton",
-            maturity="planned",
-            capability=GemmCapability(
-                architectures=("sm_89",),
-                weight_dtypes=("int4",),
-                activation_dtypes=("fp16", "bf16"),
-                scale_modes=("w:groupwise/a:per_tensor", "w:blockwise/a:per_tensor"),
-                phases=("generic", "prefill", "decode"),
-                epilogues=("any",),
-                min_sm=89,
-            ),
-            kernel_family="w4a16_triton_dequant",
-            layout="xqt_int4_nk_v1",
-            tile_shape=None,
-            warp_count=None,
-            stage_count=None,
-            alignment=(1, 1, 1),
-            priority=60,
-            implementation="triton_dequant_pending",
-        ),
+	        GemmKernelRegistration(
+	            name="sm89_w8a16_cutlass",
+	            backend="cutlass",
+	            maturity="metadata_only",
+	            capability=GemmCapability(
+	                architectures=("sm_89",),
+	                weight_dtypes=("int8",),
+	                activation_dtypes=("fp16", "bf16"),
+	                scale_modes=("w:per_channel/a:per_tensor", "w:groupwise/a:per_tensor", "w:blockwise/a:per_tensor"),
+	                phases=("generic", "prefill", "decode"),
+	                epilogues=("any",),
+	                min_sm=89,
+	            ),
+	            kernel_family="w8a16",
+	            layout="sm89_int8_nk_v1",
+	            tile_shape=(64, 128, 64),
+	            warp_count=8,
+	            stage_count=3,
+	            alignment=(16, 16, 32),
+	            priority=90,
+	            implementation="cutlass_artifact_pending",
+	        ),
     ]
-    return GemmKernelRegistry(entries)
 
 
 __all__ = [
