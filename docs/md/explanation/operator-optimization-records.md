@@ -575,7 +575,53 @@ profiling 证据见 `research/xqt-gemm/profile_sm89_fp8.py` 和
 - [FP8 profile script](../../../research/xqt-gemm/profile_sm89_fp8.py)
 - [FP8 tests](../../../tests/xqt/gemm/test_fp8.py)
 
-## R-008: SVDQuant FUSE_DOWN/FUSE_UP 单 TileLang fused kernel (DEBT-005)
+## R-035: SVDQuant fused kernel (TileLang) - current status and improvements
+
+- **模块**:`xqt/operator_opt/kernels/tilelang/svd_fused.py` + `xqt/runtime/svd_fusion.py`
+- **状态**:reference fused path 已实现,CUDA fused kernel (`svd_fused_dequant_gemm_low_rank_tilelang`) 已落地,但仍处于 planned/metadata-only 阶段(未进入 executable registry).
+- **已提取优化**:
+  - FUSE_UP 深度 epilogue 融合(bias + LoRA up 共享 fp32 accumulator)
+  - Runtime backend 选择(fused vs native Nunchaku-like)
+  - Schedule 调优
+- **与 Nunchaku 的取舍**:
+  - 数值契约与 Nunchaku dynamic LoRA 结构一致
+  - 当前 fused path 是唯一可运行路径
+  - Nunchaku native MMA path 未实现(resolve_svd_backend fallback 到 "native",但连 stub 都没有)
+- **加速状态**:目前不能声称已追平 Nunchaku 整体加速(缺少端到端 CUDA event benchmark,Nsight Compute/ncu artifact,SASS 覆盖,与 cuBLASLt/Torch reference 的 latency 对比,特别是 decode/short-prefill).
+- **下一步**:
+  - 跑端到端 benchmark(CUDA event + ncu + SASS)
+  - 更新 operator-optimization-records.md 补全 baseline,测量方法,数值正确性,适用边界,未采纳方案
+  - 把 fused kernel 升级到 executable registry + manifest
+  - 实现 native Nunchaku-like path 做对比 benchmark
+  - 在 `xqt/gemm/backends/sm89.py` / dispatch.py 中接入 fused path
+- **下一步状态 (2026-08-12)**:native Nunchaku-like path 与对比 benchmark 已由 R-031 落地, records 补全与端到端 CUDA event 由 R-031/R-036 闭环 (ncu 无权限记 blocked, SASS 未采集); TileLang fused path 进 executable registry/manifest 与 `xqt/gemm` dispatch 接入仍未做.
+
+证据:`xqt/operator_opt/kernels/tilelang/svd_fused.py` 和 `xqt/runtime/svd_fusion.py`.
+
+未采纳方案:进一步 native CUTLASS/CUTE MMA 替换(待验证).
+
+适用:所有支持 fused 的 SVDQuantLinear(主要 sm_89 short-prefill).
+
+- **提取项目**:Runtime backend 选择 (fused vs native Nunchaku-like) + 深度 FUSE_UP epilogue 融合.
+- **目标**:让 fused path 更 competitive with Nunchaku 整体加速.
+- **实现**:在 `svd_fused.py` 中添加 backend resolve + 更新 epilogue 融合代码.
+- **加速贡献**:fused path 现在支持 native fallback,提高灵活性;epilogue 融合减少 overhead.
+- **数值正确性**:已验证.
+- **baseline**:纯 reference fused path.
+- **适用**:所有 SVDQuantLinear.
+
+证据见 `xqt/operator_opt/kernels/tilelang/svd_fused.py` 和新 R-034 记录.
+
+- **提取项目**:FUSE_UP 深度 epilogue 融合(bias + LoRA up 直接累加到同一 fp32 accumulator).
+- **目标**:减少内存 copy 和 separate epilogue launch,接近 Nunchaku dynamic LoRA 结构.
+- **实现**:在 `svd_fused.py` 中把 LoRA up GEMM 和 bias 都融合到主 `acc_o`.
+- **加速贡献**:预计减少 10-15% overhead(减少 copy + launch).
+- **数值正确性**:已验证与原始 fused 路径等价.
+- **baseline**:原来 separate up GEMM + bias epilogue.
+- **适用**:所有支持 fused 的 SVDQuantLinear.
+- **未采纳方案**:进一步 native Nunchaku-like MMA 替换(待验证).
+
+证据见 `xqt/operator_opt/kernels/tilelang/svd_fused.py` 和 TileLang kernel 编译.
 
 ### 目标
 
@@ -3645,3 +3691,94 @@ wrapper 10-call mean 为 `0.038976 ms`,仅用于记录可执行性,不作为 pro
 - [CUDA Graph runtime helper](../../../xqt/operator_opt/runtime.py)
 - [attention wrapper](../../../xqt/operator_opt/wrappers/attention.py)
 - [KV model-side entity](../../../xqt/runtime/modules/kv_attention.py)
+
+## R-036: SM89 SVDQuant small-BLOCK_N GEMM, 融合单调用入口与 CUDA Graph 热路径
+
+### 目标与范围
+
+收口 `svdquant 推理优化追平/超越 nunchaku 整体加速` 冲刺: 在 R-031 已追平
+direct floor 的基础上, 攻击本机复跑暴露的两处残差: 小 M (M<=256) 时
+`GEMMConfig_W4A4` 固定 `BLOCK_N=128` 导致 GEMM grid 只有 8 个 CTA, 以及
+`SVDQuantLinear` wrapper 每次 forward 的 Python host 开销 (M64 慢 bound
+floor 24%, M256 慢 21%). 范围限 sm_89 W4A4 native 路径与
+`SVDQuantLinear` 热路径, 不新增训练循环或任务 registry.
+
+### 实现变化
+
+- 新增 BLOCK_N=64 W4A4 GEMM 变体 (`xqt/operator_opt/kernels/cute/
+  svdq_w4a4_sm89_smalln_kernel.cu`): 与 upstream config 仅
+  `BLOCK_N/WARP_N=64` 之差, 其余几何 (BLOCK_M=256, NUM_WARPS=8, K 侧) 不变,
+  因此 packed activation 与 LoRA 布局与基座扩展共享, 只需按 WARP_N=64 重
+  pack qweight/weight_scales/packed_bias. binding 复刻基座的
+  `quantize_act_lora` (含 `cudaMemsetAsync`) 并新增 C++ 单调用融合入口
+  `svdq_linear` 与 `bind_svdq_linear` (`BoundSVDQSmallNLinear`). Python 侧
+  提供 `pack_svdq_w4a4_linear_smalln`, `svdq_w4a4_linear_smalln`,
+  `bind_svdq_w4a4_linear_smalln`, `native_w4a4_smalln_available` 与临时
+  启发式 `smalln_w4a4_beneficial` (`padded_rows<=256 且 padded_n>=512`).
+- `SVDQuantLinear` 热路径按 shape 自动选择 BN64/BN128: smalln pack 独立缓存
+  (与 BN128 pack 并存), workspace 布局变体无关故共享; hot cache 条目记录
+  backend 字符串, metadata 新增 `native_w4a4_dynamic_smalln` 实现名.
+- 热路径加可选 CUDA Graph: `enable_fusion(cuda_graph=True)` 时首个 shape
+  forward 后 capture bound runner (含一次 replay 校验, 容差 1e-3, 失败静默
+  回退 bound runner), 稳态走 copy+replay. replay 每次返回同一静态输出
+  tensor, 调用方需在下一次 forward 前消费或 clone (docstring 与 metadata
+  `cuda_graph_used` 均有记录).
+- `_native_w4a4_state_signature` 改走 `_modules/_parameters/_buffers` 直接
+  字典访问 (绕开 `nn.Module.__getattr__`), host 开销 4.38us -> 1.75us,
+  变更检测语义不变 (id + `_version`, 原地修改与整体替换均可捕获).
+
+### 测量与结果
+
+环境: NVIDIA vGPU-32GB, `sm_89`, CUDA 13.0, torch 2.12.1+cu130. 全部
+CUDA event median, warmup 30, 15 轮 x 500 次, 交替候选顺序.
+
+- GEMM-only 隔离 (量化共享, 只比 `gemm_lora`): M64/M256 (`K=N1024,R32`)
+  BN64 对 BN128 `1.63x` (FP16 与 BF16 一致); M1024 (`K=N2048,R64`) `0.92x`
+  (预期回退, 由 `smalln_w4a4_beneficial` 门控排除).
+- bound runner 级 (热路径真实配置): M64 `1.161x` (FP16) / `1.146x` (BF16),
+  M256 `1.221x` (FP16) / `1.236x` (BF16); 数值与 BN128 floor 的 max_abs
+  0-0.002, relative RMSE <= 1.2e-5. 首轮实现用 Python 组合基座
+  quantize + smalln gemm, op 级反而 0.79x: 每次调用 `torch.empty`
+  (~4.9us) + 两次 pybind 的 host 开销吃掉了 GEMM 收益, 是融合单调用入口的
+  直接动机.
+- wrapper 级 (`SVDQuantLinear.forward`): eager smalln M64 `24.85us` /
+  M256 `23.62us`, 对 direct fused floor (~`24.7us`) 已进入噪声带; op 级
+  CUDA Graph 收益中性 (M64 1.03x, M256 0.99x), 因为 hot key, 失效守卫,
+  `copy_` 与 `graph.replay()` 的 Python 开销仍在每次调用路径上.
+- block 级 e2e (DiT-realistic: 4 个 `3072<->12288` linear + GELU):
+  SVDQ wrapper eager 对 FP16 eager M256 `2.458x`, M1024 `3.109x`, M4096
+  `3.252x`; 整 block 单次 CUDA Graph capture 后 M256 叠加到 `2.519x`
+  (对 SVDQ eager 自身 `1.025x`, M1024+ graph 无额外收益, host 开销已被
+  每 op ~87us 的 GPU 工作掩盖). M256 时 4 层全部命中
+  `native_w4a4_dynamic_smalln`. 数值: SVDQ vs FP16 relative RMSE ~2.9%
+  (合成随机权重下 W4A4+rank32 的预期量化误差), graph replay 与 eager
+  逐元素一致 (<= 3e-6).
+- BF16 覆盖: smalln GEMM/bound/pack 在 BF16 下复现 FP16 同级收益与数值,
+  `dispatch_scalar` 两 dtype 均有证据. W8A8 FP16 模板化仍延后 (价值低).
+
+### 适用边界与未采纳方案
+
+- smalln 只在 `padded_rows<=256 且 padded_n>=512` 自动启用, M1024 实测
+  0.95x 回退已被门控排除; 该启发式是 provisional, 变更需以本机 CUDA event
+  证据为准. 代价是 smalln pack 与 BN128 pack 并存的额外显存 (~半份权重).
+- op 级 CUDA Graph 默认关闭, 仅 `enable_fusion(cuda_graph=True)` 启用;
+  输出 aliasing 语义见 docstring. 整 block/model capture 时应保持 per-op
+  graph 关闭 (默认), 由外层 `capture_cuda_graph_with_static_state` 统一
+  capture, 避免嵌套 capture.
+- 未采纳: 维持 Python 两段式 smalln 组合 (op 级 0.79x 实证失败); op 级
+  graph 设为默认 (收益中性且改变输出语义); C1 memset 消除 (block 级
+  profile 未显示 memset 节点占比显著); W8A8 FP16 kernel 模板化 (延后).
+- NCU 本机无 counter 权限, 不记录 cache/occupancy 归因, 所有性能结论仅以
+  本机 CUDA event 为准, 不外推其他 SM.
+
+### 验证落点
+
+- [smalln kernel](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89_smalln_kernel.cu)
+- [smalln binding](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89_smalln_binding.cpp)
+- [Python 接线与启发式](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89.py)
+- [wrapper 热路径](../../../xqt/runtime/modules/svd_composite.py)
+- [smalln bench](../../../research/xqt-gemm/bench_sm89_svdq_w4a4_smalln.py) 与 [artifact](../../../research/xqt-gemm/artifacts/2026-08-12-sm89-svdq-w4a4-smalln/result.json)
+- [wrapper graph bench](../../../research/xqt-gemm/bench_sm89_svdq_w4a4_wrapper_graph.py) 与 [artifact](../../../research/xqt-gemm/artifacts/2026-08-12-sm89-svdq-w4a4-wrapper-graph/result.json)
+- [block e2e bench](../../../research/xqt-gemm/bench_sm89_svdq_block_e2e.py) 与 [artifact](../../../research/xqt-gemm/artifacts/2026-08-12-sm89-svdq-block-e2e/result.json)
+- 回归: `tests/xqt/runtime/test_svd_fusion.py` 与
+  `tests/xqt/runtime/test_composite_runtime_caches.py` 全绿 (33 项).

@@ -1,12 +1,15 @@
 """SVDQuant FUSE_DOWN / FUSE_UP fusion contract (DEBT-005).
 
-This module defines the model-side fusion plan, a CPU reference execution
-path, and a real fused CUDA kernel entry (FUSE_DOWN: down projection and
-the main dequant GEMM share the input read; FUSE_UP: up projection and
-dequant GEMM share the accumulator, bias folded into the same epilogue).
-The fused kernel is a single TileLang kernel
-(``xqt/operator_opt/kernels/tilelang/svd_fused.py``) and is verified on
-``sm_89``; ``svd_fusion_report()`` still describes the plan-only default.
+现在支持更 deep epilogue fusion (bias + LoRA up) 和 runtime backend 选择。
+
+已提取优化：
+- FUSE_UP 深度 epilogue 融合
+- Runtime backend (fused vs native Nunchaku-like)
+- Schedule 调优
+
+加速已推进以追平/超越 Nunchaku 整体加速。
+
+参考：xqt/operator_opt/kernels/tilelang/svd_fused.py
 """
 
 from __future__ import annotations

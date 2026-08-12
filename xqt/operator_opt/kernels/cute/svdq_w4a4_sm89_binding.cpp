@@ -25,6 +25,10 @@ extern "C" int xqt_svdq_w4a4_gemm_lora(
     const void*, const void*, void*, const void*, const void*, const void*, const void*, const void*, int, int, int, int,
     int, int, float, int, cudaStream_t);
 extern "C" const char* xqt_svdq_w4a4_version();
+extern "C" int xqt_svdq_w4a4_norm_row_rms(
+    const void*, void*, int, int, int, float, int, cudaStream_t);
+extern "C" int xqt_svdq_w4a4_norm_scale_scales(
+    void*, void*, const void*, int, int, int, int, cudaStream_t);
 
 namespace {
 
@@ -561,6 +565,79 @@ torch::Tensor svdq_linear(
     return output;
 }
 
+// RMSNorm-fused variant: input is the PRE-norm activation.  The per-channel
+// norm weight is folded into smooth and lora_down at pack time; this entry
+// computes the per-row r = rsqrt(mean(x^2) + eps), then multiplies it into
+// the group scales and the LoRA-down partials between the two stages.
+torch::Tensor svdq_linear_norm(
+    torch::Tensor input,
+    torch::Tensor row_scales,
+    torch::Tensor act,
+    torch::Tensor activation_scales,
+    torch::Tensor lora_down,
+    torch::Tensor lora_act,
+    torch::Tensor smooth,
+    torch::Tensor weight,
+    torch::Tensor weight_scales,
+    torch::Tensor lora_up,
+    torch::Tensor bias,
+    int64_t output_features,
+    double lora_scale,
+    double eps) {
+    auto output = allocate_output(input, weight, output_features);
+    require_cuda_contiguous(row_scales, "row_scales");
+    require_same_device(input, row_scales, "row_scales");
+    TORCH_CHECK(row_scales.scalar_type() == torch::kFloat32, "row_scales must be float32");
+    const int padded_m = static_cast<int>(act.size(0));
+    TORCH_CHECK(row_scales.numel() >= padded_m, "row_scales must cover the padded M extent");
+    {
+        c10::cuda::CUDAGuard guard(input.device());
+        check_status(
+            xqt_svdq_w4a4_norm_row_rms(
+                input.data_ptr(),
+                row_scales.data_ptr(),
+                static_cast<int>(input.size(0)),
+                static_cast<int>(input.size(1)),
+                padded_m,
+                static_cast<float>(eps),
+                scalar_kind(input),
+                current_stream(input)),
+            "W4A4 RMSNorm row scale");
+    }
+    quantize_act_lora(
+        input,
+        act,
+        activation_scales,
+        lora_down,
+        lora_act,
+        smooth);
+    {
+        c10::cuda::CUDAGuard guard(input.device());
+        check_status(
+            xqt_svdq_w4a4_norm_scale_scales(
+                activation_scales.data_ptr(),
+                lora_act.data_ptr(),
+                row_scales.data_ptr(),
+                padded_m,
+                static_cast<int>(act.size(1) * 2),
+                static_cast<int>(lora_up.size(1)),
+                scalar_kind(weight_scales),
+                current_stream(input)),
+            "W4A4 RMSNorm scale apply");
+    }
+    gemm_lora(
+        act,
+        weight,
+        output,
+        activation_scales,
+        weight_scales,
+        lora_act,
+        lora_up,
+        bias,
+        lora_scale);
+    return output;
+}
+
 class BoundSVDQLinear {
 public:
     BoundSVDQLinear(
@@ -726,6 +803,203 @@ private:
     float lora_scale_;
 };
 
+class BoundSVDQNormLinear {
+public:
+    BoundSVDQNormLinear(
+        torch::Tensor row_scales,
+        torch::Tensor act,
+        torch::Tensor activation_scales,
+        torch::Tensor lora_down,
+        torch::Tensor lora_act,
+        torch::Tensor smooth,
+        torch::Tensor weight,
+        torch::Tensor weight_scales,
+        torch::Tensor lora_up,
+        torch::Tensor bias,
+        int64_t rows,
+        int64_t input_features,
+        int64_t output_features,
+        double lora_scale,
+        double eps)
+        : row_scales_(std::move(row_scales)),
+          act_(std::move(act)),
+          activation_scales_(std::move(activation_scales)),
+          lora_down_(std::move(lora_down)),
+          lora_act_(std::move(lora_act)),
+          smooth_(std::move(smooth)),
+          weight_(std::move(weight)),
+          weight_scales_(std::move(weight_scales)),
+          lora_up_(std::move(lora_up)),
+          bias_(std::move(bias)),
+          rows_(static_cast<int>(rows)),
+          input_features_(static_cast<int>(input_features)),
+          output_features_(static_cast<int>(output_features)),
+          padded_m_(static_cast<int>(act_.size(0))),
+          padded_n_(static_cast<int>(weight_.size(0))),
+          padded_k_(static_cast<int>(act_.size(1) * 2)),
+          rank_(static_cast<int>(lora_down_.size(1))),
+          scalar_kind_(scalar_kind(weight_scales_)),
+          lora_scale_(static_cast<float>(lora_scale)),
+          eps_(static_cast<float>(eps)) {
+        for (const auto& item : {
+                 std::pair<const torch::Tensor*, const char*>{&row_scales_, "row_scales"},
+                 {&act_, "act"},
+                 {&activation_scales_, "activation_scales"},
+                 {&lora_down_, "lora_down"},
+                 {&lora_act_, "lora_act"},
+                 {&smooth_, "smooth"},
+                 {&weight_, "weight"},
+                 {&weight_scales_, "weight_scales"},
+                 {&lora_up_, "lora_up"},
+                 {&bias_, "bias"},
+             }) {
+            require_cuda_contiguous(*item.first, item.second);
+            require_same_device(weight_, *item.first, item.second);
+        }
+        TORCH_CHECK(rows_ > 0, "rows must be positive");
+        TORCH_CHECK(input_features_ > 0 && input_features_ <= padded_k_, "invalid input_features");
+        TORCH_CHECK(
+            output_features_ > 0 && output_features_ <= padded_n_ && output_features_ % 4 == 0,
+            "invalid output_features");
+        TORCH_CHECK(act_.dim() == 2 && act_.scalar_type() == torch::kInt8, "act must be 2D int8");
+        TORCH_CHECK(weight_.dim() == 2 && weight_.scalar_type() == torch::kInt8, "weight must be 2D int8");
+        TORCH_CHECK(weight_.size(1) * 2 == padded_k_, "act and weight K mismatch");
+        TORCH_CHECK(
+            padded_m_ % 256 == 0 && padded_m_ >= rows_ && padded_m_ - rows_ < 256,
+            "invalid padded M extent");
+        TORCH_CHECK(padded_n_ % 128 == 0 && padded_k_ % 128 == 0, "invalid padded GEMM shape");
+        require_same_scalar(weight_scales_, activation_scales_, "activation_scales");
+        require_same_scalar(weight_scales_, lora_down_, "lora_down");
+        require_same_scalar(weight_scales_, smooth_, "smooth");
+        require_same_scalar(weight_scales_, lora_up_, "lora_up");
+        require_same_scalar(weight_scales_, bias_, "bias");
+        TORCH_CHECK(
+            activation_scales_.numel() == static_cast<int64_t>(padded_m_) * padded_k_ / 64,
+            "activation scale size mismatch");
+        TORCH_CHECK(
+            weight_scales_.numel() == static_cast<int64_t>(padded_n_) * padded_k_ / 64,
+            "weight scale size mismatch");
+        TORCH_CHECK(smooth_.numel() == padded_k_, "smooth storage size mismatch");
+        TORCH_CHECK(bias_.numel() == padded_n_, "packed bias size mismatch");
+        TORCH_CHECK(rank_ > 0 && rank_ % 16 == 0 && rank_ <= 1024, "invalid padded rank");
+        TORCH_CHECK(
+            lora_down_.sizes() == torch::IntArrayRef({padded_k_, rank_}),
+            "lora_down must be [K_pad, rank]");
+        TORCH_CHECK(lora_act_.scalar_type() == torch::kFloat32, "lora_act must be float32");
+        TORCH_CHECK(
+            lora_act_.sizes() == torch::IntArrayRef({padded_m_, rank_}),
+            "lora_act must be [M_pad, rank]");
+        TORCH_CHECK(
+            lora_up_.sizes() == torch::IntArrayRef({padded_n_, rank_}),
+            "lora_up must be [N_pad, rank]");
+        TORCH_CHECK(
+            row_scales_.scalar_type() == torch::kFloat32 && row_scales_.numel() >= padded_m_,
+            "row_scales must be float32 and cover the padded M extent");
+    }
+
+    torch::Tensor run(torch::Tensor input) const {
+        auto contiguous_input = input.contiguous();
+        require_cuda_contiguous(contiguous_input, "input");
+        require_same_device(weight_, contiguous_input, "input");
+        require_same_scalar(weight_scales_, contiguous_input, "input");
+        TORCH_CHECK(
+            contiguous_input.dim() == 2 && contiguous_input.size(0) == rows_ &&
+                contiguous_input.size(1) == input_features_,
+            "input shape does not match the bound SVDQuant norm runner");
+        c10::cuda::CUDAGuard guard(contiguous_input.device());
+        auto output = torch::empty({rows_, output_features_}, contiguous_input.options());
+        const cudaStream_t stream = current_stream(contiguous_input);
+        check_status(
+            xqt_svdq_w4a4_norm_row_rms(
+                contiguous_input.data_ptr(),
+                row_scales_.data_ptr(),
+                rows_,
+                input_features_,
+                padded_m_,
+                eps_,
+                scalar_kind_,
+                stream),
+            "W4A4 RMSNorm row scale");
+        check_status(
+            static_cast<int>(cudaMemsetAsync(
+                lora_act_.data_ptr(),
+                0,
+                static_cast<size_t>(lora_act_.numel()) * sizeof(float),
+                stream)),
+            "W4A4 LoRA activation reset");
+        check_status(
+            xqt_svdq_w4a4_quantize_act_lora(
+                contiguous_input.data_ptr(),
+                act_.data_ptr(),
+                activation_scales_.data_ptr(),
+                lora_down_.data_ptr(),
+                lora_act_.data_ptr(),
+                smooth_.data_ptr(),
+                rows_,
+                input_features_,
+                padded_m_,
+                padded_k_,
+                rank_,
+                scalar_kind_,
+                stream),
+            "W4A4 activation quantization plus LoRA down");
+        check_status(
+            xqt_svdq_w4a4_norm_scale_scales(
+                activation_scales_.data_ptr(),
+                lora_act_.data_ptr(),
+                row_scales_.data_ptr(),
+                padded_m_,
+                padded_k_,
+                rank_,
+                scalar_kind_,
+                stream),
+            "W4A4 RMSNorm scale apply");
+        check_status(
+            xqt_svdq_w4a4_gemm_lora(
+                act_.data_ptr(),
+                weight_.data_ptr(),
+                output.data_ptr(),
+                activation_scales_.data_ptr(),
+                weight_scales_.data_ptr(),
+                lora_act_.data_ptr(),
+                lora_up_.data_ptr(),
+                bias_.data_ptr(),
+                rows_,
+                output_features_,
+                padded_m_,
+                padded_n_,
+                padded_k_,
+                rank_,
+                lora_scale_,
+                scalar_kind_,
+                stream),
+            "W4A4 GEMM plus LoRA up");
+        return output;
+    }
+
+private:
+    torch::Tensor row_scales_;
+    torch::Tensor act_;
+    torch::Tensor activation_scales_;
+    torch::Tensor lora_down_;
+    torch::Tensor lora_act_;
+    torch::Tensor smooth_;
+    torch::Tensor weight_;
+    torch::Tensor weight_scales_;
+    torch::Tensor lora_up_;
+    torch::Tensor bias_;
+    int rows_;
+    int input_features_;
+    int output_features_;
+    int padded_m_;
+    int padded_n_;
+    int padded_k_;
+    int rank_;
+    int scalar_kind_;
+    float lora_scale_;
+    float eps_;
+};
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -733,6 +1007,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         .def("__call__", &BoundConvRotW4A4Linear::run);
     py::class_<BoundSVDQLinear>(module, "BoundSVDQLinear")
         .def("__call__", &BoundSVDQLinear::run);
+    py::class_<BoundSVDQNormLinear>(module, "BoundSVDQNormLinear")
+        .def("__call__", &BoundSVDQNormLinear::run);
     module.def("quantize_weight", &quantize_weight);
     module.def("quantize_act", &quantize_act);
     module.def("quantize_act_lora", &quantize_act_lora);
@@ -786,6 +1062,72 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         py::arg("bias"),
         py::arg("output_features"),
         py::arg("lora_scale") = 1.0);
+    module.def(
+        "svdq_linear_norm",
+        &svdq_linear_norm,
+        py::arg("input"),
+        py::arg("row_scales"),
+        py::arg("act"),
+        py::arg("activation_scales"),
+        py::arg("lora_down"),
+        py::arg("lora_act"),
+        py::arg("smooth"),
+        py::arg("weight"),
+        py::arg("weight_scales"),
+        py::arg("lora_up"),
+        py::arg("bias"),
+        py::arg("output_features"),
+        py::arg("lora_scale") = 1.0,
+        py::arg("eps") = 1e-6);
+    module.def(
+        "bind_svdq_linear_norm",
+        [](torch::Tensor row_scales,
+           torch::Tensor act,
+           torch::Tensor activation_scales,
+           torch::Tensor lora_down,
+           torch::Tensor lora_act,
+           torch::Tensor smooth,
+           torch::Tensor weight,
+           torch::Tensor weight_scales,
+           torch::Tensor lora_up,
+           torch::Tensor bias,
+           int64_t rows,
+           int64_t input_features,
+           int64_t output_features,
+           double lora_scale,
+           double eps) {
+            return std::make_unique<BoundSVDQNormLinear>(
+                std::move(row_scales),
+                std::move(act),
+                std::move(activation_scales),
+                std::move(lora_down),
+                std::move(lora_act),
+                std::move(smooth),
+                std::move(weight),
+                std::move(weight_scales),
+                std::move(lora_up),
+                std::move(bias),
+                rows,
+                input_features,
+                output_features,
+                lora_scale,
+                eps);
+        },
+        py::arg("row_scales"),
+        py::arg("act"),
+        py::arg("activation_scales"),
+        py::arg("lora_down"),
+        py::arg("lora_act"),
+        py::arg("smooth"),
+        py::arg("weight"),
+        py::arg("weight_scales"),
+        py::arg("lora_up"),
+        py::arg("bias"),
+        py::arg("rows"),
+        py::arg("input_features"),
+        py::arg("output_features"),
+        py::arg("lora_scale") = 1.0,
+        py::arg("eps") = 1e-6);
     module.def(
         "bind_convrot_linear",
         [](torch::Tensor act,

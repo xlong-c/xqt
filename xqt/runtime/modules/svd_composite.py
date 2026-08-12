@@ -185,13 +185,24 @@ class SVDQuantLinear(nn.Module):
             self.register_buffer("bias", bias.detach().clone().to(torch.float32))
         self._pending_activation_scale: torch.Tensor | float | None = None
         self._pending_activation_scale_mode: str = "dynamic"
+        # RMSNorm fusion (native W4A4 only): when set, the module consumes
+        # PRE-norm activations and folds the per-channel norm weight into the
+        # packed smooth factor and LoRA-down columns; the row scale is applied
+        # between the quantize and GEMM stages.  Fallback paths apply the norm
+        # explicitly so the output semantics stay identical.
+        self.register_buffer("fused_norm_weight", None, persistent=False)
+        self.fused_norm_eps = 1e-6
         self._dequantized_residual_cache: tuple[tuple[Any, ...], torch.Tensor] | None = None
         self._native_w4a4_packed_cache: tuple[tuple[Any, ...], Any] | None = None
+        self._native_w4a4_packed_smalln_cache: tuple[tuple[Any, ...], Any] | None = None
         self._native_w4a4_workspace_cache: dict[tuple[Any, ...], Any] = {}
         self._native_w4a4_hot_cache: dict[
-            tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any]
+            tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any, str, Any]
         ] = {}
         self._cuda_fused_enabled = False
+        self._cuda_graph_enabled = False
+        self._cuda_graph_warmup = 2
+        self._last_cuda_graph_used = False
         self._last_cuda_fused_used = False
         self._last_cuda_fused_backend: str | None = None
         self._last_cuda_fused_fallback_reason: str | None = None
@@ -199,6 +210,7 @@ class SVDQuantLinear(nn.Module):
     def _clear_runtime_caches(self) -> None:
         self._dequantized_residual_cache = None
         self._native_w4a4_packed_cache = None
+        self._native_w4a4_packed_smalln_cache = None
         self._native_w4a4_workspace_cache.clear()
         self._native_w4a4_hot_cache.clear()
 
@@ -210,10 +222,24 @@ class SVDQuantLinear(nn.Module):
         self._last_cuda_fused_used = False
         self._last_cuda_fused_backend = None
         self._last_cuda_fused_fallback_reason = None
+        self._last_cuda_graph_used = False
         return self
 
-    def enable_fusion(self, *, mode: str = "reduce-overhead") -> bool:
-        """Enable the optional direct CUDA fused residual + low-rank kernel."""
+    def enable_fusion(
+        self,
+        *,
+        mode: str = "reduce-overhead",
+        cuda_graph: bool = False,
+        cuda_graph_warmup: int = 2,
+    ) -> bool:
+        """Enable the optional direct CUDA fused residual + low-rank kernel.
+
+        With ``cuda_graph=True`` the native W4A4 hot path is captured into a
+        per-shape CUDA Graph after the first call, so steady-state forwards
+        replay baked kernels instead of paying the Python/pybind launch path.
+        Graph replay returns the same static output tensor on every call:
+        callers must consume or clone it before the next forward.
+        """
 
         del mode
         if not torch.cuda.is_available():
@@ -230,10 +256,42 @@ class SVDQuantLinear(nn.Module):
         if not native_usable and not _tilelang_runtime_usable():
             return False
         self._cuda_fused_enabled = True
+        self._cuda_graph_enabled = bool(cuda_graph) and native_usable
+        self._cuda_graph_warmup = max(0, int(cuda_graph_warmup))
         return True
 
     def disable_fusion(self) -> None:
         self._cuda_fused_enabled = False
+        self._cuda_graph_enabled = False
+        self._last_cuda_graph_used = False
+
+    def set_fused_norm(self, norm_weight: torch.Tensor, *, eps: float = 1e-6) -> None:
+        """Fuse an upstream RMSNorm into this linear (native W4A4 hot path).
+
+        After this call the module expects PRE-norm activations: the norm is
+        either folded into the native W4A4 quantize/GEMM chain or applied
+        explicitly on fallback paths, so outputs stay consistent either way.
+        """
+
+        if norm_weight.ndim != 1 or int(norm_weight.numel()) != self.input_features:
+            raise ValueError("fused norm weight must match input_features")
+        self.fused_norm_weight = norm_weight.detach().clone()
+        self.fused_norm_eps = float(eps)
+        self._clear_runtime_caches()
+
+    def clear_fused_norm(self) -> None:
+        self.fused_norm_weight = None
+        self._clear_runtime_caches()
+
+    def _apply_fused_norm(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self.fused_norm_weight
+        if weight is None:
+            return x
+        weight = weight.to(device=x.device, dtype=torch.float32)
+        row_scale = torch.rsqrt(
+            x.float().pow(2).mean(dim=-1, keepdim=True) + self.fused_norm_eps
+        )
+        return (x.float() * row_scale * weight).to(x.dtype)
 
     def _native_w4a4_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
         if not self._cuda_fused_enabled or not inputs.is_cuda:
@@ -252,6 +310,11 @@ class SVDQuantLinear(nn.Module):
             return False, "native W4A4 requires residual buffers on CUDA"
         if inputs.device != self.packed_residual.device:
             return False, "native W4A4 input and residual buffers must share a device"
+        fused_norm_weight = self.fused_norm_weight
+        if fused_norm_weight is not None and (
+            not fused_norm_weight.is_cuda or fused_norm_weight.device != inputs.device
+        ):
+            return False, "native W4A4 fused norm weight must live on the input device"
         major, minor = torch.cuda.get_device_capability(inputs.device)
         if (major, minor) != (8, 9):
             return False, f"native W4A4 currently targets sm_89, got sm_{major}{minor}"
@@ -273,11 +336,18 @@ class SVDQuantLinear(nn.Module):
         return True, "native Nunchaku two-stage W4A4 fusion is available"
 
     def _native_w4a4_state_signature(self) -> tuple[Any, ...]:
-        packed_residual = self.packed_residual
-        residual_scale = self.residual_scale
-        down_weight = self.down_proj.weight
-        up_weight = self.up_proj.weight
-        bias = self.bias
+        # Direct _modules/_parameters/_buffers access: nn.Module.__getattr__
+        # overhead dominates this hot-path guard when reading attributes
+        # through the usual dotted paths.
+        parameters_down = self._modules["down_proj"]._parameters
+        parameters_up = self._modules["up_proj"]._parameters
+        buffers = self._buffers
+        packed_residual = buffers["packed_residual"]
+        residual_scale = buffers["residual_scale"]
+        down_weight = parameters_down["weight"]
+        up_weight = parameters_up["weight"]
+        bias = buffers["bias"]
+        fused_norm_weight = buffers["fused_norm_weight"]
         return (
             id(packed_residual),
             int(packed_residual._version),
@@ -289,6 +359,8 @@ class SVDQuantLinear(nn.Module):
             int(up_weight._version),
             0 if bias is None else id(bias),
             0 if bias is None else int(bias._version),
+            0 if fused_norm_weight is None else id(fused_norm_weight),
+            0 if fused_norm_weight is None else int(fused_norm_weight._version),
         )
 
     @staticmethod
@@ -313,23 +385,30 @@ class SVDQuantLinear(nn.Module):
         cached = self._native_w4a4_hot_cache.get(key)
         if cached is None:
             return None
-        state_signature, packed, workspace, native_forward = cached
-        output = native_forward(flat)
+        state_signature, packed, workspace, native_forward, backend, graph_state = cached
         if state_signature != self._native_w4a4_state_signature():
             self._native_w4a4_hot_cache.pop(key, None)
             return None
+        if graph_state is not None:
+            from xqt.operator_opt.runtime import replay_cuda_graph_tensor_callable
+
+            output = replay_cuda_graph_tensor_callable(graph_state, (flat,))
+        else:
+            output = native_forward(flat)
+        self._last_cuda_graph_used = graph_state is not None
         if not self._last_cuda_fused_used:
             self._last_cuda_fused_used = True
-            self._last_cuda_fused_backend = "native_w4a4_dynamic"
+            self._last_cuda_fused_backend = backend
             self._last_cuda_fused_fallback_reason = None
         if inputs.ndim == 2:
             return output
         original_shape = inputs.shape[:-1]
         return output.reshape(*original_shape, self.output_features)
 
-    def _native_w4a4_packed(self, inputs: torch.Tensor) -> Any:
+    def _native_w4a4_packed(self, inputs: torch.Tensor, *, smalln: bool = False) -> Any:
         from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
             pack_svdq_w4a4_linear,
+            pack_svdq_w4a4_linear_smalln,
         )
 
         tensors = (
@@ -338,6 +417,7 @@ class SVDQuantLinear(nn.Module):
             self.down_proj.weight,
             self.up_proj.weight,
             self.bias,
+            self.fused_norm_weight,
         )
         signature = (
             inputs.device.index,
@@ -346,6 +426,7 @@ class SVDQuantLinear(nn.Module):
             self.output_features,
             self.rank,
             self.group_size,
+            self.fused_norm_eps if self.fused_norm_weight is not None else None,
             *(
                 None
                 if tensor is None
@@ -358,7 +439,11 @@ class SVDQuantLinear(nn.Module):
                 for tensor in tensors
             ),
         )
-        cached = self._native_w4a4_packed_cache
+        cached = (
+            self._native_w4a4_packed_smalln_cache
+            if smalln
+            else self._native_w4a4_packed_cache
+        )
         if cached is not None and cached[0] == signature:
             return cached[1]
         residual = self.dequantize_residual().to(
@@ -368,13 +453,29 @@ class SVDQuantLinear(nn.Module):
         bias = None
         if self.bias is not None:
             bias = self.bias.to(device=inputs.device, dtype=inputs.dtype)
-        packed = pack_svdq_w4a4_linear(
+        down_weight = self.down_proj.weight
+        smooth = None
+        if self.fused_norm_weight is not None:
+            norm_weight = self.fused_norm_weight.to(
+                device=inputs.device, dtype=torch.float32
+            )
+            # The quantize epilogue divides by the smooth factor, so the norm
+            # weight enters as its reciprocal there and folds directly into
+            # the LoRA-down columns.
+            down_weight = down_weight * norm_weight.to(down_weight.dtype).unsqueeze(0)
+            smooth = (1.0 / norm_weight).to(inputs.dtype)
+        pack_function = pack_svdq_w4a4_linear_smalln if smalln else pack_svdq_w4a4_linear
+        packed = pack_function(
             residual,
-            self.down_proj.weight,
+            down_weight,
             self.up_proj.weight,
             bias,
+            smooth=smooth,
         )
-        self._native_w4a4_packed_cache = (signature, packed)
+        if smalln:
+            self._native_w4a4_packed_smalln_cache = (signature, packed)
+        else:
+            self._native_w4a4_packed_cache = (signature, packed)
         self._native_w4a4_workspace_cache.clear()
         return packed
 
@@ -390,12 +491,14 @@ class SVDQuantLinear(nn.Module):
         rows = int(inputs.shape[0])
         padded_rows = ((rows + 255) // 256) * 256
         stream_id = _current_cuda_stream_id(inputs.device)
+        with_norm = self.fused_norm_weight is not None
         key = (
             str(inputs.device),
             str(inputs.dtype),
             padded_rows,
             int(packed.padded_rank),
             stream_id,
+            with_norm,
         )
         workspace = self._native_w4a4_workspace_cache.get(key)
         if workspace is not None:
@@ -404,11 +507,32 @@ class SVDQuantLinear(nn.Module):
             rows,
             packed,
             with_lora_rank=int(packed.padded_rank),
+            with_row_scales=with_norm,
         )
         if len(self._native_w4a4_workspace_cache) >= 8:
             self._native_w4a4_workspace_cache.clear()
         self._native_w4a4_workspace_cache[key] = workspace
         return workspace
+
+    def _native_w4a4_smalln_enabled(self, flat: torch.Tensor) -> bool:
+        """Pick the BLOCK_N=64 GEMM for short-prefill shapes when available."""
+
+        # The RMSNorm-fused runner currently lives in the base extension only.
+        if self.fused_norm_weight is not None:
+            return False
+        try:
+            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+                native_w4a4_smalln_available,
+                smalln_w4a4_beneficial,
+            )
+
+            if not native_w4a4_smalln_available(build=False):
+                return False
+            padded_rows = ((int(flat.shape[0]) + 255) // 256) * 256
+            padded_output = ((self.output_features + 127) // 128) * 128
+            return bool(smalln_w4a4_beneficial(padded_rows, padded_output))
+        except Exception:
+            return False
 
     def _can_use_cuda_fused(self, inputs: torch.Tensor) -> bool:
         native_allowed, _ = self._native_w4a4_gate(inputs)
@@ -664,20 +788,62 @@ class SVDQuantLinear(nn.Module):
             try:
                 from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
                     bind_svdq_w4a4_linear,
+                    bind_svdq_w4a4_linear_norm,
+                    bind_svdq_w4a4_linear_smalln,
                 )
 
                 original_shape = tuple(int(dim) for dim in x.shape[:-1])
                 flat = x if x.ndim == 2 else x.reshape(-1, self.input_features)
-                packed = self._native_w4a4_packed(flat)
+                with_norm = self.fused_norm_weight is not None
+                smalln = self._native_w4a4_smalln_enabled(flat)
+                packed = self._native_w4a4_packed(flat, smalln=smalln)
                 workspace = self._native_w4a4_workspace(flat, packed)
-                native_forward = bind_svdq_w4a4_linear(
-                    packed,
-                    workspace,
-                    rows=int(flat.shape[0]),
-                )
+                if with_norm:
+                    native_forward = bind_svdq_w4a4_linear_norm(
+                        packed,
+                        workspace,
+                        rows=int(flat.shape[0]),
+                        eps=self.fused_norm_eps,
+                    )
+                else:
+                    bind_function = (
+                        bind_svdq_w4a4_linear_smalln if smalln else bind_svdq_w4a4_linear
+                    )
+                    native_forward = bind_function(
+                        packed,
+                        workspace,
+                        rows=int(flat.shape[0]),
+                    )
                 fused = native_forward(flat)
+                graph_state = None
+                if self._cuda_graph_enabled:
+                    from xqt.operator_opt.runtime import (
+                        capture_cuda_graph_with_static_state,
+                        replay_cuda_graph_tensor_callable,
+                    )
+
+                    try:
+                        candidate = capture_cuda_graph_with_static_state(
+                            (flat.contiguous(),),
+                            body=native_forward,
+                            warmup=self._cuda_graph_warmup,
+                        )
+                        # Capture only records the kernels; replay once so the
+                        # static output holds real results before validating.
+                        replay_output = replay_cuda_graph_tensor_callable(
+                            candidate, (flat,)
+                        )
+                        difference = (replay_output.float() - fused.float()).abs().max()
+                        if float(difference.item()) <= 1e-3:
+                            graph_state = candidate
+                    except Exception:
+                        graph_state = None
                 if len(self._native_w4a4_hot_cache) >= 8:
                     self._native_w4a4_hot_cache.clear()
+                if with_norm:
+                    backend = "native_w4a4_dynamic_norm"
+                else:
+                    backend = "native_w4a4_dynamic_smalln" if smalln else "native_w4a4_dynamic"
                 self._native_w4a4_hot_cache[
                     self._native_w4a4_hot_key(flat)
                 ] = (
@@ -685,15 +851,21 @@ class SVDQuantLinear(nn.Module):
                     packed,
                     workspace,
                     native_forward,
+                    backend,
+                    graph_state,
                 )
+                self._last_cuda_graph_used = False
                 self._last_cuda_fused_used = True
-                self._last_cuda_fused_backend = "native_w4a4_dynamic"
+                self._last_cuda_fused_backend = backend
                 self._last_cuda_fused_fallback_reason = None
                 if x.ndim == 2:
                     return fused
                 return fused.reshape(*original_shape, self.output_features)
             except Exception as exc:
                 native_gate_reason = f"native W4A4 execution failed: {exc}"
+        # From here on the norm is no longer fused into a kernel chain: apply
+        # it explicitly so fallback paths keep identical output semantics.
+        x = self._apply_fused_norm(x)
         fused_allowed, fused_gate_reason = self._cuda_fused_gate(x)
         if fused_allowed:
             try:
@@ -758,6 +930,10 @@ class SVDQuantLinear(nn.Module):
         implementation = "reference_svd_low_rank_plus_dequant_residual"
         if self._last_cuda_fused_backend == "native_w4a4_dynamic":
             implementation = "native_svdq_w4a4_dynamic_lora"
+        elif self._last_cuda_fused_backend == "native_w4a4_dynamic_smalln":
+            implementation = "native_svdq_w4a4_dynamic_lora_smalln"
+        elif self._last_cuda_fused_backend == "native_w4a4_dynamic_norm":
+            implementation = "native_svdq_w4a4_dynamic_norm_fused_lora"
         elif self._last_cuda_fused_backend == "tilelang_dequant_fp16":
             implementation = "tilelang_svd_dequant_low_rank_fused"
         return {
@@ -769,6 +945,9 @@ class SVDQuantLinear(nn.Module):
             "cuda_fused_used": bool(self._last_cuda_fused_used),
             "cuda_fused_backend": self._last_cuda_fused_backend,
             "cuda_fused_fallback_reason": self._last_cuda_fused_fallback_reason,
+            "cuda_graph_enabled": bool(self._cuda_graph_enabled),
+            "cuda_graph_used": bool(self._last_cuda_graph_used),
+            "fused_norm_enabled": bool(self.fused_norm_weight is not None),
         }
 
 class SVDQuantInt8MmaLinear(nn.Module):
