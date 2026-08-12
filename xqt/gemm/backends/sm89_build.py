@@ -35,7 +35,7 @@ _W4A16_SOURCE = Path(__file__).resolve().with_name("w4a16_sm89.cu")
 _W4A16_FUSED_SOURCE = Path(__file__).resolve().with_name("w4a16_cutlass_fused_sm89.cu")
 _W4A16_GROUPED_SOURCE = Path(__file__).resolve().with_name("w4a16_grouped_sm89.cu")
 _W8A8_GROUPED_SOURCE = Path(__file__).resolve().with_name("w8a8_grouped_sm89.cu")
-_W8A16_SOURCE = Path(__file__).resolve().with_name("int8mma_kernel.cu")
+_W8A16_SOURCE = _SEED_SOURCE
 _FP8_PROBE_SOURCE = Path(__file__).resolve().with_name("fp8_cutlass_probe_sm89.cu")
 _FP8_SOURCE = Path(__file__).resolve().with_name("fp8_cutlass_sm89.cu")
 _FP8_GROUPED_SOURCE = Path(__file__).resolve().with_name("fp8_grouped_sm89.cu")
@@ -119,28 +119,29 @@ class Sm89GroupedW8A8BuildConfig:
     source: Path = _W8A8_GROUPED_SOURCE
     output: Path = field(
         default_factory=lambda: default_cache_dir() / "sm89" / "w8a8_grouped_sm89.so"
-    """Inputs for the SM89 W8A16 artifact build using INT8 MMA kernel as main path."""
-
-    source: Path = _W8A16_SOURCE
-    output: Path = field(
-        default_factory=lambda: default_cache_dir() / "sm89" / "w8a16_sm89.so"
-    )
-    target_arch: str = "sm_89"
-    extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
-
     )
     target_arch: str = "sm_89"
     extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
 
 
+@dataclass(frozen=True, slots=True)
 class Sm89W8A16BuildConfig:
     """Inputs for the SM89 W8A16 artifact build using INT8 MMA kernel as main path."""
+
     source: Path = _W8A16_SOURCE
     output: Path = field(
         default_factory=lambda: default_cache_dir() / "sm89" / "w8a16_sm89.so"
     )
     target_arch: str = "sm_89"
-    extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
+    extra_flags: tuple[str, ...] = (
+        "-use_fast_math",
+        "-lineinfo",
+        "-lcublasLt",
+        "-lcublas",
+        "-lcudart",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Sm89Fp8ProbeBuildConfig:
     """Inputs for the non-production SM89 E4M3/E5M2 MMA capability probe."""
@@ -846,7 +847,7 @@ def build_sm89_w8a16_artifact(
     manifest = GemmArtifactManifest(
         kernel_name="sm89_w8a16_cutlass",
         target_arch=report.target_arch,
-        maturity="executable",
+        maturity="metadata_only",
         source=str(source),
         artifact=str(output),
         compile_flags=flags,
@@ -855,8 +856,11 @@ def build_sm89_w8a16_artifact(
         stage_count=3,
         preflight=report,
         metadata={
-            "build_status": "complete",
-            "correctness_verified": True,
+            "build_status": "compiled_pending_correctness_gate",
+            "correctness_verified": False,
+            "execution_mode": "dynamic_int8_activation_then_mma",
+            "weight_granularity": "per_channel",
+            "activation_dtype": "fp16|bf16",
         },
     )
     manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))

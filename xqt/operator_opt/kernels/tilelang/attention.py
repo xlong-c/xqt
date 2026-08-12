@@ -14,6 +14,7 @@ from xqt.operator_opt.kernels.tilelang._common import (
     require_fp16_or_bf16_tensors,
     require_tilelang,
 )
+from xqt.operator_opt.runtime import target_arch_mismatch
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,15 @@ def _validate_attention_inputs(
         raise XQTBackendError("TileLang attention currently requires seq_kv >= seq_q")
     if dropout_p != 0.0:
         raise XQTBackendError("TileLang attention kernel does not yet support dropout_p != 0")
+    # Wrapper projections are non-leaf tensors when only module parameters are
+    # grad-enabled.  Reject caller-owned leaf inputs, which are the explicit
+    # backward contract boundary, while preserving the existing inference call.
+    if torch.is_grad_enabled() and any(
+        tensor.requires_grad and tensor.is_leaf for tensor in (q, k, v)
+    ):
+        raise XQTBackendError(
+            "TileLang attention is inference-only and has no backward"
+        )
 
 
 
@@ -185,11 +195,17 @@ def fused_attention_forward_tilelang(
     block_n: int = 64,
     threads: int = 128,
     num_stages: int = 2,
+    target_arch: str | None = None,
 ) -> torch.Tensor:
     """CUDA-only TileLang attention entry point."""
 
     require_cuda_tensors(q, k, v)
     require_fp16_or_bf16_tensors(q, k, v)
+    mismatch = target_arch_mismatch(target_arch, q)
+    if mismatch is not None:
+        raise XQTBackendError(
+            f"TileLang attention target architecture is not executable: {mismatch}"
+        )
     _validate_attention_inputs(q, k, v, dropout_p=dropout_p)
     input_dtype = (
         "float16" if q.dtype == torch.float16 else "bfloat16"

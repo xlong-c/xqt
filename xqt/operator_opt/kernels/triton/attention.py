@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 
 from xqt.core.errors import XQTBackendError
+from xqt.operator_opt.runtime import target_arch_mismatch
 
 
 _LOG2_E = 1.4426950408889634
@@ -338,6 +339,11 @@ def fused_attention_forward_triton(
         raise XQTBackendError("Triton attention scale must be finite")
 
     resolved_target_arch = target_arch or _cuda_target_arch(q.device)
+    mismatch = target_arch_mismatch(target_arch, q)
+    if mismatch is not None:
+        raise XQTBackendError(
+            f"Triton attention target architecture is not executable: {mismatch}"
+        )
     input_dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
     schedule = resolve_triton_attention_schedule(
         batch=int(q.shape[0]),

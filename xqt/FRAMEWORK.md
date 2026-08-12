@@ -8,6 +8,16 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 
 | 概念 | 说明 |
 |---|---|
+| GEMM 合约 | xqt/gemm/contracts.py: GemmProblem, GemmSpec, QuantSpec 等 (P3/P4 完成, P5 in progress) |
+| 注册表 | xqt/gemm/registry.py: GemmKernelRegistration, maturity levels (executable/metadata_only/planned) |
+| Dispatch | xqt/gemm/dispatch.py: dispatch_gemm, fallback chain |
+| P5 | TODO-P5.md: persistent grouped scheduler, multi-stream prepack, CUDA Graph |
+
+## 重要类/方法注释
+
+- **GemmKernelRegistration**: 跟踪内核成熟度、能力矩阵、tile 参数和 executor。用于 dispatch 过滤和 fallback。
+- **GemmCapability.supports()**: 检查能力是否匹配 problem/quant/epilogue。
+- **GemmProblem.__post_init__**: 校验维度,处理 MoE grouped case (M=0 allowed)。
 | `OptimizationConfig` | 对外唯一 YAML workflow schema,包含 `project` / `model` / `task` / `compression_axes` / `hardware` / `stages`. |
 | `StageSpec` | `stages[*].params` 经 loader 解析后的 typed stage 参数. |
 | `load_optimization_config()` | `OptimizationConfig` 加载器. |

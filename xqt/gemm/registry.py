@@ -10,15 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+_MATURITIES = {"executable", "metadata_only", "planned", "reference_guarded"}
+
 from .contracts import EpilogueSpec, GemmProblem, QuantSpec
-
-
-_MATURITIES = frozenset({"executable", "reference_guarded", "metadata_only", "planned"})
-
 
 @dataclass(frozen=True, slots=True)
 class GemmCapability:
-    """Declarative capability matrix for one kernel family."""
+    """Declarative capability matrix for one kernel family.
+
+    Defines which architectures, dtypes, scale modes, phases and epilogues
+    a kernel supports. Used by registry to filter candidates during dispatch.
+    """
 
     architectures: tuple[str, ...] = ("any",)
     weight_dtypes: tuple[str, ...] = ("fp32",)
@@ -34,6 +36,7 @@ class GemmCapability:
         quant: QuantSpec,
         epilogue: EpilogueSpec,
     ) -> bool:
+        """Check if this capability matches the given problem/quant/epilogue."""
         architecture = problem.arch
         if "any" not in self.architectures and architecture not in self.architectures:
             return False
@@ -52,15 +55,7 @@ class GemmCapability:
         return True
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "architectures": list(self.architectures),
-            "weight_dtypes": list(self.weight_dtypes),
-            "activation_dtypes": list(self.activation_dtypes),
-            "scale_modes": list(self.scale_modes),
-            "phases": list(self.phases),
-            "epilogues": list(self.epilogues),
-            "min_sm": self.min_sm,
-        }
+        """Return capability as dict for registry serialization."""
 
 
 GemmExecutor = Callable[..., Any]
@@ -68,7 +63,12 @@ GemmExecutor = Callable[..., Any]
 
 @dataclass(frozen=True, slots=True)
 class GemmKernelRegistration:
-    """One registry entry, including implementation maturity and tile metadata."""
+    """One registry entry, including implementation maturity and tile metadata.
+
+    Tracks kernel family, maturity level (executable/metadata_only/planned),
+    capability matrix, tile params and executor. Used for dispatch filtering
+    and fallback chain construction.
+    """
 
     name: str
     backend: str
@@ -93,7 +93,9 @@ class GemmKernelRegistration:
             raise ValueError("kernel priority must be non-negative")
         if any(int(item) <= 0 for item in self.alignment):
             raise ValueError("kernel alignment values must be positive")
-        if self.tile_shape is not None and any(int(item) <= 0 for item in self.tile_shape):
+        if self.tile_shape is not None and any(
+            int(item) <= 0 for item in self.tile_shape
+        ):
             raise ValueError("tile_shape values must be positive")
         if self.maturity == "executable" and self.executor is None:
             raise ValueError("executable GEMM registration requires an executor")
@@ -102,7 +104,9 @@ class GemmKernelRegistration:
     def executable(self) -> bool:
         return self.maturity == "executable" and self.executor is not None
 
-    def supports(self, problem: GemmProblem, quant: QuantSpec, epilogue: EpilogueSpec) -> bool:
+    def supports(
+        self, problem: GemmProblem, quant: QuantSpec, epilogue: EpilogueSpec
+    ) -> bool:
         return self.capability.supports(problem, quant, epilogue)
 
     def to_dict(self) -> dict[str, Any]:
@@ -140,7 +144,9 @@ class GemmKernelRegistry:
         """Replace an existing entry after an artifact/correctness gate."""
 
         if entry.name not in self._entries:
-            raise KeyError(f"cannot replace unknown GEMM kernel registration: {entry.name!r}")
+            raise KeyError(
+                f"cannot replace unknown GEMM kernel registration: {entry.name!r}"
+            )
         self._entries[entry.name] = entry
 
     def get(self, name: str) -> GemmKernelRegistration:
@@ -218,7 +224,9 @@ def default_registry() -> GemmKernelRegistry:
             backend="torch",
             maturity="reference_guarded",
             capability=_reference_capability(
-                weight_dtypes=("fp32",), activation_dtypes=("fp32",), scale_modes=dense_modes
+                weight_dtypes=("fp32",),
+                activation_dtypes=("fp32",),
+                scale_modes=dense_modes,
             ),
             kernel_family="dense",
             priority=10,
@@ -228,7 +236,9 @@ def default_registry() -> GemmKernelRegistry:
             backend="torch",
             maturity="reference_guarded",
             capability=_reference_capability(
-                weight_dtypes=("fp16",), activation_dtypes=("fp16",), scale_modes=dense_modes
+                weight_dtypes=("fp16",),
+                activation_dtypes=("fp16",),
+                scale_modes=dense_modes,
             ),
             kernel_family="dense",
             priority=10,
@@ -238,7 +248,9 @@ def default_registry() -> GemmKernelRegistry:
             backend="torch",
             maturity="reference_guarded",
             capability=_reference_capability(
-                weight_dtypes=("bf16",), activation_dtypes=("bf16",), scale_modes=dense_modes
+                weight_dtypes=("bf16",),
+                activation_dtypes=("bf16",),
+                scale_modes=dense_modes,
             ),
             kernel_family="dense",
             priority=10,
@@ -293,7 +305,14 @@ def default_registry() -> GemmKernelRegistry:
             maturity="reference_guarded",
             capability=_reference_capability(
                 weight_dtypes=("int4", "int8", "fp8_e4m3", "fp8_e5m2"),
-                activation_dtypes=("fp16", "bf16", "fp32", "int8", "fp8_e4m3", "fp8_e5m2"),
+                activation_dtypes=(
+                    "fp16",
+                    "bf16",
+                    "fp32",
+                    "int8",
+                    "fp8_e4m3",
+                    "fp8_e5m2",
+                ),
                 scale_modes=quantized_modes,
             ),
             kernel_family="quantized_dequant",
@@ -319,8 +338,23 @@ def default_registry() -> GemmKernelRegistry:
             backend="torch",
             maturity="reference_guarded",
             capability=_reference_capability(
-                weight_dtypes=("fp16", "bf16", "fp32", "int4", "int8", "fp8_e4m3", "fp8_e5m2"),
-                activation_dtypes=("fp16", "bf16", "fp32", "int8", "fp8_e4m3", "fp8_e5m2"),
+                weight_dtypes=(
+                    "fp16",
+                    "bf16",
+                    "fp32",
+                    "int4",
+                    "int8",
+                    "fp8_e4m3",
+                    "fp8_e5m2",
+                ),
+                activation_dtypes=(
+                    "fp16",
+                    "bf16",
+                    "fp32",
+                    "int8",
+                    "fp8_e4m3",
+                    "fp8_e5m2",
+                ),
                 scale_modes=("any",),
             ),
             kernel_family="grouped",
@@ -378,7 +412,8 @@ def default_registry() -> GemmKernelRegistry:
                 architectures=("sm_90",),
                 weight_dtypes=("fp8_e4m3",),
                 activation_dtypes=("fp8_e4m3",),
-                scale_modes=fp8_modes,
+                scale_modes=fp8_modes
+                + ("w:blockwise/a:blockwise", "w:blockwise/a:per_token"),
                 phases=("generic", "prefill", "decode"),
                 epilogues=("any",),
                 min_sm=90,
@@ -390,7 +425,7 @@ def default_registry() -> GemmKernelRegistry:
             stage_count=4,
             alignment=(64, 128, 32),
             priority=100,
-            implementation="cutlass_fp8_sm90_wgmma_pending",
+            implementation="cutlass_sm90_wgmma_tma_pending",
         ),
         GemmKernelRegistration(
             name="sm90_fp8_e5m2_wgmma",
@@ -400,7 +435,8 @@ def default_registry() -> GemmKernelRegistry:
                 architectures=("sm_90",),
                 weight_dtypes=("fp8_e5m2",),
                 activation_dtypes=("fp8_e5m2",),
-                scale_modes=fp8_modes,
+                scale_modes=fp8_modes
+                + ("w:blockwise/a:blockwise", "w:blockwise/a:per_token"),
                 phases=("generic", "prefill", "decode"),
                 epilogues=("any",),
                 min_sm=90,
@@ -412,7 +448,7 @@ def default_registry() -> GemmKernelRegistry:
             stage_count=4,
             alignment=(64, 128, 32),
             priority=100,
-            implementation="cutlass_fp8_sm90_wgmma_pending",
+            implementation="cutlass_sm90_wgmma_tma_pending",
         ),
         GemmKernelRegistration(
             name="sm89_int8_mma_cutlass",
@@ -528,29 +564,316 @@ def default_registry() -> GemmKernelRegistry:
             priority=70,
             implementation="cuda_artifact_pending",
         ),
-	        GemmKernelRegistration(
-	            name="sm89_w8a16_cutlass",
-	            backend="cutlass",
-	            maturity="metadata_only",
-	            capability=GemmCapability(
-	                architectures=("sm_89",),
-	                weight_dtypes=("int8",),
-	                activation_dtypes=("fp16", "bf16"),
-	                scale_modes=("w:per_channel/a:per_tensor", "w:groupwise/a:per_tensor", "w:blockwise/a:per_tensor"),
-	                phases=("generic", "prefill", "decode"),
-	                epilogues=("any",),
-	                min_sm=89,
-	            ),
-	            kernel_family="w8a16",
-	            layout="sm89_int8_nk_v1",
-	            tile_shape=(64, 128, 64),
-	            warp_count=8,
-	            stage_count=3,
-	            alignment=(16, 16, 32),
-	            priority=90,
-	            implementation="cutlass_artifact_pending",
-	        ),
+        GemmKernelRegistration(
+            name="sm89_w4a16_triton_dequant",
+            backend="triton",
+            maturity="planned",
+            capability=GemmCapability(
+                architectures=("sm_89",),
+                weight_dtypes=("int4",),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=("w:groupwise/a:per_tensor", "w:blockwise/a:per_tensor"),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=89,
+            ),
+            kernel_family="w4a16_triton_dequant",
+            layout="xqt_int4_nk_v1",
+            alignment=(1, 1, 1),
+            priority=60,
+            implementation="triton_dequant_pending",
+        ),
+        GemmKernelRegistration(
+            name="w8a16_packed_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("int8",),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=(
+                    "w:per_channel/a:per_tensor",
+                    "w:groupwise/a:per_tensor",
+                    "w:blockwise/a:per_tensor",
+                ),
+            ),
+            kernel_family="w8a16_reference",
+            layout="xqt_int8_nk_v1",
+            alignment=(1, 1, 1),
+            priority=7,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="sm89_w8a16_cutlass",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_89",),
+                weight_dtypes=("int8",),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=("w:per_channel/a:per_tensor",),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=89,
+            ),
+            kernel_family="w8a16",
+            layout="sm89_int8_nk_v1",
+            tile_shape=(64, 128, 64),
+            warp_count=8,
+            stage_count=3,
+            alignment=(16, 16, 32),
+            priority=90,
+            implementation="cutlass_artifact_pending",
+        ),
+        GemmKernelRegistration(
+            name="w4a8_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("int4",),
+                activation_dtypes=("int8", "fp8_e4m3", "fp8_e5m2"),
+                scale_modes=(
+                    "w:groupwise/a:per_tensor",
+                    "w:groupwise/a:per_token",
+                    "w:groupwise/a:blockwise",
+                ),
+            ),
+            kernel_family="w4a8_reference",
+            layout="xqt_int4_nk_v1",
+            alignment=(1, 1, 1),
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="sm89_w4a8_int8_cutlass",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_89",),
+                weight_dtypes=("int4",),
+                activation_dtypes=("int8",),
+                scale_modes=(
+                    "w:groupwise/a:per_tensor",
+                    "w:groupwise/a:per_token",
+                ),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=89,
+            ),
+            kernel_family="w4a8_int8_mma",
+            layout="sm89_w4a8_int4_int8_v1",
+            tile_shape=(64, 128, 64),
+            warp_count=8,
+            stage_count=3,
+            alignment=(16, 16, 32),
+            priority=98,
+            implementation="cutlass_sm89_w4a8_int8_artifact_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm89_w4a8_fp8_cutlass",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_89",),
+                weight_dtypes=("int4",),
+                activation_dtypes=("fp8_e4m3", "fp8_e5m2"),
+                scale_modes=(
+                    "w:groupwise/a:per_tensor",
+                    "w:groupwise/a:per_token",
+                    "w:groupwise/a:blockwise",
+                ),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=89,
+            ),
+            kernel_family="w4a8_fp8_mma",
+            layout="sm89_w4a8_int4_fp8_v1",
+            tile_shape=(64, 128, 64),
+            warp_count=8,
+            stage_count=3,
+            alignment=(16, 16, 32),
+            priority=98,
+            implementation="cutlass_sm89_w4a8_fp8_artifact_pending",
+        ),
+        GemmKernelRegistration(
+            name="fp4_e2m1_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("fp4",),
+                activation_dtypes=("fp16", "bf16", "fp32"),
+                scale_modes=("w:groupwise/a:per_tensor",),
+            ),
+            kernel_family="fp4_e2m1_reference",
+            layout="xqt_fp4_nk_v1",
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="mxfp4_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("mxfp4",),
+                activation_dtypes=("fp16", "bf16", "fp32"),
+                scale_modes=("w:groupwise/a:per_tensor",),
+            ),
+            kernel_family="mxfp4_reference",
+            layout="xqt_fp4_nk_v1",
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="nvfp4_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("nvfp4",),
+                activation_dtypes=("fp16", "bf16", "fp32"),
+                scale_modes=("w:groupwise/a:per_tensor",),
+            ),
+            kernel_family="nvfp4_reference",
+            layout="xqt_fp4_nk_v1",
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="sm100_fp4_e2m1_cutlass",
+            backend="cutlass",
+            maturity="planned",
+            capability=GemmCapability(
+                architectures=("sm_100",),
+                weight_dtypes=("fp4",),
+                activation_dtypes=("fp16", "bf16", "fp8_e4m3", "fp8_e5m2"),
+                scale_modes=("w:groupwise/a:per_tensor", "w:groupwise/a:blockwise"),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=100,
+            ),
+            kernel_family="fp4_e2m1_mma",
+            layout="sm100_fp4_e2m1_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(128, 128, 64),
+            priority=110,
+            implementation="cutlass_sm100_fp4_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm100_mxfp4_cutlass",
+            backend="cutlass",
+            maturity="planned",
+            capability=GemmCapability(
+                architectures=("sm_100",),
+                weight_dtypes=("mxfp4",),
+                activation_dtypes=("fp16", "bf16", "fp8_e4m3", "fp8_e5m2"),
+                scale_modes=("w:groupwise/a:per_tensor", "w:groupwise/a:blockwise"),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=100,
+            ),
+            kernel_family="mxfp4_mma",
+            layout="sm100_mxfp4_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(128, 128, 64),
+            priority=110,
+            implementation="cutlass_sm100_mxfp4_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm100_nvfp4_cutlass",
+            backend="cutlass",
+            maturity="planned",
+            capability=GemmCapability(
+                architectures=("sm_100",),
+                weight_dtypes=("nvfp4",),
+                activation_dtypes=("fp16", "bf16", "fp8_e4m3", "fp8_e5m2"),
+                scale_modes=("w:groupwise/a:per_tensor", "w:groupwise/a:blockwise"),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=100,
+            ),
+            kernel_family="nvfp4_mma",
+            layout="sm100_nvfp4_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(128, 128, 64),
+            priority=110,
+            implementation="cutlass_sm100_nvfp4_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm90_grouped_fp8_e4m3_wgmma",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_90",),
+                weight_dtypes=("fp8_e4m3",),
+                activation_dtypes=("fp8_e4m3",),
+                scale_modes=(
+                    "w:per_tensor/a:per_tensor",
+                    "w:per_channel/a:per_token",
+                    "w:blockwise/a:blockwise",
+                ),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=90,
+            ),
+            kernel_family="fp8_grouped_wgmma",
+            layout="xqt_fp8_rowmajor_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(64, 128, 32),
+            priority=105,
+            implementation="cutlass_sm90_grouped_wgmma_tma_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm90_grouped_fp8_e5m2_wgmma",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_90",),
+                weight_dtypes=("fp8_e5m2",),
+                activation_dtypes=("fp8_e5m2",),
+                scale_modes=(
+                    "w:per_tensor/a:per_tensor",
+                    "w:per_channel/a:per_token",
+                    "w:blockwise/a:blockwise",
+                ),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=90,
+            ),
+            kernel_family="fp8_grouped_wgmma",
+            layout="xqt_fp8_rowmajor_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(64, 128, 32),
+            priority=105,
+            implementation="cutlass_sm90_grouped_wgmma_tma_pending",
+        ),
+        GemmKernelRegistration(
+            name="svd_dual_path_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("int4", "int8", "fp4", "mxfp4", "nvfp4"),
+                activation_dtypes=("fp16", "bf16", "fp32"),
+                scale_modes=(
+                    "w:per_channel/a:per_tensor",
+                    "w:groupwise/a:per_tensor",
+                    "w:blockwise/a:per_tensor",
+                ),
+            ),
+            kernel_family="svd_dual_path",
+            layout="xqt_svd_dual_v1",
+            priority=2,
+            implementation="reference",
+        ),
     ]
+    return GemmKernelRegistry(entries)
 
 
 __all__ = [

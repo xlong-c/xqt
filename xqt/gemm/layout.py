@@ -298,6 +298,77 @@ def _build_canonical_w4(
     )
 
 
+def _build_canonical_w8(
+    qweight: torch.Tensor,
+    *,
+    logical_shape: tuple[int, int],
+    scales: torch.Tensor,
+    zero_points: torch.Tensor | None,
+    group_size: int,
+    symmetric: bool,
+    pack_version: str,
+    storage_layout: str,
+) -> PackedWeight:
+    """Build canonical signed INT8 storage for per-channel/groupwise scales."""
+
+    n, k = (int(logical_shape[0]), int(logical_shape[1]))
+    if qweight.ndim != 2 or tuple(qweight.shape) != (n, k):
+        raise ValueError(f"INT8 qweight must have shape {(n, k)}, got {tuple(qweight.shape)}")
+    if qweight.dtype != torch.int8:
+        raise TypeError("INT8 qweight must use torch.int8")
+    if zero_points is not None:
+        raise ValueError("symmetric INT8 canonical storage does not support zero_points")
+
+    scale_shape = tuple(int(item) for item in scales.shape)
+    if scale_shape in {(n,), (n, 1)}:
+        granularity = "per_channel"
+        canonical_scales = scales.detach().to(torch.float32).reshape(n, 1).contiguous()
+        padded_k = k
+        spec_group_size: int | None = None
+    elif scale_shape in {(), (1, 1)}:
+        granularity = "per_tensor"
+        canonical_scales = scales.detach().to(torch.float32).reshape(1, 1).contiguous()
+        padded_k = k
+        spec_group_size = None
+    else:
+        if int(group_size) <= 0:
+            raise ValueError("groupwise INT8 canonical repack requires group_size > 0")
+        padded_k = ((k + int(group_size) - 1) // int(group_size)) * int(group_size)
+        groups = padded_k // int(group_size)
+        granularity = "groupwise"
+        canonical_scales = _canonical_group_parameter(
+            scales,
+            n=n,
+            groups=groups,
+            name="scales",
+        )
+        spec_group_size = int(group_size)
+
+    padded_weight = qweight
+    if padded_k != k:
+        padded_weight = F.pad(qweight, (0, padded_k - k), value=0)
+    spec = QuantSpec(
+        weight_dtype="int8",
+        activation_dtype="int8",
+        output_dtype="fp16",
+        weight_granularity=granularity,
+        group_size=spec_group_size,
+        symmetric=symmetric,
+        weight_scale_source="weight_offline",
+        activation_scale_source="activation_dynamic",
+    )
+    return build_packed_weight(
+        padded_weight,
+        logical_shape=(n, k),
+        spec=spec,
+        scales=canonical_scales,
+        zero_points=None,
+        padded_k=padded_k,
+        storage_layout=storage_layout,
+        pack_version=pack_version,
+    )
+
+
 def repack_gptq_int4(
     qweight: torch.Tensor,
     *,
@@ -323,6 +394,34 @@ def repack_gptq_int4(
         group_size=group_size,
         signed=True,
         symmetric=True,
+        pack_version=pack_version,
+        storage_layout="xqt_int4_nk_v1",
+    )
+
+
+def repack_awq_int4(
+    qweight: torch.Tensor,
+    *,
+    logical_shape: tuple[int, int],
+    scales: torch.Tensor,
+    zero_points: torch.Tensor | None = None,
+    group_size: int = 128,
+    g_idx: torch.Tensor | None = None,
+    pack_version: str = "xqt-w4a16-awq-v1",
+) -> PackedWeight:
+    """Convert AWQ int32 words to unsigned canonical XQT W4 storage."""
+
+    n, k = (int(logical_shape[0]), int(logical_shape[1]))
+    _validate_sequential_g_idx(g_idx, logical_k=k, group_size=group_size)
+    codes = _source_int4_codes(qweight, logical_shape=(n, k), method="awq")
+    return _build_canonical_w4(
+        codes,
+        logical_shape=(n, k),
+        scales=scales,
+        zero_points=zero_points,
+        group_size=group_size,
+        signed=False,
+        symmetric=False,
         pack_version=pack_version,
         storage_layout="xqt_int4_nk_v1",
     )
@@ -420,6 +519,7 @@ def build_packed_weight(
     pack_version: str | None = None,
     local_shape: tuple[int, int] | None = None,
     shard_axis: int | None = None,
+    global_scale: torch.Tensor | None = None,
 ) -> PackedWeight:
     """Create a versioned packed-weight object without changing tensor values."""
 
@@ -428,11 +528,13 @@ def build_packed_weight(
         raise ValueError("qweight must have shape [N, packed-or-logical-K]")
     if padded_k is None:
         padded_k = k
-    if spec.weight_dtype == "int4":
+    if spec.weight_dtype in {"int4", "fp4", "mxfp4", "nvfp4"}:
+        if spec.weight_dtype in {"fp4", "mxfp4", "nvfp4"} and qweight.dtype != torch.uint8:
+            raise TypeError("FP4-family qweight must use torch.uint8 packed storage")
         expected_columns = (int(padded_k) + 1) // 2
         if int(qweight.shape[1]) != expected_columns:
             raise ValueError(
-                f"packed INT4 qweight must have {expected_columns} columns, got {qweight.shape[1]}"
+                f"packed 4-bit qweight must have {expected_columns} columns, got {qweight.shape[1]}"
             )
         packed_bits: int | None = 4
         nibble_order: str | None = "low_high"
@@ -466,11 +568,33 @@ def build_packed_weight(
         group_size=spec.group_size,
         packed_bits=packed_bits,
         nibble_order=nibble_order,
-        nibble_signed=spec.symmetric,
+        # FP4 family nibbles are sign-bit codebook indices, not two's
+        # complement INT4 values.  Keep that distinction in the ABI.
+        nibble_signed=(
+            False
+            if spec.weight_dtype in {"fp4", "mxfp4", "nvfp4"}
+            else spec.symmetric
+        ),
         local_shape=local_shape,
         shard_axis=shard_axis,
     )
-    return PackedWeight(qweight=qweight.contiguous(), scales=scales, zero_points=zero_points, metadata=metadata)
+    if spec.weight_dtype == "nvfp4":
+        if global_scale is None:
+            raise ValueError("NVFP4 packed weights require a scalar global_scale")
+        if not isinstance(global_scale, torch.Tensor) or global_scale.numel() != 1:
+            raise ValueError("NVFP4 global_scale must be a scalar tensor")
+        if not bool(torch.isfinite(global_scale).all()) or bool((global_scale <= 0).any()):
+            raise ValueError("NVFP4 global_scale must be finite and positive")
+        global_scale = global_scale.detach().to(dtype=torch.float32).reshape(())
+    elif global_scale is not None:
+        raise ValueError("global_scale is only valid for NVFP4 packed weights")
+    return PackedWeight(
+        qweight=qweight.contiguous(),
+        scales=scales,
+        zero_points=zero_points,
+        metadata=metadata,
+        global_scale=global_scale,
+    )
 
 
 def validate_w4a16_packed_weight(

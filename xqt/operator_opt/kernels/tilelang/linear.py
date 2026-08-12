@@ -13,6 +13,7 @@ from xqt.operator_opt.kernels.tilelang._common import (
     require_tilelang,
 )
 from xqt.operator_opt.kernels.tilelang.gemm_builder import build_tilelang_gemm_kernel
+from xqt.operator_opt.runtime import target_arch_mismatch
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,11 @@ def dense_linear_epilogue_tilelang(
     tensors = (x, weight) if bias is None else (x, weight, bias)
     require_cuda_tensors(*tensors)
     require_fp16_or_bf16_tensors(*tensors)
+    mismatch = target_arch_mismatch(target_arch, x)
+    if mismatch is not None:
+        raise XQTBackendError(
+            f"TileLang Linear target architecture is not executable: {mismatch}"
+        )
     if x.ndim != 2 or weight.ndim != 2:
         raise XQTBackendError("dense Linear TileLang path expects 2D x and weight")
     if x.shape[1] != weight.shape[1]:

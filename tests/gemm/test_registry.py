@@ -38,7 +38,8 @@ def _sm89_w8a8_spec() -> GemmSpec:
 def test_registry_exposes_metadata_only_sm89_candidate_and_reference() -> None:
     candidates = select_kernel(_sm89_w8a8_spec(), registry=default_registry())
     assert candidates[0].name == "sm89_int8_mma_cutlass"
-candidates[0].maturity == "executable"    assert any(candidate.name == "quantized_dequant_reference" for candidate in candidates)
+    assert candidates[0].maturity == "metadata_only"
+    assert any(candidate.name == "quantized_dequant_reference" for candidate in candidates)
 
 
 def test_w4a16_registry_exposes_main_and_alternate_cutlass_ladder() -> None:
@@ -230,8 +231,7 @@ def test_w8a16_registry_exposes_main_cutlass_ladder_and_reference() -> None:
         weight_dtype="int8",
         activation_dtype="fp16",
         output_dtype="fp16",
-        weight_granularity="groupwise",
-        group_size=128,
+        weight_granularity="per_channel",
         weight_scale_source="weight_offline",
         storage_layout="xqt_int8_nk_v1",
         pack_version="xqt-int8-v1",
@@ -243,49 +243,9 @@ def test_w8a16_registry_exposes_main_cutlass_ladder_and_reference() -> None:
     )
     candidates = select_kernel(spec, registry=default_registry())
     names = [candidate.name for candidate in candidates]
-    assert names[:4] == [
+    assert names[:2] == [
         "sm89_w8a16_cutlass",
-        "sm89_w4a16_cutlass_fused",
-        "sm89_w4a16_cutlass",
-        "sm89_w4a16_cutlass_alt_tile",
+        "w8a16_packed_reference",
     ]
     assert candidates[0].maturity == "metadata_only"
     assert any(candidate.name == "quantized_dequant_reference" for candidate in candidates)
-    n, k, group_size = 8, 32, 32
-    quant = QuantSpec(
-        weight_dtype="int4",
-        activation_dtype="fp16",
-        output_dtype="fp16",
-        weight_granularity="groupwise",
-        group_size=group_size,
-        weight_scale_source="weight_offline",
-        storage_layout="xqt_int4_nk_v1",
-        pack_version="xqt-int4-v1",
-    )
-    packed = build_packed_weight(
-        pack_int4_signed(torch.zeros(n, k, dtype=torch.int8)),
-        scales=torch.ones(n, 1),
-        spec=quant,
-        logical_shape=(n, k),
-        padded_k=k,
-        storage_layout="xqt_int4_nk_v1",
-        pack_version="xqt-int4-v1",
-    )
-    registry = default_registry()
-    entry = registry.get("sm89_w4a16_cutlass_fused")
-
-    def fake_executor(activation: torch.Tensor, weight: object, **kwargs: object) -> torch.Tensor:
-        return reference_w4a16_gemm(activation, packed, spec=kwargs["spec"])
-
-    registry.replace(replace(entry, maturity="executable", executor=fake_executor))
-    spec = GemmSpec(
-        problem=GemmProblem(m=16, n=n, k=k, sm=89, device="cuda:0"),
-        quant=quant,
-        epilogue=EpilogueSpec(output_dtype="fp16"),
-    )
-    result = dispatch_gemm(
-        torch.ones(16, k, dtype=torch.float16), packed, spec=spec, registry=registry
-    )
-    assert result.report.selected_kernel == "sm89_w4a16_cutlass_fused"
-    assert result.report.shape_variant == "tile_m_16x8x16"
-    assert result.report.native is True

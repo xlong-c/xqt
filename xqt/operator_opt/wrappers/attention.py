@@ -21,6 +21,7 @@ from ._common import (
     _matching_tensor_dtype_name,
     _resolved_target_arch,
     _scaled_dot_product_attention_with_causal_semantics,
+    _target_arch_mismatch_reason,
 )
 
 
@@ -215,6 +216,7 @@ class _TileLangAttentionWrapper(nn.Module):
             block_n=int(self.settings.get("block_n", 64)),
             threads=int(self.settings.get("threads", 128)),
             num_stages=int(self.settings.get("num_stages", 2)),
+            target_arch=self.settings.get("target_arch"),
             fallback=self.fallback,
         )
 
@@ -248,6 +250,41 @@ class _TileLangAttentionWrapper(nn.Module):
             causal=is_causal,
         )
         return self._finalize_attention_output(attn_output)
+
+    def _run_reference_attention_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        *,
+        need_weights: bool,
+        average_attn_weights: bool,
+        attn_mask: torch.Tensor | None,
+        key_padding_mask: torch.Tensor | None,
+        is_causal: bool,
+        reason: str,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Use the complete PyTorch MHA contract for unsupported fastpath inputs."""
+
+        self.last_execution_mode = "reference_fallback"
+        self.last_fastpath = "eager_reference_fallback"
+        self.last_execution_reason = reason
+        self.last_graph_state = "disabled"
+        self.last_graph_reason = reason
+        self.last_kernel_dtype = str(query.dtype).removeprefix("torch.")
+        reference_key = query if key is None else key
+        reference_value = reference_key if value is None else value
+        output, weights = self.attention(
+            query,
+            reference_key,
+            reference_value,
+            need_weights=need_weights,
+            average_attn_weights=average_attn_weights,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            is_causal=is_causal,
+        )
+        return output, weights
 
     def _graph_capture_attention(
         self,
@@ -316,12 +353,46 @@ class _TileLangAttentionWrapper(nn.Module):
         is_causal: bool = False,
         **_: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        del average_attn_weights
         if attn_mask is not None or key_padding_mask is not None:
-            raise XQTBackendError(
-                "TileLang attention wrapper does not yet support attn_mask or key_padding_mask"
+            return self._run_reference_attention_forward(
+                query,
+                key,
+                value,
+                need_weights=need_weights,
+                average_attn_weights=average_attn_weights,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                is_causal=is_causal,
+                reason="attention_mask_requires_reference",
             )
         q_input, k_input, v_input = self._canonicalize_attention_inputs(query, key, value)
+        mismatch = _target_arch_mismatch_reason(self.settings, q_input)
+        if mismatch is not None:
+            return self._run_reference_attention_forward(
+                query,
+                key,
+                value,
+                need_weights=need_weights,
+                average_attn_weights=average_attn_weights,
+                attn_mask=None,
+                key_padding_mask=None,
+                is_causal=is_causal,
+                reason=mismatch,
+            )
+        if torch.is_grad_enabled() and any(
+            tensor.requires_grad for tensor in (q_input, k_input, v_input)
+        ):
+            return self._run_reference_attention_forward(
+                query,
+                key,
+                value,
+                need_weights=need_weights,
+                average_attn_weights=average_attn_weights,
+                attn_mask=None,
+                key_padding_mask=None,
+                is_causal=is_causal,
+                reason="autograd_unsupported",
+            )
         input_is_cuda = q_input.is_cuda and k_input.is_cuda and v_input.is_cuda
         use_graph_tilelang = (
             input_is_cuda and self._prefer_graph_attention_fastpath(q_input)

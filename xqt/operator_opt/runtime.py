@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Mapping
 
 import torch
@@ -10,6 +11,12 @@ from xqt.core.errors import XQTBackendError
 
 
 DEFAULT_CUDA_GRAPH_WARMUP = 2
+
+# CUDA Graph objects own mutable static buffers and replay state.  Serializing
+# capture/replay keeps a single wrapper correct when inference callers share it
+# across Python threads.  The lock is process-local and does not affect eager
+# kernel execution.
+_CUDA_GRAPH_LOCK = threading.RLock()
 
 
 def cuda_graph_tensor_signature(tensor: torch.Tensor) -> tuple[Any, ...]:
@@ -21,6 +28,29 @@ def cuda_graph_tensor_signature(tensor: torch.Tensor) -> tuple[Any, ...]:
         str(tensor.dtype),
         str(tensor.device),
     )
+
+
+def cuda_target_arch(tensor: torch.Tensor) -> str | None:
+    """Return the runtime ``sm_*`` architecture for a CUDA tensor."""
+
+    if not tensor.is_cuda:
+        return None
+    major, minor = torch.cuda.get_device_capability(tensor.device)
+    return f"sm_{major}{minor}"
+
+
+def target_arch_mismatch(
+    requested: str | None,
+    tensor: torch.Tensor,
+) -> str | None:
+    """Describe a requested/runtime SM mismatch, if one exists."""
+
+    if not requested or not tensor.is_cuda:
+        return None
+    actual = cuda_target_arch(tensor)
+    if actual is None or str(requested) == actual:
+        return None
+    return f"target_arch_mismatch:{requested}!={actual}"
 
 
 def _make_static_cuda_graph_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -40,20 +70,23 @@ def capture_cuda_graph_with_static_state(
 ) -> dict[str, Any]:
     """Capture a fixed-shape CUDA Graph with static input storage."""
 
-    if not dynamic_args:
-        raise XQTBackendError("CUDA Graph capture requires at least one dynamic tensor")
-    if not all(tensor.is_cuda for tensor in dynamic_args):
-        raise XQTBackendError("CUDA Graph capture requires CUDA tensor inputs")
-    static_dynamic_args = tuple(_make_static_cuda_graph_tensor(tensor) for tensor in dynamic_args)
-    for static_arg, runtime_arg in zip(static_dynamic_args, dynamic_args):
-        static_arg.copy_(runtime_arg)
-    with torch.no_grad():
-        for _ in range(max(int(warmup), 0)):
-            body(*static_dynamic_args)
-        torch.cuda.synchronize(dynamic_args[0].device)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            static_output = body(*static_dynamic_args)
+    with _CUDA_GRAPH_LOCK:
+        if not dynamic_args:
+            raise XQTBackendError("CUDA Graph capture requires at least one dynamic tensor")
+        if not all(tensor.is_cuda for tensor in dynamic_args):
+            raise XQTBackendError("CUDA Graph capture requires CUDA tensor inputs")
+        static_dynamic_args = tuple(
+            _make_static_cuda_graph_tensor(tensor) for tensor in dynamic_args
+        )
+        for static_arg, runtime_arg in zip(static_dynamic_args, dynamic_args):
+            static_arg.copy_(runtime_arg)
+        with torch.no_grad():
+            for _ in range(max(int(warmup), 0)):
+                body(*static_dynamic_args)
+            torch.cuda.synchronize(dynamic_args[0].device)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                static_output = body(*static_dynamic_args)
     return {
         "graph": graph,
         "static_args": static_dynamic_args,
@@ -67,27 +100,30 @@ def replay_cuda_graph_tensor_callable(
 ) -> torch.Tensor:
     """Copy runtime inputs into a captured CUDA Graph and replay it."""
 
-    static_args = state.get("static_args")
-    graph = state.get("graph")
-    static_output = state.get("static_output")
-    if (
-        not isinstance(static_args, tuple)
-        or graph is None
-        or not isinstance(static_output, torch.Tensor)
-        or len(static_args) != len(runtime_args)
-    ):
-        raise XQTBackendError("invalid CUDA Graph state")
-    for static_arg, runtime_arg in zip(static_args, runtime_args):
-        if not isinstance(static_arg, torch.Tensor) or not isinstance(runtime_arg, torch.Tensor):
-            raise XQTBackendError("CUDA Graph state contains non-tensor inputs")
-        static_arg.copy_(runtime_arg)
-    graph.replay()
-    return static_output
+    with _CUDA_GRAPH_LOCK:
+        static_args = state.get("static_args")
+        graph = state.get("graph")
+        static_output = state.get("static_output")
+        if (
+            not isinstance(static_args, tuple)
+            or graph is None
+            or not isinstance(static_output, torch.Tensor)
+            or len(static_args) != len(runtime_args)
+        ):
+            raise XQTBackendError("invalid CUDA Graph state")
+        for static_arg, runtime_arg in zip(static_args, runtime_args):
+            if not isinstance(static_arg, torch.Tensor) or not isinstance(runtime_arg, torch.Tensor):
+                raise XQTBackendError("CUDA Graph state contains non-tensor inputs")
+            static_arg.copy_(runtime_arg)
+        graph.replay()
+        return static_output
 
 
 __all__ = [
     "DEFAULT_CUDA_GRAPH_WARMUP",
     "capture_cuda_graph_with_static_state",
+    "cuda_target_arch",
     "cuda_graph_tensor_signature",
     "replay_cuda_graph_tensor_callable",
+    "target_arch_mismatch",
 ]

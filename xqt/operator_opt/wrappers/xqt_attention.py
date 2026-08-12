@@ -20,6 +20,7 @@ from ._common import (
     _matching_tensor_dtype_name,
     _resolved_target_arch,
     _scaled_dot_product_attention_with_causal_semantics,
+    _target_arch_mismatch_reason,
 )
 
 if TYPE_CHECKING:
@@ -80,6 +81,7 @@ class _TileLangXqtAttentionWrapper(nn.Module):
             block_n=int(self.settings.get("block_n", 64)),
             threads=int(self.settings.get("threads", 128)),
             num_stages=int(self.settings.get("num_stages", 2)),
+            target_arch=self.settings.get("target_arch"),
             fallback=self.fallback,
         )
 
@@ -170,6 +172,21 @@ class _TileLangXqtAttentionWrapper(nn.Module):
         return replay_cuda_graph_tensor_callable(state, (x,))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mismatch = _target_arch_mismatch_reason(self.settings, x)
+        if mismatch is not None:
+            self.last_execution_mode = "reference_fallback"
+            self.last_fastpath = "eager_reference_fallback"
+            self.last_execution_reason = mismatch
+            self.last_graph_state = "disabled"
+            self.last_graph_reason = mismatch
+            return self._run_sdpa_attention_forward(x)
+        if torch.is_grad_enabled() and x.requires_grad:
+            self.last_execution_mode = "reference_fallback"
+            self.last_fastpath = "eager_reference_fallback"
+            self.last_execution_reason = "autograd_unsupported"
+            self.last_graph_state = "disabled"
+            self.last_graph_reason = "autograd_unsupported"
+            return self._run_sdpa_attention_forward(x)
         input_is_cuda = x.is_cuda
         use_graph_tilelang = input_is_cuda and self._prefer_graph_attention_fastpath()
         self.last_execution_mode = (

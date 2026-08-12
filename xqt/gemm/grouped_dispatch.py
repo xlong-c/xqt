@@ -82,6 +82,7 @@ class GroupedGemmDispatchReport:
     tuning_cache_reason: str | None = None
     tuning_source: str = "candidate_order"
     tuning_record_id: str | None = None
+    cuda_graph: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-ready grouped dispatch report."""
@@ -115,6 +116,7 @@ class GroupedGemmDispatchReport:
             "tuning_cache_reason": self.tuning_cache_reason,
             "tuning_source": self.tuning_source,
             "tuning_record_id": self.tuning_record_id,
+            "cuda_graph": self.cuda_graph,
         }
 
 
@@ -166,6 +168,7 @@ def dispatch_grouped_gemm(
     weights: Sequence[torch.Tensor | PackedWeight] | None,
     *,
     grouped_problem: GroupedGemmProblem,
+    cuda_graph: bool = False,
     quant_specs: Sequence[QuantSpec] | QuantSpec,
     weight_scales: Sequence[torch.Tensor | None] | None = None,
     activation_scales: torch.Tensor
@@ -186,8 +189,8 @@ def dispatch_grouped_gemm(
 
     if not isinstance(grouped_problem, GroupedGemmProblem):
         raise TypeError("dispatch_grouped_gemm requires GroupedGemmProblem")
-    if tuning is not None and not isinstance(tuning, GemmTuningLookup):
-        raise TypeError("dispatch_grouped_gemm tuning must be GemmTuningLookup")
+    if not isinstance(cuda_graph, bool):
+        raise TypeError("dispatch_grouped_gemm cuda_graph must be bool")
     tuning_fields = (
         {
             "tuning_cache_status": "not_applicable",
@@ -262,6 +265,7 @@ def dispatch_grouped_gemm(
                 fallback_chain=fallback_chain,
                 native_details=dict(candidate_output.details),
                 **tuning_fields,
+                cuda_graph=cuda_graph,
             ),
         )
 
@@ -324,6 +328,7 @@ def dispatch_grouped_gemm(
             fallback_chain=fallback_chain,
             native_details=None,
             **tuning_fields,
+            cuda_graph=cuda_graph,
         ),
     )
 

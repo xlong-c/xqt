@@ -8,6 +8,8 @@ logical ``A[M, K] @ W[N, K].T -> Y[M, N]`` convention.
 
 from __future__ import annotations
 
+import torch
+
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -358,6 +360,7 @@ class PackedWeightMetadata:
     nibble_signed: bool = True
     local_shape: tuple[int, int] | None = None
     shard_axis: int | None = None
+    global_scale: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         logical = _shape(self.logical_shape, field_name="PackedWeightMetadata.logical_shape", rank=2)
@@ -377,6 +380,12 @@ class PackedWeightMetadata:
             object.__setattr__(self, "local_shape", _shape(self.local_shape, field_name="local_shape", rank=2))
         if self.shard_axis is not None and self.shard_axis not in {0, 1}:
             raise ValueError("shard_axis must be 0, 1, or None")
+        if self.global_scale is not None:
+            if not isinstance(self.global_scale, torch.Tensor) or self.global_scale.numel() != 1:
+                raise ValueError("global_scale must be a scalar tensor")
+            if not bool(torch.isfinite(self.global_scale).all()) or bool((self.global_scale <= 0).any()):
+                raise ValueError("global_scale must be finite and positive")
+            object.__setattr__(self, "global_scale", self.global_scale.detach().to(dtype=torch.float32).reshape(()))
 
     @property
     def padding_ratio(self) -> float:
@@ -396,6 +405,8 @@ class PackedWeightMetadata:
             "local_shape": None if self.local_shape is None else list(self.local_shape),
             "shard_axis": self.shard_axis,
             "padding_ratio": self.padding_ratio,
+            "global_scale_present": self.global_scale is not None,
+            "global_scale_shape": () if self.global_scale is not None else None,
         }
 
     @classmethod
@@ -426,6 +437,7 @@ class PackedWeight:
     zero_points: Any | None
     metadata: PackedWeightMetadata
     canonical_qweight: Any | None = None
+    global_scale: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if not hasattr(self.qweight, "shape"):
@@ -448,6 +460,7 @@ class GroupedGemmProblem:
     problems: tuple[GemmProblem, ...]
     m_offsets: tuple[int, ...] | None = None
     output_rows: tuple[int, ...] | None = None
+    cuda_graph: bool = False
 
     def __post_init__(self) -> None:
         if not self.problems:
@@ -479,6 +492,8 @@ class GroupedGemmProblem:
             if set(rows) != set(range(total_m)):
                 raise ValueError("output_rows must be a permutation of [0, total_m)")
             object.__setattr__(self, "output_rows", rows)
+        if not isinstance(self.cuda_graph, bool):
+            raise TypeError("GroupedGemmProblem.cuda_graph must be bool")
 
     @property
     def group_count(self) -> int:
@@ -503,6 +518,7 @@ class GroupedGemmProblem:
             "problems": [problem.to_dict() for problem in self.problems],
             "m_offsets": None if self.m_offsets is None else list(self.m_offsets),
             "output_rows": None if self.output_rows is None else list(self.output_rows),
+            "cuda_graph": self.cuda_graph,
         }
 
     @classmethod
@@ -515,6 +531,41 @@ class GroupedGemmProblem:
             output_rows=None
             if payload.get("output_rows") is None
             else tuple(payload["output_rows"]),
+            cuda_graph=bool(payload.get("cuda_graph", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Sparse2_4Contract:
+    """Skeleton contract for 2:4 sparse GEMM (P5 item)."""
+
+    sparsity_ratio: float = 0.5
+    weight_dtype: str = "int8"
+    activation_dtype: str = "fp16"
+
+    def quant_spec(self) -> QuantSpec:
+        return QuantSpec(
+            weight_dtype=self.weight_dtype,
+            activation_dtype=self.activation_dtype,
+            weight_granularity="groupwise",
+            group_size=8,
+            weight_scale_source="weight_offline",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class W3A16Contract:
+    """Skeleton contract for W3A16 (P5 item)."""
+
+    weight_dtype: str = "int4"
+    activation_dtype: str = "fp16"
+
+    def quant_spec(self) -> QuantSpec:
+        return QuantSpec(
+            weight_dtype=self.weight_dtype,
+            activation_dtype=self.activation_dtype,
+            weight_granularity="groupwise",
+            group_size=16,
         )
 
 
@@ -526,4 +577,6 @@ __all__ = [
     "PackedWeight",
     "PackedWeightMetadata",
     "QuantSpec",
+    "Sparse2_4Contract",
+    "W3A16Contract",
 ]

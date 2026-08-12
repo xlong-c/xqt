@@ -1,6 +1,6 @@
 """Minimal shared helpers used by 2+ wrapper modules.
 
-Do not add dequant-only or build-only helpers here — those belong in their
+Do not add dequant-only or build-only helpers here - those belong in their
 respective modules.
 """
 
@@ -12,6 +12,8 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
+
+from ..runtime import target_arch_mismatch
 
 
 def _matching_tensor_dtype_name(*tensors: torch.Tensor) -> str:
@@ -29,6 +31,19 @@ def _resolved_target_arch(settings: dict[str, Any], x: torch.Tensor) -> str | No
         major, minor = torch.cuda.get_device_capability(x.device)
         return f"sm_{major}{minor}"
     return None
+
+
+def _target_arch_mismatch_reason(
+    settings: dict[str, Any],
+    x: torch.Tensor,
+) -> str | None:
+    """Return an explicit reason when settings target a different runtime SM."""
+
+    requested = settings.get("target_arch")
+    return target_arch_mismatch(
+        requested if isinstance(requested, str) and requested else None,
+        x,
+    )
 
 
 def _scaled_dot_product_attention_with_causal_semantics(

@@ -11,6 +11,12 @@
 - 兼容事实源: [../docs/md/XQT.md](../docs/md/XQT.md)
 - 兼容摘要入口: [../docs/md/XQT_SUMMARY.md](../docs/md/XQT_SUMMARY.md)
 - 包内工程契约: [FRAMEWORK.md](FRAMEWORK.md)
+- P5 待办: [TODO-P5.md](../research/xqt-gemm/TODO-P5.md) (persistent grouped scheduler, multi-stream prepack, CUDA Graph)
+
+## 当前可用入口
+- xqt.gemm: GEMM 核心模块 (P3/P4 完成, P5 in progress)
+- xqt/operator_opt: 旧 operator 迁移 seed
+- xqt/runtime/modules: KV attention 等
 
 ## 核心边界
 

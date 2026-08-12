@@ -21,6 +21,13 @@ from .layout import unpack_int4, validate_logical_shapes, validate_w4a16_packed_
 from .quantize import dequantize_int8_activation, quantize_int8_activation
 
 
+_FP4_E2M1_CODEBOOK = torch.tensor(
+    (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0),
+    dtype=torch.float32,
+)
+
+
 _FLOAT_DTYPES: dict[str, torch.dtype] = {
     "fp32": torch.float32,
     "fp16": torch.float16,
@@ -117,6 +124,20 @@ def _decode_weight_values(
         if qweight.ndim != 2 or int(qweight.shape[1]) != padded_k:
             raise ValueError("unpacked INT4 reference weight must have padded logical K columns")
         return _as_float32(qweight)
+    if spec.weight_dtype in {"fp4", "mxfp4", "nvfp4"}:
+        if qweight.ndim != 2 or qweight.dtype != torch.uint8:
+            raise ValueError("packed FP4 reference weight must be uint8 rank-2")
+        expected_columns = (int(padded_k) + 1) // 2
+        if int(qweight.shape[1]) != expected_columns:
+            raise ValueError(
+                "packed FP4 reference weight must have "
+                f"{expected_columns} columns, got {qweight.shape[1]}"
+            )
+        low = qweight & 0x0F
+        high = (qweight >> 4) & 0x0F
+        codes = torch.stack((low, high), dim=-1).reshape(qweight.shape[0], -1)
+        codebook = _FP4_E2M1_CODEBOOK.to(device=qweight.device)
+        return codebook[codes.long()][:, :padded_k]
     if spec.weight_dtype in {"fp8_e4m3", "fp8_e5m2"}:
         if qweight.ndim != 2 or int(qweight.shape[1]) != padded_k:
             raise ValueError("FP8 reference weight must have padded logical K columns")
@@ -205,6 +226,11 @@ def dequantize_weight_reference(
     decoded = values
     if expanded_zero is not None:
         decoded = decoded - expanded_zero
+    if spec.weight_dtype == "nvfp4":
+        if not isinstance(weight, PackedWeight) or weight.global_scale is None:
+            raise ValueError("NVFP4 PackedWeight requires global_scale")
+        global_scale = weight.global_scale.to(device=decoded.device, dtype=torch.float32).reshape(())
+        expanded_scale = expanded_scale / global_scale
     return (decoded * expanded_scale)[:, :logical_k]
 
 

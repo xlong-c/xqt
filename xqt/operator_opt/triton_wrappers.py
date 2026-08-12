@@ -27,7 +27,7 @@ from .runtime import (
     replay_cuda_graph_tensor_callable,
 )
 from .types import OperatorOptimizationTargetPlan
-from .wrappers._common import _resolved_target_arch
+from .wrappers._common import _resolved_target_arch, _target_arch_mismatch_reason
 
 
 _TRITON_LINEAR_PATTERNS = frozenset({"linear", "gemm_fp16", "gemm_bf16"})
@@ -461,13 +461,10 @@ class _TritonLinearWrapper(nn.Module):
         ):
             return False, None
         try:
-            static_input = self._graph_replay_static_input
-            graph = self._graph_replay_graph
             output = self._graph_replay_output
-            if static_input is None or graph is None or output is None:
+            if output is None:
                 raise XQTBackendError("invalid Triton linear CUDA Graph replay state")
-            static_input.copy_(x)
-            graph.replay()
+            replay_cuda_graph_tensor_callable(state, (x,))
         except Exception as exc:
             reason = f"CUDA Graph replay failed: {type(exc).__name__}: {exc}"
             self._invalidate_graph_cache(reason)
@@ -660,6 +657,21 @@ class _TritonLinearWrapper(nn.Module):
             return self._reference_or_raise(
                 x,
                 "Triton linear kernel requires CUDA tensors; using configured fallback.",
+            )
+        mismatch = _target_arch_mismatch_reason(self.settings, x)
+        if mismatch is not None:
+            self.last_graph_state = "disabled"
+            self.last_graph_reason = mismatch
+            return self._reference_or_raise(
+                x,
+                f"Triton linear runtime fallback: {mismatch}",
+            )
+        if torch.is_grad_enabled() and x.requires_grad:
+            self.last_graph_state = "disabled"
+            self.last_graph_reason = "autograd_unsupported"
+            return self._reference_or_raise(
+                x,
+                "Triton linear kernel is inference-only; autograd input requires reference fallback.",
             )
         graph_replay_attempted = False
         if self._linear_fastpath == "graph":

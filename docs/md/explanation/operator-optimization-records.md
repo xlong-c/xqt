@@ -3574,3 +3574,74 @@ stall,roofline,register pressure 或 tensor-pipe utilization.
 - [independent audit](../../../research/xqt-gemm/artifacts/2026-08-10-sm89-tilelang-linear-fp16-mlp/independent-audit.json)
 - [Nsight Systems summary](../../../research/xqt-gemm/artifacts/2026-08-10-sm89-tilelang-linear-fp16-mlp/nsys-summary.json)
 - [full conclusion](../../../research/xqt-gemm/artifacts/2026-08-10-sm89-tilelang-linear-fp16-mlp/conclusion.md)
+
+## R-035: P3 boundary gate for dynamic shapes, masks, cross-SM fallback and replay safety
+
+### 目标与范围
+
+本 checkpoint 收口 P3 中仍未完成的 runtime/kernel 边界,不扩大任何默认
+promotion. 覆盖 TileLang MHA/Linear, Triton attention/Linear wrapper,
+`KvScaleAttention` offline phase 和 CUDA Graph shared-state replay. XQT 仍只
+负责模型侧 entity,不实现 serving scheduler 或 KV/cache storage.
+
+### 实现变化
+
+- CUDA Graph capture/replay 通过进程内 RLock 串行访问静态输入和 graph-owned
+  output. `_TritonLinearWrapper` 和两个 attention wrapper 统一走该 helper.
+- Triton 和 TileLang 低层入口以及 wrapper 对显式 `target_arch` 做 runtime SM
+  mismatch 检查. 不匹配时 wrapper 使用 reference fallback,低层 kernel 在编译前
+  明确拒绝.
+- MHA wrapper 的 `attn_mask`/`key_padding_mask`/self-attention `None` 参数和
+  autograd 输入进入完整 PyTorch reference contract. Inference-only kernel 仍
+  保留 backward rejection.
+- `KvScaleAttention.prefill()`/`decode()` 记录 phase,report 明确
+  `serving_cache.implemented=false`.
+
+### 测量与结果
+
+固定入口为
+`research/xqt-gemm/bench_p3_boundary_gate.py`,seed 为 `20260812`. 当前环境是
+NVIDIA GeForce RTX 4070 Ti SUPER,`sm_89`,CUDA 13.0,torch 2.12.1+cu130.
+`result.json` 中的 correctness checks 全部通过:
+
+- MHA mask 和 per-head weights 与直接 PyTorch MHA 的 max abs 为 `0`;
+  autograd reference fallback 可回传 input gradient.
+- 动态 `seq=3/7` 和 non-contiguous input 的 model-level attention 通过.
+- Triton attention 动态 shape correctness 通过;Triton Linear Graph 两个 shape
+  (`M=1/2`) 各自 capture,replay cache size 为 `2`.
+- TileLang FP16 Linear 的 `M/N/K=(1,64,64),(4,96,64),(16,128,128)` 以及
+  `None/SiLU/GELU` epilogue 通过 reference gate,max abs 为
+  `0.0078125/0.015625/0.03125`.
+- 显式 other-SM target 在 wrapper 和 TileLang/Triton low-level entry 均在编译
+  前 fallback 或拒绝. Resolver 对 `sm_80`/`sm_90` 保持 `default`.
+- shared replay fake-graph concurrency gate 的 `12` 次调用最大并发为 `1`;
+  这是共享可变 graph state 的正确性证据,不是 GPU kernel 性能结论.
+
+单次当前设备描述性 benchmark 中,`sm_89` FP16 Triton Linear `M=1,K=64,N=96`
+wrapper 10-call mean 为 `0.038976 ms`,仅用于记录可执行性,不作为 promotion
+门槛. 其他 SM 没有可用硬件,artifact 将 performance status 记为
+`not_available`,不从 `sm_89` 外推.
+
+### 适用边界与未采纳方案
+
+- 只在显式 target 与实际 device SM 一致时进入对应 kernel/graph fastpath;
+  mismatch 必须显式 fallback 或 error,不静默编译错误架构.
+- mask,backward 和需要完整 MHA contract 的调用不进入 TileLang forward-only
+  kernel. Dynamic shape 通过 shape/layout key 建立独立 graph entry.
+- `KvScaleAttention` 只提供 offline `prefill`/`decode` 和 model-side metadata;
+  serving 级 cache 生命周期留给外部 runtime.
+- 没有把当前 `sm_89` timing 扩展成跨 SM promotion,也没有因 boundary gate 改变
+  `auto` 默认路由. NCU/NSYS 本轮不采集新 counter;既有 NCU 环境为
+  `counter_permission_denied`,不写 counter-derived 归因.
+
+### 验证落点
+
+- [boundary gate entry](../../../research/xqt-gemm/bench_p3_boundary_gate.py)
+- [boundary artifact](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/result.json)
+- [boundary correctness metadata](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/correctness.json)
+- [boundary benchmark metadata](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/benchmark.json)
+- [boundary reproduction](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/reproduction.md)
+- [regression tests](../../../tests/xqt/test_p3_boundary_contracts.py)
+- [CUDA Graph runtime helper](../../../xqt/operator_opt/runtime.py)
+- [attention wrapper](../../../xqt/operator_opt/wrappers/attention.py)
+- [KV model-side entity](../../../xqt/runtime/modules/kv_attention.py)

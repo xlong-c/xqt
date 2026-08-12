@@ -10,6 +10,7 @@ import torch
 
 from xqt.gemm import dense_gemm_reference
 from xqt.core.errors import XQTBackendError
+from xqt.operator_opt.runtime import target_arch_mismatch
 from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
 from xqt.runtime.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
 
@@ -813,6 +814,11 @@ def gemm_fp16_triton(
     resolved_target_arch = target_arch
     if resolved_target_arch is None and a.is_cuda:
         resolved_target_arch = _cuda_target_arch(a.device)
+    mismatch = target_arch_mismatch(target_arch, a)
+    if mismatch is not None:
+        raise XQTBackendError(
+            f"Triton GEMM target architecture is not executable: {mismatch}"
+        )
     schedule = resolve_triton_fp16_gemm_schedule(
         m=int(M),
         n=int(N),
@@ -896,6 +902,11 @@ def gemm_bf16_triton(
     resolved_target_arch = target_arch
     if resolved_target_arch is None and a.is_cuda:
         resolved_target_arch = _cuda_target_arch(a.device)
+    mismatch = target_arch_mismatch(target_arch, a)
+    if mismatch is not None:
+        raise XQTBackendError(
+            f"Triton GEMM target architecture is not executable: {mismatch}"
+        )
     if a.dim() == 2 and b.dim() == 2:
         m, k = int(a.shape[0]), int(a.shape[1])
         n = int(b.shape[0]) if transpose_b else int(b.shape[1])

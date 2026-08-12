@@ -11,7 +11,7 @@ from xqt.core.errors import XQTBackendError
 
 from .contracts import GemmSpec, PackedWeight
 from .layout import validate_w4a16_packed_weight
-from .reference import reference_gemm, reference_w4a16_gemm
+from .reference import reference_gemm, reference_w4a16_gemm, reference_w8a16_gemm
 from .registry import GemmKernelRegistration, GemmKernelRegistry, default_registry
 
 
@@ -192,7 +192,12 @@ def dispatch_gemm(
         spec.quant.weight_dtype == "int4"
         and isinstance(weight, PackedWeight)
         and weight.metadata.storage_layout == "xqt_int4_nk_v1"
+        and spec.quant.activation_dtype in {"fp16", "bf16"}
     ):
+        # The W4A16 native ABI is narrower than the W4A8 reference contract.
+        # In particular, its kernel only accepts the documented 32/64/128 K
+        # groups, so applying its validator to an INT8/FP8 activation path
+        # would reject a valid reference-only W4A8 packed weight.
         validate_w4a16_packed_weight(
             weight,
             spec=spec.quant,
@@ -293,6 +298,11 @@ def dispatch_gemm(
             shape_variant = "tile_m_8x16x32"
     elif native and report_entry.kernel_family == "w4a16_fused_cutlass_mma":
         shape_variant = "tile_m_16x8x16"
+    elif native and report_entry.kernel_family == "w8a16":
+        if spec.problem.m == 1:
+            shape_variant = "m1_gemv"
+        else:
+            shape_variant = "general_m_quantize_int8"
     return GemmDispatchResult(
         output=output,
         report=GemmDispatchReport(

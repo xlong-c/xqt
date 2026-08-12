@@ -37,6 +37,7 @@ from xqt.contracts.runtime_quant import (
     RuntimeQuantContract,
 )
 from xqt.core.errors import XQTBackendError, XQTConfigError
+from xqt.operator_opt.runtime import target_arch_mismatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +196,7 @@ class KvScaleAttention(nn.Module):
         fused_quant_block_size: int = 256,
         attention_fastpath: str = "eager",
         cuda_graph_warmup: int = 2,
+        target_arch: str | None = None,
     ) -> None:
         super().__init__()
         if dim <= 0 or heads <= 0:
@@ -249,6 +251,10 @@ class KvScaleAttention(nn.Module):
         self._fused_quant_block_size = int(fused_quant_block_size)
         self.attention_fastpath = normalized_fastpath
         self.cuda_graph_warmup = int(cuda_graph_warmup)
+        self.target_arch = (
+            None if target_arch is None else str(target_arch).strip()
+        )
+        self._last_phase = "forward"
         self._fallback_reason: str | None = None
         self._selected_kernel = "torch_sdpa_kv_scale_reference"
         self._selected_kernels = ("torch_sdpa_kv_scale_reference",)
@@ -445,6 +451,11 @@ class KvScaleAttention(nn.Module):
 
         if not qkv.is_cuda:
             return "cuda_unavailable"
+        mismatch = target_arch_mismatch(self.target_arch, qkv)
+        if mismatch is not None:
+            return mismatch
+        if torch.is_grad_enabled() and qkv.requires_grad:
+            return "autograd_unsupported"
         if qkv.dtype != torch.float16:
             return "dtype_not_fp16"
         if self.dropout_p != 0.0:
@@ -718,12 +729,12 @@ class KvScaleAttention(nn.Module):
 
     def prefill(self, x: torch.Tensor) -> torch.Tensor:
         """Offline prefill phase wrapper (full sequence)."""
-
+        self._last_phase = "prefill"
         return self.forward(x)
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Offline decode phase wrapper (single token)."""
-
+        self._last_phase = "decode"
         return self.forward(x)
 
     def kv_cache_metadata(self) -> KvCacheMetadata:
@@ -767,6 +778,12 @@ class KvScaleAttention(nn.Module):
             "layer_path": self.layer_path,
             "preferred_kernel": self.preferred_kernel,
             "attention_fastpath": self.attention_fastpath,
+            "phase": self._last_phase,
+            "target_arch": self.target_arch,
+            "serving_cache": {
+                "implemented": False,
+                "reason": "model_side_entity_does_not_manage_serving_cache",
+            },
             "projection_mode": "packed_qkv",
             "selected_kernel": self._selected_kernel,
             "selected_kernels": list(self._selected_kernels),
