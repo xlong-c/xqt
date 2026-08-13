@@ -76,8 +76,13 @@ def _reference_entry(
     *,
     weight: torch.Tensor | PackedWeight,
 ) -> GemmKernelRegistration | None:
+    has_sparse_mask = isinstance(weight, PackedWeight) and weight.sparse_mask is not None
     for entry in matches:
         if entry.implementation == "reference" and entry.maturity == "reference_guarded":
+            if entry.kernel_family == "sparse2_4_reference" and not has_sparse_mask:
+                continue
+            if entry.kernel_family != "sparse2_4_reference" and has_sparse_mask:
+                continue
             if entry.kernel_family in {"w4a16_reference", "w8a16_reference"}:
                 if not isinstance(weight, PackedWeight):
                     continue

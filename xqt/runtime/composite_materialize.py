@@ -41,9 +41,9 @@ def materialize_composite_compute(
         if isinstance(compute_config, ComputeConfig)
         else compute_config_from_mapping(compute_config)
     )
-    if config is None or not config.modules:
-        return model
     target = model if inplace else copy.deepcopy(model)
+    if config is None or not config.modules:
+        return target
     for spec in config.modules:
         contract = normalize_compute_contract(spec.compute_contract)
         if contract not in {"composite_add", "mix_fp4_int8_mma"} and not spec.branches:

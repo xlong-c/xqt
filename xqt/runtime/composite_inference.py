@@ -14,6 +14,7 @@ a one-shot per-tensor activation-range collection, matching the existing
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Iterable, Mapping
 
 import torch
@@ -25,8 +26,72 @@ from xqt.contracts.compute import (
     compute_config_from_mapping,
     normalize_composite_mode,
 )
-from xqt.runtime.composite_branch import SupportsStaticActivationCalibration
+from xqt.runtime.composite_branch import (
+    SupportsStaticActivationCalibration,
+    replace_submodule,
+)
 from xqt.runtime.composite_materialize import materialize_composite_compute
+from xqt.runtime.modules import SVDQuantGeluMLP, SVDQuantLinear
+
+
+def _match_diffusers_svd_gelu_mlp(
+    module: nn.Module,
+) -> tuple[SVDQuantLinear, SVDQuantLinear] | None:
+    module_type = type(module)
+    if module_type.__name__ != "FeedForward" or not module_type.__module__.startswith(
+        "diffusers."
+    ):
+        return None
+    net = getattr(module, "net", None)
+    if not isinstance(net, (nn.ModuleList, nn.Sequential)) or len(net) < 3:
+        return None
+    activation = net[0]
+    activation_type = type(activation)
+    if activation_type.__name__ != "GELU" or not activation_type.__module__.startswith(
+        "diffusers."
+    ):
+        return None
+    if getattr(activation, "approximate", None) != "tanh":
+        return None
+    fc1 = getattr(activation, "proj", None)
+    fc2 = net[2]
+    if not isinstance(fc1, SVDQuantLinear) or not isinstance(fc2, SVDQuantLinear):
+        return None
+    for dropout in (net[1], *net[3:]):
+        if not isinstance(dropout, nn.Dropout) or float(dropout.p) != 0.0:
+            return None
+    return fc1, fc2
+
+
+def materialize_svd_gelu_mlps(
+    model: nn.Module,
+    *,
+    inplace: bool = True,
+) -> nn.Module:
+    """Replace eligible Diffusers GELU FFNs with the native SVDQuant wrapper.
+
+    Matching is deliberately strict: only Diffusers ``FeedForward`` modules
+    with tanh-approximate GELU, two ``SVDQuantLinear`` projections, and
+    inference-identity dropout are rewritten. Exact GELU, gated FFNs, and
+    nonzero dropout retain their original module graph.
+    """
+
+    target = model if inplace else copy.deepcopy(model)
+    root_match = _match_diffusers_svd_gelu_mlp(target)
+    if root_match is not None:
+        replacement = SVDQuantGeluMLP(*root_match, approximate="tanh")
+        replacement.train(target.training)
+        return replacement
+    candidates = [
+        (name, module, match)
+        for name, module in target.named_modules()
+        if name and (match := _match_diffusers_svd_gelu_mlp(module)) is not None
+    ]
+    for name, module, match in candidates:
+        replacement = SVDQuantGeluMLP(*match, approximate="tanh")
+        replacement.train(module.training)
+        replace_submodule(target, name, replacement)
+    return target
 
 
 def fuse_composite_modules(model: nn.Module, *, mode: str = "reduce-overhead") -> int:
@@ -100,6 +165,7 @@ def materialize_svd_for_inference(
     calibration_sample_limit: int | None = None,
     fuse: bool = False,
     fuse_mode: str = "reduce-overhead",
+    fuse_gelu_mlp: bool = False,
     inplace: bool = True,
 ) -> nn.Module:
     """Override execution knobs, materialize composite modules, then calibrate.
@@ -110,7 +176,8 @@ def materialize_svd_for_inference(
     ``activation_scale_mode`` is ``"static"`` and ``calibration_inputs`` are
     given, static scales are collected in one pass. When ``fuse`` is set, the
     low-rank branch of split modules is folded via torch.compile (recovers
-    overhead at large M; safe no-op otherwise).
+    overhead at large M; safe no-op otherwise). ``fuse_gelu_mlp`` performs a
+    strict Diffusers tanh-GELU FFN rewrite after projection materialization.
     """
 
     config = override_composite_execution(
@@ -127,6 +194,8 @@ def materialize_svd_for_inference(
             calibration_inputs,
             sample_limit=calibration_sample_limit,
         )
+    if fuse_gelu_mlp:
+        materialized = materialize_svd_gelu_mlps(materialized, inplace=True)
     if fuse:
         fuse_composite_modules(materialized, mode=fuse_mode)
     return materialized
@@ -209,6 +278,7 @@ def calibrate_static_activation_scales(
 __all__ = [
     "calibrate_static_activation_scales",
     "fuse_composite_modules",
+    "materialize_svd_gelu_mlps",
     "materialize_svd_for_inference",
     "override_composite_execution",
 ]

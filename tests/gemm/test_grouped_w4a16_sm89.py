@@ -22,9 +22,11 @@ from xqt.gemm import (
     pack_int4_signed,
     pack_int4_unsigned,
     pack_sm89_grouped_w4a16_weights,
+    pack_sm89_grouped_w4a16_weights_multi_stream,
     query_sm89_grouped_w4a16_persistent_resources,
     reference_w4a16_gemm,
     sm89_grouped_w4a16_executor,
+    warmup_sm89_grouped_w4a16,
 )
 
 
@@ -495,3 +497,53 @@ def test_grouped_w4a16_requires_manifest_promotion(tmp_path: Path) -> None:
             schedule,
             artifact=temp_artifact,
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("stream_count", [1, 3, 5])
+def test_multi_stream_prepack_matches_canonical(stream_count: int) -> None:
+    rows = (0, 1, 2, 8, 9)
+    n, k = 32, 1001
+    quant = _quant(128, unsigned=False)
+    experts = tuple(
+        _make_weight(n=n, k=k, group_size=128, unsigned=False, seed=53000 + index)
+        for index in range(len(rows))
+    )
+    bias = tuple(torch.randn(n, dtype=torch.float32, device="cuda") for _ in rows)
+    canonical = pack_sm89_grouped_w4a16_weights(experts, quant=quant, bias=bias)
+    multi = pack_sm89_grouped_w4a16_weights_multi_stream(
+        experts, quant=quant, bias=bias, stream_count=stream_count
+    )
+
+    assert multi.expert_count == canonical.expert_count
+    assert torch.equal(multi.qweight, canonical.qweight)
+    assert torch.equal(multi.scales, canonical.scales)
+    assert torch.equal(multi.bias, canonical.bias)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_grouped_w4a16_warmup_reports_runs() -> None:
+    artifact = Path.home() / ".cache/xqt/gemm/sm89/w4a16_grouped_sm89.so"
+    if not artifact.is_file():
+        pytest.skip("grouped SM89 W4A16 artifact is not built")
+    n, k = 16, 64
+    quant = _quant(32, unsigned=False)
+    expert = _make_weight(n=n, k=k, group_size=32, unsigned=False, seed=54000)
+    problem = _grouped_problem((1,), n=n, k=k, output_rows=(0,))
+    packed = pack_sm89_grouped_w4a16_weights(
+        (expert,), quant=quant, bias=(torch.zeros(n, device="cuda"),)
+    )
+    schedule = build_sm89_grouped_w4a16_schedule(problem, device="cuda")
+    activation = torch.randn(1, k, dtype=torch.float16, device="cuda")
+
+    report = warmup_sm89_grouped_w4a16(
+        activation,
+        packed,
+        schedule,
+        quant=quant,
+        artifact=artifact,
+        runs=3,
+        allow_unverified_artifact=True,
+    )
+    assert report["runs"] == 3
+    assert report["expert_count"] == 1

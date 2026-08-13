@@ -61,20 +61,50 @@ def test_fused_norm_reference_fallback_applies_norm_explicitly() -> None:
     assert module_fused.execution_metadata()["fused_norm_enabled"] is True
 
 
-def test_fused_norm_native_path_matches_unfused_native_path() -> None:
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_norm_native_path_matches_unfused_native_path(
+    dtype: torch.dtype,
+) -> None:
     _require_native_w4a4()
-    module_ref, module_fused, norm_weight, eps = _make_pair()
+    module_ref, module_fused, norm_weight, eps = _make_pair(dtype=dtype)
     module_ref.enable_fusion()
     module_fused.enable_fusion()
-    x = torch.randn(256, 256, dtype=torch.float16, device="cuda") * 2.0
+    x = torch.randn(256, 256, dtype=dtype, device="cuda") * 2.0
 
-    expected = module_ref(_rmsnorm(x, norm_weight, eps))
-    actual = module_fused(x)
+    with torch.no_grad():
+        expected = module_ref(_rmsnorm(x, norm_weight, eps))
+        actual = module_fused(x)
 
     metadata = module_fused.execution_metadata()
     assert metadata["cuda_fused_backend"] == "native_w4a4_dynamic_norm"
     assert metadata["implementation"] == "native_svdq_w4a4_dynamic_norm_fused_lora"
-    assert _rel_rmse(actual, expected) < 2e-2
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fused_norm_native_smalln_path_matches_unfused_smalln_path(
+    dtype: torch.dtype,
+) -> None:
+    _require_native_w4a4()
+    module_ref, module_fused, norm_weight, eps = _make_pair(
+        out_features=512,
+        dtype=dtype,
+    )
+    module_ref.enable_fusion()
+    module_fused.enable_fusion()
+    x = torch.randn(256, 256, dtype=dtype, device="cuda") * 2.0
+
+    with torch.no_grad():
+        expected = module_ref(_rmsnorm(x, norm_weight, eps))
+        actual = module_fused(x)
+
+    reference_metadata = module_ref.execution_metadata()
+    metadata = module_fused.execution_metadata()
+    assert reference_metadata["cuda_fused_backend"] == "native_w4a4_dynamic_smalln"
+    assert metadata["cuda_fused_backend"] == "native_w4a4_dynamic_smalln_norm"
+    assert metadata["implementation"] == "native_svdq_w4a4_dynamic_norm_fused_lora_smalln"
+    assert metadata["cuda_fused_fallback_reason"] is None
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 def test_fused_norm_native_path_captures_cuda_graph() -> None:
@@ -84,14 +114,50 @@ def test_fused_norm_native_path_captures_cuda_graph() -> None:
     module_fused.enable_fusion(cuda_graph=True)
     x = torch.randn(256, 256, dtype=torch.float16, device="cuda") * 2.0
 
-    expected = module_ref(_rmsnorm(x, norm_weight, eps))
-    first = module_fused(x).clone()
-    second = module_fused(x).clone()
+    with torch.no_grad():
+        expected = module_ref(_rmsnorm(x, norm_weight, eps))
+        first = module_fused(x).clone()
+        second = module_fused(x).clone()
 
     metadata = module_fused.execution_metadata()
     assert metadata["cuda_graph_used"] is True
     assert _rel_rmse(first, expected) < 2e-2
     assert _rel_rmse(second, first) < 1e-5
+
+
+def test_fused_norm_native_path_falls_back_when_autograd_is_required() -> None:
+    _require_native_w4a4()
+    _, module_fused, _, _ = _make_pair(out_features=512)
+    module_fused.enable_fusion()
+    x = torch.randn(
+        16,
+        256,
+        dtype=torch.float16,
+        device="cuda",
+        requires_grad=True,
+    )
+
+    with torch.no_grad():
+        _ = module_fused(x.detach())
+    assert (
+        module_fused.execution_metadata()["cuda_fused_backend"]
+        == "native_w4a4_dynamic_smalln_norm"
+    )
+
+    output = module_fused(x)
+    output.float().square().mean().backward()
+
+    metadata = module_fused.execution_metadata()
+    assert output.requires_grad is True
+    assert output.grad_fn is not None
+    assert x.grad is not None
+    assert module_fused.down_proj.weight.grad is not None
+    assert module_fused.up_proj.weight.grad is not None
+    assert metadata["cuda_fused_used"] is False
+    assert metadata["cuda_fused_backend"] is None
+    assert "forward-only when autograd is required" in str(
+        metadata["cuda_fused_fallback_reason"]
+    )
 
 
 def test_clear_fused_norm_restores_post_norm_input_contract() -> None:

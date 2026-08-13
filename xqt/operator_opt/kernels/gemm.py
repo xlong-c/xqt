@@ -28,6 +28,7 @@ from .triton.gemm import (
     gemm_int4_dequant_triton,
     gemm_int8_triton,
     gemm_reference,
+    quantize_int8_rowwise_triton,
     resolve_triton_bf16_gemm_schedule,
     resolve_triton_fp16_gemm_schedule,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "gemm_fp8_triton",
     "gemm_int4_dequant_triton",
     "gemm_int8_triton",
+    "quantize_int8_rowwise_triton",
     "gemm_mxfp_reference",
     "gemm_mxfp_triton",
     "gemm_reference",

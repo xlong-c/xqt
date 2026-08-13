@@ -28,24 +28,45 @@ from xqt.gemm import (
     sm90_fp8_wgmma_executor,
     Sparse2_4Contract,
     W3A16Contract,
+    pack_sparse2_4_weight,
+    pack_w3a16_weight,
+    unpack_int3,
 )
 
 def test_sparse_2_4_contract_roundtrip_quant_dequant_and_dispatch() -> None:
     torch.manual_seed(20260812)
     contract = Sparse2_4Contract()
     m, n, k = 4, 8, 16
-    activation = torch.randn(m, k, dtype=torch.float16)
-    # Skeleton: verify contract and registry gate only (no native yet)
     spec = contract.quant_spec()
     assert spec.weight_dtype == "int8"
     assert spec.activation_dtype == "fp16"
     assert spec.weight_granularity == "groupwise"
     assert spec.group_size == 8
     assert spec.scale_mode == "w:groupwise/a:per_tensor"
-    # Roundtrip simulation using existing reference dequant (skeleton)
-    # For full sparse reference, would use reference_grouped or similar once implemented
-    print("Sparse 2:4 contract skeleton passes: dtype, granularity, registry gate")
-    # TODO: once sparse reference_gemm added, use it here with proper packed weights
+
+    weight = torch.randn(n, k)
+    mask = torch.zeros(n, k, dtype=torch.bool)
+    mask[:, 0::4] = True
+    mask[:, 1::4] = True
+    packed = pack_sparse2_4_weight(weight, mask, contract=contract)
+    activation = torch.randn(m, k)
+    gemm_spec = GemmSpec(
+        GemmProblem(m=m, n=n, k=k),
+        contract.quant_spec(),
+        EpilogueSpec(output_dtype="fp16"),
+    )
+    result = dispatch_gemm(activation, packed, spec=gemm_spec)
+    decoded = dequantize_weight_reference(packed, spec=contract.quant_spec())
+    expected = activation.to(torch.float32) @ decoded.transpose(0, 1)
+
+    assert result.report.selected_kernel == "sparse2_4_reference"
+    assert result.report.native is False
+    torch.testing.assert_close(result.output, expected.to(torch.float16), atol=1e-4, rtol=1e-4)
+
+    bad_mask = mask.clone()
+    bad_mask[0, 2] = True
+    with pytest.raises(ValueError, match="exactly two"):
+        pack_sparse2_4_weight(weight, bad_mask, contract=contract)
 
 
 @pytest.mark.parametrize("format_name", ("fp4", "mxfp4", "nvfp4"))
@@ -260,12 +281,29 @@ def test_w3a16_contract_roundtrip_and_dispatch() -> None:
     torch.manual_seed(20260812)
     contract = W3A16Contract()
     m, n, k = 4, 8, 16
-    activation = torch.randn(m, k, dtype=torch.float16)
     spec = contract.quant_spec()
-    assert spec.weight_dtype == "int4"
+    assert spec.weight_dtype == "int3"
     assert spec.activation_dtype == "fp16"
     assert spec.weight_granularity == "groupwise"
     assert spec.group_size == 16
     assert spec.scale_mode == "w:groupwise/a:per_tensor"
-    print("W3A16 contract skeleton passes: dtype, granularity, registry gate")
-    # TODO: once W3A16 reference added, use reference_gemm here
+
+    codes = torch.randint(-4, 4, (n, k), dtype=torch.int8)
+    packed = pack_w3a16_weight(codes, contract=contract)
+    assert packed.metadata.packed_bits == 3
+    roundtrip = unpack_int3(packed.qweight, logical_k=packed.metadata.padded_k)
+    assert torch.equal(roundtrip[:, :k], codes)
+
+    activation = torch.randn(m, k)
+    gemm_spec = GemmSpec(
+        GemmProblem(m=m, n=n, k=k),
+        contract.quant_spec(),
+        EpilogueSpec(output_dtype="fp16"),
+    )
+    result = dispatch_gemm(activation, packed, spec=gemm_spec)
+    decoded = dequantize_weight_reference(packed, spec=contract.quant_spec())
+    expected = activation.to(torch.float32) @ decoded.transpose(0, 1)
+
+    assert result.report.selected_kernel == "w3a16_reference"
+    assert result.report.native is False
+    torch.testing.assert_close(result.output, expected.to(torch.float16), atol=1e-4, rtol=1e-4)

@@ -95,6 +95,85 @@ def _load_lib(so_path: str | None = None) -> Any:
             ctypes.c_int,
         ]
         lib.int8mma_dequant_i32.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_run_cutlass_i32_64x128_prepacked_b"):
+        lib.int8mma_run_cutlass_i32_64x128_prepacked_b.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_run_cutlass_i32_64x128_prepacked_b.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_run_cutlass_i32_128x256_prepacked_b"):
+        lib.int8mma_run_cutlass_i32_128x256_prepacked_b.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_run_cutlass_i32_128x256_prepacked_b.restype = ctypes.c_int
+    for name in (
+        "int8mma_run_cutlass_scale_64x128_prepacked_b_stream",
+        "int8mma_run_cutlass_scale_128x256_prepacked_b_stream",
+    ):
+        if not hasattr(lib, name):
+            continue
+        fn = getattr(lib, name)
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        fn.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_convrot_quantize_rows"):
+        lib.int8mma_convrot_quantize_rows.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_convrot_quantize_rows.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_dequant_i32_rowwise"):
+        lib.int8mma_dequant_i32_rowwise.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_dequant_i32_rowwise.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_apply_half_rowwise_scale_bias"):
+        lib.int8mma_apply_half_rowwise_scale_bias.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_apply_half_rowwise_scale_bias.restype = ctypes.c_int
     lib.int8mma_version.argtypes = []
     lib.int8mma_version.restype = ctypes.c_char_p
     lib.int8mma_smem_bytes.argtypes = []
@@ -238,6 +317,221 @@ def int8_linear_cutlass_sm89(
     if err != 0:
         raise XQTBackendError(f"CUTLASS cuda_sm89 W8A8 GEMM failed with cuda error {err}")
     return output
+
+
+def convrot_cutlass_w8a8_sm89(
+    inputs: torch.Tensor,
+    qweight_t: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    rotated_input_features: int,
+    rot_size: int,
+    output_dtype: torch.dtype,
+    prepacked_b: torch.Tensor | None = None,
+    quantized_activation: torch.Tensor | None = None,
+    activation_scales: torch.Tensor | None = None,
+    accumulator: torch.Tensor | None = None,
+    output: torch.Tensor | None = None,
+    weight_scale_buffer: torch.Tensor | None = None,
+    bias_buffer: torch.Tensor | None = None,
+    scaled_output: torch.Tensor | None = None,
+    scale_bias_buffer: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run CUDA ConvRot quantization plus a CUTLASS INT8 GEMM on sm_89."""
+
+    if not inputs.is_cuda or inputs.ndim != 2:
+        raise XQTBackendError("CUTLASS ConvRot expects a two-dimensional CUDA input")
+    if inputs.dtype not in {torch.float16, torch.bfloat16}:
+        raise XQTBackendError("CUTLASS ConvRot expects FP16 or BF16 inputs")
+    if qweight_t.dtype != torch.int8 or not qweight_t.is_cuda:
+        raise XQTBackendError("CUTLASS ConvRot expects CUDA int8 qweight_t")
+    if qweight_t.ndim != 2 or qweight_t.shape[0] != int(rotated_input_features):
+        raise XQTBackendError("CUTLASS ConvRot qweight shape does not match rotated K")
+    major, minor = torch.cuda.get_device_capability(inputs.device)
+    if (major, minor) != (8, 9):
+        raise XQTBackendError(
+            f"CUTLASS ConvRot is tuned for sm_89, got sm_{major}{minor}"
+        )
+    if output_dtype not in {torch.float16, torch.bfloat16}:
+        raise XQTBackendError("CUTLASS ConvRot output must be FP16 or BF16")
+
+    m = int(inputs.shape[0])
+    logical_k = int(inputs.shape[1])
+    rotated_k = int(rotated_input_features)
+    n = int(qweight_t.shape[1])
+    padded_m = ((m + 255) // 256) * 256
+    padded_k = int(qweight_t.shape[0])
+    if rotated_k % 256 != 0 or padded_k % 256 != 0:
+        raise XQTBackendError("CUTLASS ConvRot requires K aligned to 256")
+    if logical_k > rotated_k or n % 8 != 0:
+        raise XQTBackendError("CUTLASS ConvRot shape is not Tensor Core aligned")
+
+    if quantized_activation is None:
+        quantized_activation = torch.empty(
+            (padded_m, padded_k),
+            device=inputs.device,
+            dtype=torch.int8,
+        )
+    if activation_scales is None:
+        activation_scales = torch.empty(
+            padded_m,
+            device=inputs.device,
+            dtype=torch.float32,
+        )
+    if (
+        quantized_activation.shape != (padded_m, padded_k)
+        or quantized_activation.dtype != torch.int8
+        or quantized_activation.device != inputs.device
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot quantized activation workspace")
+    if (
+        activation_scales.shape != (padded_m,)
+        or activation_scales.dtype != torch.float32
+        or activation_scales.device != inputs.device
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot activation scale workspace")
+
+    lib = _load_lib()
+    required = (
+        "int8mma_convrot_quantize_rows",
+        "int8mma_run_cutlass_scale_64x128_prepacked_b_stream",
+        "int8mma_run_cutlass_scale_128x256_prepacked_b_stream",
+        "int8mma_apply_half_rowwise_scale_bias",
+    )
+    if not all(hasattr(lib, name) for name in required):
+        raise XQTBackendError(
+            "CUTLASS ConvRot symbols are unavailable; rebuild int8mma_sm89.so"
+        )
+    if prepacked_b is None:
+        prepacked_b = prepack_qweight_t_for_ptx_sm89(qweight_t)
+    if (
+        prepacked_b.shape != (n, padded_k)
+        or prepacked_b.dtype != torch.int8
+        or prepacked_b.device != inputs.device
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot prepacked B workspace")
+
+    stream = torch.cuda.current_stream(inputs.device).cuda_stream
+    input_kind = 0 if inputs.dtype == torch.bfloat16 else 1
+    err = lib.int8mma_convrot_quantize_rows(
+        inputs.contiguous().data_ptr(),
+        quantized_activation.data_ptr(),
+        activation_scales.data_ptr(),
+        m,
+        logical_k,
+        rotated_k,
+        padded_m,
+        padded_k,
+        input_kind,
+        stream,
+    )
+    if err != 0:
+        raise XQTBackendError(
+            f"CUTLASS ConvRot quantization failed with CUDA error {err}"
+        )
+
+    if scaled_output is None:
+        scaled_output = torch.empty(
+            (padded_m, n),
+            device=inputs.device,
+            dtype=torch.float16,
+        )
+    if (
+        scaled_output.shape != (padded_m, n)
+        or scaled_output.dtype != torch.float16
+        or scaled_output.device != inputs.device
+        or not scaled_output.is_contiguous()
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot scaled output workspace")
+
+    wscale = (
+        weight_scale
+        if weight_scale_buffer is None
+        else weight_scale_buffer
+    )
+    wscale = wscale.detach().to(
+        device=inputs.device,
+        dtype=torch.float32,
+    ).reshape(-1).contiguous()
+    if wscale.numel() != n:
+        raise XQTBackendError("weight_scale must contain one value per output channel")
+    if scale_bias_buffer is None:
+        scale_bias_buffer = torch.stack(
+            (wscale, torch.zeros_like(wscale)),
+            dim=1,
+        ).contiguous()
+    if (
+        scale_bias_buffer.shape != (n, 2)
+        or scale_bias_buffer.dtype != torch.float32
+        or scale_bias_buffer.device != inputs.device
+        or not scale_bias_buffer.is_contiguous()
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot scale/bias workspace")
+
+    gemm_symbol = (
+        "int8mma_run_cutlass_scale_128x256_prepacked_b_stream"
+        if padded_m <= 512
+        else "int8mma_run_cutlass_scale_64x128_prepacked_b_stream"
+    )
+    err = getattr(lib, gemm_symbol)(
+        quantized_activation.data_ptr(),
+        prepacked_b.data_ptr(),
+        scaled_output.data_ptr(),
+        scale_bias_buffer.data_ptr(),
+        padded_m,
+        n,
+        padded_k,
+        stream,
+    )
+    if err != 0:
+        raise XQTBackendError(
+            f"CUTLASS ConvRot GEMM failed with CUDA error {err}"
+        )
+
+    bias_value = bias_buffer
+    if bias_value is None:
+        bias_value = (
+            torch.zeros(n, device=inputs.device, dtype=torch.float32)
+            if bias is None
+            else bias.detach()
+        )
+    bias_value = bias_value.to(
+        device=inputs.device,
+        dtype=torch.float32,
+    ).reshape(-1).contiguous()
+    if bias_value.numel() != n:
+        raise XQTBackendError("bias must contain one value per output channel")
+
+    if output is None:
+        output = torch.empty(
+            (padded_m, n),
+            device=inputs.device,
+            dtype=output_dtype,
+        )
+    if (
+        output.shape != (padded_m, n)
+        or output.dtype != output_dtype
+        or output.device != inputs.device
+        or not output.is_contiguous()
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot output workspace")
+    output_kind = 0 if output_dtype == torch.bfloat16 else 1
+    err = lib.int8mma_apply_half_rowwise_scale_bias(
+        scaled_output.data_ptr(),
+        output.data_ptr(),
+        activation_scales.data_ptr(),
+        bias_value.data_ptr(),
+        padded_m,
+        n,
+        output_kind,
+        stream,
+    )
+    if err != 0:
+        raise XQTBackendError(
+            f"CUTLASS ConvRot epilogue failed with CUDA error {err}"
+        )
+    return output[:m], quantized_activation, activation_scales
 
 
 def int8_linear_ptx_sm89(

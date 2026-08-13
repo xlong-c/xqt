@@ -29,6 +29,94 @@
 
 不要把没有运行的候选写成失败,不要把 metadata-only backend 写成已执行,也不要把单次 host-wall 时间写成 kernel latency.
 
+## R-039: SM90 WGMMA 与 SM120 tcgen05 compile-ready GEMM matrix
+
+### 目标
+
+为后续 H100 (`sm_90`) 和 RTX 5090 (`sm_120`) 测试准备独立的 CUTLASS
+CollectiveBuilder GEMM 类型,不把 SM89 kernel 或 artifact 外推到新架构.
+当前交付物是可重复的 target-SM 编译入口和 registry capability matrix,
+不是 executable native path.
+
+### 基线与方法
+
+本机只有 RTX 4070 Ti SUPER (`sm_89`),因此没有在目标硬件上运行 correctness,
+SASS 或 CUDA event benchmark. 编译验证使用 CUDA 13.1.80,仓库 vendored
+CUTLASS headers,`nvcc -O3 -std=c++17 -shared -fPIC`,分别生成
+`compute_90,code=sm_90` 和 `compute_120,code=sm_120` shared objects.
+
+### 实现
+
+1. `sm90_fp8_wgmma.cu` 实例化 SM90 dense FP16/BF16 WGMMA/TMA
+   CollectiveBuilder,以及 E4M3/E5M2 FP8 blockwise mainloop. source 同时导出
+   固定内部 scale layout 的 `Arguments -> can_implement -> initialize -> run`
+   C ABI,并接收 PyTorch current CUDA stream. Python
+   `Sm90Fp8WgmmaBuildConfig` 和 `build_sm90_dense_artifact` 共用这个独立
+   source,manifest 仍写 `metadata_only`.
+2. `sm120_gemm.cu` 实例化 SM120 E4M3/E5M2 FP8 blockwise mainloop,
+   `Sm120BlockwiseScaleConfig<1,128,128>` groupwise schedule probe 和
+   NVFP4 block-scaled MMA probe,并为 FP8 blockwise/groupwise 导出 BF16 C ABI,
+   cluster 固定为 `1x1x1`.
+3. SM120 当前 CUTLASS builder 对 FP16 dense 配置会触发
+   `F8F6F4` 限制,所以没有伪造 FP16 tcgen05 registry entry. groupwise
+   schedule 复用 XQT 现有 `w:blockwise/a:blockwise` ABI,避免把 CUTLASS
+   内部 scale layout 误报成已有的 XQT groupwise layout.
+4. NVFP4 只保留 compile probe. XQT 当前没有 packed NVFP4 activation 加
+   global-scale 的 GEMM ABI,因此不进入自动 dispatch.
+5. 新增显式 target harness: `run_sm90_dense_wgmma_probe`,
+   `run_sm90_fp8_wgmma_probe` 和 `run_sm120_fp8_tcgen05_probe` 只接受
+   目标设备和已编译 artifact,并严格校验 CUTLASS tiled scale layout. 研究脚本
+   `bench_sm90_sm120.py` 负责 correctness,Cuda event benchmark 和 SASS
+   dump,但不会自动 promotion.
+   manifest 额外记录 `runtime_stream_abi="torch_current_stream_void_p"`.
+   scale grid 在传入 C ABI 前按 CUTLASS 非零 stride 做 column-major flatten,
+   不直接使用 XQT canonical tensor 的 C-contiguous 顺序.
+
+### 结果
+
+两份 translation unit 均在本机编译成功,shared object 可生成,并通过 `nm`
+检查 compile probe 与 runtime probe 符号. stream-aware ABI 和 Python
+contract 测试通过;研究 harness 已具备目标卡 correctness,Cuda event
+benchmark 和 SASS 采集入口. 当前本机仍不是 SM90/SM120,因此没有运行这些
+target gate,也没有数值,延迟或 SASS 结果;manifest 和 registry 均保持
+`metadata_only`,dispatch 继续回退 reference.
+
+### 适用边界与回退
+
+- SM90 dense/FP8 候选只匹配 `sm_90`.
+- SM120 FP8 候选只匹配 `sm_120` 和 blockwise FP8 scale mode.
+- 没有 target hardware correctness manifest 时,所有新候选都不能被 native
+  选择.
+- 非匹配 scale layout,dtype 或 architecture 走既有 reference path.
+
+### 未采纳方案
+
+- 不把 SM89 的 executor 改成运行时 `if sm >= 90`.
+- 不把 SM120 FP16 dense 作为 CUTLASS 已支持路径.
+- 不把 NVFP4 compile probe 当作 weight-only runtime kernel.
+- 不把 CUTLASS 内部 tiled scale tensor 当成 XQT `[N,G]` canonical scale ABI.
+- 不把 SM90/SM120 的 opt-in probe API 直接接入自动 dispatch;promotion
+  仍需要 target correctness,SASS 和 benchmark evidence.
+- 没有编造 latency,SASS 或误差数据.
+
+### 可复用规则
+
+- 新架构先独立实例化官方 builder,再接入 registry;compile success 和
+  correctness promotion 必须是两个 gate.
+- CUTLASS scale layout 与 XQT logical scale layout 不同的时候,先保留
+  compile probe,不要在 adapter 中隐式重排.
+- 当前硬件不是目标架构时,只记录 compile artifact,不做性能外推.
+
+### 验证落点
+
+- [SM90 source](../../../xqt/gemm/backends/sm90_fp8_wgmma.cu)
+- [SM90 build adapter](../../../xqt/gemm/backends/sm90_fp8_wgmma.py)
+- [SM120 source](../../../xqt/gemm/backends/sm120_gemm.cu)
+- [SM120 build adapter](../../../xqt/gemm/backends/sm120.py)
+- [target benchmark harness](../../../research/xqt-gemm/bench_sm90_sm120.py)
+- [registry](../../../xqt/gemm/registry.py)
+- [architecture tests](../../../tests/xqt/gemm/test_sm90_sm120_backends.py)
+
 ---
 
 ## R-001: ConvRot W8A8,TileLang front + CUDA/CUTLASS GEMM
@@ -3771,14 +3859,250 @@ CUDA event median, warmup 30, 15 轮 x 500 次, 交替候选顺序.
 - NCU 本机无 counter 权限, 不记录 cache/occupancy 归因, 所有性能结论仅以
   本机 CUDA event 为准, 不外推其他 SM.
 
+## R-037: SM89 SVDQuant RMSNorm fusion 的同层复核
+
+### 目标与范围
+
+复核 `SVDQuantLinear.set_fused_norm(...)` 的真实收益,并把 kernel 实现存在,
+wrapper 已接线,真实模型已自动 materialize 三个层级分开. 范围限 `sm_89`,
+INT4 W4A4,FP16/BF16 和 inference forward.
+
+### 实现状态
+
+- main BN128 和 small-N BN64 bound runner 均支持 `row_rms -> activation scale / LoRA
+  activation apply -> W4A4 GEMM` 路径.
+- `SVDQuantLinear` 在显式调用 `set_fused_norm(weight, eps)` 后可从 native hot path
+  进入相应 norm runner;unsupported device,dtype,autograd 或 backend 会显式回退.
+- 当前没有 transformer/Klein materializer 自动寻找相邻 RMSNorm 并调用
+  `set_fused_norm(...)`. 生产入口是显式 runtime API,不是完整模型已接线证明.
+
+### 公平基线修正
+
+旧 `bench_sm89_svdq_norm_fusion.py` 的 block 对照把 fused runner 与手写 FP32
+RMSNorm eager 组合比较. 后者会产生多个独立 kernel 和临时张量,因此其中
+`1.7x-2.9x` 一类差异不能归因于 norm fusion 本身. `M256 +23.9us` 和
+`M1024 +119.5us` 只描述该手写 standalone norm 相对无 norm block 的成本,
+不是 fused 相对同语义最优 baseline 的收益.
+
+记录基准改为 `bench_sm89_svdq_norm_runner.py`:
+
+- baseline 与 candidate 使用相同 BN64/BN128 GEMM schedule;
+- baseline 为 standalone Triton RMSNorm + 同一个 bound runner;
+- candidate 为 fused norm bound runner;
+- CUDA event,30 次 warmup,15 轮,每轮 200 次,候选顺序正反交替;
+- 数值 reference 为 FP32 RMSNorm accumulation/multiply,cast 回输入 dtype,再进入
+  相同 bound runner.
+
+### 测量结果
+
+环境为 NVIDIA GeForce RTX 4070 Ti SUPER,`sm_89`,torch 2.12.1+cu130,
+CUDA 13.0.
+
+| projection | M | dtype | fused / standalone 收益 |
+| --- | ---: | --- | ---: |
+| up | 256 | FP16 | `0.993x` |
+| up | 256 | BF16 | `0.973x` |
+| up | 1024 | FP16 | `1.037x` |
+| up | 1024 | BF16 | `1.023x` |
+| down | 256 | FP16 | `1.033x` |
+| down | 256 | BF16 | `1.037x` |
+| down | 1024 | FP16 | `1.120x` |
+| down | 1024 | BF16 | `1.112x` |
+
+可信口径是 norm fusion 相对 schedule-matched standalone 依 shape/dtype 为
+`-2.7%` 到 `+12.0%`. fused 相对无 norm floor 仍承担 norm 数学本身的成本.
+不能由此声称 block,transformer 或完整模型已追平 Nunchaku.
+
+数值方面,fused candidate 相对 FP32 RMSNorm reference 的 relative RMSE 为
+`0-1.79e-4`,低于 `5e-4` hard gate. 这证明融合未引入超出当前 W4A4 runner
+契约的额外漂移,但不等价于相对原始 FP16 模型无量化误差.
+
+### 适用边界
+
+- 仅覆盖本机 `sm_89`;其他 SM 需要独立 correctness 和 paired gate.
+- `fused_norm_weight` 需要显式设置;当前不是 Diffusers/Klein 自动接线.
+- NCU 无 counter 权限,不记录 occupancy,cache 或 warp stall 归因.
+- 旧 block benchmark 仍可描述 FP16 eager 与 SVDQuant block 的总体差异,但不能
+  作为 norm fusion 单项收益证据.
+
 ### 验证落点
 
-- [smalln kernel](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89_smalln_kernel.cu)
-- [smalln binding](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89_smalln_binding.cpp)
-- [Python 接线与启发式](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89.py)
-- [wrapper 热路径](../../../xqt/runtime/modules/svd_composite.py)
-- [smalln bench](../../../research/xqt-gemm/bench_sm89_svdq_w4a4_smalln.py) 与 [artifact](../../../research/xqt-gemm/artifacts/2026-08-12-sm89-svdq-w4a4-smalln/result.json)
-- [wrapper graph bench](../../../research/xqt-gemm/bench_sm89_svdq_w4a4_wrapper_graph.py) 与 [artifact](../../../research/xqt-gemm/artifacts/2026-08-12-sm89-svdq-w4a4-wrapper-graph/result.json)
-- [block e2e bench](../../../research/xqt-gemm/bench_sm89_svdq_block_e2e.py) 与 [artifact](../../../research/xqt-gemm/artifacts/2026-08-12-sm89-svdq-block-e2e/result.json)
-- 回归: `tests/xqt/runtime/test_svd_fusion.py` 与
-  `tests/xqt/runtime/test_composite_runtime_caches.py` 全绿 (33 项).
+- [production wrapper](../../../xqt/runtime/modules/svd_composite.py)
+- [native runner](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89.py)
+- [same-layer benchmark](../../../research/xqt-gemm/bench_sm89_svdq_norm_runner.py)
+- [tracked result](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-norm-runner/result.json)
+- [runtime tests](../../../tests/xqt/runtime/test_svd_norm_fusion.py)
+
+## R-038: SM89 官方 Nunchaku tanh-GELU MLP module parity
+
+### 目标与官方基线
+
+验证经典 Diffusers `FeedForward` 的两层 SVDQuant INT4 MLP 是否在真实 module
+wrapper 层追平官方 Nunchaku,而不是用 FP16 eager 加速比替代 parity.
+
+固定官方基线:
+
+| 项 | 值 |
+| --- | --- |
+| Nunchaku wheel | `1.3.0.dev20260306+cu13.0torch2.12` |
+| wheel SHA256 | `52cdcade40c3f656eeb86e53dfce2ad1a5dd1e1ebdfbf04e0fb064ba32be4910` |
+| source commit | `8f41840596bd516d434a1f88ac16c86fdb64e74f` |
+| official module | `NunchakuFeedForward` |
+| XQT module | Diffusers `FeedForward` 经 `materialize_svd_gelu_mlps(...)` 生成的 `SVDQuantGeluMLP` |
+
+两侧共享完全相同的 BN128 packed residual weight,weight scale,LoRA down/up,
+smooth factor 和 bias. native 语义为 tanh-approximate GELU,`+0.171875` shift,
+unsigned INT4 hidden activation quantization,再进入第二层 W4A4 GEMM. 固定官方
+CUDA 内核不是 PyTorch `approximate="none"` exact GELU.
+
+### 测量方法
+
+- GPU: NVIDIA GeForce RTX 4070 Ti SUPER,`sm_89`;
+- dtype: FP16/BF16;
+- shape: `M={64,256,1024}`,`K=O=3072`,`H=12288`,`rank=32`;
+- CUDA event + `end.synchronize()`;
+- 30 次 warmup,15 轮,每轮 500 次;
+- 每轮正反交替候选顺序;
+- module 对 module gate 为 `XQT / official <=1.025x`;
+- 官方和 XQT LoRA 分支都含 CUDA atomic accumulation. 每个候选采 8 次输出均值
+  做 numeric parity,同时单列 self drift;numeric hard gate 保持 `5e-4`.
+
+### 结果
+
+| M | dtype | official module | XQT materialized module | XQT / official | relative RMSE |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 64 | FP16 | `191.262 us` | `192.778 us` | `1.00793x` | `1.74e-4` |
+| 64 | BF16 | `194.508 us` | `191.842 us` | `0.98629x` | `7.90e-5` |
+| 256 | FP16 | `196.637 us` | `193.521 us` | `0.98415x` | `8.82e-5` |
+| 256 | BF16 | `198.250 us` | `195.406 us` | `0.98565x` | `1.03e-4` |
+| 1024 | FP16 | `482.441 us` | `481.402 us` | `0.99785x` | `5.17e-5` |
+| 1024 | BF16 | `483.240 us` | `482.562 us` | `0.99860x` | `3.25e-5` |
+
+6/6 module case 通过 gate. XQT materialized module 相对官方 module 的范围为
+`0.98415x-1.00793x`. 最大 XQT numeric relative RMSE 为 `1.74e-4`;所有
+候选的最大重复调用 self drift 为 `6.32e-4`,已作为 atomic nondeterminism 单列,
+没有放宽 parity hard gate.
+
+### 生产接线
+
+- `SVDQuantGeluMLP` 持有两层 `SVDQuantLinear`,支持 `[M,K]` 和 `[...,K]`.
+- `materialize_svd_gelu_mlps(...)` 只匹配 Diffusers `FeedForward`,
+  `GELU.approximate == "tanh"`,零 dropout 和两层 `SVDQuantLinear`.
+- `materialize_svd_for_inference(..., fuse_gelu_mlp=True)` 是显式 opt-in 入口.
+- exact GELU,GEGLU,SwiGLU,非零 dropout,fused norm,autograd,非 `sm_89` 和错误
+  dtype/device 均不进入 native runner.
+- cache key 包含 device,dtype,rows 和 CUDA stream;参数/buffer identity/version
+  变化会触发重新 pack/bind.
+
+### 仍未完成
+
+- 本记录只证明经典 tanh-GELU FFN module parity,不证明 attention,transformer
+  block 或完整 diffusion transformer parity.
+- FLUX.2 Klein 的 FFN 是 `linear_in -> SwiGLU -> linear_out`,不是本记录覆盖的
+  GELU MLP. 当前没有 Klein SVDQuant fused SwiGLU runner/model integration.
+- XQT 是 inference-only 路径,不能据此宣称训练加速.
+
+### 验证落点
+
+- [production module](../../../xqt/runtime/modules/svd_gelu_mlp.py)
+- [materializer](../../../xqt/runtime/composite_inference.py)
+- [official paired benchmark](../../../research/xqt-gemm/bench_sm89_svdq_official_mlp_parity_v1.py)
+- [tracked result](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-mlp-parity-v1/result.json)
+- [module tests](../../../tests/xqt/runtime/test_svd_gelu_mlp.py)
+
+## R-040: FLUX.2 Klein ConvRot W8A8 official Triton parity
+
+### 目标
+
+为 FLUX.2 Klein 4B transformer 提供 XQT 的 ConvRot W8A8 量化入口,并把
+`ComfyUI-INT8-Fast` 的官方 ConvRot 语义映射到 XQT runtime:
+regular-Hadamard group rotation, per-output-channel INT8 weight 和 dynamic
+per-token INT8 activation. 目标设备为 RTX 4070 Ti SUPER `sm_89`,dtype 为 BF16,
+官方 group size 为 `256`.
+
+### 基线与方法
+
+官方参考固定为 `/tmp/ComfyUI-INT8-Fast` 当前 checkout 的
+`convrot.py` 和 `int8_fused_kernel.py`. 两侧共享 XQT 从同一个 synthetic
+BF16 `nn.Linear(3072,3072)` 生成的 rotated INT8 weight,weight scale 和输入.
+每个 `M` 先 warmup `30` 次,再以 CUDA event 测量 `100` 次连续 forward,采样
+`15` 轮并交替候选顺序. 对照边界包含 rotation,activation quant 和 INT8 GEMM,
+不是只测 GEMM.
+
+### 瓶颈与实现
+
+初始 XQT dynamic path 把 activation rotation 强制转成 FP32,且通用 Triton
+W8A8 wrapper 只接受 scalar activation scale. 这与官方 BF16/FP16 rotation 和
+per-token scale 不同,并在小 `M` 上放大 launch 和 conversion 成本.
+
+本轮实现:
+
+1. 新增 `quantize_int8_rowwise_triton(...)`,在 Triton kernel 内完成 rowwise
+   max-abs,scale 和 signed INT8 quant.
+2. `gemm_int8_triton(...)` 的 activation scale ABI 同时接受 scalar 或 `[M]`,
+   kernel 按输出行加载 scale,保持已有 scalar-scale contract.
+3. `Int8MmaLinear` 的 Triton dynamic path 使用 rowwise quant;ConvRot 在显式
+   `engine="triton"` 时使用输入 dtype rotation,并短路 native capability/cache
+   检查.
+4. Klein helper 默认 `engine="triton"` 和 `min_int8_rows=17`;通用 `auto` native
+   path 保留为显式选项,避免把 native workspace 的小批量 `256` 行 padding 当成
+   官方默认行为.
+
+### 结果
+
+正式结果由 benchmark script 写入 artifact. 该 artifact 只覆盖 synthetic
+operator proxy,不覆盖真实 Klein 4B transformer:
+
+| M | official | XQT | XQT / official |
+| ---: | ---: | ---: | ---: |
+| 17 | `0.052613 ms` | `0.085587 ms` | `1.627x` |
+| 64 | `0.050545 ms` | `0.079216 ms` | `1.567x` |
+| 256 | `0.062792 ms` | `0.083764 ms` | `1.334x` |
+| 1024 | `0.133632 ms` | `0.134400 ms` | `1.006x` |
+
+`M=17/64` 的 XQT 结果仍慢于官方,因为官方参考把 rotation,activation quant 和
+GEMM 融合为更少的 launch;XQT 当前 Triton 路径已消除 FP32 rotation 和 scalar
+scale 的额外差异,但 rowwise quant 仍是独立 launch.`M=1024` 已基本追平,
+后续若要覆盖 Klein 常见小 batch,应继续做 rotation + rowwise quant + GEMM
+融合,不能通过调大 `min_int8_rows` 隐藏差距.
+
+XQT 和官方输出在 BF16 store 精度内一致: `M=17/64` 最大绝对差为 `0`,
+`M=256` 为 `0.00390625`,`M=1024` 为 `0.0078125`. 四个 shape 的 mean
+absolute 差依次为 `0`,`0`,`1.49e-8` 和 `1.26e-8`. runtime metadata 报告
+`engine="triton"`,`activation_quant_engine="triton_dynamic_per_token"`,
+`activation_granularity="per_token"` 和真实 `native_mma_executed=true`.
+完整 4B 权重不在本机缓存,所以没有进行 pipeline 级 prompt latency 或完整
+transformer parity.
+
+### 适用边界与未采纳方案
+
+- 默认 Klein helper 需要 CUDA Triton;CPU 仍可走 `torch_int_mm` reference,
+ 但不代表官方速度.
+- `engine="auto"` 的 SM89 native ConvRot 继续支持 BF16/FP16,但其 workspace
+  对非 `256` 行会向上 padding,小批量不作为 Klein 默认.
+- `M < 17` 默认走 BF16 dense fallback,可显式传 `min_int8_rows=0` 覆盖.
+- `torch.compile`/CUDA Graph whole-transformer wrapper 本轮没有设为默认;此前
+  synthetic compile 测量慢于 eager,且没有真实 4B transformer 输入验证.
+- 没有把 Klein 9B 的官方公开速度数据外推到 Klein 4B,也没有把 synthetic
+  operator proxy 外推成完整 pipeline 加速.
+
+### 可复用规则
+
+- W8A8 per-token contract 必须从量化 API,scale ABI,metadata 到 kernel 全链路
+  保持 `[M]` 语义,不能用 scalar-only wrapper 隐式代替.
+- 与外部实现对照时,必须把 rotation,activation quant,GEMM 和 dtype 转换放在
+  同一个计时边界.
+- native path 与官方 path 的 workspace/padding 规则不同时,按模型真实 `M`
+  选择默认 engine,不要只根据 GEMM-only 结果宣称 parity.
+
+### 验证落点
+
+- [Klein load helpers](../../../xqt/model/flux2_klein/load.py)
+- [Klein optimize helpers](../../../xqt/model/flux2_klein/optimize.py)
+- [rowwise Triton GEMM](../../../xqt/operator_opt/kernels/triton/gemm.py)
+- [INT8 runtime](../../../xqt/runtime/modules/int8_mma_linear.py)
+- [ConvRot runtime](../../../xqt/quant/quantizers/convrot_int8.py)
+- [paired benchmark](../../../research/xqt-gemm/bench_sm89_flux2_klein_convrot_w8a8.py)
+- [benchmark artifact](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-flux2-klein-convrot-w8a8/result.json)
+- [regression tests](../../../tests/xqt/test_flux2_klein_nvfp4_backend.py)
+- [Triton W8A8 tests](../../../tests/operator_opt/test_gemm_precision.py)

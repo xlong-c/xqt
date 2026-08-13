@@ -128,10 +128,10 @@ if triton is not None and tl is not None:
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < hidden_dim
         base = row_id * hidden_dim + offsets
-        x = tl.load(x_ptr + base, mask=mask, other=0.0)
+        x = tl.load(x_ptr + base, mask=mask, other=0.0).to(tl.float32)
         square_sum = tl.sum(x * x, axis=0)
         rms = tl.rsqrt(square_sum / hidden_dim + eps)
-        weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0)
+        weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
         out = x * rms * weight
         tl.store(out_ptr + base, out, mask=mask)
 
@@ -150,14 +150,14 @@ if triton is not None and tl is not None:
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < hidden_dim
         base = row_id * hidden_dim + offsets
-        merged = tl.load(x_ptr + base, mask=mask, other=0.0) + tl.load(
+        merged = tl.load(x_ptr + base, mask=mask, other=0.0).to(tl.float32) + tl.load(
             residual_ptr + base,
             mask=mask,
             other=0.0,
-        )
+        ).to(tl.float32)
         square_sum = tl.sum(merged * merged, axis=0)
         rms = tl.rsqrt(square_sum / hidden_dim + eps)
-        weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0)
+        weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
         out = merged * rms * weight
         tl.store(out_ptr + base, out, mask=mask)
 

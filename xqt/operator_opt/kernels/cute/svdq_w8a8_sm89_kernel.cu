@@ -390,6 +390,83 @@ struct QuantizeActLoraKernel {
     }
 };
 
+template <bool FuseGlu>
+struct QuantizeActPlainKernel {
+    static constexpr int MIN_ARCH = 800;
+
+    static constexpr size_t smem_size() {
+        if constexpr (!FuseGlu) {
+            return 0;
+        }
+        return Base::INSN_M * (Base::WARP_N / 2) * sizeof(Base::half_t);
+    }
+
+    __device__ void operator()(
+        const Base::half_t* input,
+        Base::packed_act_t* output,
+        Base::packed_ascale_t* oscales,
+        int K,
+        bool alwaysfalse) {
+        const int lane_id = static_cast<int>(threadIdx.x) % Base::WARP_SIZE;
+        const int warp_id = static_cast<int>(threadIdx.x) / Base::WARP_SIZE;
+        const int num_warps = static_cast<int>(blockDim.x) / Base::WARP_SIZE;
+        const int global_warp_row = static_cast<int>(blockIdx.x);
+        const int block_m = global_warp_row / (Base::BLOCK_M / Base::WARP_M);
+        const int gemm_warp_id = global_warp_row % (Base::BLOCK_M / Base::WARP_M);
+
+        __shared__ alignas(128) Base::half_t oscale_shmem[Base::WARP_M];
+        __shared__ alignas(128) uint8_t tmp_shmem[Base::NUM_WARPS][512];
+
+        const int K2 = FuseGlu ? K / 2 : K;
+        extern __shared__ uint8_t smem[];
+        Base::half_t* shmem = reinterpret_cast<Base::half_t*>(smem);
+
+        for (int tile_m = 0; tile_m < Base::WARP_M_TILES; tile_m++) {
+            for (int index = warp_id; index < Base::INSN_M; index += num_warps) {
+                const int row_local = tile_m * Base::INSN_M + index;
+                const int row_global = global_warp_row * Base::WARP_M + row_local;
+                const Base::half_t max_value =
+                    GEMM::template findmax_warp<FuseGlu>(
+                        input + row_global * K,
+                        shmem + index * K2,
+                        K,
+                        alwaysfalse);
+                oscale_shmem[row_local] = max_value / Base::half_t(127);
+            }
+            __syncthreads();
+
+            for (int block_k = warp_id; block_k < K2 / Base::WARP_K; block_k += num_warps) {
+                const int row_local = tile_m * Base::INSN_M;
+                const int row_global = global_warp_row * Base::WARP_M + row_local;
+                const int col = block_k * Base::WARP_K;
+                Base::packed_act_t quantized;
+                GEMM::template quantize_w8a8_warp<FuseGlu>(
+                    FuseGlu ? shmem + col : input + row_global * K + col,
+                    oscale_shmem + row_local,
+                    FuseGlu ? K2 : K,
+                    quantized,
+                    &tmp_shmem[warp_id]);
+                const int output_index =
+                    (((block_m * (K2 / Base::WARP_K) + block_k) *
+                          Base::NUM_WARPS +
+                      gemm_warp_id) *
+                         Base::WARP_M_TILES +
+                     tile_m) *
+                        Base::WARP_SIZE +
+                    lane_id;
+                store(&output[output_index], quantized);
+            }
+            __syncthreads();
+        }
+
+        GEMM::pack_ascales(
+            oscale_shmem,
+            &oscales[
+                (block_m * Base::NUM_WARPS + gemm_warp_id) *
+                Base::ASCALES_NUM_PACKS * Base::ASCALES_VALID_LANES]);
+    }
+};
+
 int launch_quantize_weight(
     const void* input,
     const void* scales,
@@ -449,6 +526,34 @@ int launch_quantize_act_lora_specialized(
         .padded_k = padded_k,
         .rank = rank,
     });
+    return static_cast<int>(cudaGetLastError());
+}
+
+int launch_quantize_act_fast(
+    const void* input,
+    void* output,
+    void* scales,
+    int padded_m,
+    int padded_k,
+    cudaStream_t stream) {
+    using Kernel = QuantizeActPlainKernel<false>;
+    auto function = invoke_kernel<
+        Kernel,
+        const Base::half_t*,
+        Base::packed_act_t*,
+        Base::packed_ascale_t*,
+        int,
+        bool>;
+    function<<<
+        dim3(padded_m / Base::WARP_M),
+        Base::WARP_SIZE * Base::NUM_WARPS,
+        Kernel::smem_size(),
+        stream>>>(
+        static_cast<const Base::half_t*>(input),
+        static_cast<Base::packed_act_t*>(output),
+        static_cast<Base::packed_ascale_t*>(scales),
+        padded_k,
+        false);
     return static_cast<int>(cudaGetLastError());
 }
 
@@ -709,6 +814,22 @@ extern "C" int xqt_svdq_w8a8_quantize_act(
         padded_m,
         padded_k,
         0,
+        stream);
+}
+
+extern "C" int xqt_svdq_w8a8_quantize_act_fast(
+    const void* input,
+    void* output,
+    void* scales,
+    int padded_m,
+    int padded_k,
+    cudaStream_t stream) {
+    return launch_quantize_act_fast(
+        input,
+        output,
+        scales,
+        padded_m,
+        padded_k,
         stream);
 }
 

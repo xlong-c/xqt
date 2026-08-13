@@ -97,6 +97,7 @@ def test_int8_mma_linear_cpu_metadata_reports_reference_not_true_mma() -> None:
         "requested": "w8a8_int8_mma",
         "weight_storage": "signed_int8_per_output_channel",
         "activation_encoding": "signed_int8_per_tensor",
+        "activation_granularity": "per_tensor",
         "execution_kind": "w8a8_int8_reference",
         "int8_operands_executed": True,
         "native_mma_executed": False,

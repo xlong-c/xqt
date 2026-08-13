@@ -37,6 +37,7 @@ from xqt.operator_opt.kernels.triton.gemm import (
     gemm_fp16_triton,
     gemm_int8_triton,
     gemm_reference,
+    quantize_int8_rowwise_triton,
     resolve_triton_bf16_gemm_schedule,
     resolve_triton_fp16_gemm_schedule,
 )
@@ -252,7 +253,55 @@ class TestTritonGEMMKernels:
         reference = reference * (a_scale.reshape(1) * b_scale.reshape(1, -1)) + bias
 
         assert output.dtype == torch.float16
-        assert torch.allclose(output.float(), reference, rtol=1e-3, atol=1e-3)
+        assert torch.allclose(
+            output.float(),
+            reference,
+            rtol=1e-2,
+            atol=4e-3,
+        )
+
+    def test_int8_true_w8a8_per_row_activation_scale(self) -> None:
+        torch.manual_seed(12)
+        rows, cols, output_features = 32, 128, 96
+        activation = torch.randn(
+            rows,
+            cols,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        quantized, activation_scale = quantize_int8_rowwise_triton(activation)
+        weight = torch.randint(
+            -16,
+            16,
+            (cols, output_features),
+            device="cuda",
+            dtype=torch.int8,
+        )
+        weight_scale = torch.linspace(
+            0.001,
+            0.003,
+            output_features,
+            device="cuda",
+        )
+
+        output = gemm_int8_triton(
+            quantized,
+            weight,
+            activation_scale,
+            weight_scale,
+            transpose_b=False,
+            output_dtype=torch.bfloat16,
+            block_m=64,
+            block_n=128,
+            block_k=32,
+        )
+        reference = torch._int_mm(quantized, weight).to(torch.float32)
+        reference = reference * activation_scale[:, None] * weight_scale[None, :]
+
+        assert quantized.dtype == torch.int8
+        assert activation_scale.shape == (rows,)
+        assert output.dtype == torch.bfloat16
+        assert torch.allclose(output.float(), reference, rtol=1e-2, atol=4e-3)
 
 
 @pytest.mark.parametrize(

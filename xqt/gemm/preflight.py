@@ -126,7 +126,14 @@ class GemmPreflightReport:
 
     @property
     def ready_for_compile(self) -> bool:
-        return self.status == "ready"
+        """Whether nvcc and CUTLASS headers are sufficient for compilation.
+
+        A host GPU with a different SM is an execution limitation, not a
+        cross-compilation limitation.  Executable promotion still requires a
+        fully ready target-device preflight.
+        """
+
+        return self.nvcc_path is not None and self.cutlass_include is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -250,7 +257,7 @@ class GemmArtifactManifest:
             return False
         if not self.artifact or not Path(self.artifact).expanduser().is_file():
             return False
-        return self.preflight.ready_for_compile
+        return self.preflight.status == "ready"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -418,6 +425,11 @@ def build_compile_flags(
 
     if preflight.nvcc_path is None or preflight.cutlass_include is None:
         raise RuntimeError("cannot build compile flags before CUDA/CUTLASS preflight is ready")
+    cutlass_include = Path(preflight.cutlass_include)
+    utility_include = cutlass_include.parent / "tools" / "util" / "include"
+    include_flags = ["-I", str(cutlass_include)]
+    if utility_include.is_dir():
+        include_flags.extend(["-I", str(utility_include)])
     return tuple(
         [
             preflight.nvcc_path,
@@ -427,8 +439,7 @@ def build_compile_flags(
             "-Xcompiler",
             "-fPIC",
             f"-gencode=arch=compute_{preflight.target_arch[3:]},code={preflight.target_arch}",
-            "-I",
-            preflight.cutlass_include,
+            *include_flags,
             str(source),
             "-o",
             str(output),

@@ -547,6 +547,129 @@ def pack_sm89_grouped_w4a16_weights(
     )
 
 
+def pack_sm89_grouped_w4a16_weights_multi_stream(
+    weights: Sequence[PackedWeight],
+    *,
+    quant: QuantSpec,
+    bias: Sequence[torch.Tensor | None] | None = None,
+    stream_count: int = 4,
+) -> Sm89GroupedW4A16PackedWeights:
+    """Prepack expert payloads across round-robin CUDA streams.
+
+    The canonical single-stream pack still owns every contract and shape gate;
+    the multi-stream path only parallelizes the per-expert normalization copies
+    and is rejected if its payload does not match the canonical result exactly.
+    """
+
+    if isinstance(stream_count, bool) or int(stream_count) != stream_count or int(stream_count) < 1:
+        raise ValueError("stream_count must be a positive int")
+    canonical = pack_sm89_grouped_w4a16_weights(weights, quant=quant, bias=bias)
+    if int(stream_count) == 1 or len(weights) == 1:
+        return canonical
+    device = canonical.qweight.device
+    normalized_bias = tuple(None for _ in weights) if bias is None else tuple(bias)
+    has_bias = any(value is not None for value in normalized_bias)
+    stream_count = min(int(stream_count), len(weights))
+    streams = [torch.cuda.Stream(device=device) for _ in range(stream_count)]
+    qweight_copies: list[torch.Tensor | None] = [None] * len(weights)
+    scale_copies: list[torch.Tensor | None] = [None] * len(weights)
+    zero_point_copies: list[torch.Tensor | None] = [None] * len(weights)
+    bias_copies: list[torch.Tensor | None] = [None] * len(weights)
+    events: list[torch.cuda.Event] = []
+    for index, weight in enumerate(weights):
+        with torch.cuda.stream(streams[index % stream_count]):
+            qweight_copies[index] = weight.qweight.contiguous()
+            scale_copies[index] = weight.scales.contiguous()
+            if quant.weight_zero_point:
+                zero_point_copies[index] = weight.zero_points.contiguous()
+            if has_bias:
+                current_bias = normalized_bias[index]
+                if current_bias is None:
+                    bias_copies[index] = torch.zeros(
+                        (canonical.n,), device=device, dtype=torch.float32
+                    )
+                else:
+                    bias_copies[index] = current_bias.to(dtype=torch.float32).reshape(
+                        canonical.n
+                    ).contiguous()
+            events.append(torch.cuda.Event())
+            events[-1].record(streams[index % stream_count])
+    current = torch.cuda.current_stream(device)
+    for event in events:
+        current.wait_event(event)
+    payload = Sm89GroupedW4A16PackedWeights(
+        qweight=torch.stack([value for value in qweight_copies if value is not None], dim=0).contiguous(),
+        scales=torch.stack([value for value in scale_copies if value is not None], dim=0).contiguous(),
+        zero_points=(
+            None
+            if not quant.weight_zero_point
+            else torch.stack(
+                [value for value in zero_point_copies if value is not None], dim=0
+            ).contiguous()
+        ),
+        bias=(
+            None
+            if not has_bias
+            else torch.stack([value for value in bias_copies if value is not None], dim=0).contiguous()
+        ),
+        expert_count=canonical.expert_count,
+        n=canonical.n,
+        k=canonical.k,
+        padded_k=canonical.padded_k,
+        group_size=canonical.group_size,
+        nibble_signed=canonical.nibble_signed,
+    )
+    if not torch.equal(payload.qweight, canonical.qweight):
+        raise RuntimeError("multi-stream grouped W4A16 qweight disagrees with canonical pack")
+    if not torch.equal(payload.scales, canonical.scales):
+        raise RuntimeError("multi-stream grouped W4A16 scales disagree with canonical pack")
+    for name in ("zero_points", "bias"):
+        multi = getattr(payload, name)
+        single = getattr(canonical, name)
+        if (multi is None) != (single is None):
+            raise RuntimeError(f"multi-stream grouped W4A16 {name} presence disagrees")
+        if multi is not None and not torch.equal(multi, single):
+            raise RuntimeError(f"multi-stream grouped W4A16 {name} disagrees with canonical pack")
+    return payload
+
+
+def warmup_sm89_grouped_w4a16(
+    activation: torch.Tensor,
+    weights: Sm89GroupedW4A16PackedWeights,
+    schedule: Sm89GroupedW4A16Schedule,
+    *,
+    quant: QuantSpec,
+    artifact: str | Path,
+    runs: int = 5,
+    scheduler: str = "auto",
+    persistent_blocks_per_sm: int = _DEFAULT_PERSISTENT_BLOCKS_PER_SM,
+    allow_unverified_artifact: bool = False,
+) -> dict[str, Any]:
+    """Warm instruction/data caches with discardable grouped W4A16 launches."""
+
+    if isinstance(runs, bool) or int(runs) != runs or int(runs) < 1:
+        raise ValueError("warmup runs must be a positive int")
+    for _ in range(int(runs)):
+        sm89_grouped_w4a16_executor(
+            activation,
+            weights,
+            schedule,
+            artifact=artifact,
+            scheduler=scheduler,
+            persistent_blocks_per_sm=persistent_blocks_per_sm,
+            allow_unverified_artifact=allow_unverified_artifact,
+        )
+    torch.cuda.synchronize(activation.device)
+    return {
+        "runs": int(runs),
+        "artifact": str(artifact),
+        "scheduler": scheduler,
+        "persistent_blocks_per_sm": persistent_blocks_per_sm,
+        "allow_unverified_artifact": allow_unverified_artifact,
+        "expert_count": weights.expert_count,
+    }
+
+
 def build_sm89_grouped_w4a16_schedule(
     grouped_problem: GroupedGemmProblem,
     *,
@@ -1181,8 +1304,10 @@ __all__ = [
     "build_sm89_grouped_w4a16_schedule",
     "dispatch_sm89_grouped_w4a16",
     "pack_sm89_grouped_w4a16_weights",
+    "pack_sm89_grouped_w4a16_weights_multi_stream",
     "query_sm89_grouped_w4a16_resources",
     "query_sm89_grouped_w4a16_persistent_resources",
     "sm89_grouped_w4a16_artifact_available",
     "sm89_grouped_w4a16_executor",
+    "warmup_sm89_grouped_w4a16",
 ]

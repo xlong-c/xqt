@@ -47,9 +47,15 @@ def _tilelang_int8_api():
 
 def _triton_int8_api():
     """Lazy import Triton INT8 GEMM kernels."""
-    from xqt.operator_opt.kernels.triton.gemm import gemm_int8_triton
+    from xqt.operator_opt.kernels.triton.gemm import (
+        gemm_int8_triton,
+        quantize_int8_rowwise_triton,
+    )
 
-    return {"gemm_int8_triton": gemm_int8_triton}
+    return {
+        "gemm_int8_triton": gemm_int8_triton,
+        "quantize_int8_rowwise_triton": quantize_int8_rowwise_triton,
+    }
 
 def _target_arch_from_device(device: torch.device) -> str | None:
     if device.type != "cuda":
@@ -275,10 +281,20 @@ class Int8MmaLinear(nn.Module):
             if engine_error_fallback_taken
             else "not_taken"
         )
+        activation_quant_engine = str(execution.get("activation_quant_engine", ""))
+        activation_granularity = str(
+            execution.get(
+                "activation_granularity",
+                "per_token"
+                if "per_token" in activation_quant_engine
+                else "per_tensor",
+            )
+        )
         return {
             "requested": "w8a8_int8_mma",
             "weight_storage": "signed_int8_per_output_channel",
-            "activation_encoding": "signed_int8_per_tensor",
+            "activation_encoding": f"signed_int8_{activation_granularity}",
+            "activation_granularity": activation_granularity,
             "execution_kind": execution_kind,
             "int8_operands_executed": int8_operands,
             "native_mma_executed": native_mma,
@@ -339,6 +355,7 @@ class Int8MmaLinear(nn.Module):
         inputs: torch.Tensor,
         *,
         prefer_tilelang: bool = False,
+        prefer_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, str]:
         flat_input = inputs.reshape(-1, self.input_features)
         if self.activation_scale_mode == "static":
@@ -357,6 +374,17 @@ class Int8MmaLinear(nn.Module):
                 )
                 return qactivation.contiguous(), scale, "tilelang_static"
         else:
+            if (
+                prefer_triton
+                and flat_input.is_cuda
+                and inputs.dtype
+                in {torch.float16, torch.bfloat16, torch.float32}
+            ):
+                api = _triton_int8_api()
+                qactivation, scale = api["quantize_int8_rowwise_triton"](
+                    flat_input.contiguous()
+                )
+                return qactivation, scale, "triton_dynamic_per_token"
             flat = flat_input.to(torch.float32)
             scale = self.activation_scale_from_inputs(flat, eps=self.eps).to(device=flat.device)
             qactivation = torch.round(flat / scale).clamp(-127, 127).to(torch.int8)
@@ -1167,6 +1195,7 @@ class Int8MmaLinear(nn.Module):
         qactivation, activation_scale, activation_quant_engine = self._quantize_activation(
             inputs,
             prefer_tilelang=prefer_tilelang and not prefer_ptx,
+            prefer_triton=selected_engine == "triton",
         )
         if selected_engine == "auto":
             if qactivation.is_cuda:

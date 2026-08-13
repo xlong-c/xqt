@@ -20,6 +20,7 @@ _NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _VECTOR_ALIGNMENT = 4
 _SUPPORTED_ROTATION_SIZES = frozenset({1, 4, 16, 64, 256})
+_QKV_HEAD_DIM = 128
 
 
 def _round_up(value: int, alignment: int) -> int:
@@ -105,7 +106,7 @@ def _load_extension() -> Any:
     os.environ.setdefault("MAX_JOBS", "1")
     try:
         return load(
-            name="xqt_svdq_w4a4_sm89_v2",
+            name="xqt_svdq_w4a4_sm89_v6",
             sources=[
                 str(_HERE / "svdq_w4a4_sm89_binding.cpp"),
                 str(_HERE / "svdq_w4a4_sm89_kernel.cu"),
@@ -165,6 +166,77 @@ def native_w4a4_version() -> str:
     return str(_load_extension().version())
 
 
+def pack_svdq_w4a4_rotary_emb(
+    rotary_emb: torch.Tensor,
+    *,
+    rows: int,
+    padded_rows: int | None = None,
+) -> torch.Tensor:
+    """Pack raw RoPE sin/cos values for the fused QKV epilogue.
+
+    ``rotary_emb`` must contain one raw RoPE record per flattened input row,
+    with shape ``[B, S, 64, 1, 2]`` or ``[M, 64, 1, 2]``. Padding is applied
+    after flattening so its row extent exactly matches the W4A4 workspace.
+    """
+
+    actual_rows = int(rows)
+    target_rows = (
+        _round_up(actual_rows, 256)
+        if padded_rows is None
+        else int(padded_rows)
+    )
+    if actual_rows <= 0:
+        raise ValueError("rows must be positive")
+    if target_rows < actual_rows or target_rows % 16 != 0:
+        raise ValueError("padded_rows must cover rows and be divisible by 16")
+    if rotary_emb.dtype != torch.float32:
+        raise ValueError("rotary_emb must be float32")
+    if rotary_emb.ndim == 5:
+        flattened_rows = int(rotary_emb.shape[0]) * int(rotary_emb.shape[1])
+    elif rotary_emb.ndim == 4:
+        flattened_rows = int(rotary_emb.shape[0])
+    else:
+        raise ValueError(
+            "rotary_emb must have shape [B, S, 64, 1, 2] or [M, 64, 1, 2]"
+        )
+    if tuple(int(dim) for dim in rotary_emb.shape[-3:]) != (
+        _QKV_HEAD_DIM // 2,
+        1,
+        2,
+    ):
+        raise ValueError("rotary_emb trailing shape must be [64, 1, 2]")
+    if flattened_rows != actual_rows:
+        raise ValueError("rotary_emb row count must match rows")
+
+    flattened = rotary_emb.reshape(
+        1,
+        actual_rows,
+        _QKV_HEAD_DIM // 2,
+        1,
+        2,
+    )
+    if target_rows != actual_rows:
+        padded = torch.zeros(
+            (1, target_rows, _QKV_HEAD_DIM // 2, 1, 2),
+            dtype=rotary_emb.dtype,
+            device=rotary_emb.device,
+        )
+        padded[:, :actual_rows].copy_(flattened)
+        flattened = padded
+
+    packed = flattened.reshape(
+        1,
+        target_rows // 16,
+        16,
+        _QKV_HEAD_DIM // 8,
+        8,
+    )
+    packed = packed.permute(0, 1, 3, 2, 4)
+    packed = packed.reshape(*packed.shape[:3], 2, 8, 4, 2)
+    packed = packed.permute(0, 1, 2, 4, 5, 3, 6).contiguous()
+    return packed.view(1, target_rows, _QKV_HEAD_DIM)
+
+
 @lru_cache(maxsize=1)
 def _load_smalln_extension() -> Any:
     if os.environ.get("XQT_DISABLE_SVDQ_W4A4_SM89", "0") == "1":
@@ -189,10 +261,11 @@ def _load_smalln_extension() -> Any:
     os.environ.setdefault("MAX_JOBS", "1")
     try:
         return load(
-            name="xqt_svdq_w4a4_sm89_smalln_v1",
+            name="xqt_svdq_w4a4_sm89_smalln_v3",
             sources=[
                 str(_HERE / "svdq_w4a4_sm89_smalln_binding.cpp"),
                 str(_HERE / "svdq_w4a4_sm89_smalln_kernel.cu"),
+                str(_HERE / "svdq_w4a4_sm89_norm_kernels.cu"),
             ],
             extra_include_paths=[str(_NUNCHAKU_INCLUDE)],
             extra_cflags=["-O3", "-std=c++20"],
@@ -317,6 +390,7 @@ class PackedW4A4Linear:
 class PackedSVDQW4A4Linear(PackedW4A4Linear):
     packed_down: torch.Tensor
     packed_up: torch.Tensor
+    norm_weight: torch.Tensor | None
     rank: int
     padded_rank: int
 
@@ -331,6 +405,12 @@ class W4A4Workspace:
     @property
     def padded_rows(self) -> int:
         return int(self.quantized_activation.shape[0])
+
+
+@dataclass(frozen=True)
+class SVDQW4A4GeluMLPWorkspace:
+    fc1: W4A4Workspace
+    fc2: W4A4Workspace
 
 
 def pack_w4a4_linear(
@@ -393,11 +473,18 @@ def pack_svdq_w4a4_linear(
     bias: torch.Tensor | None = None,
     *,
     smooth: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
 ) -> PackedSVDQW4A4Linear:
     """Prepack the residual and low-rank branches for two-stage SVDQuant."""
 
     base = pack_w4a4_linear(residual_weight, bias)
-    return _pack_svdq_lora_parts(base, down_weight, up_weight, smooth)
+    return _pack_svdq_lora_parts(
+        base,
+        down_weight,
+        up_weight,
+        smooth,
+        norm_weight,
+    )
 
 
 def _pack_svdq_lora_parts(
@@ -405,6 +492,7 @@ def _pack_svdq_lora_parts(
     down_weight: torch.Tensor,
     up_weight: torch.Tensor,
     smooth: torch.Tensor | None,
+    norm_weight: torch.Tensor | None,
 ) -> PackedSVDQW4A4Linear:
     if down_weight.ndim != 2 or up_weight.ndim != 2:
         raise ValueError("down_weight and up_weight must be two-dimensional")
@@ -445,10 +533,23 @@ def _pack_svdq_lora_parts(
         )
     base_values = dict(base.__dict__)
     base_values["packed_smooth"] = pack_scale(smooth_values)
+    padded_norm_weight = None
+    if norm_weight is not None:
+        if norm_weight.ndim != 1 or int(norm_weight.numel()) != base.input_features:
+            raise ValueError("norm_weight must match input_features")
+        padded_norm_weight = F.pad(
+            norm_weight.to(
+                device=base.qweight.device,
+                dtype=base.weight_scales.dtype,
+            ),
+            (0, base.padded_input_features - base.input_features),
+            value=1.0,
+        ).contiguous()
     return PackedSVDQW4A4Linear(
         **base_values,
         packed_down=pack_lowrank_weight(down, down=True),
         packed_up=pack_lowrank_weight(up, down=False),
+        norm_weight=padded_norm_weight,
         rank=rank,
         padded_rank=padded_rank,
     )
@@ -519,11 +620,18 @@ def pack_svdq_w4a4_linear_smalln(
     bias: torch.Tensor | None = None,
     *,
     smooth: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
 ) -> PackedSVDQW4A4Linear:
     """Prepack two-stage SVDQuant for the BLOCK_N=64 GEMM variant."""
 
     base = pack_w4a4_linear_smalln(residual_weight, bias)
-    return _pack_svdq_lora_parts(base, down_weight, up_weight, smooth)
+    return _pack_svdq_lora_parts(
+        base,
+        down_weight,
+        up_weight,
+        smooth,
+        norm_weight,
+    )
 
 
 def smalln_w4a4_beneficial(
@@ -667,6 +775,87 @@ def bind_svdq_w4a4_linear_smalln(
     )
 
 
+def svdq_w4a4_linear_smalln_norm(
+    inputs: torch.Tensor,
+    packed: PackedSVDQW4A4Linear,
+    *,
+    workspace: W4A4Workspace | None = None,
+    lora_scale: float = 1.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Run the RMSNorm-fused SVDQuant path with the BLOCK_N=64 GEMM."""
+
+    _require_native_shape(inputs, "inputs")
+    if int(inputs.shape[1]) != packed.input_features:
+        raise ValueError("inputs do not match packed input_features")
+    if inputs.device != packed.qweight.device or inputs.dtype != packed.weight_scales.dtype:
+        raise XQTBackendError("inputs must match packed weight device and dtype")
+    active_workspace = workspace or allocate_w4a4_workspace(
+        int(inputs.shape[0]),
+        packed,
+        with_lora_rank=packed.padded_rank,
+        with_row_scales=True,
+    )
+    _require_norm_workspace(inputs, active_workspace)
+    if packed.norm_weight is None:
+        raise ValueError("norm-fused packed state requires norm_weight")
+    smalln_extension = _load_smalln_extension()
+    return smalln_extension.svdq_linear_norm(
+        inputs.contiguous(),
+        packed.norm_weight,
+        active_workspace.row_scales,
+        active_workspace.quantized_activation,
+        active_workspace.activation_scales,
+        packed.packed_down,
+        active_workspace.lora_activation,
+        packed.packed_smooth,
+        packed.qweight,
+        packed.weight_scales,
+        packed.packed_up,
+        packed.packed_bias,
+        packed.output_features,
+        float(lora_scale),
+        float(eps),
+    )
+
+
+def bind_svdq_w4a4_linear_smalln_norm(
+    packed: PackedSVDQW4A4Linear,
+    workspace: W4A4Workspace,
+    *,
+    rows: int,
+    lora_scale: float = 1.0,
+    eps: float = 1e-6,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Bind the RMSNorm-fused BLOCK_N=64 SVDQuant steady-state runner."""
+
+    if workspace.lora_activation is None or workspace.row_scales is None:
+        raise ValueError("SVDQuant norm workspace requires lora_activation and row_scales")
+    if workspace.padded_rows != _round_up(int(rows), 256):
+        raise ValueError("workspace row extent does not match rows")
+    if packed.norm_weight is None:
+        raise ValueError("norm-fused packed state requires norm_weight")
+    smalln_extension = _load_smalln_extension()
+    return smalln_extension.bind_svdq_linear_norm(
+        packed.norm_weight,
+        workspace.row_scales,
+        workspace.quantized_activation,
+        workspace.activation_scales,
+        packed.packed_down,
+        workspace.lora_activation,
+        packed.packed_smooth,
+        packed.qweight,
+        packed.weight_scales,
+        packed.packed_up,
+        packed.packed_bias,
+        int(rows),
+        int(packed.input_features),
+        int(packed.output_features),
+        float(lora_scale),
+        float(eps),
+    )
+
+
 def allocate_w4a4_workspace(
     rows: int,
     packed: PackedW4A4Linear,
@@ -704,6 +893,31 @@ def allocate_w4a4_workspace(
         activation_scales=activation_scales,
         lora_activation=lora_activation,
         row_scales=row_scales,
+    )
+
+
+def allocate_svdq_w4a4_gelu_mlp_workspace(
+    rows: int,
+    fc1: PackedSVDQW4A4Linear,
+    fc2: PackedSVDQW4A4Linear,
+) -> SVDQW4A4GeluMLPWorkspace:
+    """Allocate both activation/LoRA workspaces for a fused GELU MLP."""
+
+    if fc1.output_features != fc2.input_features:
+        raise ValueError("fc1 output_features must match fc2 input_features")
+    if fc1.padded_output_features != fc2.padded_input_features:
+        raise ValueError("fc1 and fc2 padded hidden features must match")
+    return SVDQW4A4GeluMLPWorkspace(
+        fc1=allocate_w4a4_workspace(
+            rows,
+            fc1,
+            with_lora_rank=fc1.padded_rank,
+        ),
+        fc2=allocate_w4a4_workspace(
+            rows,
+            fc2,
+            with_lora_rank=fc2.padded_rank,
+        ),
     )
 
 
@@ -892,6 +1106,224 @@ def bind_svdq_w4a4_linear(
     )
 
 
+def bind_svdq_w4a4_qkv_rmsnorm_rope(
+    packed: PackedSVDQW4A4Linear,
+    workspace: W4A4Workspace,
+    norm_q: torch.Tensor,
+    norm_k: torch.Tensor,
+    *,
+    rows: int,
+    lora_scale: float = 1.0,
+    eps: float = 1e-6,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Bind the QKV projection, Q/K RMSNorm, and RoPE epilogue hot path."""
+
+    if workspace.lora_activation is None:
+        raise ValueError("SVDQuant QKV workspace requires lora_activation")
+    if workspace.padded_rows != _round_up(int(rows), 256):
+        raise ValueError("workspace row extent does not match rows")
+    if packed.output_features != packed.padded_output_features:
+        raise ValueError("QKV output_features must not require output padding")
+    if packed.output_features % (3 * _QKV_HEAD_DIM) != 0:
+        raise ValueError("QKV output_features must be divisible by 384")
+    for tensor, name in ((norm_q, "norm_q"), (norm_k, "norm_k")):
+        if tensor.ndim != 1 or int(tensor.numel()) != _QKV_HEAD_DIM:
+            raise ValueError(f"{name} must have 128 elements")
+        if tensor.device != packed.qweight.device:
+            raise ValueError(f"{name} must match the packed weight device")
+        if tensor.dtype != packed.weight_scales.dtype:
+            raise ValueError(f"{name} must match the packed weight dtype")
+    extension = _load_extension()
+    return extension.bind_svdq_qkv_rmsnorm_rope(
+        workspace.quantized_activation,
+        workspace.activation_scales,
+        packed.packed_down,
+        workspace.lora_activation,
+        packed.packed_smooth,
+        packed.qweight,
+        packed.weight_scales,
+        packed.packed_up,
+        packed.packed_bias,
+        norm_q.contiguous(),
+        norm_k.contiguous(),
+        int(rows),
+        int(packed.input_features),
+        int(packed.output_features),
+        float(lora_scale),
+        float(eps),
+    )
+
+
+def svdq_w4a4_qkv_rmsnorm_rope(
+    inputs: torch.Tensor,
+    packed: PackedSVDQW4A4Linear,
+    norm_q: torch.Tensor,
+    norm_k: torch.Tensor,
+    rotary_emb: torch.Tensor,
+    *,
+    workspace: W4A4Workspace | None = None,
+    lora_scale: float = 1.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Run one fused QKV projection with an already packed RoPE tensor."""
+
+    _require_native_shape(inputs, "inputs")
+    if int(inputs.shape[1]) != packed.input_features:
+        raise ValueError("inputs do not match packed input_features")
+    if inputs.device != packed.qweight.device or inputs.dtype != packed.weight_scales.dtype:
+        raise XQTBackendError("inputs must match packed weight device and dtype")
+    active_workspace = workspace or allocate_w4a4_workspace(
+        int(inputs.shape[0]),
+        packed,
+        with_lora_rank=packed.padded_rank,
+    )
+    runner = bind_svdq_w4a4_qkv_rmsnorm_rope(
+        packed,
+        active_workspace,
+        norm_q,
+        norm_k,
+        rows=int(inputs.shape[0]),
+        lora_scale=lora_scale,
+        eps=eps,
+    )
+    return runner(inputs.contiguous(), rotary_emb.contiguous())
+
+
+def svdq_w4a4_attention_fp16(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    scale: float,
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run the official Nunchaku-style FP16 online-softmax attention kernel."""
+
+    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+        raise ValueError("attention query, key, and value must be [B, H, S, 128]")
+    if query.shape != key.shape or query.shape != value.shape:
+        raise ValueError("attention query, key, and value shapes must match")
+    if int(query.shape[-1]) != _QKV_HEAD_DIM:
+        raise ValueError("attention head dimension must be 128")
+    if query.dtype != torch.float16 or key.dtype != torch.float16 or value.dtype != torch.float16:
+        raise ValueError("FP16 attention query, key, and value must use float16")
+    if not query.is_cuda or key.device != query.device or value.device != query.device:
+        raise XQTBackendError("FP16 attention tensors must share a CUDA device")
+    if output is None:
+        output = torch.empty(
+            (int(query.shape[0]), int(query.shape[2]), int(query.shape[1]) * _QKV_HEAD_DIM),
+            device=query.device,
+            dtype=query.dtype,
+        )
+    if output.shape != (
+        int(query.shape[0]),
+        int(query.shape[2]),
+        int(query.shape[1]) * _QKV_HEAD_DIM,
+    ):
+        raise ValueError("attention output shape does not match query")
+    if output.dtype not in {torch.float16, torch.bfloat16}:
+        raise ValueError("attention output must use float16 or bfloat16")
+    extension = _load_extension()
+    return extension.attention_fp16(
+        query.contiguous(),
+        key.contiguous(),
+        value.contiguous(),
+        output,
+        float(scale),
+    )
+
+
+def bind_svdq_w4a4_gelu_mlp(
+    fc1: PackedSVDQW4A4Linear,
+    fc2: PackedSVDQW4A4Linear,
+    workspace: SVDQW4A4GeluMLPWorkspace,
+    *,
+    rows: int,
+    fc1_lora_scale: float = 1.0,
+    fc2_lora_scale: float = 1.0,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Bind an official-semantics INT4 SVDQuant GELU MLP hot path.
+
+    The first GEMM epilogue applies LoRA-up and bias, tanh-approximate GELU, the
+    Nunchaku ``+0.171875`` shift, unsigned INT4 quantization, and the second
+    layer LoRA-down. The second GEMM consumes unsigned activations and applies
+    its LoRA-up and bias.
+    """
+
+    if fc1.output_features != fc2.input_features:
+        raise ValueError("fc1 output_features must match fc2 input_features")
+    if fc1.padded_output_features != fc2.padded_input_features:
+        raise ValueError("fc1 and fc2 padded hidden features must match")
+    expected_rows = _round_up(int(rows), 256)
+    if workspace.fc1.padded_rows != expected_rows:
+        raise ValueError("fc1 workspace row extent does not match rows")
+    if workspace.fc2.padded_rows != expected_rows:
+        raise ValueError("fc2 workspace row extent does not match rows")
+    if workspace.fc1.lora_activation is None:
+        raise ValueError("fc1 workspace requires lora_activation")
+    if workspace.fc2.lora_activation is None:
+        raise ValueError("fc2 workspace requires lora_activation")
+    extension = _load_extension()
+    return extension.bind_svdq_gelu_mlp(
+        workspace.fc1.quantized_activation,
+        workspace.fc1.activation_scales,
+        fc1.packed_down,
+        workspace.fc1.lora_activation,
+        fc1.packed_smooth,
+        fc1.qweight,
+        fc1.weight_scales,
+        fc1.packed_up,
+        fc1.packed_bias,
+        workspace.fc2.quantized_activation,
+        workspace.fc2.activation_scales,
+        fc2.packed_down,
+        workspace.fc2.lora_activation,
+        fc2.packed_smooth,
+        fc2.qweight,
+        fc2.weight_scales,
+        fc2.packed_up,
+        fc2.packed_bias,
+        int(rows),
+        int(fc1.input_features),
+        int(fc1.output_features),
+        int(fc2.output_features),
+        float(fc1_lora_scale),
+        float(fc2_lora_scale),
+    )
+
+
+def svdq_w4a4_gelu_mlp(
+    inputs: torch.Tensor,
+    fc1: PackedSVDQW4A4Linear,
+    fc2: PackedSVDQW4A4Linear,
+    *,
+    workspace: SVDQW4A4GeluMLPWorkspace | None = None,
+    fc1_lora_scale: float = 1.0,
+    fc2_lora_scale: float = 1.0,
+) -> torch.Tensor:
+    """Run the bound official-semantics SVDQuant GELU MLP once."""
+
+    _require_native_shape(inputs, "inputs")
+    if int(inputs.shape[1]) != fc1.input_features:
+        raise ValueError("inputs do not match fc1 input_features")
+    if inputs.device != fc1.qweight.device or inputs.dtype != fc1.weight_scales.dtype:
+        raise XQTBackendError("inputs must match packed weight device and dtype")
+    active_workspace = workspace or allocate_svdq_w4a4_gelu_mlp_workspace(
+        int(inputs.shape[0]),
+        fc1,
+        fc2,
+    )
+    runner = bind_svdq_w4a4_gelu_mlp(
+        fc1,
+        fc2,
+        active_workspace,
+        rows=int(inputs.shape[0]),
+        fc1_lora_scale=fc1_lora_scale,
+        fc2_lora_scale=fc2_lora_scale,
+    )
+    return runner(inputs.contiguous())
+
+
 def _require_norm_workspace(
     inputs: torch.Tensor,
     workspace: W4A4Workspace,
@@ -914,10 +1346,10 @@ def svdq_w4a4_linear_norm(
 ) -> torch.Tensor:
     """RMSNorm-fused two-stage W4A4: ``inputs`` is the PRE-norm activation.
 
-    The per-channel norm weight must already be folded into ``packed`` (as
-    ``smooth`` and into the LoRA-down columns); this call only computes the
-    per-row ``rsqrt(mean(x^2) + eps)`` factor and applies it to the group
-    scales and LoRA partials between the quantize and GEMM stages.
+    The per-channel norm weight is stored explicitly in ``packed``. The row
+    RMS kernel computes ``rsqrt(mean(x^2) + eps)`` and the activation kernel
+    applies both factors before sharing the fragment with W4A4 quantization
+    and LoRA-down.
     """
 
     _require_native_shape(inputs, "inputs")
@@ -932,9 +1364,12 @@ def svdq_w4a4_linear_norm(
         with_row_scales=True,
     )
     _require_norm_workspace(inputs, active_workspace)
+    if packed.norm_weight is None:
+        raise ValueError("norm-fused packed state requires norm_weight")
     extension = _load_extension()
     return extension.svdq_linear_norm(
         inputs.contiguous(),
+        packed.norm_weight,
         active_workspace.row_scales,
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
@@ -965,8 +1400,11 @@ def bind_svdq_w4a4_linear_norm(
         raise ValueError("SVDQuant norm workspace requires lora_activation and row_scales")
     if workspace.padded_rows != _round_up(int(rows), 256):
         raise ValueError("workspace row extent does not match rows")
+    if packed.norm_weight is None:
+        raise ValueError("norm-fused packed state requires norm_weight")
     extension = _load_extension()
     return extension.bind_svdq_linear_norm(
+        packed.norm_weight,
         workspace.row_scales,
         workspace.quantized_activation,
         workspace.activation_scales,
@@ -988,12 +1426,17 @@ def bind_svdq_w4a4_linear_norm(
 __all__ = [
     "PackedSVDQW4A4Linear",
     "PackedW4A4Linear",
+    "SVDQW4A4GeluMLPWorkspace",
     "W4A4Workspace",
+    "allocate_svdq_w4a4_gelu_mlp_workspace",
     "allocate_w4a4_workspace",
     "bind_convrot_w4a4_linear",
     "bind_svdq_w4a4_linear",
     "bind_svdq_w4a4_linear_norm",
+    "bind_svdq_w4a4_qkv_rmsnorm_rope",
     "bind_svdq_w4a4_linear_smalln",
+    "bind_svdq_w4a4_linear_smalln_norm",
+    "bind_svdq_w4a4_gelu_mlp",
     "convrot_w4a4_linear",
     "native_convrot_w4a4_shape_supported",
     "native_w4a4_available",
@@ -1003,14 +1446,19 @@ __all__ = [
     "native_w4a4_version",
     "pack_lowrank_weight",
     "pack_scale",
+    "pack_svdq_w4a4_rotary_emb",
     "pack_svdq_w4a4_linear",
     "pack_svdq_w4a4_linear_smalln",
     "pack_w4a4_linear",
     "pack_w4a4_linear_smalln",
     "smalln_w4a4_beneficial",
     "svdq_w4a4_linear",
+    "svdq_w4a4_gelu_mlp",
     "svdq_w4a4_linear_norm",
+    "svdq_w4a4_qkv_rmsnorm_rope",
+    "svdq_w4a4_attention_fp16",
     "svdq_w4a4_linear_smalln",
+    "svdq_w4a4_linear_smalln_norm",
     "w4a4_linear",
     "w4a4_linear_smalln",
 ]

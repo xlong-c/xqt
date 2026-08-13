@@ -15,6 +15,10 @@ from xqt.quant.quantizers.convrot_4bit import (
     ConvRot4BitQuantizationResult,
     quantize_with_convrot_4bit,
 )
+from xqt.quant.quantizers.convrot_int8 import (
+    ConvRotInt8QuantizationResult,
+    quantize_with_convrot_int8,
+)
 from xqt.runtime import apply_execution_policy
 
 from .types import (
@@ -30,6 +34,49 @@ from .types import (
     normalize_flux2_klein_nvfp4_engine,
 )
 from .targets import materialize_flux2_klein_nvfp4_engine
+
+
+_FLUX2_KLEIN_CONVROT_INT8_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    r"(^|\.)img_in($|\.)",
+    r"(^|\.)x_embedder($|\.)",
+    r"(^|\.)txt_in($|\.)",
+    r"(^|\.)time_in($|\.)",
+    r"(^|\.)guidance_in($|\.)",
+    r"(^|\.)double_stream_modulation_img($|\.)",
+    r"(^|\.)double_stream_modulation_txt($|\.)",
+    r"(^|\.)single_stream_modulation($|\.)",
+)
+
+
+def flux2_klein_bf16_convrot_int8_default_policy() -> dict[str, Any]:
+    """Return the official-aligned FLUX.2 klein ConvRot W8A8 policy."""
+
+    return {
+        "dtype": "int8",
+        "scheme": "convrot_w8a8",
+        "include_module_types": ["Linear"],
+        "exclude_name_patterns": list(_FLUX2_KLEIN_CONVROT_INT8_EXCLUDE_PATTERNS),
+        "rot_size": 256,
+        "activation_scale_mode": "dynamic",
+        "min_int8_rows": 17,
+        "fuse_norm": False,
+    }
+
+
+def _resolve_flux2_klein_convrot_int8_policy(
+    policy: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    resolved = flux2_klein_bf16_convrot_int8_default_policy()
+    if policy is not None:
+        resolved.update(dict(policy))
+        custom_excludes = policy.get("exclude_name_patterns")
+        if custom_excludes is not None:
+            merged_excludes = [str(pattern) for pattern in custom_excludes]
+            for pattern in _FLUX2_KLEIN_CONVROT_INT8_EXCLUDE_PATTERNS:
+                if pattern not in merged_excludes:
+                    merged_excludes.append(pattern)
+            resolved["exclude_name_patterns"] = merged_excludes
+    return resolved
 
 
 def _resolve_flux2_klein_nvfp4_model_file(
@@ -546,6 +593,59 @@ def quantize_flux2_klein_bf16_transformer_to_convrot_4bit(
     )
 
 
+def quantize_flux2_klein_bf16_transformer_to_convrot_int8(
+    model: nn.Module,
+    *,
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    inplace: bool = False,
+    engine: str = "cuda_sm89",
+    fallback_engine: str = "torch_int_mm",
+    min_int8_rows: int | None = None,
+) -> ConvRotInt8QuantizationResult:
+    """Quantize one FLUX.2 klein BF16 transformer to ConvRot W8A8."""
+
+    resolved_policy = _resolve_flux2_klein_convrot_int8_policy(policy)
+    effective_min_int8_rows = int(
+        resolved_policy["min_int8_rows"]
+        if min_int8_rows is None
+        else min_int8_rows
+    )
+    resolved_policy["min_int8_rows"] = effective_min_int8_rows
+    result = quantize_with_convrot_int8(
+        model,
+        policy=resolved_policy,
+        strategy="convrot_w8a8",
+        calibration_inputs=calibration_inputs,
+        inplace=inplace,
+        engine=engine,
+        fallback_engine=fallback_engine,
+        activation_scale_mode="dynamic",
+        min_int8_rows=effective_min_int8_rows,
+        fuse_norm=bool(resolved_policy.get("fuse_norm", False)),
+    )
+    if not result.quantized_modules:
+        raise XQTBackendError(
+            "no FLUX.2 klein Linear layers matched the ConvRot W8A8 policy"
+        )
+    result.metadata.update(
+        {
+            "model_family": "flux2_klein_4b",
+            "model_part": "transformer",
+            "official_reference": "ComfyUI-INT8-Fast",
+            "official_convrot_group_size": 256,
+            "official_excluded_module_patterns": list(
+                _FLUX2_KLEIN_CONVROT_INT8_EXCLUDE_PATTERNS
+            ),
+            "quantization_scope": (
+                "Linear modules except FLUX.2 input, time, guidance, "
+                "and modulation projections"
+            ),
+        }
+    )
+    return result
+
+
 def quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
     pipeline: Any,
     *,
@@ -569,6 +669,38 @@ def quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
         calibration_inputs=calibration_inputs,
         inplace=True,
         materialize_mixed_precision=materialize_mixed_precision,
+    )
+    setattr(target_pipeline, transformer_attr, result.model)
+    return target_pipeline, result
+
+
+def quantize_flux2_klein_bf16_pipeline_to_convrot_int8(
+    pipeline: Any,
+    *,
+    transformer_attr: str = "transformer",
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    inplace: bool = False,
+    engine: str = "cuda_sm89",
+    fallback_engine: str = "torch_int_mm",
+    min_int8_rows: int | None = None,
+) -> tuple[Any, ConvRotInt8QuantizationResult]:
+    """Quantize the BF16 FLUX.2 klein pipeline transformer to ConvRot W8A8."""
+
+    if not hasattr(pipeline, transformer_attr):
+        raise XQTBackendError(
+            f"pipeline does not expose transformer attribute {transformer_attr!r}"
+        )
+    target_pipeline = pipeline if inplace else copy.deepcopy(pipeline)
+    transformer = getattr(target_pipeline, transformer_attr)
+    result = quantize_flux2_klein_bf16_transformer_to_convrot_int8(
+        transformer,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=True,
+        engine=engine,
+        fallback_engine=fallback_engine,
+        min_int8_rows=min_int8_rows,
     )
     setattr(target_pipeline, transformer_attr, result.model)
     return target_pipeline, result
@@ -605,6 +737,41 @@ def load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit(
     )
 
 
+def load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_int8(
+    *,
+    repo_id: str = FLUX2_KLEIN_4B_REPO_ID,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str | torch.device | None = None,
+    local_files_only: bool = False,
+    transformer_attr: str = "transformer",
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    engine: str = "cuda_sm89",
+    fallback_engine: str = "torch_int_mm",
+    min_int8_rows: int | None = None,
+    **kwargs: Any,
+) -> tuple[Any, ConvRotInt8QuantizationResult]:
+    """Load one BF16 FLUX.2 klein pipeline and quantize its transformer to W8A8."""
+
+    pipeline = load_flux2_klein_bf16_pipeline(
+        repo_id=repo_id,
+        dtype=dtype,
+        device=device,
+        local_files_only=local_files_only,
+        **kwargs,
+    )
+    return quantize_flux2_klein_bf16_pipeline_to_convrot_int8(
+        pipeline,
+        transformer_attr=transformer_attr,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=True,
+        engine=engine,
+        fallback_engine=fallback_engine,
+        min_int8_rows=min_int8_rows,
+    )
+
+
 def run_flux2_klein_bf16_convrot_4bit_inference(
     pipeline: Any,
     *,
@@ -625,6 +792,40 @@ def run_flux2_klein_bf16_convrot_4bit_inference(
         calibration_inputs=calibration_inputs,
         inplace=inplace,
         materialize_mixed_precision=materialize_mixed_precision,
+    )
+    with torch.inference_mode():
+        output = quantized_pipeline(prompt=prompt, **kwargs)
+    return {
+        "pipeline": quantized_pipeline,
+        "quantization": result.to_dict(),
+        "output": output,
+    }
+
+
+def run_flux2_klein_bf16_convrot_int8_inference(
+    pipeline: Any,
+    *,
+    prompt: str | list[str],
+    transformer_attr: str = "transformer",
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Iterable[Any] | None = None,
+    engine: str = "cuda_sm89",
+    fallback_engine: str = "torch_int_mm",
+    min_int8_rows: int | None = None,
+    inplace: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Quantize one BF16 FLUX.2 klein pipeline to W8A8 and execute it once."""
+
+    quantized_pipeline, result = quantize_flux2_klein_bf16_pipeline_to_convrot_int8(
+        pipeline,
+        transformer_attr=transformer_attr,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=inplace,
+        engine=engine,
+        fallback_engine=fallback_engine,
+        min_int8_rows=min_int8_rows,
     )
     with torch.inference_mode():
         output = quantized_pipeline(prompt=prompt, **kwargs)

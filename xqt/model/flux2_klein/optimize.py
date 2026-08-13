@@ -12,6 +12,7 @@ from xqt.analysis.compare import compare_tensors
 from xqt.benchmark import benchmark_callable
 from xqt.core.errors import XQTBackendError
 from xqt.operator_opt._benchmark import _benchmark_paired_callables
+from xqt.quant.quantizers.convrot_int8 import ConvRotInt8QuantizationResult
 
 from .types import (
     Flux2KleinNVFP4CompiledTransformerResult,
@@ -170,6 +171,80 @@ def optimize_flux2_klein_nvfp4_transformer(
     )
 
 
+def optimize_flux2_klein_convrot_int8_transformer(
+    transformer: nn.Module,
+    *,
+    policy: Mapping[str, Any] | None = None,
+    calibration_inputs: Sequence[Any] | None = None,
+    inplace: bool = False,
+    engine: str = "cuda_sm89",
+    fallback_engine: str = "torch_int_mm",
+    min_int8_rows: int | None = None,
+    optimization_kind: str = "compile",
+    compile_engine: str = "inductor",
+    compile_mode: str | None = None,
+    compile_fullgraph: bool = False,
+    compile_dynamic: bool = False,
+    compile_options: Mapping[str, Any] | None = None,
+    hidden_states: torch.Tensor | None = None,
+    encoder_hidden_states: torch.Tensor | None = None,
+    timestep: torch.Tensor | None = None,
+    img_ids: torch.Tensor | None = None,
+    txt_ids: torch.Tensor | None = None,
+    guidance: torch.Tensor | None = None,
+    joint_attention_kwargs: dict[str, Any] | None = None,
+    warmup_iterations: int = 0,
+) -> tuple[
+    ConvRotInt8QuantizationResult,
+    Flux2KleinNVFP4CompiledTransformerResult
+    | Flux2KleinNVFP4CudaGraphTransformerResult,
+]:
+    """Quantize ConvRot W8A8, then build a whole-transformer fastpath."""
+
+    from .load import quantize_flux2_klein_bf16_transformer_to_convrot_int8
+
+    quantization = quantize_flux2_klein_bf16_transformer_to_convrot_int8(
+        transformer,
+        policy=policy,
+        calibration_inputs=calibration_inputs,
+        inplace=inplace,
+        engine=engine,
+        fallback_engine=fallback_engine,
+        min_int8_rows=min_int8_rows,
+    )
+    optimized = optimize_flux2_klein_nvfp4_transformer(
+        quantization.model,
+        engine=None,
+        optimization_kind=optimization_kind,
+        compile_engine=compile_engine,
+        compile_mode=compile_mode,
+        compile_fullgraph=compile_fullgraph,
+        compile_dynamic=compile_dynamic,
+        compile_options=compile_options,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        joint_attention_kwargs=joint_attention_kwargs,
+        warmup_iterations=warmup_iterations,
+        inplace=True,
+    )
+    optimized_metadata = dict(quantization.metadata)
+    optimized_metadata["whole_transformer_optimization"] = optimized.to_dict()
+    optimized_quantization = ConvRotInt8QuantizationResult(
+        model=optimized.model,
+        backend=quantization.backend,
+        method=quantization.method,
+        strategy=quantization.strategy,
+        quantized_modules=list(quantization.quantized_modules),
+        metadata=optimized_metadata,
+        compute_config=quantization.compute_config,
+    )
+    return optimized_quantization, optimized
+
+
 def benchmark_flux2_klein_nvfp4_transformer_forward(
     transformer: nn.Module,
     *,
@@ -207,6 +282,37 @@ def benchmark_flux2_klein_nvfp4_transformer_forward(
         sync_cuda=sync_cuda,
         device=device,
     ).to_dict()
+
+
+def benchmark_flux2_klein_convrot_int8_transformer_forward(
+    transformer: nn.Module,
+    *,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None = None,
+    joint_attention_kwargs: dict[str, Any] | None = None,
+    warmup: int = 6,
+    iterations: int = 20,
+    sync_cuda: bool = True,
+) -> dict[str, Any]:
+    """Benchmark one Klein ConvRot W8A8 transformer forward path."""
+
+    return benchmark_flux2_klein_nvfp4_transformer_forward(
+        transformer,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        joint_attention_kwargs=joint_attention_kwargs,
+        warmup=warmup,
+        iterations=iterations,
+        sync_cuda=sync_cuda,
+    )
 
 
 def benchmark_flux2_klein_nvfp4_transformer_paired(
@@ -299,4 +405,41 @@ def benchmark_flux2_klein_nvfp4_transformer_paired(
         allclose_vs_eager=bool(diff.allclose),
         atol=float(atol),
         rtol=float(rtol),
+    )
+
+
+def benchmark_flux2_klein_convrot_int8_transformer_paired(
+    *,
+    reference_transformer: nn.Module,
+    candidate_transformer: nn.Module,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    img_ids: torch.Tensor,
+    txt_ids: torch.Tensor,
+    guidance: torch.Tensor | None = None,
+    joint_attention_kwargs: Mapping[str, Any] | None = None,
+    warmup: int = 6,
+    iterations: int = 20,
+    sync_cuda: bool = True,
+    atol: float = 1e-2,
+    rtol: float = 1e-2,
+) -> Flux2KleinNVFP4PairedBenchmarkResult:
+    """Compare Klein ConvRot W8A8 against an eager transformer in pairs."""
+
+    return benchmark_flux2_klein_nvfp4_transformer_paired(
+        reference_transformer=reference_transformer,
+        candidate_transformer=candidate_transformer,
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        guidance=guidance,
+        joint_attention_kwargs=joint_attention_kwargs,
+        warmup=warmup,
+        iterations=iterations,
+        sync_cuda=sync_cuda,
+        atol=atol,
+        rtol=rtol,
     )

@@ -22,11 +22,14 @@ _DTYPES = frozenset(
         "bf16",
         "int8",
         "int4",
+        "int3",
+        "int2",
         "fp8_e4m3",
         "fp8_e5m2",
         "fp4",
         "mxfp4",
         "nvfp4",
+        "codebook",
         "none",
     }
 )
@@ -224,7 +227,18 @@ class QuantSpec:
             if value not in _SCALE_SOURCES:
                 raise ValueError(f"QuantSpec.{field_name} unsupported value: {value!r}")
             object.__setattr__(self, field_name, value)
-        if self.weight_dtype in {"int4", "int8", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "nvfp4"}:
+        if self.weight_dtype in {
+            "int4",
+            "int8",
+            "int3",
+            "int2",
+            "fp8_e4m3",
+            "fp8_e5m2",
+            "fp4",
+            "mxfp4",
+            "nvfp4",
+            "codebook",
+        }:
             if self.weight_scale_source == "none":
                 raise ValueError("quantized weights require weight_scale_source")
         elif self.weight_scale_source != "none":
@@ -370,10 +384,12 @@ class PackedWeightMetadata:
         object.__setattr__(self, "padded_k", int(self.padded_k))
         if self.weight_dtype not in _DTYPES:
             raise ValueError(f"unsupported packed weight dtype: {self.weight_dtype!r}")
-        if self.packed_bits not in {None, 4, 8}:
-            raise ValueError("packed_bits must be None, 4, or 8")
+        if self.packed_bits not in {None, 2, 3, 4, 8}:
+            raise ValueError("packed_bits must be None, 2, 3, 4, or 8")
         if self.packed_bits == 4 and self.nibble_order not in {"low_high", "high_low"}:
             raise ValueError("4-bit weights require nibble_order low_high or high_low")
+        if self.packed_bits in {2, 3} and self.nibble_order is not None:
+            raise ValueError("2/3-bit weights do not use nibble_order")
         if not isinstance(self.nibble_signed, bool):
             raise TypeError("nibble_signed must be bool")
         if self.local_shape is not None:
@@ -406,7 +422,7 @@ class PackedWeightMetadata:
             "shard_axis": self.shard_axis,
             "padding_ratio": self.padding_ratio,
             "global_scale_present": self.global_scale is not None,
-            "global_scale_shape": () if self.global_scale is not None else None,
+            "global_scale_shape": [] if self.global_scale is not None else None,
         }
 
     @classmethod
@@ -438,6 +454,8 @@ class PackedWeight:
     metadata: PackedWeightMetadata
     canonical_qweight: Any | None = None
     global_scale: torch.Tensor | None = None
+    sparse_mask: torch.Tensor | None = None
+    codebook: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if not hasattr(self.qweight, "shape"):
@@ -448,6 +466,22 @@ class PackedWeight:
             raise TypeError("PackedWeight.zero_points must be tensor-like when provided")
         if self.canonical_qweight is not None and not hasattr(self.canonical_qweight, "shape"):
             raise TypeError("PackedWeight.canonical_qweight must be tensor-like when provided")
+        if self.sparse_mask is not None:
+            if not isinstance(self.sparse_mask, torch.Tensor) or self.sparse_mask.ndim != 2:
+                raise TypeError("PackedWeight.sparse_mask must be a rank-2 bool tensor")
+            expected_mask = self.metadata.logical_shape
+            if tuple(self.sparse_mask.shape) != expected_mask:
+                raise ValueError(
+                    "PackedWeight.sparse_mask must match logical_shape "
+                    f"{expected_mask}, got {tuple(self.sparse_mask.shape)}"
+                )
+            if self.sparse_mask.dtype != torch.bool:
+                raise TypeError("PackedWeight.sparse_mask must use torch.bool")
+        if self.codebook is not None:
+            if not isinstance(self.codebook, torch.Tensor) or self.codebook.ndim != 2:
+                raise TypeError("PackedWeight.codebook must be a rank-2 tensor")
+            if self.codebook.dtype not in {torch.float16, torch.float32, torch.bfloat16}:
+                raise TypeError("PackedWeight.codebook must use a floating dtype")
 
     def to_metadata_dict(self) -> dict[str, Any]:
         return self.metadata.to_dict()
@@ -535,40 +569,6 @@ class GroupedGemmProblem:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class Sparse2_4Contract:
-    """Skeleton contract for 2:4 sparse GEMM (P5 item)."""
-
-    sparsity_ratio: float = 0.5
-    weight_dtype: str = "int8"
-    activation_dtype: str = "fp16"
-
-    def quant_spec(self) -> QuantSpec:
-        return QuantSpec(
-            weight_dtype=self.weight_dtype,
-            activation_dtype=self.activation_dtype,
-            weight_granularity="groupwise",
-            group_size=8,
-            weight_scale_source="weight_offline",
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class W3A16Contract:
-    """Skeleton contract for W3A16 (P5 item)."""
-
-    weight_dtype: str = "int4"
-    activation_dtype: str = "fp16"
-
-    def quant_spec(self) -> QuantSpec:
-        return QuantSpec(
-            weight_dtype=self.weight_dtype,
-            activation_dtype=self.activation_dtype,
-            weight_granularity="groupwise",
-            group_size=16,
-        )
-
-
 __all__ = [
     "EpilogueSpec",
     "GemmProblem",
@@ -577,6 +577,4 @@ __all__ = [
     "PackedWeight",
     "PackedWeightMetadata",
     "QuantSpec",
-    "Sparse2_4Contract",
-    "W3A16Contract",
 ]

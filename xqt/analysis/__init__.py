@@ -30,12 +30,22 @@ from .svd_analysis import (
     compute_residual_weight,
     decompose_weight_svd,
 )
+from .visualization import (
+    TensorSelection,
+    TensorPlotData,
+    plot_model_tensor_selections_bar3d,
+    plot_tensor_bar3d,
+    plot_tensor_bar3d_panels,
+    prepare_tensor_plot_data,
+)
 
 __all__ = [
     "DecodedDetectionDiff",
     "SVDDecomposition",
     "SVDQuantAnalysis",
     "TensorDiff",
+    "TensorSelection",
+    "TensorPlotData",
     "TensorSummary",
     "build_pareto_points",
     "compare_decoded_detections",
@@ -52,6 +62,10 @@ __all__ = [
     "layer_sensitivity_rows",
     "records_to_dataframe",
     "records_to_rows",
+    "plot_model_tensor_selections_bar3d",
+    "plot_tensor_bar3d",
+    "plot_tensor_bar3d_panels",
+    "prepare_tensor_plot_data",
     "summarize_tensor",
     "top_layer_error_for_scenario",
     "write_csv_report",

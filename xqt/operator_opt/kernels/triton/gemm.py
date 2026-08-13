@@ -17,6 +17,7 @@ from xqt.runtime.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
 
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 
 def _require_cuda_tensors(*tensors: torch.Tensor) -> None:
@@ -498,6 +499,71 @@ def _gemm_kernel(
 
 
 @triton.jit
+def _quantize_int8_rowwise_kernel(
+    x_ptr,
+    q_ptr,
+    scale_ptr,
+    rows,
+    cols,
+    stride_xm,
+    stride_xk,
+    stride_qm,
+    stride_qk,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < cols
+    values = tl.load(
+        x_ptr + row * stride_xm + offsets * stride_xk,
+        mask=mask,
+        other=0.0,
+    )
+    max_abs = tl.max(tl.abs(values), axis=0)
+    scale = tl.maximum(max_abs / 127.0, 1e-30)
+    quantized = libdevice.rint(values / scale)
+    quantized = tl.maximum(tl.minimum(quantized, 127.0), -127.0)
+    tl.store(
+        q_ptr + row * stride_qm + offsets * stride_qk,
+        quantized.to(tl.int8),
+        mask=mask,
+    )
+    tl.store(scale_ptr + row, scale.to(tl.float32))
+
+
+def quantize_int8_rowwise_triton(
+    inputs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a CUDA matrix to signed INT8 with one scale per input row."""
+
+    _require_triton()
+    _require_cuda_tensors(inputs)
+    if inputs.ndim != 2:
+        raise ValueError("rowwise INT8 quantization expects a 2D tensor")
+    if inputs.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        raise ValueError("rowwise INT8 quantization expects FP16, BF16, or FP32 input")
+    rows, cols = (int(inputs.shape[0]), int(inputs.shape[1]))
+    if rows < 1 or cols < 1:
+        raise ValueError("rowwise INT8 quantization expects non-empty dimensions")
+    quantized = torch.empty_like(inputs, dtype=torch.int8)
+    scales = torch.empty((rows,), device=inputs.device, dtype=torch.float32)
+    block_size = _next_power_of_2(cols)
+    _quantize_int8_rowwise_kernel[(rows,)](
+        inputs,
+        quantized,
+        scales,
+        rows,
+        cols,
+        inputs.stride(0),
+        inputs.stride(1),
+        quantized.stride(0),
+        quantized.stride(1),
+        BLOCK_SIZE=block_size,
+    )
+    return quantized, scales
+
+
+@triton.jit
 def _gemm_int8_kernel(
     a_ptr, b_ptr, c_ptr,
     a_scale_ptr, b_scale_ptr, bias_ptr,
@@ -507,6 +573,7 @@ def _gemm_int8_kernel(
     stride_cm, stride_cn,
     has_a_scale: tl.constexpr,
     has_b_scale: tl.constexpr,
+    per_row_a_scale: tl.constexpr,
     has_bias: tl.constexpr,
     activation: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -554,7 +621,15 @@ def _gemm_int8_kernel(
     c = accumulator.to(tl.float32)
 
     if has_a_scale:
-        c = c * tl.load(a_scale_ptr).to(tl.float32)
+        if per_row_a_scale:
+            a_scale = tl.load(
+                a_scale_ptr + offs_m,
+                mask=offs_m < M,
+                other=1.0,
+            )
+        else:
+            a_scale = tl.load(a_scale_ptr)
+        c = c * a_scale[:, None].to(tl.float32)
 
     if has_b_scale:
         b_scale = tl.load(b_scale_ptr + offs_n, mask=offs_n < N, other=1.0)
@@ -995,15 +1070,18 @@ def gemm_int8_triton(
     m, k = (int(a.shape[0]), int(a.shape[1]))
     if a_scale is None or b_scale is None:
         raise ValueError("true W8A8 Triton GEMM requires activation and weight scales")
-    if a_scale.numel() != 1:
-        raise ValueError("Triton W8A8 activation scale must be scalar")
+    if a_scale.numel() not in {1, m}:
+        raise ValueError(
+            "Triton W8A8 activation scale must be scalar or one value per input row"
+        )
     if b_scale.numel() != int(n):
         raise ValueError("Triton W8A8 weight_scale must contain one value per output")
     if bias is not None and bias.numel() != int(n):
         raise ValueError("bias must contain one value per output")
 
     output = torch.empty((m, int(n)), device=a.device, dtype=output_dtype)
-    activation_scale = a_scale.to(device=a.device, dtype=torch.float32).reshape(1)
+    per_row_a_scale = int(a_scale.numel()) == m
+    activation_scale = a_scale.to(device=a.device, dtype=torch.float32).reshape(-1)
     weight_scale = b_scale.to(device=a.device, dtype=torch.float32).reshape(int(n))
     bias_tensor = (
         bias.to(device=a.device, dtype=torch.float32).reshape(int(n))
@@ -1038,6 +1116,7 @@ def gemm_int8_triton(
         output.stride(1),
         has_a_scale=True,
         has_b_scale=True,
+        per_row_a_scale=per_row_a_scale,
         has_bias=bias is not None,
         activation=act_code,
         BLOCK_M=block_m,

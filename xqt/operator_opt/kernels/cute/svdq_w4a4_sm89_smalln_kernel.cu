@@ -20,6 +20,7 @@
 
 #include "gemm_w4a4.cuh"
 #include "lora.cuh"
+#include "svdq_w4a4_sm89_norm_quantize.cuh"
 
 namespace {
 
@@ -295,6 +296,61 @@ extern "C" int xqt_svdq_w4a4_smalln_quantize_act_lora(
     return static_cast<int>(cudaErrorInvalidValue);
 }
 
+extern "C" int xqt_svdq_w4a4_smalln_norm_quantize_act_lora(
+    const void* input,
+    const void* norm_weight,
+    const void* row_scales,
+    void* output,
+    void* activation_scales,
+    const void* lora_down,
+    void* lora_activation,
+    const void* smooth,
+    int actual_m,
+    int actual_k,
+    int padded_m,
+    int padded_k,
+    int rank,
+    int scalar_kind,
+    cudaStream_t stream) {
+    // Activation quantization keeps the upstream BLOCK_N=128 layout even
+    // when the residual GEMM uses BLOCK_N=64.
+    switch (static_cast<ScalarKind>(scalar_kind)) {
+        case ScalarKind::FP16:
+            return launch_xqt_norm_quantize_act_lora<GEMMConfig_W4A4_FP16>(
+                input,
+                norm_weight,
+                row_scales,
+                output,
+                activation_scales,
+                lora_down,
+                lora_activation,
+                smooth,
+                actual_m,
+                actual_k,
+                padded_m,
+                padded_k,
+                rank,
+                stream);
+        case ScalarKind::BF16:
+            return launch_xqt_norm_quantize_act_lora<GEMMConfig_W4A4_BF16>(
+                input,
+                norm_weight,
+                row_scales,
+                output,
+                activation_scales,
+                lora_down,
+                lora_activation,
+                smooth,
+                actual_m,
+                actual_k,
+                padded_m,
+                padded_k,
+                rank,
+                stream);
+    }
+    return static_cast<int>(cudaErrorInvalidValue);
+}
+
 extern "C" int xqt_svdq_w4a4_smalln_gemm(
     const void* act,
     const void* weight,
@@ -370,5 +426,5 @@ extern "C" int xqt_svdq_w4a4_smalln_gemm_lora(
 }
 
 extern "C" const char* xqt_svdq_w4a4_smalln_version() {
-    return "xqt_w4a4_sm89_smalln_bn64_v2";
+    return "xqt_w4a4_sm89_smalln_bn64_norm_quantize_v3";
 }

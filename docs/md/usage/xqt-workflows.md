@@ -86,6 +86,89 @@ YAML workflow 只保留一种配置项集合:
 - profiler 给瓶颈归因
 - artifact 和 report 都要进入 manifest
 
+## 张量 3D 可视化
+
+`xqt.analysis` 提供可选的 3D 张量柱状图组件,用于观察权重矩阵或模型前向中的二维激活分布. 组件属于 analysis,不属于 quantizer, benchmark 或 runtime.
+
+安装可视化依赖:
+
+```bash
+pip install "xdl[xqt-viz]"
+```
+
+绘制单个二维张量:
+
+```python
+import torch
+
+from xqt.analysis import plot_tensor_bar3d
+
+plot_tensor_bar3d(
+    model.layer.weight,
+    "artifacts/layer_weight.png",
+    title="Gate Projection",
+    xlabel="In channel",
+    ylabel="Out channel",
+    value_mode="absolute",
+)
+```
+
+绘制多个任意张量的多面板图:
+
+```python
+from xqt.analysis import plot_tensor_bar3d_panels
+
+plot_tensor_bar3d_panels(
+    {
+        "Gate Projection": gate_projection_weight,
+        "Output Projection": output_projection_activation,
+        "State Update": state_update_activation,
+    },
+    "artifacts/tensor_distribution.png",
+    axis_labels={
+        "Gate Projection": ("In channel", "Out channel"),
+        "Output Projection": ("Token dim", "Hidden dim"),
+        "State Update": ("Token dim", "State dim"),
+    },
+    max_bars=20_000,
+)
+```
+
+如果张量来自模型,可以直接通过统一选择器指定模块和来源:
+
+```python
+from xqt.analysis import TensorSelection, plot_model_tensor_selections_bar3d
+
+plot_model_tensor_selections_bar3d(
+    model,
+    example_input,
+    [
+        TensorSelection(
+            module_name="encoder.in_proj",
+            source="weight",
+            label="Input Projection",
+            row_axis=0,
+            col_axis=1,
+        ),
+        TensorSelection(
+            module_name="encoder.out_proj",
+            source="activation",
+            label="Output Projection",
+            row_axis=-2,
+            col_axis=-1,
+            matrix_index=0,
+        ),
+    ],
+    "artifacts/tensor_distribution.png",
+)
+```
+
+`source="activation"` 会使用 `example_input` 执行一次模型并捕获指定模块输出;`source="weight"` 会读取模块的 `weight`,必要时调用 `dequantize_weight()`. 对形状为 `[batch, tokens, hidden]` 的激活,`matrix_index=0` 表示绘制第一个 batch item 的 `tokens x hidden` 矩阵. `matrix_index=None` 会把其他前置维度拼接到行轴. 超过 `max_bars` 时,组件使用确定性的二维池化;默认 `reduction="max"` 会保留异常值尖峰,也可以使用 `reduction="mean"` 观察平均分布.
+
+这个选择器是模型无关的,不为任何模型族提供特例. 论文图只是调用方选择多个模块/张量后的一个结果. 如果目标中间值不是模块输出,必须由模型本身或适配层显式暴露;XQT 不猜测 fused function 内部局部变量.
+
+`layer_statistics` 仍然只输出标量统计和 histogram 摘要,不能恢复原始二维矩阵.
+
 ## 修改顺序
 
 1. 先看 [../XQT.md](../XQT.md)

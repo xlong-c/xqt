@@ -69,6 +69,17 @@ _FLUX2_KLEIN_NVFP4_EXPORTS = {
     "warmup_flux2_klein_nvfp4_transformer",
 }
 
+_FLUX2_KLEIN_CONVROT_INT8_EXPORTS = {
+    "benchmark_flux2_klein_convrot_int8_transformer_forward",
+    "benchmark_flux2_klein_convrot_int8_transformer_paired",
+    "flux2_klein_bf16_convrot_int8_default_policy",
+    "load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_int8",
+    "optimize_flux2_klein_convrot_int8_transformer",
+    "quantize_flux2_klein_bf16_pipeline_to_convrot_int8",
+    "quantize_flux2_klein_bf16_transformer_to_convrot_int8",
+    "run_flux2_klein_bf16_convrot_int8_inference",
+}
+
 _WAN21_VAE_EXPORTS = {
     "WAN21_VAE_OPTIMIZATION_KINDS",
     "WAN21_VAE_REPO_ID",
@@ -125,6 +136,10 @@ _UNLIMITED_OCR_EXPORTS = {
 
 
 def __getattr__(name: str) -> object:
+    if name in _FLUX2_KLEIN_CONVROT_INT8_EXPORTS:
+        from . import flux2_klein
+
+        return getattr(flux2_klein, name)
     if name in _FLUX2_KLEIN_NVFP4_EXPORTS:
         from . import flux2_klein_nvfp4
 
@@ -208,8 +223,10 @@ __all__ = [
     "diffusion_smoke_report",
     "encoder_cache_metadata",
     "flux2_klein_nvfp4_single_file_url",
+    "flux2_klein_bf16_convrot_int8_default_policy",
     "family_smoke_report",
     "load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
+    "load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_int8",
     "load_flux2_klein_bf16_pipeline",
     "load_hunyuan_ocr",
     "load_hunyuan_ocr_dflash",
@@ -222,13 +239,17 @@ __all__ = [
     "load_flux2_klein_nvfp4_transformer",
     "materialize_flux2_klein_nvfp4_engine",
     "normalize_flux2_klein_nvfp4_engine",
+    "optimize_flux2_klein_convrot_int8_transformer",
     "optimize_flux2_klein_nvfp4_transformer",
     "optimize_hunyuan_ocr_svd_int4_blocks",
     "optimize_hunyuan_ocr_dflash_svd_int4_blocks",
     "quantize_flux2_klein_bf16_pipeline_to_convrot_4bit",
+    "quantize_flux2_klein_bf16_pipeline_to_convrot_int8",
     "quantize_flux2_klein_bf16_transformer_to_convrot_4bit",
+    "quantize_flux2_klein_bf16_transformer_to_convrot_int8",
     "quantize_unlimited_ocr_convrot_int8",
     "run_flux2_klein_bf16_convrot_4bit_inference",
+    "run_flux2_klein_bf16_convrot_int8_inference",
     "run_flux2_klein_nvfp4_inference",
     "select_unlimited_ocr_convrot_modules",
     "suggest_expert_pruning",

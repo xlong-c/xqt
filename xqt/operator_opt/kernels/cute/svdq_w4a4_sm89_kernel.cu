@@ -7,7 +7,10 @@
 #include <cstdint>
 
 #include "gemm_w4a4.cuh"
+#include "attention.cuh"
+#include "epilogues.cuh"
 #include "lora.cuh"
+#include "svdq_w4a4_sm89_norm_quantize.cuh"
 
 namespace {
 
@@ -470,7 +473,7 @@ int launch_quantize_act_lora(
     return static_cast<int>(cudaGetLastError());
 }
 
-template <typename Config, bool UseLora>
+template <typename Config, bool UseLora, bool ActUnsigned = false>
 int launch_gemm(
     const void* act,
     const void* weight,
@@ -506,7 +509,7 @@ int launch_gemm(
 
     auto launch = [&]<typename Epilogue>(const typename Epilogue::Arguments& arguments) {
         auto function = invoke_kernel<
-            typename GEMM::template gemm_w4a4_kernel<Epilogue, false>,
+            typename GEMM::template gemm_w4a4_kernel<Epilogue, ActUnsigned>,
             const typename Base::packed_act_t*,
             const typename Base::packed_wgt_t*,
             const typename Base::packed_ascale_t*,
@@ -565,6 +568,407 @@ int launch_gemm(
             typename Nop::Arguments{},
         });
     }
+    return static_cast<int>(cudaGetLastError());
+}
+
+template <typename Config>
+int launch_gemm_lora_qkv_rmsnorm_rope(
+    const void* act,
+    const void* weight,
+    void* output,
+    const void* activation_scales,
+    const void* weight_scales,
+    const void* lora_act,
+    const void* lora_up,
+    const void* bias,
+    const void* norm_q,
+    const void* norm_k,
+    const void* rotary_emb,
+    int actual_m,
+    int actual_n,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank,
+    float lora_scale,
+    float eps,
+    cudaStream_t stream) {
+    using GEMM = GEMM_W4A4<Config>;
+    using Base = GEMMBase<Config>;
+    using Bias = typename Base::template EpilogueBias<true, false>;
+    using Default = typename Base::EpilogueDefault;
+    using Nop = typename Base::EpilogueNop;
+    using LoraImpl = Lora<Config>;
+    using LoraUp = typename LoraImpl::EpilogueLoraUp;
+    using ExtraEpilogues = Epilogues<Config>;
+    using Rope = typename ExtraEpilogues::EpilogueRMSNormRope;
+    using QKVRopeChain = typename Base::template EpilogueCombination<
+        LoraUp,
+        Nop,
+        Rope,
+        Default,
+        Nop>;
+    using Epilogue = typename Base::template EpilogueCombination<
+        Bias,
+        QKVRopeChain,
+        Nop>;
+
+    static_assert(Rope::HEAD_DIM == 128);
+
+    typename LoraImpl::scale_t scales{};
+    const int scale_count = std::min(
+        rank / LoraImpl::WARP_R,
+        static_cast<int>(scales.size()));
+    for (int index = 0; index < scale_count; ++index) {
+        scales[static_cast<size_t>(index)] = lora_scale;
+    }
+
+    const typename Bias::Arguments bias_args{
+        .bias = static_cast<const typename Base::packed_wscale_t*>(bias),
+        .scale = nullptr,
+    };
+    const typename LoraUp::Arguments lora_args{
+        .lora_act = static_cast<const float*>(lora_act),
+        .lora_wgt_up = static_cast<const typename Base::packed_fpsum_t*>(lora_up),
+        .rank = rank,
+        .scales = scales,
+        .alwaysfalse = false,
+    };
+    const typename Rope::Arguments rope_args{
+        .rotary_emb = static_cast<const typename Rope::packed_rotemb_t*>(rotary_emb),
+        .rmsnorm_weight_q = static_cast<const typename Base::half_t*>(norm_q),
+        .rmsnorm_weight_k = static_cast<const typename Base::half_t*>(norm_k),
+        .epsilon = eps,
+    };
+    const typename Default::Arguments output_args{
+        .out = static_cast<typename Base::half_t*>(output),
+        .actualM = actual_m,
+        .actualN = actual_n,
+    };
+
+    auto function = invoke_kernel<
+        typename GEMM::template gemm_w4a4_kernel<Epilogue, false>,
+        const typename Base::packed_act_t*,
+        const typename Base::packed_wgt_t*,
+        const typename Base::packed_ascale_t*,
+        const typename Base::packed_wscale_t*,
+        int,
+        int,
+        int,
+        typename Epilogue::Arguments,
+        bool,
+        bool>;
+    dim3 grid(padded_m / GEMM::BLOCK_M, padded_n / GEMM::BLOCK_N);
+    bool swap_blocks = padded_m > padded_n * 2;
+    if (swap_blocks) {
+        std::swap(grid.x, grid.y);
+    }
+    function<<<grid, GEMM::WARP_SIZE * GEMM::NUM_WARPS, 0, stream>>>(
+        static_cast<const typename Base::packed_act_t*>(act),
+        static_cast<const typename Base::packed_wgt_t*>(weight),
+        static_cast<const typename Base::packed_ascale_t*>(activation_scales),
+        static_cast<const typename Base::packed_wscale_t*>(weight_scales),
+        padded_m,
+        padded_n,
+        padded_k,
+        typename Epilogue::Arguments{
+            bias_args,
+            typename QKVRopeChain::Arguments{
+                lora_args,
+                typename Nop::Arguments{},
+                rope_args,
+                output_args,
+                typename Nop::Arguments{},
+            },
+            typename Nop::Arguments{},
+        },
+        swap_blocks,
+        false);
+    return static_cast<int>(cudaGetLastError());
+}
+
+template <typename Config>
+int launch_gemm_lora_qkv_rmsnorm_rope_packed(
+    const void* act,
+    const void* weight,
+    const void* activation_scales,
+    const void* weight_scales,
+    const void* lora_act,
+    const void* lora_up,
+    const void* bias,
+    const void* norm_q,
+    const void* norm_k,
+    const void* rotary_emb,
+    void* out_q,
+    void* out_k,
+    void* out_v,
+    int stride_head_q,
+    int stride_head_k,
+    int stride_head_v,
+    int actual_m,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank,
+    float lora_scale,
+    float eps,
+    cudaStream_t stream) {
+    using GEMM = GEMM_W4A4<Config>;
+    using Base = GEMMBase<Config>;
+    using Bias = typename Base::template EpilogueBias<true, false>;
+    using Nop = typename Base::EpilogueNop;
+    using LoraImpl = Lora<Config>;
+    using LoraUp = typename LoraImpl::EpilogueLoraUp;
+    using ExtraEpilogues = Epilogues<Config>;
+    using Rope = typename ExtraEpilogues::EpilogueRMSNormRope;
+    using PackQKV = typename ExtraEpilogues::EpiloguePackQKV;
+    using QKVRopePackChain = typename Base::template EpilogueCombination<
+        LoraUp,
+        Nop,
+        Rope,
+        PackQKV,
+        Nop>;
+    using Epilogue = typename Base::template EpilogueCombination<
+        Bias,
+        QKVRopePackChain,
+        Nop>;
+
+    static_assert(Rope::HEAD_DIM == 128);
+    static_assert(PackQKV::HEAD_DIM == 128);
+
+    typename LoraImpl::scale_t scales{};
+    const int scale_count = std::min(
+        rank / LoraImpl::WARP_R,
+        static_cast<int>(scales.size()));
+    for (int index = 0; index < scale_count; ++index) {
+        scales[static_cast<size_t>(index)] = lora_scale;
+    }
+
+    const typename Bias::Arguments bias_args{
+        .bias = static_cast<const typename Base::packed_wscale_t*>(bias),
+        .scale = nullptr,
+    };
+    const typename LoraUp::Arguments lora_args{
+        .lora_act = static_cast<const float*>(lora_act),
+        .lora_wgt_up = static_cast<const typename Base::packed_fpsum_t*>(lora_up),
+        .rank = rank,
+        .scales = scales,
+        .alwaysfalse = false,
+    };
+    const typename Rope::Arguments rope_args{
+        .rotary_emb = static_cast<const typename Rope::packed_rotemb_t*>(rotary_emb),
+        .rmsnorm_weight_q = static_cast<const typename Base::half_t*>(norm_q),
+        .rmsnorm_weight_k = static_cast<const typename Base::half_t*>(norm_k),
+        .epsilon = eps,
+    };
+    const typename PackQKV::Arguments pack_args{
+        .out_q = static_cast<typename PackQKV::packed_qkv_t*>(out_q),
+        .out_k = static_cast<typename PackQKV::packed_qkv_t*>(out_k),
+        .out_v = static_cast<typename PackQKV::packed_qkv_t*>(out_v),
+        .actualM = actual_m,
+        .strideHead_q = stride_head_q,
+        .strideHead_k = stride_head_k,
+        .strideHead_v = stride_head_v,
+    };
+
+    auto function = invoke_kernel<
+        typename GEMM::template gemm_w4a4_kernel<Epilogue, false>,
+        const typename Base::packed_act_t*,
+        const typename Base::packed_wgt_t*,
+        const typename Base::packed_ascale_t*,
+        const typename Base::packed_wscale_t*,
+        int,
+        int,
+        int,
+        typename Epilogue::Arguments,
+        bool,
+        bool>;
+    dim3 grid(padded_m / GEMM::BLOCK_M, padded_n / GEMM::BLOCK_N);
+    bool swap_blocks = padded_m > padded_n * 2;
+    if (swap_blocks) {
+        std::swap(grid.x, grid.y);
+    }
+    function<<<grid, GEMM::WARP_SIZE * GEMM::NUM_WARPS, 0, stream>>>(
+        static_cast<const typename Base::packed_act_t*>(act),
+        static_cast<const typename Base::packed_wgt_t*>(weight),
+        static_cast<const typename Base::packed_ascale_t*>(activation_scales),
+        static_cast<const typename Base::packed_wscale_t*>(weight_scales),
+        padded_m,
+        padded_n,
+        padded_k,
+        typename Epilogue::Arguments{
+            bias_args,
+            typename QKVRopePackChain::Arguments{
+                lora_args,
+                typename Nop::Arguments{},
+                rope_args,
+                pack_args,
+                typename Nop::Arguments{},
+            },
+            typename Nop::Arguments{},
+        },
+        swap_blocks,
+        false);
+    return static_cast<int>(cudaGetLastError());
+}
+
+template <bool BF16Output>
+int launch_attention_fp16(
+    const void* query,
+    const void* key,
+    const void* value,
+    void* output,
+    int batch,
+    int heads,
+    int query_tokens,
+    int key_value_tokens,
+    float scale,
+    cudaStream_t stream) {
+    using AttentionImpl = Attention<AttentionFP16Config<BF16Output>>;
+    using GEMM = typename AttentionImpl::GEMM;
+    using Epilogue = typename GEMM::EpilogueDefault;
+
+    const typename Epilogue::Arguments output_args{
+        .out = static_cast<typename GEMM::half_t*>(output),
+        .actualM = batch * query_tokens,
+        .actualN = heads * AttentionImpl::HEAD_DIM,
+    };
+    auto function = invoke_kernel<
+        typename AttentionImpl::template attention_fp16_kernel<Epilogue>,
+        const typename AttentionImpl::packed_q_t*,
+        const typename AttentionImpl::packed_k_t*,
+        const typename AttentionImpl::packed_v_t*,
+        float,
+        int,
+        int,
+        typename Epilogue::Arguments,
+        bool>;
+    const dim3 grid(
+        query_tokens / AttentionImpl::BLOCK_M,
+        heads,
+        batch);
+    function<<<grid, GEMM::WARP_SIZE * GEMM::NUM_WARPS, 0, stream>>>(
+        static_cast<const typename AttentionImpl::packed_q_t*>(query),
+        static_cast<const typename AttentionImpl::packed_k_t*>(key),
+        static_cast<const typename AttentionImpl::packed_v_t*>(value),
+        scale * 1.4426950408889634074F,
+        query_tokens,
+        key_value_tokens,
+        output_args,
+        false);
+    return static_cast<int>(cudaGetLastError());
+}
+
+template <typename Config>
+int launch_gemm_lora_gelu_quantize_lora(
+    const void* act,
+    const void* weight,
+    void* quantized_output,
+    const void* activation_scales,
+    const void* weight_scales,
+    void* output_scales,
+    const void* lora_act_in,
+    const void* lora_up,
+    const void* lora_down,
+    void* lora_act_out,
+    const void* bias,
+    const void* smooth,
+    int actual_m,
+    int actual_n,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank_up,
+    int rank_down,
+    float lora_scale,
+    cudaStream_t stream) {
+    using GEMM = GEMM_W4A4<Config>;
+    using Base = GEMMBase<Config>;
+    using Bias = typename Base::template EpilogueBias<true, false>;
+    using Gelu = typename Epilogues<Config>::EpilogueGelu;
+    using LoraImpl = Lora<Config>;
+    using LoraUp = typename LoraImpl::EpilogueLoraUp;
+    using LoraDown = typename LoraImpl::EpilogueLoraDown;
+    using Quantize = typename GEMM::template EpilogueQuantize<false, true, false>;
+    using Nop = typename Base::EpilogueNop;
+    using Chain = typename Base::template EpilogueCombination<
+        LoraUp,
+        Gelu,
+        LoraDown,
+        Quantize,
+        Nop>;
+    using Epilogue = typename Base::template EpilogueCombination<Bias, Chain, Nop>;
+
+    typename LoraImpl::scale_t scales{};
+    const int scale_count = std::min(
+        rank_up / LoraImpl::WARP_R,
+        static_cast<int>(scales.size()));
+    for (int index = 0; index < scale_count; ++index) {
+        scales[static_cast<size_t>(index)] = lora_scale;
+    }
+
+    const typename Bias::Arguments bias_args{
+        .bias = static_cast<const typename Base::packed_wscale_t*>(bias),
+        .scale = nullptr,
+    };
+    const typename LoraUp::Arguments lora_up_args{
+        .lora_act = static_cast<const float*>(lora_act_in),
+        .lora_wgt_up = static_cast<const typename Base::packed_fpsum_t*>(lora_up),
+        .rank = rank_up,
+        .scales = scales,
+        .alwaysfalse = false,
+    };
+    const typename LoraDown::Arguments lora_down_args{
+        .lora_wgt_down = static_cast<const typename Base::packed_fpsum_t*>(lora_down),
+        .lora_act = static_cast<float*>(lora_act_out),
+        .rank = rank_down,
+        .alwaysfalse = false,
+    };
+    const typename Quantize::Arguments quantize_args{
+        .qout = static_cast<typename Base::packed_act_t*>(quantized_output),
+        .oscales = static_cast<typename Quantize::oscales_t*>(output_scales),
+        .shift_value = 0.171875F,
+        .smooth_factor = static_cast<const typename Base::packed_wscale_t*>(smooth),
+    };
+
+    auto function = invoke_kernel<
+        typename GEMM::template gemm_w4a4_kernel<Epilogue, false>,
+        const typename Base::packed_act_t*,
+        const typename Base::packed_wgt_t*,
+        const typename Base::packed_ascale_t*,
+        const typename Base::packed_wscale_t*,
+        int,
+        int,
+        int,
+        typename Epilogue::Arguments,
+        bool,
+        bool>;
+    dim3 grid(padded_m / GEMM::BLOCK_M, padded_n / GEMM::BLOCK_N);
+    bool swap_blocks = padded_m > padded_n * 2;
+    if (swap_blocks) {
+        std::swap(grid.x, grid.y);
+    }
+    function<<<grid, GEMM::WARP_SIZE * GEMM::NUM_WARPS, 0, stream>>>(
+        static_cast<const typename Base::packed_act_t*>(act),
+        static_cast<const typename Base::packed_wgt_t*>(weight),
+        static_cast<const typename Base::packed_ascale_t*>(activation_scales),
+        static_cast<const typename Base::packed_wscale_t*>(weight_scales),
+        padded_m,
+        padded_n,
+        padded_k,
+        typename Epilogue::Arguments{
+            bias_args,
+            typename Chain::Arguments{
+                lora_up_args,
+                typename Gelu::Arguments{},
+                lora_down_args,
+                quantize_args,
+                typename Nop::Arguments{},
+            },
+            typename Nop::Arguments{},
+        },
+        swap_blocks,
+        false);
     return static_cast<int>(cudaGetLastError());
 }
 
@@ -640,6 +1044,41 @@ extern "C" int xqt_svdq_w4a4_quantize_act_lora(
             scales,
             lora_down,
             lora_act,
+            smooth,
+            actual_m,
+            actual_k,
+            padded_m,
+            padded_k,
+            rank,
+            stream);
+    });
+}
+
+extern "C" int xqt_svdq_w4a4_norm_quantize_act_lora(
+    const void* input,
+    const void* norm_weight,
+    const void* row_scales,
+    void* output,
+    void* activation_scales,
+    const void* lora_down,
+    void* lora_activation,
+    const void* smooth,
+    int actual_m,
+    int actual_k,
+    int padded_m,
+    int padded_k,
+    int rank,
+    int scalar_kind,
+    cudaStream_t stream) {
+    return dispatch_scalar(scalar_kind, [&]<typename Config>() {
+        return launch_xqt_norm_quantize_act_lora<Config>(
+            input,
+            norm_weight,
+            row_scales,
+            output,
+            activation_scales,
+            lora_down,
+            lora_activation,
             smooth,
             actual_m,
             actual_k,
@@ -749,6 +1188,237 @@ extern "C" int xqt_svdq_w4a4_gemm_lora(
     });
 }
 
+extern "C" int xqt_svdq_w4a4_gemm_lora_unsigned(
+    const void* act,
+    const void* weight,
+    void* output,
+    const void* activation_scales,
+    const void* weight_scales,
+    const void* lora_act,
+    const void* lora_up,
+    const void* bias,
+    int actual_m,
+    int actual_n,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank,
+    float lora_scale,
+    int scalar_kind,
+    cudaStream_t stream) {
+    return dispatch_scalar(scalar_kind, [&]<typename Config>() {
+        return launch_gemm<Config, true, true>(
+            act,
+            weight,
+            output,
+            activation_scales,
+            weight_scales,
+            lora_act,
+            lora_up,
+            bias,
+            actual_m,
+            actual_n,
+            padded_m,
+            padded_n,
+            padded_k,
+            rank,
+            lora_scale,
+            stream);
+    });
+}
+
+extern "C" int xqt_svdq_w4a4_gemm_lora_qkv_rmsnorm_rope(
+    const void* act,
+    const void* weight,
+    void* output,
+    const void* activation_scales,
+    const void* weight_scales,
+    const void* lora_act,
+    const void* lora_up,
+    const void* bias,
+    const void* norm_q,
+    const void* norm_k,
+    const void* rotary_emb,
+    int actual_m,
+    int actual_n,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank,
+    float lora_scale,
+    float eps,
+    int scalar_kind,
+    cudaStream_t stream) {
+    return dispatch_scalar(scalar_kind, [&]<typename Config>() {
+        return launch_gemm_lora_qkv_rmsnorm_rope<Config>(
+            act,
+            weight,
+            output,
+            activation_scales,
+            weight_scales,
+            lora_act,
+            lora_up,
+            bias,
+            norm_q,
+            norm_k,
+            rotary_emb,
+            actual_m,
+            actual_n,
+            padded_m,
+            padded_n,
+            padded_k,
+            rank,
+            lora_scale,
+            eps,
+            stream);
+    });
+}
+
+extern "C" int xqt_svdq_w4a4_gemm_lora_qkv_rmsnorm_rope_packed(
+    const void* act,
+    const void* weight,
+    const void* activation_scales,
+    const void* weight_scales,
+    const void* lora_act,
+    const void* lora_up,
+    const void* bias,
+    const void* norm_q,
+    const void* norm_k,
+    const void* rotary_emb,
+    void* out_q,
+    void* out_k,
+    void* out_v,
+    int stride_head_q,
+    int stride_head_k,
+    int stride_head_v,
+    int actual_m,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank,
+    float lora_scale,
+    float eps,
+    int scalar_kind,
+    cudaStream_t stream) {
+    return dispatch_scalar(scalar_kind, [&]<typename Config>() {
+        return launch_gemm_lora_qkv_rmsnorm_rope_packed<Config>(
+            act,
+            weight,
+            activation_scales,
+            weight_scales,
+            lora_act,
+            lora_up,
+            bias,
+            norm_q,
+            norm_k,
+            rotary_emb,
+            out_q,
+            out_k,
+            out_v,
+            stride_head_q,
+            stride_head_k,
+            stride_head_v,
+            actual_m,
+            padded_m,
+            padded_n,
+            padded_k,
+            rank,
+            lora_scale,
+            eps,
+            stream);
+    });
+}
+
+extern "C" int xqt_svdq_w4a4_attention_fp16(
+    const void* query,
+    const void* key,
+    const void* value,
+    void* output,
+    int batch,
+    int heads,
+    int query_tokens,
+    int key_value_tokens,
+    float scale,
+    int output_scalar_kind,
+    cudaStream_t stream) {
+    if (output_scalar_kind == static_cast<int>(ScalarKind::FP16)) {
+        return launch_attention_fp16<false>(
+            query,
+            key,
+            value,
+            output,
+            batch,
+            heads,
+            query_tokens,
+            key_value_tokens,
+            scale,
+            stream);
+    }
+    if (output_scalar_kind == static_cast<int>(ScalarKind::BF16)) {
+        return launch_attention_fp16<true>(
+            query,
+            key,
+            value,
+            output,
+            batch,
+            heads,
+            query_tokens,
+            key_value_tokens,
+            scale,
+            stream);
+    }
+    return static_cast<int>(cudaErrorInvalidValue);
+}
+
+extern "C" int xqt_svdq_w4a4_gemm_lora_gelu_quantize_lora(
+    const void* act,
+    const void* weight,
+    void* quantized_output,
+    const void* activation_scales,
+    const void* weight_scales,
+    void* output_scales,
+    const void* lora_act_in,
+    const void* lora_up,
+    const void* lora_down,
+    void* lora_act_out,
+    const void* bias,
+    const void* smooth,
+    int actual_m,
+    int actual_n,
+    int padded_m,
+    int padded_n,
+    int padded_k,
+    int rank_up,
+    int rank_down,
+    float lora_scale,
+    int scalar_kind,
+    cudaStream_t stream) {
+    return dispatch_scalar(scalar_kind, [&]<typename Config>() {
+        return launch_gemm_lora_gelu_quantize_lora<Config>(
+            act,
+            weight,
+            quantized_output,
+            activation_scales,
+            weight_scales,
+            output_scales,
+            lora_act_in,
+            lora_up,
+            lora_down,
+            lora_act_out,
+            bias,
+            smooth,
+            actual_m,
+            actual_n,
+            padded_m,
+            padded_n,
+            padded_k,
+            rank_up,
+            rank_down,
+            lora_scale,
+            stream);
+    });
+}
+
 extern "C" const char* xqt_svdq_w4a4_version() {
-    return "nunchaku_w4a4_sm89_v1";
+    return "xqt_w4a4_sm89_packed_qkv_attention_v6";
 }

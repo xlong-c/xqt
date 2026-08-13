@@ -13,6 +13,8 @@ extern "C" int xqt_svdq_w8a8_quantize_act_lora(
     const void*, void*, void*, const void*, void*, int, int, int, int, int, cudaStream_t);
 extern "C" int xqt_svdq_w8a8_quantize_act(
     const void*, void*, void*, int, int, int, int, cudaStream_t);
+extern "C" int xqt_svdq_w8a8_quantize_act_fast(
+    const void*, void*, void*, int, int, cudaStream_t);
 extern "C" int xqt_svdq_w8a8_gemm_lora(
     const void*, const void*, void*, const void*, const void*, const void*, const void*, const void*, int, int, int, int,
     int, int, float, cudaStream_t);
@@ -167,6 +169,18 @@ void quantize_act(
         "invalid K padding");
     TORCH_CHECK(scales.numel() == padded_m, "activation scales must contain M_pad values");
     c10::cuda::CUDAGuard guard(input.device());
+    if (actual_m == padded_m && actual_k == padded_k) {
+        check_status(
+            xqt_svdq_w8a8_quantize_act_fast(
+                input.data_ptr(),
+                output.data_ptr(),
+                scales.data_ptr(),
+                padded_m,
+                padded_k,
+                current_stream(input)),
+            "fast W8A8 activation quantization");
+        return;
+    }
     check_status(
         xqt_svdq_w8a8_quantize_act(
             input.data_ptr(),

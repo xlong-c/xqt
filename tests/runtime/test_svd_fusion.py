@@ -235,7 +235,8 @@ def test_svdq_w4a4_native_metadata_reports_real_backend() -> None:
     ).half().cuda().eval()
     assert module.enable_fusion() is True
 
-    output = module(torch.randn(13, 128, device="cuda", dtype=torch.float16))
+    with torch.no_grad():
+        output = module(torch.randn(13, 128, device="cuda", dtype=torch.float16))
     torch.cuda.synchronize()
     metadata = module.execution_metadata()
 
@@ -266,14 +267,16 @@ def test_svdq_w4a4_hot_cache_rebuilds_after_residual_scale_mutation() -> None:
     assert module.enable_fusion() is True
     inputs = torch.randn(13, 128, device="cuda", dtype=torch.float16)
 
-    before = module(inputs)
-    first_cache = module._native_w4a4_packed_cache
-    module(inputs)
+    with torch.no_grad():
+        before = module(inputs)
+        first_cache = module._native_w4a4_packed_cache
+        module(inputs)
     assert first_cache is not None
 
     with torch.no_grad():
         module.residual_scale.mul_(2.0)
-    after = module(inputs)
+    with torch.no_grad():
+        after = module(inputs)
     torch.cuda.synchronize()
     second_cache = module._native_w4a4_packed_cache
 

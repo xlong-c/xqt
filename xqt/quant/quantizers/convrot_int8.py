@@ -167,16 +167,30 @@ class ConvRotInt8Linear(nn.Module):
         self._rotated_dense_weight: torch.Tensor | None = None
         self._rotated_dense_weight_signature: tuple[Any, ...] | None = None
         self._runtime_rotation_cache: dict[
-            tuple[str, int, int], torch.Tensor
+            tuple[str, int, int, torch.dtype], torch.Tensor
         ] = {}
         self._native_w8a8_packed_cache: tuple[tuple[Any, ...], Any] | None = None
         self._native_w8a8_workspace_cache: dict[tuple[Any, ...], Any] = {}
         self._native_w8a8_hot_cache: dict[
             tuple[Any, ...], tuple[tuple[Any, ...], Any, Any, Any, str]
         ] = {}
+        self._cutlass_w8a8_workspace_cache: dict[
+            tuple[Any, ...],
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+            ],
+        ] = {}
         self._last_native_w8a8_used = False
         self._last_native_w8a8_backend: str | None = None
         self._last_native_w8a8_fallback_reason: str | None = None
+        self._last_cutlass_w8a8_used = False
+        self._last_cutlass_w8a8_fallback_reason: str | None = None
 
     def _apply(self, fn: Any) -> "ConvRotInt8Linear":
         """Move child runtime tensors and invalidate dense/rotation views."""
@@ -194,9 +208,12 @@ class ConvRotInt8Linear(nn.Module):
         self._native_w8a8_packed_cache = None
         self._native_w8a8_workspace_cache.clear()
         self._native_w8a8_hot_cache.clear()
+        self._cutlass_w8a8_workspace_cache.clear()
         self._last_native_w8a8_used = False
         self._last_native_w8a8_backend = None
         self._last_native_w8a8_fallback_reason = None
+        self._last_cutlass_w8a8_used = False
+        self._last_cutlass_w8a8_fallback_reason = None
         return self
 
     def _dense_unrotated_weight(
@@ -389,14 +406,20 @@ class ConvRotInt8Linear(nn.Module):
         padded = self._pad_inputs(inputs)
         if self.input_already_rotated:
             return padded.to(dtype=inputs.dtype)
+        rotation_dtype = (
+            inputs.dtype
+            if self.int8_compute.engine == "triton"
+            and inputs.dtype in {torch.float16, torch.bfloat16}
+            else torch.float32
+        )
         can_cache = _can_mutate_runtime_cache()
         if not can_cache:
             return _apply_groupwise_rotation(
-                padded.to(torch.float32),
+                padded.to(rotation_dtype),
                 rot_size=self.rot_size,
                 rotation_matrix=self.rotation_matrix.to(
                     device=inputs.device,
-                    dtype=torch.float32,
+                    dtype=rotation_dtype,
                 ),
                 return_padded=True,
             ).to(dtype=inputs.dtype)
@@ -404,17 +427,18 @@ class ConvRotInt8Linear(nn.Module):
             str(inputs.device),
             int(self.rotation_matrix.data_ptr()),
             int(getattr(self.rotation_matrix, "_version", 0)),
+            rotation_dtype,
         )
         rotation = None
         rotation = self._runtime_rotation_cache.get(rotation_key)
         if rotation is None:
             rotation = self.rotation_matrix.to(
                 device=inputs.device,
-                dtype=torch.float32,
+                dtype=rotation_dtype,
             )
             self._runtime_rotation_cache[rotation_key] = rotation
         return _apply_groupwise_rotation(
-            padded.to(torch.float32),
+            padded.to(rotation_dtype),
             rot_size=self.rot_size,
             rotation_matrix=rotation,
             return_padded=True,
@@ -506,6 +530,198 @@ class ConvRotInt8Linear(nn.Module):
         except Exception as exc:
             return False, f"native ConvRot W8A8 capability check failed: {exc}"
         return True, "native ConvRot rotation plus dynamic per-token W8 packing is available"
+
+    def _cutlass_w8a8_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        compute = self.int8_compute
+        if compute.activation_scale_mode != "dynamic":
+            return False, "CUTLASS ConvRot requires dynamic activation scales"
+        if compute.engine != "cuda_sm89":
+            return False, "CUTLASS ConvRot requires the explicit cuda_sm89 engine"
+        if not inputs.is_cuda or inputs.dtype not in {torch.float16, torch.bfloat16}:
+            return False, "CUTLASS ConvRot requires FP16 or BF16 CUDA activations"
+        if compute.output_dtype != inputs.dtype:
+            return False, "CUTLASS ConvRot output dtype must match activations"
+        if inputs.ndim < 1 or int(inputs.shape[-1]) != self.input_features:
+            return False, "CUTLASS ConvRot input trailing dimension is invalid"
+        if self.input_already_rotated:
+            return False, "CUTLASS ConvRot requires online activation rotation"
+        if self.rot_size != 256:
+            return False, "CUTLASS ConvRot currently requires rot_size=256"
+        tensors = (compute.qweight_t, compute.weight_scale, compute.bias)
+        if any(tensor is not None and not tensor.is_cuda for tensor in tensors):
+            return False, "CUTLASS ConvRot requires weight buffers on CUDA"
+        if any(
+            tensor is not None and tensor.device != inputs.device
+            for tensor in tensors
+        ):
+            return False, "CUTLASS ConvRot inputs and weights must share a device"
+        major, minor = torch.cuda.get_device_capability(inputs.device)
+        if (major, minor) != (8, 9):
+            return False, f"CUTLASS ConvRot currently targets sm_89, got sm_{major}{minor}"
+        if self.padded_input_features % 256 != 0:
+            return False, "CUTLASS ConvRot requires padded K % 256 == 0"
+        if self.output_features % 8 != 0:
+            return False, "CUTLASS ConvRot requires output_features % 8 == 0"
+        try:
+            from xqt.operator_opt.kernels.cute.int8mma_binding import _load_lib
+
+            lib = _load_lib()
+            required = (
+                "int8mma_convrot_quantize_rows",
+                "int8mma_run_cutlass_i32_64x128_prepacked_b",
+                "int8mma_run_cutlass_i32_128x256_prepacked_b",
+                "int8mma_dequant_i32_rowwise",
+            )
+            if not all(hasattr(lib, name) for name in required):
+                return False, "CUTLASS ConvRot symbols are unavailable"
+        except Exception as exc:
+            return False, f"CUTLASS ConvRot capability check failed: {exc}"
+        return True, "CUDA rotation/quantization plus CUTLASS INT32 GEMM is available"
+
+    def _cutlass_w8a8_workspace(
+        self,
+        inputs: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        rows = int(inputs.shape[0])
+        padded_rows = ((rows + 255) // 256) * 256
+        key = (
+            str(inputs.device),
+            str(inputs.dtype),
+            padded_rows,
+            self.padded_input_features,
+            self.output_features,
+            self.int8_compute.output_dtype,
+        )
+        cached = self._cutlass_w8a8_workspace_cache.get(key)
+        if cached is not None:
+            return cached
+        workspace = (
+            torch.empty(
+                (padded_rows, self.padded_input_features),
+                device=inputs.device,
+                dtype=torch.int8,
+            ),
+            torch.empty(
+                padded_rows,
+                device=inputs.device,
+                dtype=torch.float32,
+            ),
+            torch.empty(
+                (padded_rows, self.output_features),
+                device=inputs.device,
+                dtype=torch.float16,
+            ),
+            self.int8_compute.weight_scale.to(
+                device=inputs.device,
+                dtype=torch.float32,
+            ).reshape(-1).contiguous(),
+            (
+                torch.zeros(
+                    self.output_features,
+                    device=inputs.device,
+                    dtype=torch.float32,
+                )
+                if self.int8_compute.bias is None
+                else self.int8_compute.bias.to(
+                    device=inputs.device,
+                    dtype=torch.float32,
+                ).reshape(-1).contiguous()
+            ),
+            torch.stack(
+                (
+                    self.int8_compute.weight_scale.to(
+                        device=inputs.device,
+                        dtype=torch.float32,
+                    ).reshape(-1),
+                    torch.zeros(
+                        self.output_features,
+                        device=inputs.device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=1,
+            ).contiguous(),
+        )
+        if workspace[4].numel() != self.output_features:
+            raise ValueError("weight_scale must contain one value per output channel")
+        if workspace[5].numel() != self.output_features:
+            raise ValueError("bias must contain one value per output channel")
+        if workspace[6].shape != (self.output_features, 2):
+            raise ValueError("scale_bias must have shape [output_features, 2]")
+        if len(self._cutlass_w8a8_workspace_cache) >= 8:
+            self._cutlass_w8a8_workspace_cache.clear()
+        self._cutlass_w8a8_workspace_cache[key] = workspace
+        return workspace
+
+    def _cutlass_w8a8_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        from xqt.operator_opt.kernels.cute.int8mma_binding import (
+            convrot_cutlass_w8a8_sm89,
+        )
+
+        original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
+        flat = inputs.reshape(-1, self.input_features)
+        (
+            quantized_activation,
+            activation_scales,
+            scaled_output,
+            output_workspace,
+            weight_scale,
+            bias,
+            scale_bias,
+        ) = self._cutlass_w8a8_workspace(flat)
+        prepacked = self.int8_compute._ensure_ptx_prepacked_b()
+        output, _, _ = convrot_cutlass_w8a8_sm89(
+            flat,
+            self.int8_compute.qweight_t,
+            weight_scale,
+            bias,
+            rotated_input_features=self.padded_input_features,
+            rot_size=self.rot_size,
+            output_dtype=self.int8_compute.output_dtype,
+            prepacked_b=prepacked,
+            quantized_activation=quantized_activation,
+            activation_scales=activation_scales,
+            output=output_workspace,
+            weight_scale_buffer=weight_scale,
+            bias_buffer=bias,
+            scaled_output=scaled_output,
+            scale_bias_buffer=scale_bias,
+        )
+        self._last_cutlass_w8a8_used = True
+        self._last_cutlass_w8a8_fallback_reason = None
+        self._last_native_w8a8_used = False
+        self._last_native_w8a8_backend = None
+        self._last_native_w8a8_fallback_reason = (
+            "CUTLASS ConvRot selected by explicit cuda_sm89 engine"
+        )
+        self.int8_compute.last_execution = {
+            "engine": "cuda_sm89_cutlass_convrot",
+            "reason": "cuda_rotation_dynamic_per_token_quant_then_cutlass_int32_gemm",
+            "true_int8_mma": True,
+            "activation_dtype": "int8",
+            "weight_dtype": "int8",
+            "accumulation_dtype": "int32",
+            "activation_scale_mode": "dynamic",
+            "activation_granularity": "per_token",
+            "activation_quant_engine": "cuda_convrot_hadamard_dynamic_per_token",
+            "rotation_fused": True,
+            "input_rows": int(flat.shape[0]),
+            "padded_rows": int(quantized_activation.shape[0]),
+            "input_features": self.input_features,
+            "output_features": self.output_features,
+            "target_arch": "sm_89",
+            "prepacked_b": prepacked is not None,
+            "cutlass_mainloop": "int8_tensorop_m16n8k32",
+            "cutlass_epilogue": "cuda_rowwise_scale_bias",
+        }
+        return output.reshape(*original_shape, self.output_features)
 
     def _native_w8a8_packed(self, inputs: torch.Tensor) -> Any:
         from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
@@ -790,10 +1006,34 @@ class ConvRotInt8Linear(nn.Module):
         min_rows = self.int8_compute.min_int8_rows
         rows = int(inputs.numel() // self.input_features)
         if 0 < min_rows and rows < min_rows:
+            self._last_cutlass_w8a8_used = False
+            self._last_cutlass_w8a8_fallback_reason = "rows_below_min_int8_rows"
             self._last_native_w8a8_used = False
             self._last_native_w8a8_backend = None
             self._last_native_w8a8_fallback_reason = None
             return self._forward_float_fallback(inputs)
+        if self.int8_compute.engine == "cuda_sm89":
+            cutlass_allowed, cutlass_reason = self._cutlass_w8a8_gate(inputs)
+            if cutlass_allowed:
+                try:
+                    return self._cutlass_w8a8_forward(inputs)
+                except Exception as exc:
+                    cutlass_reason = f"CUTLASS ConvRot execution failed: {exc}"
+            self._last_cutlass_w8a8_used = False
+            self._last_cutlass_w8a8_fallback_reason = cutlass_reason
+        if self.int8_compute.engine not in {"auto", "cuda_sm89"}:
+            self._last_cutlass_w8a8_used = False
+            self._last_native_w8a8_used = False
+            self._last_native_w8a8_backend = None
+            self._last_native_w8a8_fallback_reason = (
+                "native ConvRot W8A8 skipped by explicit engine"
+            )
+            original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
+            rotated = self._rotate_inputs(inputs)
+            return self.int8_compute(rotated).reshape(
+                *original_shape,
+                self.output_features,
+            )
         hot_output = self._native_w8a8_hot_forward(inputs)
         if hot_output is not None:
             return hot_output
@@ -826,7 +1066,9 @@ class ConvRotInt8Linear(nn.Module):
         return {
             **base,
             "implementation": (
-                self._last_native_w8a8_backend
+                "cuda_sm89_cutlass_convrot"
+                if self._last_cutlass_w8a8_used
+                else self._last_native_w8a8_backend
                 if self._last_native_w8a8_used
                 else "convrot_rotation_then_int8_mma"
             ),
@@ -839,12 +1081,17 @@ class ConvRotInt8Linear(nn.Module):
             "strategy": "w8a8_int8",
             "input_already_rotated": bool(self.input_already_rotated),
             "rotation_quant_fused": bool(
-                self._last_native_w8a8_used and not self.input_already_rotated
+                (self._last_cutlass_w8a8_used or self._last_native_w8a8_used)
+                and not self.input_already_rotated
             ),
-            "activation_quant_fused": bool(self._last_native_w8a8_used),
+            "activation_quant_fused": bool(
+                self._last_cutlass_w8a8_used or self._last_native_w8a8_used
+            ),
             "native_w8a8_used": bool(self._last_native_w8a8_used),
             "native_w8a8_backend": self._last_native_w8a8_backend,
             "native_w8a8_fallback_reason": self._last_native_w8a8_fallback_reason,
+            "cutlass_w8a8_used": bool(self._last_cutlass_w8a8_used),
+            "cutlass_w8a8_fallback_reason": self._last_cutlass_w8a8_fallback_reason,
             "fused_rotation_quant_fallback_reason": self._last_fused_static_fallback_reason,
             "norm_fused": bool(base.get("norm_fused", False)),
         }

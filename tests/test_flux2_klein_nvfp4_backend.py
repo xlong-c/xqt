@@ -15,6 +15,7 @@ from torch import nn
 from xqt.core.errors import XQTBackendError
 from xqt.model import (
     FLUX2_KLEIN_4B_REPO_ID,
+    benchmark_flux2_klein_convrot_int8_transformer_paired,
     benchmark_flux2_klein_nvfp4_transformer_paired,
     benchmark_flux2_klein_nvfp4_transformer_forward,
     capture_flux2_klein_nvfp4_transformer_cuda_graph,
@@ -22,6 +23,7 @@ from xqt.model import (
     collect_flux2_klein_nvfp4_engine_targets,
     flux2_klein_nvfp4_single_file_url,
     load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_4bit,
+    load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_int8,
     load_flux2_klein_bf16_pipeline,
     load_flux2_klein_bf16_transformer,
     load_flux2_klein_nvfp4_transformer,
@@ -29,12 +31,15 @@ from xqt.model import (
     normalize_flux2_klein_nvfp4_engine,
     optimize_flux2_klein_nvfp4_transformer,
     quantize_flux2_klein_bf16_pipeline_to_convrot_4bit,
+    quantize_flux2_klein_bf16_pipeline_to_convrot_int8,
     quantize_flux2_klein_bf16_transformer_to_convrot_4bit,
+    quantize_flux2_klein_bf16_transformer_to_convrot_int8,
+    run_flux2_klein_bf16_convrot_int8_inference,
     run_flux2_klein_bf16_convrot_4bit_inference,
     run_flux2_klein_nvfp4_inference,
     warmup_flux2_klein_nvfp4_transformer,
 )
-from xqt.quant import ConvRotMixedPrecisionLinear
+from xqt.quant import ConvRotInt8Linear, ConvRotMixedPrecisionLinear
 from xqt.quant import expand_group_scale, unpack_nvfp4e2m1
 
 
@@ -355,6 +360,106 @@ def test_run_flux2_klein_bf16_convrot_4bit_inference_quantizes_then_calls_pipeli
     assert isinstance(result["pipeline"].transformer[0], ConvRotMixedPrecisionLinear)
     assert result["pipeline"].transformer[0].compute_precision == "w8a8"
     assert result["quantization"]["strategy"] == "w4a4_int4"
+    assert result["output"]["prompt"] == "test"
+    assert pipeline.calls == []
+
+
+def test_quantize_flux2_klein_bf16_transformer_to_convrot_int8_uses_official_scope() -> None:
+    class _TinyKleinTransformer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.img_in = nn.Linear(16, 16)
+            self.time_in = nn.Linear(16, 16)
+            self.double_stream_modulation_img = nn.Linear(16, 16)
+            self.core = nn.Linear(16, 32)
+            self.proj_out = nn.Linear(16, 16)
+
+    model = _TinyKleinTransformer().eval()
+    original_weight = model.core.weight.detach().clone()
+
+    result = quantize_flux2_klein_bf16_transformer_to_convrot_int8(
+        model,
+        inplace=False,
+    )
+
+    assert result.quantized_modules == ["core", "proj_out"]
+    assert isinstance(result.model.core, ConvRotInt8Linear)
+    assert isinstance(result.model.proj_out, ConvRotInt8Linear)
+    assert isinstance(result.model.img_in, nn.Linear)
+    assert isinstance(result.model.time_in, nn.Linear)
+    assert isinstance(result.model.double_stream_modulation_img, nn.Linear)
+    assert isinstance(model.core, nn.Linear)
+    assert torch.equal(model.core.weight, original_weight)
+    assert result.metadata["model_family"] == "flux2_klein_4b"
+    assert result.metadata["official_convrot_group_size"] == 256
+    assert result.model.core.int8_compute.min_int8_rows == 17
+    assert result.model.core.int8_compute.engine == "triton"
+    assert result.model.core(torch.randn(2, 16)).shape == (2, 32)
+
+
+def test_quantize_flux2_klein_bf16_pipeline_to_convrot_int8_replaces_transformer() -> None:
+    pipeline = types.SimpleNamespace(
+        transformer=nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+    )
+
+    quantized_pipeline, result = quantize_flux2_klein_bf16_pipeline_to_convrot_int8(
+        pipeline,
+        policy={"include_module_names": ["0"]},
+        inplace=False,
+    )
+
+    assert isinstance(quantized_pipeline.transformer[0], ConvRotInt8Linear)
+    assert isinstance(pipeline.transformer[0], nn.Linear)
+    assert result.strategy == "w8a8_int8"
+
+
+def test_load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_int8_uses_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_pipeline = types.SimpleNamespace(
+        transformer=nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+    )
+
+    monkeypatch.setattr(
+        "xqt.model.flux2_klein.load.load_flux2_klein_bf16_pipeline",
+        lambda **kwargs: loaded_pipeline,
+    )
+
+    quantized_pipeline, result = load_and_quantize_flux2_klein_bf16_pipeline_to_convrot_int8(
+        policy={"include_module_names": ["0"]},
+    )
+
+    assert quantized_pipeline is loaded_pipeline
+    assert isinstance(quantized_pipeline.transformer[0], ConvRotInt8Linear)
+    assert result.strategy == "w8a8_int8"
+
+
+def test_run_flux2_klein_bf16_convrot_int8_inference_quantizes_then_calls_pipeline() -> None:
+    class _TinyPipeline:
+        def __init__(self) -> None:
+            self.transformer = nn.Sequential(nn.Linear(16, 32, bias=True)).eval()
+            self.calls: list[dict[str, object]] = []
+
+        def __call__(
+            self,
+            *,
+            prompt: str | list[str],
+            input_tensor: torch.Tensor,
+        ) -> dict[str, object]:
+            self.calls.append({"prompt": prompt, "input_shape": tuple(input_tensor.shape)})
+            return {"prompt": prompt, "output": self.transformer(input_tensor)}
+
+    pipeline = _TinyPipeline()
+    result = run_flux2_klein_bf16_convrot_int8_inference(
+        pipeline,
+        prompt="test",
+        input_tensor=torch.randn(2, 16),
+        policy={"include_module_names": ["0"]},
+        inplace=False,
+    )
+
+    assert isinstance(result["pipeline"].transformer[0], ConvRotInt8Linear)
+    assert result["quantization"]["strategy"] == "w8a8_int8"
     assert result["output"]["prompt"] == "test"
     assert pipeline.calls == []
 
@@ -1152,6 +1257,49 @@ def test_benchmark_flux2_klein_nvfp4_transformer_paired_reports_close_outputs() 
     assert len(result.paired_speedup_ratios) == 3
     assert reference.calls == 6
     assert candidate.calls == 6
+
+
+def test_benchmark_flux2_klein_convrot_int8_transformer_paired_reuses_whole_model_gate() -> None:
+    class _CountingTransformer(nn.Module):
+        def forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            timestep: torch.Tensor,
+            img_ids: torch.Tensor,
+            txt_ids: torch.Tensor,
+            guidance: torch.Tensor | None = None,
+            joint_attention_kwargs: dict[str, object] | None = None,
+            return_dict: bool = False,
+        ) -> tuple[torch.Tensor]:
+            del (
+                encoder_hidden_states,
+                timestep,
+                img_ids,
+                txt_ids,
+                guidance,
+                joint_attention_kwargs,
+                return_dict,
+            )
+            return (hidden_states + 1.0,)
+
+    hidden_states = torch.randn(1, 2, 4)
+    result = benchmark_flux2_klein_convrot_int8_transformer_paired(
+        reference_transformer=_CountingTransformer(),
+        candidate_transformer=_CountingTransformer(),
+        hidden_states=hidden_states,
+        encoder_hidden_states=torch.randn(1, 3, 8),
+        timestep=torch.tensor([0.5]),
+        img_ids=torch.zeros(2, 4),
+        txt_ids=torch.zeros(3, 4),
+        warmup=1,
+        iterations=2,
+        sync_cuda=False,
+    )
+
+    assert result.allclose_vs_eager is True
+    assert result.candidate_report["iterations"] == 2
 
 
 @pytest.mark.skipif(

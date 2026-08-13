@@ -272,6 +272,34 @@ def test_triton_bfloat16_rmsnorm_cuda_kernel_matches_reference() -> None:
 
 @requires_cuda
 @requires_triton
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_triton_wide_rmsnorm_uses_float32_reduction(dtype: torch.dtype) -> None:
+    torch.manual_seed(11)
+    x = torch.randn(4, 12288, device="cuda", dtype=dtype)
+    weight = torch.randn(12288, device="cuda", dtype=dtype) * 0.2 + 1.0
+
+    output = fused_rmsnorm_triton(
+        x,
+        weight,
+        eps=1e-6,
+        block_size=16384,
+        num_warps=8,
+        num_stages=4,
+    )
+    row_scale = torch.rsqrt(
+        x.float().square().mean(dim=-1, keepdim=True) + 1e-6
+    )
+    reference = (x.float() * row_scale * weight.float()).to(dtype)
+    relative_rmse = (
+        torch.linalg.vector_norm(output.float() - reference.float())
+        / torch.linalg.vector_norm(reference.float()).clamp_min(1e-12)
+    )
+
+    assert float(relative_rmse.item()) < 5e-4
+
+
+@requires_cuda
+@requires_triton
 def test_triton_channel_first_half_cuda_kernel_matches_reference() -> None:
     torch.manual_seed(0)
     module = _FakeWanChannelFirstRMSNorm(64).eval().to(device="cuda", dtype=torch.float16)

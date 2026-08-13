@@ -60,6 +60,46 @@ def test_compile_flags_use_reported_include_and_arch(tmp_path: Path) -> None:
     assert report.cutlass_include in flags
 
 
+def test_cross_arch_report_allows_compile_but_not_executable_promotion(
+    tmp_path: Path,
+) -> None:
+    report = GemmPreflightReport(
+        target_arch="sm_90",
+        status="partial",
+        nvcc_path="/usr/local/cuda/bin/nvcc",
+        nvcc_version="CUDA",
+        cuda_runtime_version="13.1",
+        compiler_version="g++",
+        cutlass_version=None,
+        cutlass_python_path=None,
+        cutlass_include="/tmp/cutlass/include",
+        device_name="RTX 4070 Ti SUPER",
+        device_arch="sm_89",
+        reasons=("device arch sm_89 does not match target sm_90",),
+    )
+    assert report.ready_for_compile is True
+
+    artifact = tmp_path / "kernel.so"
+    artifact.write_bytes(b"placeholder")
+    manifest = GemmArtifactManifest(
+        kernel_name="cross_arch_probe",
+        target_arch="sm_90",
+        maturity="executable",
+        source="kernel.cu",
+        artifact=str(artifact),
+        compile_flags=("nvcc",),
+        tile_shape=(128, 128, 128),
+        warp_count=4,
+        stage_count=4,
+        preflight=report,
+        metadata={
+            "correctness_verified": True,
+            "correctness": {"max_abs_error": 0.0},
+        },
+    )
+    assert manifest.executable_ready is False
+
+
 def test_sm89_build_config_defaults_to_metadata_only_seed() -> None:
     config = Sm89BuildConfig()
     assert config.target_arch == "sm_89"
