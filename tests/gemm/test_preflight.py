@@ -60,6 +60,39 @@ def test_compile_flags_use_reported_include_and_arch(tmp_path: Path) -> None:
     assert report.cutlass_include in flags
 
 
+def test_compile_flags_support_architecture_feature_variant(tmp_path: Path) -> None:
+    report = GemmPreflightReport(
+        target_arch="sm_120",
+        status="ready",
+        nvcc_path="/usr/local/cuda/bin/nvcc",
+        nvcc_version="CUDA",
+        cuda_runtime_version="13.0",
+        compiler_version="g++",
+        cutlass_version="4.6.1",
+        cutlass_python_path="cutlass",
+        cutlass_include="/tmp/cutlass/include",
+        device_name="RTX 5090",
+        device_arch="sm_120",
+    )
+
+    flags = build_compile_flags(
+        report,
+        source=tmp_path / "kernel.cu",
+        output=tmp_path / "kernel.so",
+        compile_target_arch="sm_120a",
+    )
+
+    assert "-gencode=arch=compute_120a,code=sm_120a" in flags
+
+    with pytest.raises(ValueError, match="does not match logical target"):
+        build_compile_flags(
+            report,
+            source=tmp_path / "kernel.cu",
+            output=tmp_path / "kernel.so",
+            compile_target_arch="sm_90",
+        )
+
+
 def test_cross_arch_report_allows_compile_but_not_executable_promotion(
     tmp_path: Path,
 ) -> None:

@@ -31,6 +31,8 @@ def test_sm90_and_sm120_build_configs_are_architecture_specific() -> None:
     assert sm90.target_arch == "sm_90"
     assert sm90.source.name == "sm90_fp8_wgmma.cu"
     assert sm120.target_arch == "sm_120"
+    assert sm120.compile_target_arch == "sm_120a"
+    assert "--expt-relaxed-constexpr" in sm120.extra_flags
     assert sm120.source.name == "sm120_gemm.cu"
 
 
@@ -41,6 +43,8 @@ def test_target_manifests_declare_stream_aware_runtime_abi() -> None:
 
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm90_source
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm120_source
+    assert '"compile_target_arch": resolved.compile_target_arch' in sm120_source
+    assert '"required_compile_flags": list(_SM120_REQUIRED_FLAGS)' in sm120_source
     assert '"dense_schedule_variants"' in sm90_source
     assert '"fp8_groupwise_pingpong_probe_present": True' in sm90_source
     assert '"fp8_groupwise_schedule_variants"' in sm90_source

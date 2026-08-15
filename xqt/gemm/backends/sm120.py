@@ -43,6 +43,8 @@ from ._sm1xx_runtime import (
 _SOURCE = Path(__file__).with_name("sm120_gemm.cu")
 _DEFAULT_ARTIFACT = default_cache_dir() / "sm120" / "low_precision_tcgen05_sm120.so"
 _SM120_CAPABILITY = (12, 0)
+_SM120_COMPILE_TARGET = "sm_120a"
+_SM120_REQUIRED_FLAGS = ("--expt-relaxed-constexpr",)
 _SM120_FP8_SYMBOLS = {
     ("fp8_e4m3", "blockwise", "cooperative"): "xqt_sm120_fp8_e4m3_blockwise_bf16_run",
     ("fp8_e5m2", "blockwise", "cooperative"): "xqt_sm120_fp8_e5m2_blockwise_bf16_run",
@@ -175,11 +177,27 @@ class Sm120BuildConfig:
     source: Path = _SOURCE
     output: Path = field(default_factory=lambda: _DEFAULT_ARTIFACT)
     target_arch: str = "sm_120"
-    extra_flags: tuple[str, ...] = ("-lineinfo", "-lcudart")
+    compile_target_arch: str = _SM120_COMPILE_TARGET
+    extra_flags: tuple[str, ...] = (
+        *_SM120_REQUIRED_FLAGS,
+        "-lineinfo",
+        "-lcudart",
+    )
 
     def __post_init__(self) -> None:
         if self.target_arch != "sm_120":
             raise ValueError("SM120 build target_arch must be sm_120")
+        if self.compile_target_arch != _SM120_COMPILE_TARGET:
+            raise ValueError(
+                "SM120 build compile_target_arch must be sm_120a for CUTLASS tcgen05"
+            )
+        missing_flags = tuple(
+            flag for flag in _SM120_REQUIRED_FLAGS if flag not in self.extra_flags
+        )
+        if missing_flags:
+            raise ValueError(
+                "SM120 build extra_flags must include " + ", ".join(missing_flags)
+            )
 
 
 def build_sm120_artifact(
@@ -201,6 +219,7 @@ def build_sm120_artifact(
         source=source,
         output=output,
         extra_flags=resolved.extra_flags,
+        compile_target_arch=resolved.compile_target_arch,
     )
     try:
         subprocess.run(list(flags), check=True)
@@ -221,6 +240,8 @@ def build_sm120_artifact(
         preflight=report,
         metadata={
             "build_status": "compiled_pending_rtx50_correctness_gate",
+            "compile_target_arch": resolved.compile_target_arch,
+            "required_compile_flags": list(_SM120_REQUIRED_FLAGS),
             "correctness_verified": False,
             "native_tcgen05_verified": False,
             "tma_verified": False,

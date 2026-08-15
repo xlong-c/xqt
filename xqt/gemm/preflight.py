@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 
 _ARCH_RE = re.compile(r"^sm_(?P<sm>[0-9]+)$")
+_COMPILE_ARCH_RE = re.compile(r"^sm_(?P<sm>[0-9]+)(?P<variant>[af])?$")
 
 
 def _normalize_arch(value: str | int) -> str:
@@ -34,6 +35,27 @@ def _normalize_arch(value: str | int) -> str:
     if sm < 50:
         raise ValueError(f"target SM must be >= 50, got {sm}")
     return f"sm_{sm}"
+
+
+def _normalize_compile_arch(value: str | int, *, target_arch: str) -> str:
+    """Normalize a CUDA codegen target while preserving the logical SM."""
+
+    if isinstance(value, bool):
+        raise ValueError("compile target SM must be an integer or sm_<number>[a|f] string")
+    if isinstance(value, int):
+        compile_arch = f"sm_{value}"
+    else:
+        compile_arch = str(value).strip()
+    match = _COMPILE_ARCH_RE.fullmatch(compile_arch)
+    if match is None:
+        raise ValueError(
+            "compile target_arch must look like sm_89, sm_120a, or sm_120f"
+        )
+    if int(match.group("sm")) != int(target_arch[3:]):
+        raise ValueError(
+            f"compile target {compile_arch} does not match logical target {target_arch}"
+        )
+    return compile_arch
 
 
 def _command_output(command: Sequence[str]) -> str | None:
@@ -420,11 +442,16 @@ def build_compile_flags(
     source: str | Path,
     output: str | Path,
     extra_flags: Sequence[str] = (),
+    compile_target_arch: str | int | None = None,
 ) -> tuple[str, ...]:
-    """Build a deterministic nvcc command tuple for manifest/build tooling."""
+    """Build deterministic nvcc flags for a logical target and its codegen."""
 
     if preflight.nvcc_path is None or preflight.cutlass_include is None:
         raise RuntimeError("cannot build compile flags before CUDA/CUTLASS preflight is ready")
+    codegen_arch = _normalize_compile_arch(
+        preflight.target_arch if compile_target_arch is None else compile_target_arch,
+        target_arch=preflight.target_arch,
+    )
     cutlass_include = Path(preflight.cutlass_include)
     utility_include = cutlass_include.parent / "tools" / "util" / "include"
     include_flags = ["-I", str(cutlass_include)]
@@ -438,7 +465,7 @@ def build_compile_flags(
             "-shared",
             "-Xcompiler",
             "-fPIC",
-            f"-gencode=arch=compute_{preflight.target_arch[3:]},code={preflight.target_arch}",
+            f"-gencode=arch=compute_{codegen_arch[3:]},code={codegen_arch}",
             *include_flags,
             str(source),
             "-o",
