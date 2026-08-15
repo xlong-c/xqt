@@ -21,16 +21,18 @@ using DenseLayoutA = cutlass::layout::RowMajor;
 using DenseLayoutB = cutlass::layout::ColumnMajor;
 using DenseLayoutC = cutlass::layout::RowMajor;
 using DenseAccumulator = float;
-using DenseTile = Shape<_128, _128, _64>;
-using DenseCluster = Shape<_2, _1, _1>;
 
-template <typename Element>
+template <
+    typename Element,
+    typename TileShape = Shape<_128, _128, _64>,
+    typename ClusterShape = Shape<_2, _1, _1>,
+    typename Schedule = cutlass::gemm::collective::KernelScheduleAuto>
 struct DenseKernel {
   using Epilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       cutlass::arch::Sm90,
       cutlass::arch::OpClassTensorOp,
-      DenseTile,
-      DenseCluster,
+      TileShape,
+      ClusterShape,
       cutlass::epilogue::collective::EpilogueTileAuto,
       DenseAccumulator,
       DenseAccumulator,
@@ -52,11 +54,11 @@ struct DenseKernel {
       DenseLayoutB,
       8,
       DenseAccumulator,
-      DenseTile,
-      DenseCluster,
+      TileShape,
+      ClusterShape,
       cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename Epilogue::SharedStorage))>,
-      cutlass::gemm::collective::KernelScheduleAuto
+      Schedule
     >::CollectiveOp;
   using Kernel = cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>,
@@ -67,6 +69,78 @@ struct DenseKernel {
 
 using DenseFp16Gemm = typename DenseKernel<cutlass::half_t>::Gemm;
 using DenseBf16Gemm = typename DenseKernel<cutlass::bfloat16_t>::Gemm;
+using DenseCooperative128Fp16Gemm =
+    typename DenseKernel<
+        cutlass::half_t,
+        Shape<_128, _128, _64>,
+        Shape<_1, _1, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>::Gemm;
+using DenseCooperative128Bf16Gemm =
+    typename DenseKernel<
+        cutlass::bfloat16_t,
+        Shape<_128, _128, _64>,
+        Shape<_1, _1, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>::Gemm;
+using DensePingpong128Fp16Gemm =
+    typename DenseKernel<
+        cutlass::half_t,
+        Shape<_128, _128, _64>,
+        Shape<_1, _1, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpong>::Gemm;
+using DensePingpong128Bf16Gemm =
+    typename DenseKernel<
+        cutlass::bfloat16_t,
+        Shape<_128, _128, _64>,
+        Shape<_1, _1, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpong>::Gemm;
+using DenseCooperative256Fp16Gemm =
+    typename DenseKernel<
+        cutlass::half_t,
+        Shape<_256, _128, _64>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>::Gemm;
+using DenseCooperative256Bf16Gemm =
+    typename DenseKernel<
+        cutlass::bfloat16_t,
+        Shape<_256, _128, _64>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>::Gemm;
+using DenseCooperative128Cluster2x2Fp16Gemm =
+    typename DenseKernel<
+        cutlass::half_t,
+        Shape<_128, _128, _64>,
+        Shape<_2, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>::Gemm;
+using DenseCooperative128Cluster2x2Bf16Gemm =
+    typename DenseKernel<
+        cutlass::bfloat16_t,
+        Shape<_128, _128, _64>,
+        Shape<_2, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>::Gemm;
+using DensePingpong128Cluster2x2Fp16Gemm =
+    typename DenseKernel<
+        cutlass::half_t,
+        Shape<_128, _128, _64>,
+        Shape<_2, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpong>::Gemm;
+using DensePingpong128Cluster2x2Bf16Gemm =
+    typename DenseKernel<
+        cutlass::bfloat16_t,
+        Shape<_128, _128, _64>,
+        Shape<_2, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpong>::Gemm;
+using DensePingpong64Cluster2x2Fp16Gemm =
+    typename DenseKernel<
+        cutlass::half_t,
+        Shape<_64, _128, _64>,
+        Shape<_2, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpong>::Gemm;
+using DensePingpong64Cluster2x2Bf16Gemm =
+    typename DenseKernel<
+        cutlass::bfloat16_t,
+        Shape<_64, _128, _64>,
+        Shape<_2, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpong>::Gemm;
 
 template <typename Element, typename ElementOutput = float>
 struct Fp8Kernel {
@@ -140,13 +214,18 @@ using Fp8GroupwiseScaleConfig = cutlass::detail::Sm90BlockwiseScaleConfig<
     cute::GMMA::Major::MN,
     cute::GMMA::Major::K>;
 
-template <typename Element, typename ElementOutput>
-struct Fp8GroupwisePingpongKernel {
+template <
+    typename Element,
+    typename ElementOutput,
+    typename TileShape,
+    typename ClusterShape,
+    typename Schedule>
+struct Fp8GroupwiseKernel {
   using LayoutA = cutlass::layout::RowMajor;
   using LayoutB = cutlass::layout::ColumnMajor;
   using LayoutC = cutlass::layout::RowMajor;
-  using Tile = Shape<_128, _128, _128>;
-  using Cluster = Shape<_1, _2, _1>;
+  using Tile = TileShape;
+  using Cluster = ClusterShape;
   using ScaleConfig = Fp8GroupwiseScaleConfig;
   using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
   using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());
@@ -180,7 +259,7 @@ struct Fp8GroupwisePingpongKernel {
       Cluster,
       cutlass::gemm::collective::StageCountAutoCarveout<
           static_cast<int>(sizeof(typename Epilogue::SharedStorage))>,
-      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8Blockwise
+      Schedule
     >::CollectiveOp;
   using Kernel = cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>,
@@ -190,21 +269,61 @@ struct Fp8GroupwisePingpongKernel {
 };
 
 using Fp8GroupwisePingpongE4M3Fp16Gemm =
-    typename Fp8GroupwisePingpongKernel<
+    typename Fp8GroupwiseKernel<
         cutlass::float_e4m3_t,
-        cutlass::half_t>::Gemm;
+        cutlass::half_t,
+        Shape<_128, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8Blockwise>::Gemm;
 using Fp8GroupwisePingpongE4M3Bf16Gemm =
-    typename Fp8GroupwisePingpongKernel<
+    typename Fp8GroupwiseKernel<
         cutlass::float_e4m3_t,
-        cutlass::bfloat16_t>::Gemm;
+        cutlass::bfloat16_t,
+        Shape<_128, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8Blockwise>::Gemm;
 using Fp8GroupwisePingpongE5M2Fp16Gemm =
-    typename Fp8GroupwisePingpongKernel<
+    typename Fp8GroupwiseKernel<
         cutlass::float_e5m2_t,
-        cutlass::half_t>::Gemm;
+        cutlass::half_t,
+        Shape<_128, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8Blockwise>::Gemm;
 using Fp8GroupwisePingpongE5M2Bf16Gemm =
-    typename Fp8GroupwisePingpongKernel<
+    typename Fp8GroupwiseKernel<
         cutlass::float_e5m2_t,
-        cutlass::bfloat16_t>::Gemm;
+        cutlass::bfloat16_t,
+        Shape<_128, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8Blockwise>::Gemm;
+using Fp8GroupwiseCooperativeE4M3Fp16Gemm =
+    typename Fp8GroupwiseKernel<
+        cutlass::float_e4m3_t,
+        cutlass::half_t,
+        Shape<_256, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8Blockwise>::Gemm;
+using Fp8GroupwiseCooperativeE4M3Bf16Gemm =
+    typename Fp8GroupwiseKernel<
+        cutlass::float_e4m3_t,
+        cutlass::bfloat16_t,
+        Shape<_256, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8Blockwise>::Gemm;
+using Fp8GroupwiseCooperativeE5M2Fp16Gemm =
+    typename Fp8GroupwiseKernel<
+        cutlass::float_e5m2_t,
+        cutlass::half_t,
+        Shape<_256, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8Blockwise>::Gemm;
+using Fp8GroupwiseCooperativeE5M2Bf16Gemm =
+    typename Fp8GroupwiseKernel<
+        cutlass::float_e5m2_t,
+        cutlass::bfloat16_t,
+        Shape<_256, _128, _128>,
+        Shape<_1, _2, _1>,
+        cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8Blockwise>::Gemm;
 
 template <typename Gemm>
 int run_dense_gemm(
@@ -513,6 +632,345 @@ xqt_sm90_fp8_e5m2_groupwise_pingpong_bf16_run(
       static_cast<cutlass::bfloat16_t*>(d), stream);
 }
 
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e4m3_groupwise_cooperative_256_compile_probe() {
+  return static_cast<int>(sizeof(Fp8GroupwiseCooperativeE4M3Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e4m3_groupwise_cooperative_256_fp16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    float const* scale_a,
+    float const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_fp8_gemm<
+      Fp8GroupwiseCooperativeE4M3Fp16Gemm,
+      Fp8GroupwiseScaleConfig>(
+      m, n, k, static_cast<cutlass::float_e4m3_t const*>(a),
+      static_cast<cutlass::float_e4m3_t const*>(b), scale_a, scale_b,
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e4m3_groupwise_cooperative_256_bf16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    float const* scale_a,
+    float const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_fp8_gemm<
+      Fp8GroupwiseCooperativeE4M3Bf16Gemm,
+      Fp8GroupwiseScaleConfig>(
+      m, n, k, static_cast<cutlass::float_e4m3_t const*>(a),
+      static_cast<cutlass::float_e4m3_t const*>(b), scale_a, scale_b,
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e5m2_groupwise_cooperative_256_compile_probe() {
+  return static_cast<int>(sizeof(Fp8GroupwiseCooperativeE5M2Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e5m2_groupwise_cooperative_256_fp16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    float const* scale_a,
+    float const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_fp8_gemm<
+      Fp8GroupwiseCooperativeE5M2Fp16Gemm,
+      Fp8GroupwiseScaleConfig>(
+      m, n, k, static_cast<cutlass::float_e5m2_t const*>(a),
+      static_cast<cutlass::float_e5m2_t const*>(b), scale_a, scale_b,
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e5m2_groupwise_cooperative_256_bf16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    float const* scale_a,
+    float const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_fp8_gemm<
+      Fp8GroupwiseCooperativeE5M2Bf16Gemm,
+      Fp8GroupwiseScaleConfig>(
+      m, n, k, static_cast<cutlass::float_e5m2_t const*>(a),
+      static_cast<cutlass::float_e5m2_t const*>(b), scale_a, scale_b,
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_compile_probe() {
+  return static_cast<int>(
+      sizeof(DenseCooperative128Fp16Gemm) +
+      sizeof(DenseCooperative128Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_fp16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DenseCooperative128Fp16Gemm>(
+      m, n, k, static_cast<cutlass::half_t const*>(a),
+      static_cast<cutlass::half_t const*>(b),
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_bf16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DenseCooperative128Bf16Gemm>(
+      m, n, k, static_cast<cutlass::bfloat16_t const*>(a),
+      static_cast<cutlass::bfloat16_t const*>(b),
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_compile_probe() {
+  return static_cast<int>(
+      sizeof(DensePingpong128Fp16Gemm) + sizeof(DensePingpong128Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_fp16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DensePingpong128Fp16Gemm>(
+      m, n, k, static_cast<cutlass::half_t const*>(a),
+      static_cast<cutlass::half_t const*>(b),
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_bf16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DensePingpong128Bf16Gemm>(
+      m, n, k, static_cast<cutlass::bfloat16_t const*>(a),
+      static_cast<cutlass::bfloat16_t const*>(b),
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_256_compile_probe() {
+  return static_cast<int>(
+      sizeof(DenseCooperative256Fp16Gemm) +
+      sizeof(DenseCooperative256Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_256_fp16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DenseCooperative256Fp16Gemm>(
+      m, n, k, static_cast<cutlass::half_t const*>(a),
+      static_cast<cutlass::half_t const*>(b),
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_256_bf16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DenseCooperative256Bf16Gemm>(
+      m, n, k, static_cast<cutlass::bfloat16_t const*>(a),
+      static_cast<cutlass::bfloat16_t const*>(b),
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_cluster2x2_compile_probe() {
+  return static_cast<int>(
+      sizeof(DenseCooperative128Cluster2x2Fp16Gemm) +
+      sizeof(DenseCooperative128Cluster2x2Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_cluster2x2_fp16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DenseCooperative128Cluster2x2Fp16Gemm>(
+      m, n, k, static_cast<cutlass::half_t const*>(a),
+      static_cast<cutlass::half_t const*>(b),
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_cluster2x2_bf16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DenseCooperative128Cluster2x2Bf16Gemm>(
+      m, n, k, static_cast<cutlass::bfloat16_t const*>(a),
+      static_cast<cutlass::bfloat16_t const*>(b),
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_cluster2x2_compile_probe() {
+  return static_cast<int>(
+      sizeof(DensePingpong128Cluster2x2Fp16Gemm) +
+      sizeof(DensePingpong128Cluster2x2Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_cluster2x2_fp16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DensePingpong128Cluster2x2Fp16Gemm>(
+      m, n, k, static_cast<cutlass::half_t const*>(a),
+      static_cast<cutlass::half_t const*>(b),
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_cluster2x2_bf16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DensePingpong128Cluster2x2Bf16Gemm>(
+      m, n, k, static_cast<cutlass::bfloat16_t const*>(a),
+      static_cast<cutlass::bfloat16_t const*>(b),
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_64_cluster2x2_compile_probe() {
+  return static_cast<int>(
+      sizeof(DensePingpong64Cluster2x2Fp16Gemm) +
+      sizeof(DensePingpong64Cluster2x2Bf16Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_64_cluster2x2_fp16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DensePingpong64Cluster2x2Fp16Gemm>(
+      m, n, k, static_cast<cutlass::half_t const*>(a),
+      static_cast<cutlass::half_t const*>(b),
+      static_cast<cutlass::half_t const*>(c),
+      static_cast<cutlass::half_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_64_cluster2x2_bf16_wgmma_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_dense_gemm<DensePingpong64Cluster2x2Bf16Gemm>(
+      m, n, k, static_cast<cutlass::bfloat16_t const*>(a),
+      static_cast<cutlass::bfloat16_t const*>(b),
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
 #else
 
 extern "C" __attribute__((visibility("default"))) int
@@ -528,6 +986,108 @@ xqt_sm90_dense_fp16_wgmma_run(
 
 extern "C" __attribute__((visibility("default"))) int
 xqt_sm90_dense_bf16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_fp16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_bf16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_fp16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_bf16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_256_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_256_fp16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_256_bf16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_cluster2x2_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_cluster2x2_fp16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_cooperative_128_cluster2x2_bf16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_cluster2x2_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_cluster2x2_fp16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_128_cluster2x2_bf16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_64_cluster2x2_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_64_cluster2x2_fp16_wgmma_run(
+    int, int, int, void const*, void const*, void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_dense_pingpong_64_cluster2x2_bf16_wgmma_run(
     int, int, int, void const*, void const*, void const*, void*, void*) {
   return 0;
 }
@@ -603,6 +1163,44 @@ xqt_sm90_fp8_e5m2_groupwise_pingpong_fp16_run(
 
 extern "C" __attribute__((visibility("default"))) int
 xqt_sm90_fp8_e5m2_groupwise_pingpong_bf16_run(
+    int, int, int, void const*, void const*, float const*, float const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e4m3_groupwise_cooperative_256_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e4m3_groupwise_cooperative_256_fp16_run(
+    int, int, int, void const*, void const*, float const*, float const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e4m3_groupwise_cooperative_256_bf16_run(
+    int, int, int, void const*, void const*, float const*, float const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e5m2_groupwise_cooperative_256_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e5m2_groupwise_cooperative_256_fp16_run(
+    int, int, int, void const*, void const*, float const*, float const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm90_fp8_e5m2_groupwise_cooperative_256_bf16_run(
     int, int, int, void const*, void const*, float const*, float const*,
     void const*, void*, void*) {
   return 0;

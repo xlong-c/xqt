@@ -46,14 +46,20 @@ _SM120_CAPABILITY = (12, 0)
 _SM120_FP8_SYMBOLS = {
     ("fp8_e4m3", "blockwise", "cooperative"): "xqt_sm120_fp8_e4m3_blockwise_bf16_run",
     ("fp8_e5m2", "blockwise", "cooperative"): "xqt_sm120_fp8_e5m2_blockwise_bf16_run",
+    ("fp8_e4m3", "blockwise", "pingpong"):
+        "xqt_sm120_fp8_e4m3_blockwise_pingpong_bf16_run",
+    ("fp8_e5m2", "blockwise", "pingpong"):
+        "xqt_sm120_fp8_e5m2_blockwise_pingpong_bf16_run",
     ("fp8_e4m3", "groupwise", "cooperative"): "xqt_sm120_fp8_e4m3_groupwise_bf16_run",
     ("fp8_e5m2", "groupwise", "cooperative"): "xqt_sm120_fp8_e5m2_groupwise_bf16_run",
     ("fp8_e4m3", "groupwise", "pingpong"): "xqt_sm120_fp8_e4m3_groupwise_pingpong_bf16_run",
     ("fp8_e5m2", "groupwise", "pingpong"): "xqt_sm120_fp8_e5m2_groupwise_pingpong_bf16_run",
 }
 _SM120_NVFP4_SYMBOLS = {
-    128: "xqt_sm120_nvfp4_bf16_run",
-    256: "xqt_sm120_nvfp4_k256_bf16_run",
+    (128, "cooperative"): "xqt_sm120_nvfp4_bf16_run",
+    (256, "cooperative"): "xqt_sm120_nvfp4_k256_bf16_run",
+    (128, "pingpong"): "xqt_sm120_nvfp4_pingpong_bf16_run",
+    (256, "pingpong"): "xqt_sm120_nvfp4_k256_pingpong_bf16_run",
 }
 
 
@@ -153,6 +159,7 @@ class Sm120Nvfp4Contract:
             "activation_storage": "packed_e2m1",
             "scale_dtype": "float_ue4m3",
             "scale_layout": "sm1xx_blockscaled_sfvec16",
+            "tile_shapes": [[128, 128, 128], [128, 128, 256]],
             "output_dtype": self.output_dtype,
             "use_tcgen05": self.use_tcgen05,
             "use_tma": self.use_tma,
@@ -224,6 +231,9 @@ def build_sm120_artifact(
             "runtime_abi": "cutlass_internal_tiled_scale_layout_float32_and_ue4m3",
             "runtime_stream_abi": "torch_current_stream_void_p",
             "nvfp4_probe_present": True,
+            "nvfp4_k256_probe_present": True,
+            "nvfp4_tile_shapes": [[128, 128, 128], [128, 128, 256]],
+            "nvfp4_schedule_variants": ["cooperative", "pingpong"],
             "dense_fp16_supported_by_builder": False,
             "nvfp4_runtime_routing": "explicit_packed_activation_and_ue4m3_scale_probe",
             "nvfp4_scale_layout": "sm1xx_blockscaled_sfvec16",
@@ -309,8 +319,10 @@ def run_sm120_fp8_tcgen05_probe(
 ) -> torch.Tensor:
     """Run the explicit SM120 FP8 tcgen05 probe on an RTX 5090.
 
-    For ``blockwise``, scale shapes are
+    For ``blockwise``, cooperative scale shapes are
     ``[ceil(M/128), ceil(K/128)]`` and ``[ceil(N/128), ceil(K/128)]``.
+    The blockwise pingpong tile uses ``SFVecM=64`` for A, so its A scale
+    shape is ``[ceil(M/64), ceil(K/128)]``.
     For ``groupwise``, the actual CUTLASS probe uses
     ``Sm120BlockwiseScaleConfig<1,128,128>``: A scales are
     ``[M, ceil(K/128)]`` and B scales are
@@ -326,8 +338,6 @@ def run_sm120_fp8_tcgen05_probe(
         )
     if schedule not in {"cooperative", "pingpong"}:
         raise XQTBackendError("SM120 FP8 probe schedule must be cooperative or pingpong")
-    if schedule == "pingpong" and scale_granularity != "groupwise":
-        raise XQTBackendError("SM120 FP8 pingpong is only available for groupwise scales")
     qweight, packed_scales = _sm120_weight_payload(weight)
     if scale_b is None:
         scale_b = packed_scales
@@ -367,7 +377,13 @@ def run_sm120_fp8_tcgen05_probe(
     )
     padded_m, padded_k = (int(item) for item in activation_runtime.shape)
     padded_n = int(weight_runtime.shape[0])
-    row_block_a = 1 if scale_granularity == "groupwise" else 128
+    row_block_a = (
+        1
+        if scale_granularity == "groupwise"
+        else 64
+        if schedule == "pingpong"
+        else 128
+    )
     scale_a_runtime = prepare_cutlass_blockscales(
         scale_a,
         rows=m,
@@ -459,9 +475,10 @@ def run_sm120_nvfp4_probe(
     scale_b: torch.Tensor | None = None,
     activation_global_scale: torch.Tensor | None = None,
     tile_k: int = 128,
+    schedule: str = "cooperative",
     artifact: str | Path,
 ) -> torch.Tensor:
-    """Run the explicit cooperative SM120 NVFP4 probe.
+    """Run an explicit SM120 NVFP4 cooperative or pingpong probe.
 
     Both operands use packed uint8 E2M1 storage.  ``scale_a`` and ``scale_b``
     are conceptual ``[rows, ceil(K / 16)]`` grids; the helper converts them to
@@ -473,6 +490,8 @@ def run_sm120_nvfp4_probe(
         raise ValueError("logical_k must be positive")
     if int(tile_k) not in {128, 256}:
         raise XQTBackendError("SM120 NVFP4 tile_k must be 128 or 256")
+    if schedule not in {"cooperative", "pingpong"}:
+        raise XQTBackendError("SM120 NVFP4 schedule must be cooperative or pingpong")
     qweight, packed_scales = _sm120_weight_payload(weight)
     if scale_b is None:
         scale_b = packed_scales
@@ -555,7 +574,7 @@ def run_sm120_nvfp4_probe(
         dtype=torch.bfloat16,
     )
     output = torch.empty_like(c_source)
-    symbol = _SM120_NVFP4_SYMBOLS[int(tile_k)]
+    symbol = _SM120_NVFP4_SYMBOLS[(int(tile_k), schedule)]
     function = load_runtime_function(
         artifact,
         symbol=symbol,

@@ -9,12 +9,16 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
 
 #include "cutlass/arch/arch.h"
 #include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/gemm/device/gemm.h"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
+#include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 #include "cutlass/gemm/device/gemm_universal_with_broadcast.h"
+#include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 
 #ifndef INT8MMA_STAGES
 #define INT8MMA_STAGES 3
@@ -353,7 +357,7 @@ extern "C" int int8mma_smem_bytes() { return BYTES_TOTAL_MATH; }
 extern "C" int int8mma_smem_bytes_prepacked() { return BYTES_TOTAL_PRE; }
 
 extern "C" const char* int8mma_version() {
-  return "int8mma-ada-sm89-v12 manual+cutlass-int8-fused-scale-bias stages=3 tile=64x128x64 warps=8";
+  return "int8mma-ada-sm89-v13 cutlass-visitor-w8a8-convrot stages=3 tile=64x128x64 warps=8";
 }
 
 // CUTLASS owns the SM80+ IMMA mainloop, including ldmatrix fragment loads and
@@ -371,9 +375,10 @@ struct alignas(8) CutlassScaleBias {
       : scale(value), bias(value) {}
 };
 
-class CutlassPerChannelScaleEpilogue {
+template <typename OutputElement>
+class CutlassPerChannelScaleEpilogueT {
  public:
-  using ElementOutput = cutlass::half_t;
+  using ElementOutput = OutputElement;
   using ElementD = ElementOutput;
   using ElementC = ElementOutput;
   using ElementT = ElementOutput;
@@ -394,7 +399,7 @@ class CutlassPerChannelScaleEpilogue {
 
   struct Params {};
 
-  CUTLASS_HOST_DEVICE CutlassPerChannelScaleEpilogue(Params const&) {}
+  CUTLASS_HOST_DEVICE CutlassPerChannelScaleEpilogueT(Params const&) {}
   CUTLASS_HOST_DEVICE bool is_source_needed() const { return false; }
   CUTLASS_HOST_DEVICE void set_k_partition(int, int) {}
 
@@ -417,6 +422,11 @@ class CutlassPerChannelScaleEpilogue {
   }
 };
 
+using CutlassPerChannelScaleEpilogue =
+    CutlassPerChannelScaleEpilogueT<cutlass::half_t>;
+using CutlassPerChannelScaleEpilogueBf16 =
+    CutlassPerChannelScaleEpilogueT<cutlass::bfloat16_t>;
+
 using CutlassInt8Gemm128x256 = cutlass::gemm::device::GemmUniversalWithBroadcast<
     int8_t, cutlass::layout::RowMajor,
     int8_t, cutlass::layout::ColumnMajor,
@@ -429,6 +439,27 @@ using CutlassInt8Gemm128x256 = cutlass::gemm::device::GemmUniversalWithBroadcast
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     3, 16, 16, cutlass::arch::OpMultiplyAddSaturate>;
 
+using CutlassInt8GemmBf16_128x256 =
+    cutlass::gemm::device::GemmUniversalWithBroadcast<
+        int8_t,
+        cutlass::layout::RowMajor,
+        int8_t,
+        cutlass::layout::ColumnMajor,
+        cutlass::bfloat16_t,
+        cutlass::layout::RowMajor,
+        int32_t,
+        cutlass::arch::OpClassTensorOp,
+        cutlass::arch::Sm80,
+        cutlass::gemm::GemmShape<128, 256, 64>,
+        cutlass::gemm::GemmShape<64, 64, 64>,
+        cutlass::gemm::GemmShape<16, 8, 32>,
+        CutlassPerChannelScaleEpilogueBf16,
+        cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+        3,
+        16,
+        16,
+        cutlass::arch::OpMultiplyAddSaturate>;
+
 using CutlassInt8Gemm64x128 = cutlass::gemm::device::GemmUniversalWithBroadcast<
     int8_t, cutlass::layout::RowMajor,
     int8_t, cutlass::layout::ColumnMajor,
@@ -440,6 +471,268 @@ using CutlassInt8Gemm64x128 = cutlass::gemm::device::GemmUniversalWithBroadcast<
     CutlassPerChannelScaleEpilogue,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     3, 16, 16, cutlass::arch::OpMultiplyAddSaturate>;
+
+using CutlassInt8GemmBf16_64x128 =
+    cutlass::gemm::device::GemmUniversalWithBroadcast<
+        int8_t,
+        cutlass::layout::RowMajor,
+        int8_t,
+        cutlass::layout::ColumnMajor,
+        cutlass::bfloat16_t,
+        cutlass::layout::RowMajor,
+        int32_t,
+        cutlass::arch::OpClassTensorOp,
+        cutlass::arch::Sm80,
+        cutlass::gemm::GemmShape<64, 128, 64>,
+        cutlass::gemm::GemmShape<32, 32, 64>,
+        cutlass::gemm::GemmShape<16, 8, 32>,
+        CutlassPerChannelScaleEpilogueBf16,
+        cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+        3,
+        16,
+        16,
+        cutlass::arch::OpMultiplyAddSaturate>;
+
+template <
+    typename ElementOutput,
+    int TBM,
+    int TBN,
+    int TBK,
+    int WM,
+    int WN,
+    int WK,
+    int Stages>
+struct FusedInt8Gemm {
+  using ElementA = int8_t;
+  using ElementB = int8_t;
+  using ElementC = ElementOutput;
+  using ElementAccumulator = int32_t;
+  using ElementCompute = float;
+  using LayoutA = cutlass::layout::RowMajor;
+  using LayoutB = cutlass::layout::ColumnMajor;
+  using LayoutC = cutlass::layout::RowMajor;
+  static constexpr int AlignA = 16;
+  static constexpr int AlignB = 16;
+  static constexpr int AlignC =
+      128 / cutlass::sizeof_bits<ElementC>::value;
+  static constexpr int EvtStages = 1;
+
+  using ThreadblockShape = cutlass::gemm::GemmShape<TBM, TBN, TBK>;
+  using WarpShape = cutlass::gemm::GemmShape<WM, WN, WK>;
+  using InstructionShape = cutlass::gemm::GemmShape<16, 8, 32>;
+  using ThreadMap = cutlass::epilogue::threadblock::OutputTileThreadLayout<
+      ThreadblockShape,
+      WarpShape,
+      ElementC,
+      AlignC,
+      EvtStages>;
+  using Accumulator = cutlass::epilogue::threadblock::VisitorAccFetch;
+  using ActivationScale =
+      cutlass::epilogue::threadblock::VisitorColBroadcast<
+          ThreadMap,
+          ElementCompute,
+          cute::Stride<cute::_1, cute::_0, int32_t>>;
+  using WeightScale = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      ThreadMap,
+      ElementCompute,
+      cute::Stride<cute::_0, cute::_1, int32_t>>;
+  using Bias = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      ThreadMap,
+      ElementCompute,
+      cute::Stride<cute::_0, cute::_1, int32_t>>;
+  using MultiplyActivation = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiplies,
+      ElementCompute,
+      ElementCompute,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using EvtActivation = cutlass::epilogue::threadblock::Sm80EVT<
+      MultiplyActivation,
+      Accumulator,
+      ActivationScale>;
+  using MultiplyWeight = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiplies,
+      ElementCompute,
+      ElementCompute,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using EvtWeight = cutlass::epilogue::threadblock::Sm80EVT<
+      MultiplyWeight,
+      EvtActivation,
+      WeightScale>;
+  using AddBias = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::plus,
+      ElementOutput,
+      ElementCompute,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using EvtBias = cutlass::epilogue::threadblock::Sm80EVT<
+      AddBias,
+      EvtWeight,
+      Bias>;
+  using Store = cutlass::epilogue::threadblock::VisitorAuxStore<
+      ThreadMap,
+      ElementOutput,
+      cutlass::FloatRoundStyle::round_to_nearest,
+      cute::Stride<int64_t, cute::_1, int64_t>>;
+  using EvtStore = cutlass::epilogue::threadblock::Sm80EVT<Store, EvtBias>;
+  using Kernel = typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
+      ElementA,
+      LayoutA,
+      cutlass::ComplexTransform::kNone,
+      AlignA,
+      ElementB,
+      LayoutB,
+      cutlass::ComplexTransform::kNone,
+      AlignB,
+      ElementC,
+      LayoutC,
+      AlignC,
+      ElementAccumulator,
+      ElementCompute,
+      cutlass::arch::OpClassTensorOp,
+      cutlass::arch::Sm89,
+      ThreadblockShape,
+      WarpShape,
+      InstructionShape,
+      EvtStore,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+      Stages,
+      cutlass::arch::OpMultiplyAddSaturate,
+      EvtStages>::GemmKernel;
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
+
+  static bool run(
+      const int8_t* activation,
+      const int8_t* weight,
+      const float* activation_scales,
+      const float* weight_scales,
+      const float* bias,
+      ElementOutput* output,
+      int actual_m,
+      int actual_n,
+      int problem_m,
+      int problem_n,
+      int problem_k,
+      cudaStream_t stream) {
+    const cutlass::gemm::GemmCoord problem(problem_m, problem_n, problem_k);
+    typename EvtStore::Arguments epilogue_args{
+        {{{{}, {const_cast<float*>(activation_scales), 0.0F,
+                {cute::_1{}, cute::_0{}, problem_m}},
+           {}},
+          {const_cast<float*>(weight_scales), 0.0F,
+           {cute::_0{}, cute::_1{}, problem_n}},
+          {}},
+         {const_cast<float*>(bias), 0.0F,
+          {cute::_0{}, cute::_1{}, problem_n}},
+         {}},
+        {output,
+         {actual_n, cute::_1{}, static_cast<int64_t>(problem_m) * actual_n}}};
+    typename Gemm::Arguments arguments(
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        problem,
+        1,
+        epilogue_args,
+        activation,
+        weight,
+        nullptr,
+        nullptr,
+        static_cast<int64_t>(problem_m) * problem_k,
+        static_cast<int64_t>(problem_n) * problem_k,
+        0,
+        0,
+        problem_k,
+        problem_k,
+        0,
+        0);
+    struct State {
+      Gemm gemm;
+      bool initialized = false;
+    };
+    static thread_local std::unordered_map<
+        uint64_t,
+        std::unique_ptr<State>>
+        cache;
+    const uint64_t key =
+        (static_cast<uint64_t>(static_cast<uint32_t>(problem_m)) << 42) |
+        (static_cast<uint64_t>(static_cast<uint32_t>(problem_n)) << 21) |
+        static_cast<uint64_t>(static_cast<uint32_t>(problem_k));
+    auto& state = cache[key];
+    if (!state) {
+      state = std::make_unique<State>();
+    }
+
+    cutlass::Status status = cutlass::Status::kSuccess;
+    if (!state->initialized) {
+      status = state->gemm.can_implement(arguments);
+      if (status != cutlass::Status::kSuccess) {
+        return false;
+      }
+      if (Gemm::get_workspace_size(arguments) != 0) {
+        return false;
+      }
+      status = state->gemm.initialize(arguments, nullptr, stream);
+      if (status != cutlass::Status::kSuccess) {
+        return false;
+      }
+      state->initialized = true;
+    } else {
+      status = state->gemm.update(arguments);
+      if (status != cutlass::Status::kSuccess) {
+        return false;
+      }
+    }
+    return state->gemm(stream) == cutlass::Status::kSuccess;
+  }
+};
+
+template <
+    typename ElementOutput,
+    int TBM,
+    int TBN,
+    int TBK,
+    int WM,
+    int WN,
+    int WK,
+    int Stages>
+int run_cutlass_visitor_w8a8(
+    const void* activation,
+    const void* weight,
+    void* output,
+    const void* activation_scales,
+    const void* weight_scales,
+    const void* bias,
+    int actual_m,
+    int actual_n,
+    int problem_m,
+    int problem_n,
+    int problem_k,
+    cudaStream_t stream) {
+  if (!activation || !weight || !output || !activation_scales ||
+      !weight_scales || !bias || actual_m <= 0 || actual_n <= 0 ||
+      problem_m < actual_m || problem_n < actual_n || problem_k <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const bool ok = FusedInt8Gemm<
+      ElementOutput,
+      TBM,
+      TBN,
+      TBK,
+      WM,
+      WN,
+      WK,
+      Stages>::run(
+      static_cast<const int8_t*>(activation),
+      static_cast<const int8_t*>(weight),
+      static_cast<const float*>(activation_scales),
+      static_cast<const float*>(weight_scales),
+      static_cast<const float*>(bias),
+      static_cast<ElementOutput*>(output),
+      actual_m,
+      actual_n,
+      problem_m,
+      problem_n,
+      problem_k,
+      stream);
+  return static_cast<int>(ok ? cudaSuccess : cudaErrorNotSupported);
+}
 
 using CutlassInt8GemmI32_64x128 = cutlass::gemm::device::Gemm<
     int8_t, cutlass::layout::RowMajor,
@@ -501,7 +794,7 @@ int run_cutlass_prepacked_b(
                                               : static_cast<int>(cudaErrorLaunchFailure);
 }
 
-template <typename Gemm>
+template <typename Gemm, typename OutputElement, typename Epilogue>
 int run_cutlass_prepacked_b_stream(
     const void* a,
     const void* b_nk,
@@ -513,11 +806,11 @@ int run_cutlass_prepacked_b_stream(
     cudaStream_t stream) {
   const auto* a_ptr = static_cast<const int8_t*>(a);
   const auto* b_ptr = static_cast<const int8_t*>(b_nk);
-  auto* c_ptr = static_cast<cutlass::half_t*>(c);
+  auto* c_ptr = static_cast<OutputElement*>(c);
   typename Gemm::Arguments args(
       cutlass::gemm::GemmUniversalMode::kGemm,
       {M, N, K}, 1,
-      CutlassPerChannelScaleEpilogue::Params{},
+      typename Epilogue::Params{},
       a_ptr, b_ptr, c_ptr, c_ptr,
       const_cast<void*>(output_scale), nullptr,
       0, 0, 0, 0, 0, 0,
@@ -595,7 +888,10 @@ extern "C" int int8mma_run_cutlass_scale_64x128_prepacked_b_stream(
       (K % 32) != 0) {
     return static_cast<int>(cudaErrorNotSupported);
   }
-  return run_cutlass_prepacked_b_stream<CutlassInt8Gemm64x128>(
+  return run_cutlass_prepacked_b_stream<
+      CutlassInt8Gemm64x128,
+      cutlass::half_t,
+      CutlassPerChannelScaleEpilogue>(
       a,
       b_nk,
       c,
@@ -622,7 +918,10 @@ extern "C" int int8mma_run_cutlass_scale_128x256_prepacked_b_stream(
       (K % 32) != 0) {
     return static_cast<int>(cudaErrorNotSupported);
   }
-  return run_cutlass_prepacked_b_stream<CutlassInt8Gemm128x256>(
+  return run_cutlass_prepacked_b_stream<
+      CutlassInt8Gemm128x256,
+      cutlass::half_t,
+      CutlassPerChannelScaleEpilogue>(
       a,
       b_nk,
       c,
@@ -630,6 +929,218 @@ extern "C" int int8mma_run_cutlass_scale_128x256_prepacked_b_stream(
       M,
       N,
       K,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_scale_bf16_64x128_prepacked_b_stream(
+    const void* a,
+    const void* b_nk,
+    void* c,
+    const void* output_scale,
+    int M,
+    int N,
+    int K,
+    void* stream_ptr) {
+  if (!a || !b_nk || !c || !output_scale || M <= 0 || N <= 0 || K <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  if ((N % CutlassPerChannelScaleEpilogueBf16::kElementsPerAccess) != 0 ||
+      (K % 32) != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_prepacked_b_stream<
+      CutlassInt8GemmBf16_64x128,
+      cutlass::bfloat16_t,
+      CutlassPerChannelScaleEpilogueBf16>(
+      a,
+      b_nk,
+      c,
+      output_scale,
+      M,
+      N,
+      K,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_scale_bf16_128x256_prepacked_b_stream(
+    const void* a,
+    const void* b_nk,
+    void* c,
+    const void* output_scale,
+    int M,
+    int N,
+    int K,
+    void* stream_ptr) {
+  if (!a || !b_nk || !c || !output_scale || M <= 0 || N <= 0 || K <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  if ((N % CutlassPerChannelScaleEpilogueBf16::kElementsPerAccess) != 0 ||
+      (K % 32) != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_prepacked_b_stream<
+      CutlassInt8GemmBf16_128x256,
+      cutlass::bfloat16_t,
+      CutlassPerChannelScaleEpilogueBf16>(
+      a,
+      b_nk,
+      c,
+      output_scale,
+      M,
+      N,
+      K,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_visitor_bf16_64x128_prepacked_b_stream(
+    const void* a,
+    const void* b_nk,
+    void* output,
+    const void* activation_scale,
+    const void* weight_scale,
+    const void* bias,
+    int actual_m,
+    int actual_n,
+    int problem_m,
+    int problem_k,
+    void* stream_ptr) {
+  if (actual_n % 8 != 0 || problem_k % 32 != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_visitor_w8a8<
+      cutlass::bfloat16_t,
+      64,
+      128,
+      64,
+      32,
+      32,
+      64,
+      3>(
+      a,
+      b_nk,
+      output,
+      activation_scale,
+      weight_scale,
+      bias,
+      actual_m,
+      actual_n,
+      problem_m,
+      actual_n,
+      problem_k,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_visitor_bf16_128x256_prepacked_b_stream(
+    const void* a,
+    const void* b_nk,
+    void* output,
+    const void* activation_scale,
+    const void* weight_scale,
+    const void* bias,
+    int actual_m,
+    int actual_n,
+    int problem_m,
+    int problem_k,
+    void* stream_ptr) {
+  if (actual_n % 8 != 0 || problem_k % 32 != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_visitor_w8a8<
+      cutlass::bfloat16_t,
+      128,
+      256,
+      64,
+      64,
+      64,
+      64,
+      3>(
+      a,
+      b_nk,
+      output,
+      activation_scale,
+      weight_scale,
+      bias,
+      actual_m,
+      actual_n,
+      problem_m,
+      actual_n,
+      problem_k,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_visitor_half_64x128_prepacked_b_stream(
+    const void* a,
+    const void* b_nk,
+    void* output,
+    const void* activation_scale,
+    const void* weight_scale,
+    const void* bias,
+    int actual_m,
+    int actual_n,
+    int problem_m,
+    int problem_k,
+    void* stream_ptr) {
+  if (actual_n % 8 != 0 || problem_k % 32 != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_visitor_w8a8<
+      cutlass::half_t,
+      64,
+      128,
+      64,
+      32,
+      32,
+      64,
+      3>(
+      a,
+      b_nk,
+      output,
+      activation_scale,
+      weight_scale,
+      bias,
+      actual_m,
+      actual_n,
+      problem_m,
+      actual_n,
+      problem_k,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_visitor_half_128x256_prepacked_b_stream(
+    const void* a,
+    const void* b_nk,
+    void* output,
+    const void* activation_scale,
+    const void* weight_scale,
+    const void* bias,
+    int actual_m,
+    int actual_n,
+    int problem_m,
+    int problem_k,
+    void* stream_ptr) {
+  if (actual_n % 8 != 0 || problem_k % 32 != 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return run_cutlass_visitor_w8a8<
+      cutlass::half_t,
+      128,
+      256,
+      64,
+      64,
+      64,
+      64,
+      3>(
+      a,
+      b_nk,
+      output,
+      activation_scale,
+      weight_scale,
+      bias,
+      actual_m,
+      actual_n,
+      problem_m,
+      actual_n,
+      problem_k,
       reinterpret_cast<cudaStream_t>(stream_ptr));
 }
 
@@ -969,6 +1480,172 @@ extern "C" int int8mma_convrot_quantize_rows(
   return static_cast<int>(cudaGetLastError());
 }
 
+template <typename ElementOutput>
+int run_cutlass_visitor_convrot_w8a8(
+    const void* input,
+    void* quantized_activation,
+    void* activation_scales,
+    const void* prepacked_b,
+    void* output,
+    const void* weight_scales,
+    const void* bias,
+    int actual_m,
+    int logical_k,
+    int rotated_k,
+    int padded_m,
+    int padded_k,
+    int n,
+    cudaStream_t stream) {
+  constexpr int WARPS = 4;
+  const dim3 block(WARPS * 32);
+  const dim3 grid((padded_m + WARPS - 1) / WARPS);
+  if constexpr (std::is_same<ElementOutput, cutlass::bfloat16_t>::value) {
+    convrot_quantize_rows_kernel<__nv_bfloat16>
+        <<<grid, block, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(input),
+            static_cast<int8_t*>(quantized_activation),
+            static_cast<float*>(activation_scales),
+            actual_m,
+            logical_k,
+            rotated_k,
+            padded_m,
+            padded_k);
+  } else {
+    convrot_quantize_rows_kernel<half>
+        <<<grid, block, 0, stream>>>(
+            static_cast<const half*>(input),
+            static_cast<int8_t*>(quantized_activation),
+            static_cast<float*>(activation_scales),
+            actual_m,
+            logical_k,
+            rotated_k,
+            padded_m,
+            padded_k);
+  }
+  const cudaError_t quantize_error = cudaGetLastError();
+  if (quantize_error != cudaSuccess) {
+    return static_cast<int>(quantize_error);
+  }
+  if (n >= 512) {
+    return run_cutlass_visitor_w8a8<
+        ElementOutput,
+        128,
+        256,
+        64,
+        64,
+        64,
+        64,
+        3>(
+        quantized_activation,
+        prepacked_b,
+        output,
+        activation_scales,
+        weight_scales,
+        bias,
+        actual_m,
+        n,
+        padded_m,
+        n,
+        padded_k,
+        stream);
+  }
+  return run_cutlass_visitor_w8a8<
+      ElementOutput,
+      64,
+      128,
+      64,
+      32,
+      32,
+      64,
+      3>(
+      quantized_activation,
+      prepacked_b,
+      output,
+      activation_scales,
+      weight_scales,
+      bias,
+      actual_m,
+      n,
+      padded_m,
+      n,
+      padded_k,
+      stream);
+}
+
+extern "C" int int8mma_run_cutlass_visitor_convrot_bf16_prepacked_b_stream(
+    const void* input,
+    void* quantized_activation,
+    void* activation_scales,
+    const void* prepacked_b,
+    void* output,
+    const void* weight_scales,
+    const void* bias,
+    int actual_m,
+    int logical_k,
+    int rotated_k,
+    int padded_m,
+    int padded_k,
+    int n,
+    void* stream_ptr) {
+  if (!input || !quantized_activation || !activation_scales || !prepacked_b ||
+      !output || !weight_scales || !bias || actual_m <= 0 || logical_k <= 0 ||
+      rotated_k <= 0 || padded_m < actual_m || padded_k < rotated_k || n <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  return run_cutlass_visitor_convrot_w8a8<cutlass::bfloat16_t>(
+      input,
+      quantized_activation,
+      activation_scales,
+      prepacked_b,
+      output,
+      weight_scales,
+      bias,
+      actual_m,
+      logical_k,
+      rotated_k,
+      padded_m,
+      padded_k,
+      n,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+extern "C" int int8mma_run_cutlass_visitor_convrot_half_prepacked_b_stream(
+    const void* input,
+    void* quantized_activation,
+    void* activation_scales,
+    const void* prepacked_b,
+    void* output,
+    const void* weight_scales,
+    const void* bias,
+    int actual_m,
+    int logical_k,
+    int rotated_k,
+    int padded_m,
+    int padded_k,
+    int n,
+    void* stream_ptr) {
+  if (!input || !quantized_activation || !activation_scales || !prepacked_b ||
+      !output || !weight_scales || !bias || actual_m <= 0 || logical_k <= 0 ||
+      rotated_k <= 0 || padded_m < actual_m || padded_k < rotated_k || n <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  return run_cutlass_visitor_convrot_w8a8<cutlass::half_t>(
+      input,
+      quantized_activation,
+      activation_scales,
+      prepacked_b,
+      output,
+      weight_scales,
+      bias,
+      actual_m,
+      logical_k,
+      rotated_k,
+      padded_m,
+      padded_k,
+      n,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
 namespace {
 
 cublasLtHandle_t g_cublaslt_handle = nullptr;
@@ -1107,9 +1784,9 @@ __global__ void int8mma_dequant_i32_rowwise_kernel(
   output[index] = convrot_convert_output<Output>(value);
 }
 
-template <typename Output>
-__global__ void int8mma_apply_half_rowwise_scale_bias_kernel(
-    const half* __restrict__ scaled,
+template <typename Input, typename Output>
+__global__ void int8mma_apply_rowwise_scale_bias_kernel(
+    const Input* __restrict__ scaled,
     Output* __restrict__ output,
     const float* __restrict__ activation_scale,
     const float* __restrict__ bias,
@@ -1123,9 +1800,36 @@ __global__ void int8mma_apply_half_rowwise_scale_bias_kernel(
   const int row = static_cast<int>(index / N);
   const int col = static_cast<int>(index % N);
   const float value =
-      __half2float(scaled[index]) * activation_scale[row] +
+      convrot_to_float<Input>(scaled[index]) * activation_scale[row] +
       (bias == nullptr ? 0.0f : bias[col]);
   output[index] = convrot_convert_output<Output>(value);
+}
+
+__global__ void int8mma_apply_bf16_rowwise_scale_bias_vec2_kernel(
+    const __nv_bfloat162* __restrict__ scaled,
+    __nv_bfloat162* __restrict__ output,
+    const float* __restrict__ activation_scale,
+    const float* __restrict__ bias,
+    int64_t pair_count,
+    int pairs_per_row) {
+  const int64_t pair_index =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (pair_index >= pair_count) {
+    return;
+  }
+  const int row = static_cast<int>(pair_index / pairs_per_row);
+  const int pair_col = static_cast<int>(pair_index % pairs_per_row);
+  const float scale = activation_scale[row];
+  float2 value = __bfloat1622float2(scaled[pair_index]);
+  if (bias != nullptr) {
+    const float2 bias_pair = reinterpret_cast<const float2*>(bias)[pair_col];
+    value.x = value.x * scale + bias_pair.x;
+    value.y = value.y * scale + bias_pair.y;
+  } else {
+    value.x *= scale;
+    value.y *= scale;
+  }
+  output[pair_index] = __float22bfloat162_rn(value);
 }
 
 extern "C" int int8mma_dequant_i32(
@@ -1208,7 +1912,7 @@ extern "C" int int8mma_apply_half_rowwise_scale_bias(
   const dim3 grid(static_cast<unsigned int>((total + threads - 1) / threads));
   const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   if (output_kind == 0) {
-    int8mma_apply_half_rowwise_scale_bias_kernel<__nv_bfloat16>
+    int8mma_apply_rowwise_scale_bias_kernel<half, __nv_bfloat16>
         <<<grid, block, 0, stream>>>(
             static_cast<const half*>(scaled),
             static_cast<__nv_bfloat16*>(output),
@@ -1217,9 +1921,67 @@ extern "C" int int8mma_apply_half_rowwise_scale_bias(
             total,
             N);
   } else if (output_kind == 1) {
-    int8mma_apply_half_rowwise_scale_bias_kernel<half>
+    int8mma_apply_rowwise_scale_bias_kernel<half, half>
         <<<grid, block, 0, stream>>>(
             static_cast<const half*>(scaled),
+            static_cast<half*>(output),
+            static_cast<const float*>(activation_scale),
+            static_cast<const float*>(bias),
+            total,
+            N);
+  } else {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int int8mma_apply_bf16_rowwise_scale_bias(
+    const void* scaled,
+    void* output,
+    const void* activation_scale,
+    const void* bias,
+    int M,
+    int N,
+    int output_kind,
+    void* stream_ptr) {
+  if (!scaled || !output || !activation_scale || M <= 0 || N <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const int64_t total = static_cast<int64_t>(M) * N;
+  constexpr int threads = 256;
+  const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  if (output_kind == 0) {
+    if ((N & 1) == 0) {
+      const int pairs_per_row = N / 2;
+      const int64_t pair_count = static_cast<int64_t>(M) * pairs_per_row;
+      const dim3 block(threads);
+      const dim3 grid(
+          static_cast<unsigned int>((pair_count + threads - 1) / threads));
+      int8mma_apply_bf16_rowwise_scale_bias_vec2_kernel<<<grid, block, 0, stream>>>(
+          static_cast<const __nv_bfloat162*>(scaled),
+          static_cast<__nv_bfloat162*>(output),
+          static_cast<const float*>(activation_scale),
+          static_cast<const float*>(bias),
+          pair_count,
+          pairs_per_row);
+      return static_cast<int>(cudaGetLastError());
+    }
+    const dim3 block(threads);
+    const dim3 grid(static_cast<unsigned int>((total + threads - 1) / threads));
+    int8mma_apply_rowwise_scale_bias_kernel<__nv_bfloat16, __nv_bfloat16>
+        <<<grid, block, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scaled),
+            static_cast<__nv_bfloat16*>(output),
+            static_cast<const float*>(activation_scale),
+            static_cast<const float*>(bias),
+            total,
+            N);
+  } else if (output_kind == 1) {
+    const dim3 block(threads);
+    const dim3 grid(static_cast<unsigned int>((total + threads - 1) / threads));
+    int8mma_apply_rowwise_scale_bias_kernel<__nv_bfloat16, half>
+        <<<grid, block, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(scaled),
             static_cast<half*>(output),
             static_cast<const float*>(activation_scale),
             static_cast<const float*>(bias),

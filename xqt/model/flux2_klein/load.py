@@ -612,6 +612,9 @@ def quantize_flux2_klein_bf16_transformer_to_convrot_int8(
         else min_int8_rows
     )
     resolved_policy["min_int8_rows"] = effective_min_int8_rows
+    activation_scale_mode = str(
+        resolved_policy.get("activation_scale_mode", "dynamic")
+    ).strip().lower()
     result = quantize_with_convrot_int8(
         model,
         policy=resolved_policy,
@@ -620,7 +623,7 @@ def quantize_flux2_klein_bf16_transformer_to_convrot_int8(
         inplace=inplace,
         engine=engine,
         fallback_engine=fallback_engine,
-        activation_scale_mode="dynamic",
+        activation_scale_mode=activation_scale_mode,
         min_int8_rows=effective_min_int8_rows,
         fuse_norm=bool(resolved_policy.get("fuse_norm", False)),
     )

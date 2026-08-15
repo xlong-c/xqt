@@ -120,6 +120,8 @@ def _load_lib(so_path: str | None = None) -> Any:
     for name in (
         "int8mma_run_cutlass_scale_64x128_prepacked_b_stream",
         "int8mma_run_cutlass_scale_128x256_prepacked_b_stream",
+        "int8mma_run_cutlass_scale_bf16_64x128_prepacked_b_stream",
+        "int8mma_run_cutlass_scale_bf16_128x256_prepacked_b_stream",
     ):
         if not hasattr(lib, name):
             continue
@@ -129,6 +131,53 @@ def _load_lib(so_path: str | None = None) -> Any:
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        fn.restype = ctypes.c_int
+    for name in (
+        "int8mma_run_cutlass_visitor_bf16_64x128_prepacked_b_stream",
+        "int8mma_run_cutlass_visitor_bf16_128x256_prepacked_b_stream",
+        "int8mma_run_cutlass_visitor_half_64x128_prepacked_b_stream",
+        "int8mma_run_cutlass_visitor_half_128x256_prepacked_b_stream",
+    ):
+        if not hasattr(lib, name):
+            continue
+        fn = getattr(lib, name)
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        fn.restype = ctypes.c_int
+    for name in (
+        "int8mma_run_cutlass_visitor_convrot_bf16_prepacked_b_stream",
+        "int8mma_run_cutlass_visitor_convrot_half_prepacked_b_stream",
+    ):
+        if not hasattr(lib, name):
+            continue
+        fn = getattr(lib, name)
+        fn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
@@ -174,6 +223,18 @@ def _load_lib(so_path: str | None = None) -> Any:
             ctypes.c_void_p,
         ]
         lib.int8mma_apply_half_rowwise_scale_bias.restype = ctypes.c_int
+    if hasattr(lib, "int8mma_apply_bf16_rowwise_scale_bias"):
+        lib.int8mma_apply_bf16_rowwise_scale_bias.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        lib.int8mma_apply_bf16_rowwise_scale_bias.restype = ctypes.c_int
     lib.int8mma_version.argtypes = []
     lib.int8mma_version.restype = ctypes.c_char_p
     lib.int8mma_smem_bytes.argtypes = []
@@ -395,9 +456,9 @@ def convrot_cutlass_w8a8_sm89(
     lib = _load_lib()
     required = (
         "int8mma_convrot_quantize_rows",
-        "int8mma_run_cutlass_scale_64x128_prepacked_b_stream",
-        "int8mma_run_cutlass_scale_128x256_prepacked_b_stream",
-        "int8mma_apply_half_rowwise_scale_bias",
+        "int8mma_run_cutlass_visitor_convrot_bf16_prepacked_b_stream"
+        if output_dtype == torch.bfloat16
+        else "int8mma_run_cutlass_visitor_convrot_half_prepacked_b_stream",
     )
     if not all(hasattr(lib, name) for name in required):
         raise XQTBackendError(
@@ -413,33 +474,87 @@ def convrot_cutlass_w8a8_sm89(
         raise XQTBackendError("invalid CUTLASS ConvRot prepacked B workspace")
 
     stream = torch.cuda.current_stream(inputs.device).cuda_stream
-    input_kind = 0 if inputs.dtype == torch.bfloat16 else 1
-    err = lib.int8mma_convrot_quantize_rows(
-        inputs.contiguous().data_ptr(),
+    if output is None:
+        output = torch.empty(
+            (padded_m, n),
+            device=inputs.device,
+            dtype=output_dtype,
+        )
+    if (
+        output.shape != (padded_m, n)
+        or output.dtype != output_dtype
+        or output.device != inputs.device
+        or not output.is_contiguous()
+    ):
+        raise XQTBackendError("invalid CUTLASS ConvRot output workspace")
+    visitor_weight_scale = (
+        weight_scale
+        if weight_scale_buffer is None
+        else weight_scale_buffer
+    ).detach().to(
+        device=inputs.device,
+        dtype=torch.float32,
+    ).reshape(-1).contiguous()
+    if visitor_weight_scale.numel() != n:
+        raise XQTBackendError(
+            "weight_scale must contain one value per output channel"
+        )
+    visitor_bias = bias_buffer
+    if visitor_bias is None:
+        visitor_bias = (
+            torch.zeros(
+                n,
+                device=inputs.device,
+                dtype=torch.float32,
+            )
+            if bias is None
+            else bias.detach()
+        )
+    visitor_bias = visitor_bias.to(
+        device=inputs.device,
+        dtype=torch.float32,
+    ).reshape(-1).contiguous()
+    if visitor_bias.numel() != n:
+        raise XQTBackendError(
+            "bias must contain one value per output channel"
+        )
+    input_tensor = inputs if inputs.is_contiguous() else inputs.contiguous()
+    visitor_symbol = (
+        "int8mma_run_cutlass_visitor_convrot_bf16_prepacked_b_stream"
+        if output_dtype == torch.bfloat16
+        else "int8mma_run_cutlass_visitor_convrot_half_prepacked_b_stream"
+    )
+    err = getattr(lib, visitor_symbol)(
+        input_tensor.data_ptr(),
         quantized_activation.data_ptr(),
         activation_scales.data_ptr(),
+        prepacked_b.data_ptr(),
+        output.data_ptr(),
+        visitor_weight_scale.data_ptr(),
+        visitor_bias.data_ptr(),
         m,
         logical_k,
         rotated_k,
         padded_m,
         padded_k,
-        input_kind,
+        n,
         stream,
     )
     if err != 0:
         raise XQTBackendError(
-            f"CUTLASS ConvRot quantization failed with CUDA error {err}"
+            f"CUTLASS ConvRot visitor GEMM failed with CUDA error {err}"
         )
+    return output[:m], quantized_activation, activation_scales
 
     if scaled_output is None:
         scaled_output = torch.empty(
             (padded_m, n),
             device=inputs.device,
-            dtype=torch.float16,
+            dtype=output_dtype,
         )
     if (
         scaled_output.shape != (padded_m, n)
-        or scaled_output.dtype != torch.float16
+        or scaled_output.dtype != output_dtype
         or scaled_output.device != inputs.device
         or not scaled_output.is_contiguous()
     ):
@@ -469,9 +584,16 @@ def convrot_cutlass_w8a8_sm89(
     ):
         raise XQTBackendError("invalid CUTLASS ConvRot scale/bias workspace")
 
+    # Klein's transformer is dominated by wide projections.  On Ada, the
+    # 128x256 tile wins once N has enough columns to fill the larger epilogue;
+    # keep 64x128 for narrow heads and the final 128-channel projection.
     gemm_symbol = (
-        "int8mma_run_cutlass_scale_128x256_prepacked_b_stream"
-        if padded_m <= 512
+        "int8mma_run_cutlass_scale_bf16_128x256_prepacked_b_stream"
+        if output_dtype == torch.bfloat16 and n >= 512
+        else "int8mma_run_cutlass_scale_bf16_64x128_prepacked_b_stream"
+        if output_dtype == torch.bfloat16
+        else "int8mma_run_cutlass_scale_128x256_prepacked_b_stream"
+        if n >= 512
         else "int8mma_run_cutlass_scale_64x128_prepacked_b_stream"
     )
     err = getattr(lib, gemm_symbol)(
@@ -517,7 +639,12 @@ def convrot_cutlass_w8a8_sm89(
     ):
         raise XQTBackendError("invalid CUTLASS ConvRot output workspace")
     output_kind = 0 if output_dtype == torch.bfloat16 else 1
-    err = lib.int8mma_apply_half_rowwise_scale_bias(
+    apply_symbol = (
+        "int8mma_apply_bf16_rowwise_scale_bias"
+        if output_dtype == torch.bfloat16
+        else "int8mma_apply_half_rowwise_scale_bias"
+    )
+    err = getattr(lib, apply_symbol)(
         scaled_output.data_ptr(),
         output.data_ptr(),
         activation_scales.data_ptr(),

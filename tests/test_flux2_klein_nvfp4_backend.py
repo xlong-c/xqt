@@ -393,8 +393,36 @@ def test_quantize_flux2_klein_bf16_transformer_to_convrot_int8_uses_official_sco
     assert result.metadata["model_family"] == "flux2_klein_4b"
     assert result.metadata["official_convrot_group_size"] == 256
     assert result.model.core.int8_compute.min_int8_rows == 17
-    assert result.model.core.int8_compute.engine == "triton"
+    assert result.model.core.int8_compute.engine == "cuda_sm89"
     assert result.model.core(torch.randn(2, 16)).shape == (2, 32)
+
+
+def test_quantize_flux2_klein_bf16_transformer_to_convrot_int8_honors_static_policy() -> None:
+    class _TinyKleinTransformer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = nn.Linear(16, 32)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.core(inputs)
+
+    model = _TinyKleinTransformer().eval()
+    result = quantize_flux2_klein_bf16_transformer_to_convrot_int8(
+        model,
+        policy={
+            "activation_scale_mode": "static",
+            "include_module_names": ["core"],
+            "rot_size": 4,
+        },
+        calibration_inputs=[torch.randn(3, 16), torch.randn(2, 16)],
+        engine="torch_int_mm",
+        inplace=False,
+    )
+
+    assert result.model.core.int8_compute.activation_scale_mode == "static"
+    assert result.metadata["activation_scale_mode"] == "static"
+    assert result.metadata["static_scale_module_count"] == 1
+    assert result.metadata["dynamic_fallback_module_count"] == 0
 
 
 def test_quantize_flux2_klein_bf16_pipeline_to_convrot_int8_replaces_transformer() -> None:

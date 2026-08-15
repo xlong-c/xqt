@@ -41,6 +41,11 @@ def test_target_manifests_declare_stream_aware_runtime_abi() -> None:
 
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm90_source
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm120_source
+    assert '"dense_schedule_variants"' in sm90_source
+    assert '"fp8_groupwise_pingpong_probe_present": True' in sm90_source
+    assert '"fp8_groupwise_schedule_variants"' in sm90_source
+    assert '"nvfp4_k256_probe_present": True' in sm120_source
+    assert '"nvfp4_schedule_variants": ["cooperative", "pingpong"]' in sm120_source
 
 
 def test_sm120_fp8_contract_keeps_xqt_blockwise_abi_for_groupwise_probe() -> None:
@@ -60,6 +65,7 @@ def test_sm120_nvfp4_contract_exposes_unverified_runtime_probe() -> None:
     assert contract.quant_spec().activation_dtype == "fp16"
     assert contract.quant_spec().activation_granularity == "per_tensor"
     assert contract.to_dict()["scale_dtype"] == "float_ue4m3"
+    assert contract.to_dict()["tile_shapes"] == [[128, 128, 128], [128, 128, 256]]
     assert contract.to_dict()["maturity"] == "metadata_only"
 
 
@@ -155,6 +161,32 @@ def test_sm120_fp8_metadata_candidate_falls_back_to_reference() -> None:
     assert result.output.shape == (m, n)
 
 
+def test_sm120_nvfp4_metadata_candidate_is_architecture_isolated() -> None:
+    registry = default_registry()
+    spec = GemmSpec(
+        problem=GemmProblem(m=128, n=128, k=128, sm=120, device="cuda:0"),
+        quant=QuantSpec(
+            weight_dtype="nvfp4",
+            activation_dtype="fp16",
+            output_dtype="bf16",
+            weight_granularity="groupwise",
+            activation_granularity="per_tensor",
+            group_size=16,
+            weight_scale_source="weight_offline",
+            activation_scale_source="none",
+            storage_layout="xqt_fp4_nk_v1",
+            pack_version="xqt-sm120-nvfp4-v1",
+        ),
+        epilogue=EpilogueSpec(output_dtype="bf16"),
+    )
+
+    names = [entry.name for entry in select_kernel(spec, registry=registry)]
+
+    assert names[0] == "sm120_nvfp4_tcgen05"
+    assert "nvfp4_reference" in names
+    assert "sm100_nvfp4_cutlass" not in names
+
+
 def test_arch_sources_keep_runtime_probe_abi_explicit() -> None:
     root = Path(__file__).resolve().parents[3]
     sm90_source = (root / "xqt/gemm/backends/sm90_fp8_wgmma.cu").read_text()
@@ -166,12 +198,21 @@ def test_arch_sources_keep_runtime_probe_abi_explicit() -> None:
     assert "gemm.run(stream)" in sm90_source
     assert "cudaStream_t stream" in sm90_source
     assert "xqt_sm90_fp8_e4m3_fp16_wgmma_run" in sm90_source
+    assert "xqt_sm90_dense_cooperative_128_fp16_wgmma_run" in sm90_source
+    assert "xqt_sm90_dense_pingpong_128_bf16_wgmma_run" in sm90_source
+    assert "xqt_sm90_dense_cooperative_256_bf16_wgmma_run" in sm90_source
+    assert "xqt_sm90_dense_cooperative_128_cluster2x2_bf16_wgmma_run" in sm90_source
+    assert "xqt_sm90_dense_pingpong_64_cluster2x2_bf16_wgmma_run" in sm90_source
     assert "xqt_sm90_fp8_e4m3_groupwise_pingpong_bf16_run" in sm90_source
+    assert "xqt_sm90_fp8_e4m3_groupwise_cooperative_256_bf16_run" in sm90_source
     assert "xqt_sm120_fp8_e4m3_blockwise_bf16_run" in sm120_source
+    assert "xqt_sm120_fp8_e4m3_blockwise_pingpong_bf16_run" in sm120_source
     assert "xqt_sm120_fp8_e4m3_groupwise_bf16_run" in sm120_source
     assert "xqt_sm120_fp8_e4m3_groupwise_pingpong_bf16_run" in sm120_source
     assert "xqt_sm120_nvfp4_bf16_run" in sm120_source
     assert "xqt_sm120_nvfp4_k256_bf16_run" in sm120_source
+    assert "xqt_sm120_nvfp4_pingpong_bf16_run" in sm120_source
+    assert "xqt_sm120_nvfp4_k256_pingpong_bf16_run" in sm120_source
     assert "float_ue4m3_t" in sm120_source
     assert "tile_atom_to_shape_SFA" in sm120_source
     assert "gemm.initialize(arguments, workspace.get(), stream)" in sm120_source
@@ -180,6 +221,7 @@ def test_arch_sources_keep_runtime_probe_abi_explicit() -> None:
 
 def test_cutlass_blockscale_shapes_are_explicitly_layout_specific() -> None:
     assert cutlass_blockscale_shape(256, 4096) == (2, 32)
+    assert cutlass_blockscale_shape(256, 4096, row_block=64) == (4, 32)
     assert cutlass_blockscale_shape(256, 4096, row_block=1) == (256, 32)
     assert cutlass_blockscale_shape(257, 4097) == (3, 33)
 
@@ -195,6 +237,14 @@ def test_cutlass_blockscale_storage_is_column_major_over_block_grid() -> None:
         2.0,
         5.0,
         3.0,
+        6.0,
+    ]
+    assert flatten_cutlass_blockscale_grid(grid, major="k").tolist() == [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
         6.0,
     ]
 

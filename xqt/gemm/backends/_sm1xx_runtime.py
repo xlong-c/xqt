@@ -103,7 +103,7 @@ def prepare_cutlass_blockscales(
         raise XQTBackendError(f"{name} padded dimensions cannot be smaller than logical dimensions")
     padded = torch.ones(target_shape, device=value.device, dtype=torch.float32)
     padded[: expected[0], : expected[1]].copy_(value)
-    return flatten_cutlass_blockscale_grid(padded)
+    return flatten_cutlass_blockscale_grid(padded, major=major)
 
 
 def flatten_cutlass_blockscale_grid(

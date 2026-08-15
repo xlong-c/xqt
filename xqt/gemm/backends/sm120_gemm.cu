@@ -18,12 +18,15 @@ using namespace cute;
 
 namespace {
 
-template <typename Element>
+template <
+    typename Element,
+    typename TileShape = Shape<_128, _128, _128>,
+    typename Schedule = cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120>
 struct Fp8Kernel {
   using LayoutA = cutlass::layout::RowMajor;
   using LayoutB = cutlass::layout::ColumnMajor;
   using LayoutC = cutlass::layout::RowMajor;
-  using Tile = Shape<_128, _128, _128>;
+  using Tile = TileShape;
   using Cluster = Shape<_1, _1, _1>;
   using ScaleConfig = decltype(
       cutlass::detail::sm120_trivial_blockwise_scale_config(Tile{}));
@@ -59,7 +62,7 @@ struct Fp8Kernel {
       Cluster,
       cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename Epilogue::SharedStorage))>,
-      cutlass::gemm::collective::KernelScheduleAuto
+      Schedule
     >::CollectiveOp;
   using Kernel = cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>,
@@ -71,6 +74,16 @@ struct Fp8Kernel {
 
 using Fp8E4M3Gemm = typename Fp8Kernel<cutlass::float_e4m3_t>::Gemm;
 using Fp8E5M2Gemm = typename Fp8Kernel<cutlass::float_e5m2_t>::Gemm;
+using Fp8PingpongE4M3Gemm =
+    typename Fp8Kernel<
+        cutlass::float_e4m3_t,
+        Shape<_64, _128, _128>,
+        cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>::Gemm;
+using Fp8PingpongE5M2Gemm =
+    typename Fp8Kernel<
+        cutlass::float_e5m2_t,
+        Shape<_64, _128, _128>,
+        cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>::Gemm;
 
 template <typename Element, typename TileShape, typename Schedule>
 struct Fp8GroupwiseKernel {
@@ -198,6 +211,12 @@ using Nvfp4Gemm = typename Nvfp4Kernel<
 using Nvfp4K256Gemm = typename Nvfp4Kernel<
     Shape<_128, _128, _256>,
     cutlass::gemm::KernelTmaWarpSpecializedNvf4Sm120>::Gemm;
+using Nvfp4PingpongGemm = typename Nvfp4Kernel<
+    Shape<_128, _128, _128>,
+    cutlass::gemm::KernelTmaWarpSpecializedPingpongNvf4Sm120>::Gemm;
+using Nvfp4PingpongK256Gemm = typename Nvfp4Kernel<
+    Shape<_128, _128, _256>,
+    cutlass::gemm::KernelTmaWarpSpecializedPingpongNvf4Sm120>::Gemm;
 
 template <typename Gemm, typename ScaleConfig>
 int run_fp8_gemm(
@@ -358,6 +377,60 @@ xqt_sm120_fp8_e5m2_blockwise_bf16_run(
 }
 
 extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e4m3_blockwise_pingpong_compile_probe() {
+  return static_cast<int>(sizeof(Fp8PingpongE4M3Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e4m3_blockwise_pingpong_bf16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    float const* scale_a,
+    float const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  using ScaleConfig = decltype(
+      cutlass::detail::sm120_trivial_blockwise_scale_config(
+          typename Fp8PingpongE4M3Gemm::TileShape{}));
+  return run_fp8_gemm<Fp8PingpongE4M3Gemm, ScaleConfig>(
+      m, n, k, static_cast<cutlass::float_e4m3_t const*>(a),
+      static_cast<cutlass::float_e4m3_t const*>(b), scale_a, scale_b,
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e5m2_blockwise_pingpong_compile_probe() {
+  return static_cast<int>(sizeof(Fp8PingpongE5M2Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e5m2_blockwise_pingpong_bf16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    float const* scale_a,
+    float const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  using ScaleConfig = decltype(
+      cutlass::detail::sm120_trivial_blockwise_scale_config(
+          typename Fp8PingpongE5M2Gemm::TileShape{}));
+  return run_fp8_gemm<Fp8PingpongE5M2Gemm, ScaleConfig>(
+      m, n, k, static_cast<cutlass::float_e5m2_t const*>(a),
+      static_cast<cutlass::float_e5m2_t const*>(b), scale_a, scale_b,
+      static_cast<cutlass::bfloat16_t const*>(c),
+      static_cast<cutlass::bfloat16_t*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
 xqt_sm120_fp8_e4m3_groupwise_compile_probe() {
   return static_cast<int>(sizeof(Fp8GroupwiseE4M3Gemm));
 }
@@ -509,6 +582,58 @@ xqt_sm120_nvfp4_k256_bf16_run(
       static_cast<Nvfp4K256Gemm::ElementD*>(d), stream);
 }
 
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_pingpong_compile_probe() {
+  return static_cast<int>(sizeof(Nvfp4PingpongGemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_pingpong_bf16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* scale_a,
+    void const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_nvfp4_gemm<Nvfp4PingpongGemm>(
+      m, n, k, static_cast<Nvfp4PingpongGemm::ElementA const*>(a),
+      static_cast<Nvfp4PingpongGemm::ElementB const*>(b),
+      static_cast<cutlass::float_ue4m3_t const*>(scale_a),
+      static_cast<cutlass::float_ue4m3_t const*>(scale_b),
+      static_cast<Nvfp4PingpongGemm::ElementC const*>(c),
+      static_cast<Nvfp4PingpongGemm::ElementD*>(d), stream);
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_k256_pingpong_compile_probe() {
+  return static_cast<int>(sizeof(Nvfp4PingpongK256Gemm));
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_k256_pingpong_bf16_run(
+    int m,
+    int n,
+    int k,
+    void const* a,
+    void const* b,
+    void const* scale_a,
+    void const* scale_b,
+    void const* c,
+    void* d,
+    void* stream) {
+  return run_nvfp4_gemm<Nvfp4PingpongK256Gemm>(
+      m, n, k, static_cast<Nvfp4PingpongK256Gemm::ElementA const*>(a),
+      static_cast<Nvfp4PingpongK256Gemm::ElementB const*>(b),
+      static_cast<cutlass::float_ue4m3_t const*>(scale_a),
+      static_cast<cutlass::float_ue4m3_t const*>(scale_b),
+      static_cast<Nvfp4PingpongK256Gemm::ElementC const*>(c),
+      static_cast<Nvfp4PingpongK256Gemm::ElementD*>(d), stream);
+}
+
 #else
 
 extern "C" __attribute__((visibility("default"))) int
@@ -530,6 +655,30 @@ xqt_sm120_fp8_e5m2_blockwise_compile_probe() {
 
 extern "C" __attribute__((visibility("default"))) int
 xqt_sm120_fp8_e5m2_blockwise_bf16_run(
+    int, int, int, void const*, void const*, float const*, float const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e4m3_blockwise_pingpong_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e4m3_blockwise_pingpong_bf16_run(
+    int, int, int, void const*, void const*, float const*, float const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e5m2_blockwise_pingpong_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_fp8_e5m2_blockwise_pingpong_bf16_run(
     int, int, int, void const*, void const*, float const*, float const*,
     void const*, void*, void*) {
   return 0;
@@ -602,6 +751,30 @@ xqt_sm120_nvfp4_k256_compile_probe() {
 
 extern "C" __attribute__((visibility("default"))) int
 xqt_sm120_nvfp4_k256_bf16_run(
+    int, int, int, void const*, void const*, void const*, void const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_pingpong_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_pingpong_bf16_run(
+    int, int, int, void const*, void const*, void const*, void const*,
+    void const*, void*, void*) {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_k256_pingpong_compile_probe() {
+  return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+xqt_sm120_nvfp4_k256_pingpong_bf16_run(
     int, int, int, void const*, void const*, void const*, void const*,
     void const*, void*, void*) {
   return 0;

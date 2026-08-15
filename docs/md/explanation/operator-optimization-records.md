@@ -48,43 +48,68 @@ CUTLASS headers,`nvcc -O3 -std=c++17 -shared -fPIC`,分别生成
 ### 实现
 
 1. `sm90_fp8_wgmma.cu` 实例化 SM90 dense FP16/BF16 WGMMA/TMA
-   CollectiveBuilder,以及 E4M3/E5M2 FP8 blockwise mainloop. source 同时导出
-   固定内部 scale layout 的 `Arguments -> can_implement -> initialize -> run`
-   C ABI,并接收 PyTorch current CUDA stream. Python
-   `Sm90Fp8WgmmaBuildConfig` 和 `build_sm90_dense_artifact` 共用这个独立
-   source,manifest 仍写 `metadata_only`.
-2. `sm120_gemm.cu` 实例化 SM120 E4M3/E5M2 FP8 blockwise mainloop,
-   `Sm120BlockwiseScaleConfig<1,128,128>` groupwise schedule probe 和
-   NVFP4 block-scaled MMA probe,并为 FP8 blockwise/groupwise 导出 BF16 C ABI,
-   cluster 固定为 `1x1x1`.
+   CollectiveBuilder. dense 入口覆盖 Auto `128x128x64`,显式 cooperative
+   `128x128x64`,ping-pong `128x128x64`,cooperative `256x128x64`,以及
+   `2x2x1` cluster 下的 cooperative `128x128x64`,ping-pong
+   `128x128x64` 和 `64x128x64`.
+   E4M3/E5M2 FP8 blockwise mainloop 使用 cooperative `128x128x128`.
+   groupwise 使用官方 `Sm90BlockwiseScaleConfig<1,128,128>` 布局,SFA 为
+   MN-major,SFB 为 K-major,并导出 ping-pong `128x128x128` 和 cooperative
+   `256x128x128` 两组 schedule. 所有入口都使用固定内部 scale layout 的
+   `Arguments -> can_implement -> initialize -> run` C ABI,并接收 PyTorch
+   current CUDA stream. Python `Sm90Fp8WgmmaBuildConfig` 和
+   `build_sm90_dense_artifact` 共用这个独立 source,manifest 仍写
+   `metadata_only`.
+2. `sm120_gemm.cu` 实例化 SM120 E4M3/E5M2 FP8 blockwise cooperative 和
+   ping-pong mainloop. blockwise cooperative 的 A scale row block 为 128,
+   ping-pong tile 的 `SFVecM=64`,因此 A scale row block 为 64.
+   `Sm120BlockwiseScaleConfig<1,128,128>` groupwise cooperative/ping-pong
+   schedule probe,以及 NVFP4 cooperative/ping-pong 的
+   `128x128x128` 和 `128x128x256` tile probe,并为 FP8 blockwise/groupwise
+   和 NVFP4 导出 stream-aware BF16 C ABI,cluster 固定为 `1x1x1`.
 3. SM120 当前 CUTLASS builder 对 FP16 dense 配置会触发
    `F8F6F4` 限制,所以没有伪造 FP16 tcgen05 registry entry. groupwise
    schedule 复用 XQT 现有 `w:blockwise/a:blockwise` ABI,避免把 CUTLASS
    内部 scale layout 误报成已有的 XQT groupwise layout.
-4. NVFP4 只保留 compile probe. XQT 当前没有 packed NVFP4 activation 加
-   global-scale 的 GEMM ABI,因此不进入自动 dispatch.
+4. NVFP4 probe 接受 packed E2M1 activation 和 `float_ue4m3` scale grid,
+   但仍不进入自动 dispatch. K=128 和 K=256 只作为显式 tile 选择,
+   后者用于长 K workload 的目标卡对比.
 5. 新增显式 target harness: `run_sm90_dense_wgmma_probe`,
    `run_sm90_fp8_wgmma_probe` 和 `run_sm120_fp8_tcgen05_probe` 只接受
    目标设备和已编译 artifact,并严格校验 CUTLASS tiled scale layout. 研究脚本
    `bench_sm90_sm120.py` 负责 correctness,Cuda event benchmark 和 SASS
-   dump,但不会自动 promotion.
+   dump,覆盖 SM90 dense 全部 schedule,FP8 blockwise cooperative,
+   groupwise cooperative/ping-pong,以及 SM120 FP8 blockwise/groupwise
+   cooperative/ping-pong 和 NVFP4 K=128/K=256 的 cooperative/ping-pong,
+   但不会自动 promotion.
    manifest 额外记录 `runtime_stream_abi="torch_current_stream_void_p"`.
-   scale grid 在传入 C ABI 前按 CUTLASS 非零 stride 做 column-major flatten,
-   不直接使用 XQT canonical tensor 的 C-contiguous 顺序.
+   scale grid 在传入 C ABI 前按 CUTLASS 非零 stride 显式 flatten,不直接使用
+   XQT canonical tensor 的 C-contiguous 顺序.
 
 ### 结果
 
 两份 translation unit 均在本机编译成功,shared object 可生成,并通过 `nm`
-检查 compile probe 与 runtime probe 符号. stream-aware ABI 和 Python
-contract 测试通过;研究 harness 已具备目标卡 correctness,Cuda event
-benchmark 和 SASS 采集入口. 当前本机仍不是 SM90/SM120,因此没有运行这些
-target gate,也没有数值,延迟或 SASS 结果;manifest 和 registry 均保持
+检查 compile probe 与 runtime probe 符号. 当前已确认的额外符号包括
+SM90 dense 的 cooperative/ping-pong 入口及 `2x2x1` cluster 变体,
+SM90 groupwise cooperative `256x128x128` 和 ping-pong `128x128x128`
+的 E4M3/E5M2 FP16/BF16 入口,
+以及 SM120 FP8 blockwise ping-pong 和 NVFP4 K=256 cooperative/ping-pong
+入口. stream-aware ABI,scale-major flatten 和 Python contract 测试通过;
+研究 harness 已覆盖全部已接入变体,具备目标卡 correctness,Cuda event
+benchmark 和 SASS 采集入口. 当前本机仍不是 SM90/SM120,因此没有运行
+这些 target gate,也没有数值,延迟或 SASS 结果;manifest 和 registry 均保持
 `metadata_only`,dispatch 继续回退 reference.
 
 ### 适用边界与回退
 
-- SM90 dense/FP8 候选只匹配 `sm_90`.
-- SM120 FP8 候选只匹配 `sm_120` 和 blockwise FP8 scale mode.
+- SM90 dense/FP8 候选只匹配 `sm_90`;dense `2x2x1` cluster 变体只通过
+  显式 probe 选择,groupwise cooperative 使用 `256x128x128`,
+  groupwise ping-pong 使用 `128x128x128`.
+- SM120 FP8 候选只匹配 `sm_120`;blockwise cooperative/ping-pong 和
+  groupwise cooperative/ping-pong 只通过显式 probe API 选择.
+- SM90 groupwise ping-pong 的 SFA/SFB scale physical layout 与 XQT
+  canonical scale tensor 不同,adapter 必须显式指定 major,不能复用默认
+  column-major flatten.
 - 没有 target hardware correctness manifest 时,所有新候选都不能被 native
   选择.
 - 非匹配 scale layout,dtype 或 architecture 走既有 reference path.
@@ -93,10 +118,12 @@ target gate,也没有数值,延迟或 SASS 结果;manifest 和 registry 均保�
 
 - 不把 SM89 的 executor 改成运行时 `if sm >= 90`.
 - 不把 SM120 FP16 dense 作为 CUTLASS 已支持路径.
-- 不把 NVFP4 compile probe 当作 weight-only runtime kernel.
+- 不把 NVFP4 probe 当作已验证的 weight-only runtime kernel.
 - 不把 CUTLASS 内部 tiled scale tensor 当成 XQT `[N,G]` canonical scale ABI.
 - 不把 SM90/SM120 的 opt-in probe API 直接接入自动 dispatch;promotion
   仍需要 target correctness,SASS 和 benchmark evidence.
+- 没有把 SM90 不满足 tile/cluster 约束的更小 M tile 作为正式变体;此前
+  `64x128x128` FP8 ping-pong 候选未通过 CUTLASS 的 split-M 静态约束.
 - 没有编造 latency,SASS 或误差数据.
 
 ### 可复用规则
@@ -4106,3 +4133,66 @@ transformer parity.
 - [benchmark artifact](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-flux2-klein-convrot-w8a8/result.json)
 - [regression tests](../../../tests/xqt/test_flux2_klein_nvfp4_backend.py)
 - [Triton W8A8 tests](../../../tests/operator_opt/test_gemm_precision.py)
+
+## R-041: FLUX.2 Klein calibrated-static ConvRot W8A8 experiment
+
+### 目标与边界
+
+验证文档中 `Norm/rotation/static quantization` 思路是否能在当前
+FLUX.2 Klein 4B BF16 W8A8 路径上直接替代 dynamic ConvRot. 当前 Klein
+默认仍保持 dynamic activation scale 和 CUTLASS visitor W8A8.
+
+实际模型的 105 个 ConvRot candidate 中没有显式相邻的 `Sequential(Norm,
+Linear)` pair. Klein block 的真实结构是 `Norm -> timestep-dependent
+modulation -> Attention/FFN`, 因此本轮没有错误地把固定 Norm gamma 折入
+Linear 权重,也没有声称 Norm 已经融合.
+
+### 实现
+
+- Klein loader 现在尊重 policy 中的 `activation_scale_mode`,默认值不变.
+- `ConvRotInt8Linear` 的 BF16 static route 放开为已有的
+  `TileLang rotation + static quantization -> Triton INT8 GEMM` 路径.
+- dynamic `cuda_sm89` CUTLASS visitor 路径没有修改.
+- static activation scale 使用独立校准输入的 rotated activation global
+  abs-max `/ 127`;本轮只作为实验 candidate,不改默认 policy.
+
+### 代表形状结果
+
+GPU: NVIDIA GeForce RTX 4070 Ti SUPER, `sm_89`; dtype: BF16; rows: `1024`;
+rotation size: `256`; CUDA events; 8 warmup and 20 measured iterations.
+
+| K -> N | dynamic CUTLASS | static TileLang/Triton | static/dynamic |
+| ---: | ---: | ---: | ---: |
+| 3072 -> 12288 | `0.33792 ms` | `0.50158 ms` | `1.484x` |
+| 12288 -> 3072 | `0.46992 ms` | `0.56829 ms` | `1.209x` |
+| 3072 -> 3072 | `0.19606 ms` | `0.23970 ms` | `1.223x` |
+
+Static path was confirmed executable with
+`activation_quant_engine=tilelang_hadamard_static` and
+`fused_static_status=tilelang_rotation_quant_then_triton_gemm`; it did not
+fall back to `torch_int_mm`. Mean absolute error versus the BF16 source was
+approximately `0.00559-0.00692` for the tested shapes, while dynamic was
+`0.00559-0.00617`.
+
+### 全模型尝试与结论
+
+独立 static 4B 校准进程在本机 16 GiB GPU 上峰值约 `15.98 GiB`,并在量化/
+kernel preparation 阶段超过 11 分钟,没有得到稳定的 end-to-end latency,所以
+该次没有作为性能证据. 重新运行的 dynamic full-model parity 为 `90.687 ms`,
+官方参考为 `85.536 ms`, `XQT/official=1.060x`,执行为 102 个 CUTLASS
+ConvRot module 和 3 个 fallback module.
+
+结论: static activation scale 当前可以使用,但现有 static backend 比已经优化
+过的 dynamic CUTLASS 慢 `20.9%-48.4%` on the representative shapes. 因此不
+切换默认策略. 要取得正收益,下一步需要实现 BF16 static activation quantization
+直接接入现有 CUTLASS visitor GEMM,把 dynamic abs-max reduction 去掉而不退回
+通用 Triton GEMM.
+
+### 验证落点
+
+- [Klein loader](../../../xqt/model/flux2_klein/load.py)
+- [ConvRot runtime](../../../xqt/quant/quantizers/convrot_int8.py)
+- [static proxy benchmark](../../../research/xqt-gemm/bench_convrot_static_proxy_v1.py)
+- [isolated Klein benchmark](../../../research/xqt-gemm/bench_flux2_klein_convrot_static_v1.py)
+- [Klein regression tests](../../../tests/xqt/test_flux2_klein_nvfp4_backend.py)
+- [ConvRot quantizer tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)

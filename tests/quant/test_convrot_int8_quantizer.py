@@ -326,6 +326,39 @@ def test_convrot_int8_auto_static_uses_cuda_sm89_gemm_after_fused_rotation() -> 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_convrot_int8_cuda_sm89_static_bf16_uses_triton_gemm_after_fused_rotation() -> None:
+    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+
+    if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
+        pytest.skip("cuda_sm89 CUTLASS extension unavailable")
+
+    source = torch.nn.Linear(
+        256,
+        256,
+        bias=True,
+        dtype=torch.bfloat16,
+        device="cuda",
+    ).eval()
+    module = ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=64,
+        engine="cuda_sm89",
+        activation_scale_mode="static",
+        activation_scale=0.02,
+    ).eval()
+
+    output = module(torch.randn(64, 256, dtype=torch.bfloat16, device="cuda"))
+    torch.cuda.synchronize()
+    metadata = module.execution_metadata()
+
+    assert output.shape == (64, 256)
+    assert metadata["engine"] == "triton"
+    assert metadata["activation_quant_engine"] == "tilelang_hadamard_static"
+    assert metadata["fused_static_status"] == "tilelang_rotation_quant_then_triton_gemm"
+    assert metadata["rotation_fused"] is True
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("rot_size", [4, 16])
 def test_convrot_norm_fusion_uses_fused_triton_input_path(rot_size: int) -> None:
     model = torch.nn.Sequential(

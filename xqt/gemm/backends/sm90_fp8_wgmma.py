@@ -43,8 +43,32 @@ _DEFAULT_ARTIFACT = default_cache_dir() / "sm90" / "fp8_wgmma_sm90.so"
 _DEFAULT_GROUPED_ARTIFACT = default_cache_dir() / "sm90" / "fp8_grouped_wgmma_sm90.so"
 _SM90_CAPABILITY = (9, 0)
 _SM90_DENSE_SYMBOLS = {
-    "fp16": "xqt_sm90_dense_fp16_wgmma_run",
-    "bf16": "xqt_sm90_dense_bf16_wgmma_run",
+    ("fp16", "auto", 128, "2x1"): "xqt_sm90_dense_fp16_wgmma_run",
+    ("bf16", "auto", 128, "2x1"): "xqt_sm90_dense_bf16_wgmma_run",
+    ("fp16", "cooperative", 128, "1x1"):
+        "xqt_sm90_dense_cooperative_128_fp16_wgmma_run",
+    ("bf16", "cooperative", 128, "1x1"):
+        "xqt_sm90_dense_cooperative_128_bf16_wgmma_run",
+    ("fp16", "pingpong", 128, "1x1"):
+        "xqt_sm90_dense_pingpong_128_fp16_wgmma_run",
+    ("bf16", "pingpong", 128, "1x1"):
+        "xqt_sm90_dense_pingpong_128_bf16_wgmma_run",
+    ("fp16", "cooperative", 256, "1x2"):
+        "xqt_sm90_dense_cooperative_256_fp16_wgmma_run",
+    ("bf16", "cooperative", 256, "1x2"):
+        "xqt_sm90_dense_cooperative_256_bf16_wgmma_run",
+    ("fp16", "cooperative", 128, "2x2"):
+        "xqt_sm90_dense_cooperative_128_cluster2x2_fp16_wgmma_run",
+    ("bf16", "cooperative", 128, "2x2"):
+        "xqt_sm90_dense_cooperative_128_cluster2x2_bf16_wgmma_run",
+    ("fp16", "pingpong", 128, "2x2"):
+        "xqt_sm90_dense_pingpong_128_cluster2x2_fp16_wgmma_run",
+    ("bf16", "pingpong", 128, "2x2"):
+        "xqt_sm90_dense_pingpong_128_cluster2x2_bf16_wgmma_run",
+    ("fp16", "pingpong", 64, "2x2"):
+        "xqt_sm90_dense_pingpong_64_cluster2x2_fp16_wgmma_run",
+    ("bf16", "pingpong", 64, "2x2"):
+        "xqt_sm90_dense_pingpong_64_cluster2x2_bf16_wgmma_run",
 }
 _SM90_FP8_SYMBOLS = {
     ("fp8_e4m3", "blockwise", "cooperative", "fp16"):
@@ -63,6 +87,14 @@ _SM90_FP8_SYMBOLS = {
         "xqt_sm90_fp8_e5m2_groupwise_pingpong_fp16_run",
     ("fp8_e5m2", "groupwise", "pingpong", "bf16"):
         "xqt_sm90_fp8_e5m2_groupwise_pingpong_bf16_run",
+    ("fp8_e4m3", "groupwise", "cooperative", "fp16"):
+        "xqt_sm90_fp8_e4m3_groupwise_cooperative_256_fp16_run",
+    ("fp8_e4m3", "groupwise", "cooperative", "bf16"):
+        "xqt_sm90_fp8_e4m3_groupwise_cooperative_256_bf16_run",
+    ("fp8_e5m2", "groupwise", "cooperative", "fp16"):
+        "xqt_sm90_fp8_e5m2_groupwise_cooperative_256_fp16_run",
+    ("fp8_e5m2", "groupwise", "cooperative", "bf16"):
+        "xqt_sm90_fp8_e5m2_groupwise_cooperative_256_bf16_run",
 }
 
 
@@ -199,7 +231,57 @@ def _build(config: Sm90Fp8WgmmaBuildConfig, *, kernel_name: str) -> GemmArtifact
             "native_wgmma_verified": False,
             "tma_verified": False,
             "dense_probe_present": True,
+            "dense_schedule_variants": [
+                {
+                    "schedule": "auto",
+                    "tile_shape": [128, 128, 64],
+                    "cluster_shape": [2, 1, 1],
+                },
+                {
+                    "schedule": "cooperative",
+                    "tile_shape": [128, 128, 64],
+                    "cluster_shape": [1, 1, 1],
+                },
+                {
+                    "schedule": "pingpong",
+                    "tile_shape": [128, 128, 64],
+                    "cluster_shape": [1, 1, 1],
+                },
+                {
+                    "schedule": "cooperative",
+                    "tile_shape": [256, 128, 64],
+                    "cluster_shape": [1, 2, 1],
+                },
+                {
+                    "schedule": "cooperative",
+                    "tile_shape": [128, 128, 64],
+                    "cluster_shape": [2, 2, 1],
+                },
+                {
+                    "schedule": "pingpong",
+                    "tile_shape": [128, 128, 64],
+                    "cluster_shape": [2, 2, 1],
+                },
+                {
+                    "schedule": "pingpong",
+                    "tile_shape": [64, 128, 64],
+                    "cluster_shape": [2, 2, 1],
+                },
+            ],
             "fp8_probe_present": True,
+            "fp8_blockwise_schedule": "cooperative",
+            "fp8_groupwise_pingpong_probe_present": True,
+            "fp8_groupwise_schedule_variants": [
+                {
+                    "schedule": "pingpong",
+                    "tile_shape": [128, 128, 128],
+                },
+                {
+                    "schedule": "cooperative",
+                    "tile_shape": [256, 128, 128],
+                },
+            ],
+            "fp8_groupwise_scale_layout": "sm90_blockwise_1x128x128_sfa_mn_sfb_k",
             "runtime_probe_present": True,
             "runtime_abi": "cutlass_internal_tiled_scale_layout_float32",
             "runtime_stream_abi": "torch_current_stream_void_p",
@@ -261,11 +343,23 @@ def sm90_grouped_fp8_wgmma_artifact_available(artifact: str | Path | None = None
     return path.expanduser().is_file()
 
 
-def _sm90_dense_function(artifact: str | Path, *, dtype_name: str) -> Any:
+def _sm90_dense_function(
+    artifact: str | Path,
+    *,
+    dtype_name: str,
+    schedule: str,
+    tile_m: int,
+    cluster_shape: str,
+) -> Any:
     try:
-        symbol = _SM90_DENSE_SYMBOLS[dtype_name]
+        symbol = _SM90_DENSE_SYMBOLS[
+            (dtype_name, schedule, int(tile_m), cluster_shape)
+        ]
     except KeyError as exc:
-        raise XQTBackendError(f"unsupported SM90 dense dtype: {dtype_name!r}") from exc
+        raise XQTBackendError(
+            "unsupported SM90 dense dtype/schedule/tile/cluster: "
+            f"{dtype_name}/{schedule}/{tile_m}/{cluster_shape}"
+        ) from exc
     return load_runtime_function(
         artifact,
         symbol=symbol,
@@ -346,6 +440,9 @@ def run_sm90_dense_wgmma_probe(
     activation: torch.Tensor,
     weight: torch.Tensor,
     *,
+    schedule: str = "auto",
+    tile_m: int = 128,
+    cluster_shape: str | None = None,
     artifact: str | Path,
 ) -> torch.Tensor:
     """Run the explicit SM90 dense WGMMA probe on an H100.
@@ -356,6 +453,42 @@ def run_sm90_dense_wgmma_probe(
     outside the automatic registry dispatch.
     """
 
+    if schedule not in {"auto", "cooperative", "pingpong"}:
+        raise XQTBackendError(
+            "SM90 dense probe schedule must be auto, cooperative, or pingpong"
+        )
+    if int(tile_m) not in {64, 128, 256}:
+        raise XQTBackendError("SM90 dense probe tile_m must be 64, 128, or 256")
+    if int(tile_m) == 256 and schedule != "cooperative":
+        raise XQTBackendError("SM90 dense tile_m=256 only exposes cooperative schedule")
+    resolved_cluster = (
+        "2x1"
+        if cluster_shape is None and schedule == "auto"
+        else "1x1"
+        if cluster_shape is None
+        else cluster_shape
+    )
+    if resolved_cluster not in {"1x1", "1x2", "2x1", "2x2"}:
+        raise XQTBackendError(
+            "SM90 dense probe cluster_shape must be 1x1, 1x2, 2x1, or 2x2"
+        )
+    if schedule == "auto" and resolved_cluster != "2x1":
+        raise XQTBackendError("SM90 dense auto schedule requires cluster_shape=2x1")
+    if int(tile_m) == 256 and resolved_cluster != "1x2":
+        raise XQTBackendError("SM90 dense tile_m=256 requires cluster_shape=1x2")
+    if int(tile_m) == 128 and schedule != "auto" and resolved_cluster not in {
+        "1x1",
+        "2x2",
+    }:
+        raise XQTBackendError(
+            "SM90 dense tile_m=128 explicit schedules require cluster_shape=1x1 or 2x2"
+        )
+    if int(tile_m) == 64 and (
+        schedule != "pingpong" or resolved_cluster != "2x2"
+    ):
+        raise XQTBackendError(
+            "SM90 dense tile_m=64 requires pingpong schedule and cluster_shape=2x2"
+        )
     if not isinstance(activation, torch.Tensor) or not isinstance(weight, torch.Tensor):
         raise XQTBackendError("SM90 dense probe requires tensor inputs")
     device = require_target_cuda(
@@ -379,7 +512,7 @@ def run_sm90_dense_wgmma_probe(
         activation,
         rows=m,
         cols=k,
-        row_multiple=128,
+        row_multiple=int(tile_m),
         col_multiple=64,
     )
     weight_runtime = pad_matrix(
@@ -397,7 +530,13 @@ def run_sm90_dense_wgmma_probe(
         dtype=activation.dtype,
     )
     output = torch.empty_like(c_source)
-    function = _sm90_dense_function(artifact, dtype_name=dtype_name)
+    function = _sm90_dense_function(
+        artifact,
+        dtype_name=dtype_name,
+        schedule=schedule,
+        tile_m=int(tile_m),
+        cluster_shape=resolved_cluster,
+    )
     error = function(
         padded_m,
         padded_n,
@@ -408,7 +547,10 @@ def run_sm90_dense_wgmma_probe(
         output.data_ptr(),
         current_cuda_stream(device),
     )
-    raise_runtime_error(_SM90_DENSE_SYMBOLS[dtype_name], error)
+    symbol = _SM90_DENSE_SYMBOLS[
+        (dtype_name, schedule, int(tile_m), resolved_cluster)
+    ]
+    raise_runtime_error(symbol, error)
     return output[:m, :n]
 
 
@@ -426,10 +568,11 @@ def run_sm90_fp8_wgmma_probe(
 ) -> torch.Tensor:
     """Run SM90 FP8 WGMMA with the explicit CUTLASS tiled scale ABI.
 
-    ``scale_a`` must have shape ``[ceil(M/128), ceil(K/128)]`` and
-    ``scale_b`` must have shape ``[ceil(N/128), ceil(K/128)]``.  These are
-    block scales shared by 128 rows/columns, not XQT's canonical per-row
-    ``[rows, ceil(K/G)]`` tensors.
+    For blockwise mode, ``scale_a`` has shape
+    ``[ceil(M/128), ceil(K/128)]``.  For groupwise mode it has shape
+    ``[M, ceil(K/128)]``.  ``scale_b`` has shape
+    ``[ceil(N/128), ceil(K/128)]`` in both modes.  These are CUTLASS tiled
+    scales, not XQT's canonical per-row ``[rows, ceil(K/G)]`` tensors.
     """
 
     if format_name not in {"fp8_e4m3", "fp8_e5m2"}:
@@ -444,8 +587,6 @@ def run_sm90_fp8_wgmma_probe(
         raise XQTBackendError("SM90 FP8 probe schedule must be cooperative or pingpong")
     if scale_granularity == "blockwise" and schedule != "cooperative":
         raise XQTBackendError("SM90 FP8 blockwise probe only exposes cooperative schedule")
-    if scale_granularity == "groupwise" and schedule != "pingpong":
-        raise XQTBackendError("SM90 FP8 groupwise probe only exposes pingpong schedule")
     qweight, packed_scales = _sm90_weight_payload(weight)
     if scale_b is None and packed_scales is not None:
         scale_b = packed_scales
@@ -473,7 +614,11 @@ def run_sm90_fp8_wgmma_probe(
         a_bytes,
         rows=m,
         cols=k,
-        row_multiple=128,
+        row_multiple=(
+            256
+            if scale_granularity == "groupwise" and schedule == "cooperative"
+            else 128
+        ),
         col_multiple=128,
     )
     weight_runtime = pad_matrix(

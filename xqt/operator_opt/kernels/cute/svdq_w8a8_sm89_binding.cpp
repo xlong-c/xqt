@@ -369,15 +369,103 @@ torch::Tensor linear(
     torch::Tensor weight_scales,
     torch::Tensor bias,
     int64_t output_features) {
-    auto output = allocate_output(input, weight, output_features);
-    quantize_act(input, activation, activation_scales);
-    gemm(
-        activation,
-        weight,
-        output,
-        activation_scales,
-        weight_scales,
-        bias);
+    for (const auto& item : {
+             std::pair<const torch::Tensor*, const char*>{&input, "input"},
+             {&activation, "activation"},
+             {&activation_scales, "activation_scales"},
+             {&weight, "weight"},
+             {&weight_scales, "weight_scales"},
+             {&bias, "bias"},
+         }) {
+        require_cuda_contiguous(*item.first, item.second);
+        require_same_device(input, *item.first, item.second);
+    }
+    require_bf16(input, "input");
+    require_bf16(activation_scales, "activation_scales");
+    require_bf16(weight_scales, "weight_scales");
+    require_bf16(bias, "bias");
+    TORCH_CHECK(input.dim() == 2, "input must be [M, K]");
+    TORCH_CHECK(
+        activation.dim() == 2 && activation.scalar_type() == torch::kInt8,
+        "activation must be 2D int8");
+    TORCH_CHECK(
+        weight.dim() == 2 && weight.scalar_type() == torch::kInt8,
+        "weight must be 2D int8");
+
+    const int actual_m = static_cast<int>(input.size(0));
+    const int actual_k = static_cast<int>(input.size(1));
+    const int padded_m = static_cast<int>(activation.size(0));
+    const int padded_k = static_cast<int>(activation.size(1));
+    const int padded_n = static_cast<int>(weight.size(0));
+    TORCH_CHECK(weight.size(1) == padded_k, "activation and weight K mismatch");
+    TORCH_CHECK(
+        padded_m % 256 == 0 && padded_m >= actual_m &&
+            padded_m - actual_m < 256,
+        "invalid M padding");
+    TORCH_CHECK(
+        padded_k % 128 == 0 && padded_k >= actual_k &&
+            padded_k - actual_k < 128,
+        "invalid K padding");
+    TORCH_CHECK(
+        padded_n % 128 == 0,
+        "weight N must be a multiple of 128");
+    TORCH_CHECK(
+        output_features > 0 && output_features <= padded_n &&
+            padded_n - output_features < 128 && output_features % 4 == 0,
+        "invalid output feature extent");
+    TORCH_CHECK(
+        activation_scales.numel() == padded_m,
+        "activation scale storage mismatch");
+    TORCH_CHECK(
+        weight_scales.numel() == padded_n,
+        "weight scale storage mismatch");
+    TORCH_CHECK(
+        bias.numel() == padded_n,
+        "bias storage mismatch");
+
+    auto output = torch::empty(
+        {input.size(0), output_features},
+        input.options());
+    c10::cuda::CUDAGuard guard(input.device());
+    const cudaStream_t stream = current_stream(input);
+    if (actual_m == padded_m && actual_k == padded_k) {
+        check_status(
+            xqt_svdq_w8a8_quantize_act_fast(
+                input.data_ptr(),
+                activation.data_ptr(),
+                activation_scales.data_ptr(),
+                padded_m,
+                padded_k,
+                stream),
+            "fast W8A8 activation quantization");
+    } else {
+        check_status(
+            xqt_svdq_w8a8_quantize_act(
+                input.data_ptr(),
+                activation.data_ptr(),
+                activation_scales.data_ptr(),
+                actual_m,
+                actual_k,
+                padded_m,
+                padded_k,
+                stream),
+            "W8A8 activation quantization");
+    }
+    check_status(
+        xqt_svdq_w8a8_gemm(
+            activation.data_ptr(),
+            weight.data_ptr(),
+            output.data_ptr(),
+            activation_scales.data_ptr(),
+            weight_scales.data_ptr(),
+            bias.data_ptr(),
+            actual_m,
+            static_cast<int>(output_features),
+            padded_m,
+            padded_n,
+            padded_k,
+            stream),
+        "W8A8 GEMM");
     return output;
 }
 
