@@ -536,7 +536,7 @@ int launch_quantize_act_fast(
     int padded_m,
     int padded_k,
     cudaStream_t stream) {
-    using Kernel = QuantizeActPlainKernel<false>;
+    using Kernel = GEMM::template quantize_w8a8_act_kernel<false>;
     auto function = invoke_kernel<
         Kernel,
         const Base::half_t*,
@@ -545,9 +545,9 @@ int launch_quantize_act_fast(
         int,
         bool>;
     function<<<
-        dim3(padded_m / Base::WARP_M),
-        Base::WARP_SIZE * Base::NUM_WARPS,
-        Kernel::smem_size(),
+        Kernel::gridSize(padded_m, padded_k),
+        Kernel::blockSize(padded_m, padded_k),
+        Kernel::smemSize(padded_m, padded_k),
         stream>>>(
         static_cast<const Base::half_t*>(input),
         static_cast<Base::packed_act_t*>(output),
