@@ -52,9 +52,6 @@ from .fp4_dynamic import (
     quantize_with_nvfp4_dynamic,
 )
 from .svd import (
-    LowRankBranch,
-    SVDQuantInt8MmaLinear,
-    SVDQuantLinear,
     SVDQuantResult,
     quantize_with_svd,
 )
@@ -81,15 +78,12 @@ __all__ = [
     "FP4DynamicQuantizationResult",
     "Int8MmaLinear",
     "Int8MmaQuantizationResult",
-    "LowRankBranch",
     "MXFPQuantizationResult",
     "Quantizer",
     "QuantizerOptions",
     "QuantizerResult",
     "FP4WeightOnlyLinear",
     "MXFPWeightOnlyLinear",
-    "SVDQuantLinear",
-    "SVDQuantInt8MmaLinear",
     "SVDQuantResult",
     "TurboQuantCodec",
     "TurboQuantEncoding",

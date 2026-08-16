@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pytest
 
 from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
+from xqt.contracts import CompositeAddLinear
 from xqt.quant.capability import describe_quant_backend_capability, list_quant_backend_capabilities
 from xqt.quant.execution import execute_quantization_plan
 from xqt.quant.plan import build_quantization_plan
 from xqt.quant.quantizers.svd import (
-    SVDQuantInt8MmaLinear,
-    SVDQuantLinear,
     SVDQuantResult,
     quantize_with_svd,
 )
+from xqt.runtime.composite_materialize import materialize_composite_compute
+from xqt.runtime.modules import SVDQuantInt8MmaLinear, SVDQuantLinear
 
 
 def test_svdquant_is_not_a_quant_backend() -> None:
@@ -81,7 +83,8 @@ def test_quantize_with_svd_reports_pytorch_backend_and_svd_method() -> None:
     assert result.strategy == "w4a16_int4"
     assert result.compute == "dequant_fp16"
     assert result.quantized_modules == ["0"]
-    assert isinstance(result.model[0], SVDQuantLinear)
+    assert isinstance(result.model[0], CompositeAddLinear)
+    assert not isinstance(result.model[0], SVDQuantLinear)
     handoff = result.infer_handoff()
     assert "method" not in handoff
     assert handoff["model"] is result.model
@@ -92,6 +95,33 @@ def test_quantize_with_svd_reports_pytorch_backend_and_svd_method() -> None:
         b["name"] for b in handoff["compute_config"]["modules"][0]["branches"]
     }
     assert branch_names == {"low_rank", "quant_residual"}
+
+
+def test_svd_reference_artifact_matches_its_reconstructed_weight() -> None:
+    torch.manual_seed(7)
+    source = nn.Sequential(nn.Linear(32, 32)).eval()
+    inputs = torch.randn(5, 32)
+    result = quantize_with_svd(
+        source,
+        strategy="w4a16_int4",
+        compute="dequant_fp16",
+        rank=4,
+        group_size=16,
+        quant_dtype="int4",
+        inplace=False,
+    )
+
+    module = result.model[0]
+    assert isinstance(module, CompositeAddLinear)
+    expected = F.linear(
+        inputs,
+        module.full_weight_dequant().to(inputs.dtype),
+        None if module.bias is None else module.bias.to(inputs.dtype),
+    )
+    torch.testing.assert_close(module(inputs), expected)
+    metadata = module.execution_metadata()
+    assert metadata["compute_contract"] == "composite_add"
+    assert metadata["residual_compute"] == "dequant_fp16"
 
 
 def test_svd_fp4_int8_mma_keeps_packed_residual_and_declares_compute_contract() -> None:
@@ -111,16 +141,23 @@ def test_svd_fp4_int8_mma_keeps_packed_residual_and_declares_compute_contract() 
 
     assert result.strategy == "w4a16_fp4"
     assert result.compute == "w8a8_int8_mma"
-    assert isinstance(result.model[0], SVDQuantInt8MmaLinear)
+    assert isinstance(result.model[0], CompositeAddLinear)
     assert result.model[0].quant_dtype == "fp4"
     output = result.model(inputs)
     assert output.shape == (3, 32)
     assert torch.isfinite(output).all()
     execution = result.model[0].execution_metadata()
     assert execution["residual_storage"] == "packed_signed_int4_group_scale"
-    assert execution["residual_compute"] == "w8a8_int8_mma"
-    assert execution["activation_dtype"] == "int8"
     assert execution["quant_dtype"] == "fp4"
+    materialized = materialize_composite_compute(
+        result.model,
+        result.compute_config,
+        inplace=False,
+    )
+    assert isinstance(materialized[0], SVDQuantInt8MmaLinear)
+    assert materialized[0].execution_metadata()["residual_compute"] == (
+        "w8a8_int8_mma"
+    )
     handoff = result.infer_handoff()
     assert handoff["compute_config"] is not None
     module_contract = handoff["compute_config"]["modules"][0]
@@ -151,14 +188,13 @@ def test_svd_int4_int8_mma_keeps_packed_residual_and_declares_compute_contract()
     assert result.strategy == "w4a16_int4"
     assert result.compute == "w8a8_int8_mma"
     assert result.metadata["quant_dtype"] == "int4"
-    assert isinstance(result.model[0], SVDQuantInt8MmaLinear)
+    assert isinstance(result.model[0], CompositeAddLinear)
     assert result.model[0].quant_dtype == "int4"
     output = result.model(inputs)
     assert output.shape == (3, 32)
     assert torch.isfinite(output).all()
     execution = result.model[0].execution_metadata()
     assert execution["residual_storage"] == "packed_signed_int4_group_scale"
-    assert execution["residual_compute"] == "w8a8_int8_mma"
     assert execution["quant_dtype"] == "int4"
     residual = next(
         b
@@ -167,6 +203,12 @@ def test_svd_int4_int8_mma_keeps_packed_residual_and_declares_compute_contract()
     )
     assert residual["storage"]["quant_dtype"] == "int4"
     assert residual["compute_contract"] == "w4_storage_int8_mma"
+    materialized = materialize_composite_compute(
+        result.model,
+        result.compute_config,
+        inplace=False,
+    )
+    assert isinstance(materialized[0], SVDQuantInt8MmaLinear)
 
 
 def test_svd_fp4_int8_mma_collects_static_scales_from_calibration_inputs() -> None:
@@ -187,11 +229,17 @@ def test_svd_fp4_int8_mma_collects_static_scales_from_calibration_inputs() -> No
     )
 
     module = result.model[0]
-    assert isinstance(module, SVDQuantInt8MmaLinear)
-    assert module.residual_int8.activation_scale_mode == "static"
+    assert isinstance(module, CompositeAddLinear)
+    assert module._pending_activation_scale_mode == "static"
     assert result.metadata["calibrated_static_scale_module_count"] == 1
-    module(torch.randn(2, 32))
-    assert module.execution_metadata()["activation_scale_mode"] == "static"
+    materialized = materialize_composite_compute(
+        result.model,
+        result.compute_config,
+        inplace=False,
+    )
+    assert isinstance(materialized[0], SVDQuantInt8MmaLinear)
+    materialized[0](torch.randn(2, 32))
+    assert materialized[0].execution_metadata()["activation_scale_mode"] == "static"
 
 
 def test_execute_plan_pytorch_svd_strategy() -> None:
@@ -218,7 +266,7 @@ def test_execute_plan_pytorch_svd_strategy() -> None:
     assert report.method == "svd"
     assert report.strategy == "w4a16_int4"
     assert report.algorithm_executable is True
-    assert isinstance(execution.model[0], SVDQuantLinear)
+    assert isinstance(execution.model[0], CompositeAddLinear)
 
 
 def test_execute_plan_svd_fp4_int8_mma_reports_true_quantization() -> None:
@@ -250,12 +298,10 @@ def test_execute_plan_svd_fp4_int8_mma_reports_true_quantization() -> None:
     report = execution.reports[0]
     assert report.strategy == "w4a16_fp4"
     assert report.nature.value == "true"
-    assert report.metadata["execution_state"] == (
-        "composite_add_materialized_int8_residual"
-    )
+    assert report.metadata["execution_state"] == "composite_add_artifact"
     assert report.calibration_summary is not None
     assert report.calibration_summary["dtypes"]["input"] == ["bfloat16"]
-    assert isinstance(execution.model[0], SVDQuantInt8MmaLinear)
+    assert isinstance(execution.model[0], CompositeAddLinear)
 
 
 def test_execute_plan_svd_int4_int8_mma_reports_true_quantization() -> None:
@@ -288,10 +334,8 @@ def test_execute_plan_svd_int4_int8_mma_reports_true_quantization() -> None:
     assert report.strategy == "w4a16_int4"
     assert report.nature.value == "true"
     assert report.metadata["quant_dtype"] == "int4"
-    assert report.metadata["execution_state"] == (
-        "composite_add_materialized_int8_residual"
-    )
-    assert isinstance(execution.model[0], SVDQuantInt8MmaLinear)
+    assert report.metadata["execution_state"] == "composite_add_artifact"
+    assert isinstance(execution.model[0], CompositeAddLinear)
     assert execution.model[0].quant_dtype == "int4"
 
 
@@ -311,18 +355,6 @@ def test_svd_storage_shell_without_eager_materialize() -> None:
     model = nn.Sequential(nn.Linear(32, 32)).eval()
     result = quantize_with_svd(
         model,
-        strategy="w4a16_fp4",
-        compute="w8a8_int8_mma",
-        rank=4,
-        group_size=16,
-        quant_dtype="fp4",
-        residual_compute="int8_mma",
-        engine="torch_int_mm",
-        inplace=False,
-    )
-    # re-run with materialize_compute=False via policy
-    result = quantize_with_svd(
-        model,
         policy={
             "rank": 4,
             "group_size": 16,
@@ -335,12 +367,11 @@ def test_svd_storage_shell_without_eager_materialize() -> None:
         compute="w8a8_int8_mma",
         inplace=False,
     )
-    assert isinstance(result.model[0], SVDQuantLinear)
+    assert isinstance(result.model[0], CompositeAddLinear)
+    assert not isinstance(result.model[0], SVDQuantLinear)
     assert result.infer_handoff()["compute_config"]["modules"][0]["compute_contract"] == (
         "composite_add"
     )
-    from xqt.runtime.composite_materialize import materialize_composite_compute
-
     materialized = materialize_composite_compute(
         result.model,
         result.compute_config,

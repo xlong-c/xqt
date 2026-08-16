@@ -63,6 +63,7 @@ from .composite_combine import (
     get_combine_strategy,
 )
 from .composite_materialize import materialize_composite_compute
+from .modules.composite_add import materialize_composite_w4a4
 from .composite_inference import (
     calibrate_static_activation_scales,
     fuse_composite_modules,
@@ -78,6 +79,11 @@ from .svd_flux_attention import (
 from .svd_flux_transformer import materialize_svd_flux_transformer
 from .modules import (
     AWQW4A16Linear,
+    CompositeAddLinear,
+    CompositeAddModule,
+    CompositeAddFp8Linear,
+    CompositeAddW4A4Linear,
+    RMSNormCompositeLinear,
     Fp8MmaLinear,
     Int8MmaLinear,
     LowRankBranch,
@@ -160,12 +166,18 @@ __all__ = [
     "ModelRunner",
     "ModelRunnerReport",
     "materialize_composite_compute",
+    "materialize_composite_w4a4",
     "calibrate_static_activation_scales",
     "fuse_composite_modules",
     "materialize_svd_gelu_mlps",
     "materialize_svd_for_inference",
     "override_composite_execution",
     "AWQW4A16Linear",
+    "CompositeAddLinear",
+    "CompositeAddModule",
+    "CompositeAddFp8Linear",
+    "CompositeAddW4A4Linear",
+    "RMSNormCompositeLinear",
     "W4StorageInt8MmaLinear",
     "SVDQuantLinear",
     "SVDQuantFp8Linear",

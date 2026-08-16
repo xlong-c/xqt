@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from .awq_w4a16_linear import AWQW4A16Linear
-from .svd_composite import SVDQuantLinear
+from xqt.contracts.composite import CompositeAddModule
 from .svd_flux_attention import SVDQuantFluxAttention, SVDQuantFluxRotaryEmb
 from .svd_gelu_mlp import SVDQuantGeluMLP
 
@@ -321,9 +321,9 @@ class SVDQuantFluxSingleTransformerBlock(nn.Module):
             raise ValueError(
                 "single-stream FLUX attention must be pre_only without added KV"
             )
-        if not isinstance(attention.to_out, SVDQuantLinear):
+        if not isinstance(attention.to_out, CompositeAddModule):
             raise TypeError(
-                "single-stream FLUX attention requires an SVDQuant output projection"
+                "single-stream FLUX attention requires a composite output projection"
             )
         if not isinstance(feed_forward, SVDQuantGeluMLP):
             raise TypeError("feed_forward must be SVDQuantGeluMLP")

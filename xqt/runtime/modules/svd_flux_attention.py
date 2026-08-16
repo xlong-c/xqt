@@ -10,9 +10,33 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .svd_composite import SVDQuantLinear
+from xqt.contracts.composite import CompositeAddLinear, CompositeAddModule
+from .composite_add_w4a4 import CompositeAddW4A4Linear
+from .svd_w4a4_legacy import SVDQuantLinear
 
 _HEAD_DIM = 128
+
+
+def _is_w4a4_projection(module: CompositeAddModule) -> bool:
+    return isinstance(module, (SVDQuantLinear, CompositeAddW4A4Linear))
+
+
+def _projection_signature(
+    module: CompositeAddModule,
+    inputs: torch.Tensor,
+) -> tuple[Any, ...]:
+    if isinstance(module, CompositeAddW4A4Linear):
+        return module._state_signature(inputs)
+    return module._native_w4a4_state_signature()
+
+
+def _projection_pack(
+    module: CompositeAddModule,
+    inputs: torch.Tensor,
+) -> Any:
+    if isinstance(module, CompositeAddW4A4Linear):
+        return module._pack(inputs)
+    return module._native_w4a4_packed(inputs, smalln=False)
 
 
 @dataclass(frozen=True)
@@ -24,21 +48,21 @@ class SVDQuantFluxRotaryEmb:
 
 
 class SVDQuantFluxAttention(nn.Module):
-    """Run Diffusers FLUX attention with native fused SVDQuant QKV epilogues.
+    """Run Diffusers FLUX attention with native fused W4A4 QKV epilogues.
 
     The wrapper consumes already-joint ``to_qkv`` and optional
-    ``add_qkv_proj`` SVDQuant artifacts. It deliberately does not concatenate
-    three independently decomposed Q/K/V modules because that changes the
-    low-rank contract. The native path is forward-only, targets ``sm_89``, and
-    requires head dimension 128.
+    ``add_qkv_proj`` W4A4 composite executors. It deliberately does not
+    concatenate three independently decomposed Q/K/V modules because that
+    changes the low-rank contract. The native path is forward-only, targets
+    ``sm_89``, and requires head dimension 128.
     """
 
     def __init__(
         self,
         attention: nn.Module,
-        to_qkv: SVDQuantLinear,
+        to_qkv: CompositeAddModule,
         *,
-        add_qkv_proj: SVDQuantLinear | None = None,
+        add_qkv_proj: CompositeAddModule | None = None,
         output_projection: nn.Module | None = None,
         native_fusion: bool = True,
         attention_processor: str = "flashattn2",
@@ -53,8 +77,10 @@ class SVDQuantFluxAttention(nn.Module):
             "diffusers."
         ):
             raise TypeError("attention must be a Diffusers FluxAttention module")
-        if not isinstance(to_qkv, SVDQuantLinear):
-            raise TypeError("to_qkv must be an SVDQuantLinear module")
+        if not isinstance(to_qkv, CompositeAddModule) or not _is_w4a4_projection(
+            to_qkv
+        ):
+            raise TypeError("to_qkv must be a W4A4 composite executor")
 
         self.head_dim = int(attention.head_dim)
         self.inner_dim = int(attention.inner_dim)
@@ -78,8 +104,10 @@ class SVDQuantFluxAttention(nn.Module):
                 "add_qkv_proj must be provided exactly when attention has added_kv_proj_dim"
             )
         if add_qkv_proj is not None:
-            if not isinstance(add_qkv_proj, SVDQuantLinear):
-                raise TypeError("add_qkv_proj must be an SVDQuantLinear module")
+            if not isinstance(add_qkv_proj, CompositeAddModule) or not _is_w4a4_projection(
+                add_qkv_proj
+            ):
+                raise TypeError("add_qkv_proj must be a W4A4 composite executor")
             if add_qkv_proj.input_features != int(self.added_kv_proj_dim):
                 raise ValueError(
                     "add_qkv_proj input_features must match added_kv_proj_dim"
@@ -103,7 +131,9 @@ class SVDQuantFluxAttention(nn.Module):
             raise ValueError(
                 "output_projection is only valid for pre_only FLUX attention"
             )
-        if isinstance(output_projection, SVDQuantLinear):
+        if isinstance(output_projection, CompositeAddModule):
+            if not _is_w4a4_projection(output_projection):
+                raise TypeError("output_projection must be a W4A4 composite executor")
             if output_projection.input_features != self.inner_dim:
                 raise ValueError(
                     "output_projection input_features must match attention inner_dim"
@@ -134,7 +164,7 @@ class SVDQuantFluxAttention(nn.Module):
 
         if self._native_fusion_enabled:
             for projection in self._output_projections():
-                if isinstance(projection, SVDQuantLinear):
+                if isinstance(projection, CompositeAddModule):
                     projection.enable_fusion()
 
     def _output_projections(self) -> tuple[nn.Module, ...]:
@@ -191,9 +221,10 @@ class SVDQuantFluxAttention(nn.Module):
 
     def _branch_signature(
         self,
-        projection: SVDQuantLinear,
+        projection: CompositeAddModule,
         norm_q: nn.Module,
         norm_k: nn.Module,
+        inputs: torch.Tensor,
     ) -> tuple[Any, ...]:
         norm_q_weight = getattr(norm_q, "weight", None)
         norm_k_weight = getattr(norm_k, "weight", None)
@@ -202,7 +233,7 @@ class SVDQuantFluxAttention(nn.Module):
         ):
             raise RuntimeError("FLUX Q/K RMSNorm must have affine weights")
         return (
-            projection._native_w4a4_state_signature(),
+            _projection_signature(projection, inputs),
             self._tensor_signature(norm_q_weight),
             self._tensor_signature(norm_k_weight),
             float(norm_q.eps),
@@ -296,7 +327,7 @@ class SVDQuantFluxAttention(nn.Module):
     def _run_qkv_branch(
         self,
         branch: str,
-        projection: SVDQuantLinear,
+        projection: CompositeAddModule,
         norm_q: nn.Module,
         norm_k: nn.Module,
         inputs: torch.Tensor,
@@ -312,14 +343,14 @@ class SVDQuantFluxAttention(nn.Module):
         flat = inputs.reshape(-1, projection.input_features).contiguous()
         packed_rotary = self._validate_rotary(rotary_emb, inputs)
         key = self._hot_key(branch, flat)
-        signature = self._branch_signature(projection, norm_q, norm_k)
+        signature = self._branch_signature(projection, norm_q, norm_k, flat)
         cached = self._native_hot_cache.get(key)
         if cached is not None and cached[0] == signature:
             output = cached[3](flat, packed_rotary)
         else:
             if cached is not None:
                 self._native_hot_cache.pop(key, None)
-            packed = projection._native_w4a4_packed(flat, smalln=False)
+            packed = _projection_pack(projection, flat)
             workspace = allocate_w4a4_workspace(
                 int(flat.shape[0]),
                 packed,
@@ -355,7 +386,7 @@ class SVDQuantFluxAttention(nn.Module):
     def _run_qkv_branch_packed(
         self,
         branch: str,
-        projection: SVDQuantLinear,
+        projection: CompositeAddModule,
         norm_q: nn.Module,
         norm_k: nn.Module,
         inputs: torch.Tensor,
@@ -375,14 +406,14 @@ class SVDQuantFluxAttention(nn.Module):
         flat = inputs.reshape(-1, projection.input_features).contiguous()
         packed_rotary = self._validate_rotary(rotary_emb, inputs)
         key = self._hot_key(f"packed:{branch}", flat)
-        signature = self._branch_signature(projection, norm_q, norm_k)
+        signature = self._branch_signature(projection, norm_q, norm_k, flat)
         cached = self._native_hot_cache.get(key)
         if cached is not None and cached[0] == signature:
             native_forward = cached[3]
         else:
             if cached is not None:
                 self._native_hot_cache.pop(key, None)
-            packed = projection._native_w4a4_packed(flat, smalln=False)
+            packed = _projection_pack(projection, flat)
             workspace = allocate_w4a4_workspace(
                 int(flat.shape[0]),
                 packed,

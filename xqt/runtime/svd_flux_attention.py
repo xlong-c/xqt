@@ -10,7 +10,8 @@ from torch import nn
 from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
     pack_svdq_w4a4_rotary_emb,
 )
-from xqt.runtime.modules.svd_composite import SVDQuantLinear
+from xqt.contracts.composite import CompositeAddLinear, CompositeAddModule
+from xqt.runtime.modules.composite_add import materialize_composite_w4a4
 from xqt.runtime.modules.svd_flux_attention import (
     SVDQuantFluxAttention,
     SVDQuantFluxRotaryEmb,
@@ -19,11 +20,17 @@ from xqt.runtime.modules.svd_flux_attention import (
 _HEAD_DIM = 128
 
 
+def _prepare_flux_projection(module: CompositeAddModule) -> CompositeAddModule:
+    if type(module) is CompositeAddLinear:
+        return materialize_composite_w4a4(module)
+    return module
+
+
 def materialize_svd_flux_attention(
     attention: nn.Module,
     *,
-    to_qkv: SVDQuantLinear,
-    add_qkv_proj: SVDQuantLinear | None = None,
+    to_qkv: CompositeAddModule,
+    add_qkv_proj: CompositeAddModule | None = None,
     output_projection: nn.Module | None = None,
     native_fusion: bool = True,
     attention_processor: str = "flashattn2",
@@ -37,9 +44,21 @@ def materialize_svd_flux_attention(
 
     return SVDQuantFluxAttention(
         attention,
-        to_qkv,
-        add_qkv_proj=add_qkv_proj,
-        output_projection=output_projection,
+        _prepare_flux_projection(to_qkv),
+        add_qkv_proj=(
+            None
+            if add_qkv_proj is None
+            else _prepare_flux_projection(add_qkv_proj)
+        ),
+        output_projection=(
+            None
+            if output_projection is None
+            else (
+                _prepare_flux_projection(output_projection)
+                if isinstance(output_projection, CompositeAddModule)
+                else output_projection
+            )
+        ),
         native_fusion=native_fusion,
         attention_processor=attention_processor,
     )

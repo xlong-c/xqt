@@ -407,10 +407,10 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | --- | --- |
 | dual-branch `ModuleComputeSpec.branches` + `combine` | `xqt/contracts/compute.py` |
 | contract `composite_add` | 同上 `SUPPORTED_COMPUTE_CONTRACTS` |
-| quant 默认先写 `SVDQuantLinear` 存储壳 + `compute_config` | `xqt/quant/quantizers/svd.py` |
-| `materialize_compute` 绑 residual INT8 | `SVDQuantLinear.materialize_compute` |
+| quant 只写 `CompositeAddLinear` 量化产物 + `compute_config` | `xqt/quant/quantizers/svd.py`, `xqt/contracts/composite.py` |
+| runtime 按 `compute_config` 绑定 residual INT8 | `xqt/runtime/modules/composite_add.py`, `xqt/runtime/composite_materialize.py` |
 | Infer materialize 入口 | `xqt/runtime/composite_materialize.py`, `HybridInferenceEngine.from_quantized_model` |
-| 默认仍可 eager materialize (`materialize_compute=True`) | quant policy 可关, 由 Infer 再绑 |
+| quantizer 不再 eager materialize runtime | compute view 只由 Infer/runtime 显式绑定 |
 
 ### 已落地 (方案 C 第二刀)
 
@@ -418,10 +418,59 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | --- | --- |
 | `Int8MmaLinear` | `xqt/runtime/modules/int8_mma_linear.py` |
 | `W4StorageInt8MmaLinear` | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
-| `SVDQuantLinear` / `SVDQuantInt8MmaLinear` / `LowRankBranch` | `xqt/runtime/modules/svd_composite.py` |
-| packing helpers | `xqt/runtime/modules/packing_int4.py` |
-| quantizers 仅 re-export 算法入口 + 兼容类名 | `xqt/quant/quantizers/{int8_mma,w4_storage_int8_mma,svd}.py` |
+| 旧 `SVDQuantLinear` / `SVDQuantInt8MmaLinear` 执行壳 | `xqt/runtime/modules/svd_w4a4_legacy.py`, `xqt/runtime/modules/svd_w8a8_legacy.py` |
+| pure packing helpers + runtime compatibility exports | `xqt/contracts/packing_int4.py`, `xqt/runtime/modules/packing_int4.py` |
+| quantizers 仅导出算法入口和量化结果类型, runtime 类从 `xqt.runtime` 访问 | `xqt/quant/quantizers/{int8_mma,w4_storage_int8_mma,svd}.py` |
 | `runtime/*` 静态无 `quant.quantizers` import | 扫描通过 |
+
+### 已落地 (方案 C 第三刀, 2026-08-16)
+
+| 项 | 位置 |
+| --- | --- |
+| 通用 additive composite reference artifact | `xqt/contracts/composite.py` |
+| SVD reference quantization 输出 `CompositeAddLinear` | `xqt/quant/quantizers/svd.py` |
+| 低秩因子 + packed residual 的 reference 重建测试 | `tests/xqt/quant/test_quant_svd_method.py` |
+| GELU materializer 接受通用 composite module | `xqt/runtime/composite_inference.py`, `xqt/runtime/modules/svd_gelu_mlp.py` |
+| 通用 W4A4 main/small-N executor + `compute_config` materialize 入口 | `xqt/runtime/modules/composite_add_w4a4.py`, `xqt/runtime/modules/composite_add.py` |
+| RMSNorm 作为独立输入变换 wrapper | `xqt/runtime/modules/composite_norm.py`, `tests/xqt/runtime/test_composite_norm.py` |
+| 旧 `SVDQuantLinear` 复用 generic artifact 存储与基础校验 | `xqt/runtime/modules/svd_w4a4_legacy.py` |
+| INT8-MMA quantizer 先输出 artifact, 再按 `compute_config` 物化 | `xqt/quant/quantizers/svd.py`, `xqt/runtime/modules/composite_add.py` |
+| FP8 split/collapse 也从 generic artifact 显式物化 | `xqt/runtime/modules/composite_add_fp8.py`, `xqt/runtime/modules/composite_add.py` |
+| GELU/FLUX native materializer 消费通用 W4A4 executor | `xqt/runtime/modules/svd_gelu_mlp.py`, `xqt/runtime/modules/svd_flux_attention.py` |
+
+### 已落地 (方案 C 第四刀, 2026-08-16)
+
+| 项 | 位置 |
+| --- | --- |
+| canonical additive artifact 下沉到 contracts | `xqt/contracts/composite.py` |
+| pure INT4 pack/unpack 协议下沉到 contracts | `xqt/contracts/packing_int4.py` |
+| SVD quantizer 去除 runtime import 与 eager compute materialization | `xqt/quant/quantizers/svd.py` |
+| runtime materialization 改为显式 helper | `xqt/runtime/modules/composite_add.py`, `xqt/runtime/composite_materialize.py` |
+
+本阶段已迁移 reference, INT8-MMA 和 FP8 的 generic artifact/materialization
+路径. canonical artifact 与 pack/unpack 协议已下沉到 `xqt.contracts`,
+quantizer 不再 import `xqt.runtime` 或 eager materialize compute view.
+`SVDQuantLinear` 仍作为 W4A4 small-N / fused-norm / CUDA Graph 的兼容
+runtime shell, `SVDQuantInt8MmaLinear` 仍作为 W4-storage + INT8-MMA 的旧
+materialized runtime; 两者只能通过 `from_composite()` 消费已有产物, 不再从
+dense `nn.Linear` 执行 SVD 或 residual quantization.
+通用 W4A4 executor 当前支持显式 main/small-N layout, RMSNorm 仅作为
+独立 wrapper 走 reference/fallback, 尚未接入 norm-fused native kernel.
+GELU/FLUX 的模型专用 native kernel 已从 generic artifact 入口显式消费
+W4A4 executor, 但 QKV/RoPE 和 CUDA Graph 仍是特例, 默认 SVD reference
+配置也不会隐式切换到 native executor. 后续阶段需要继续清理兼容 shell,
+不能把当前 executor 视为最终边界.
+
+### 已落地 (方案 C 第五刀, 2026-08-16)
+
+| 项 | 位置 |
+| --- | --- |
+| W4A4 / W8A8 / FP8 executor 按 backend 拆分 | `xqt/runtime/modules/svd_w4a4_legacy.py`, `svd_w8a8_legacy.py`, `svd_fp8_legacy.py` |
+| materializer registry 与执行壳分离 | `xqt/runtime/modules/svd_legacy_materializers.py` |
+| `svd_legacy.py` 降为兼容门面 | `xqt/runtime/modules/svd_legacy.py` |
+| runtime executor 不再继承 canonical artifact | `xqt/contracts/composite.py`, `xqt/runtime/modules/composite_add_w4a4.py`, `svd_w4a4_legacy.py` |
+| artifact/runtime 共用显式 storage 初始化协议 | `initialize_composite_add_storage()` |
+| 类型边界回归 | `tests/xqt/runtime/test_composite_add.py` |
 
 ### 仍待做 / 部分完成 (2026-07-30)
 

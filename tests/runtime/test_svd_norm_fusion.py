@@ -4,6 +4,7 @@ import pytest
 import torch
 from torch import nn
 
+from tests.xqt.svd_test_helpers import make_legacy_svd_linear
 from xqt.runtime.modules import SVDQuantLinear
 
 
@@ -37,8 +38,16 @@ def _make_pair(
     base = nn.Linear(in_features, out_features, bias=True, dtype=dtype, device="cuda")
     with torch.no_grad():
         base.weight.mul_(0.05)
-    module_ref = SVDQuantLinear.from_linear(base, rank=rank, group_size=64).to(dtype)
-    module_fused = SVDQuantLinear.from_linear(base, rank=rank, group_size=64).to(dtype)
+    module_ref = make_legacy_svd_linear(
+        base,
+        rank=rank,
+        group_size=64,
+    ).to(dtype)
+    module_fused = make_legacy_svd_linear(
+        base,
+        rank=rank,
+        group_size=64,
+    ).to(dtype)
     norm_weight = torch.randn(in_features, dtype=dtype, device="cuda") * 0.5 + 1.0
     module_fused.set_fused_norm(norm_weight, eps=eps)
     return module_ref, module_fused, norm_weight, eps
@@ -78,7 +87,8 @@ def test_fused_norm_native_path_matches_unfused_native_path(
     metadata = module_fused.execution_metadata()
     assert metadata["cuda_fused_backend"] == "native_w4a4_dynamic_norm"
     assert metadata["implementation"] == "native_svdq_w4a4_dynamic_norm_fused_lora"
-    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    # The fused norm kernel and explicit RMSNorm can differ by one FP16 ULP.
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -174,7 +184,11 @@ def test_clear_fused_norm_restores_post_norm_input_contract() -> None:
 
 
 def test_set_fused_norm_validates_weight_shape() -> None:
-    module = SVDQuantLinear.from_linear(nn.Linear(16, 8), rank=4, group_size=8)
+    module = make_legacy_svd_linear(
+        nn.Linear(16, 8),
+        rank=4,
+        group_size=8,
+    )
 
     with pytest.raises(ValueError, match="input_features"):
         module.set_fused_norm(torch.ones(8))

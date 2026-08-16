@@ -5,13 +5,18 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from tests.xqt.svd_test_helpers import make_legacy_svd_linear
 from xqt.quant.quantizers.svd import quantize_with_svd
 from xqt.runtime import (
     fuse_composite_modules,
     materialize_svd_for_inference,
     materialize_svd_gelu_mlps,
 )
-from xqt.runtime.modules import SVDQuantGeluMLP, SVDQuantLinear
+from xqt.runtime.modules import (
+    CompositeAddW4A4Linear,
+    SVDQuantGeluMLP,
+    SVDQuantLinear,
+)
 
 
 def _require_native_w4a4() -> None:
@@ -45,7 +50,7 @@ def _make_linear(
     with torch.no_grad():
         base.weight.mul_(0.05)
         base.bias.mul_(0.05)
-    return SVDQuantLinear.from_linear(
+    return make_legacy_svd_linear(
         base,
         rank=rank,
         group_size=64,
@@ -176,6 +181,8 @@ def test_materialize_diffusers_tanh_gelu_feedforward_matches_quantized_module() 
 
     assert isinstance(materialized, SVDQuantGeluMLP)
     assert materialized.approximate == "tanh"
+    assert isinstance(materialized.fc1, CompositeAddW4A4Linear)
+    assert isinstance(materialized.fc2, CompositeAddW4A4Linear)
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 

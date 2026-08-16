@@ -5,6 +5,7 @@ import torch
 from diffusers.models.transformers.transformer_flux import FluxAttention
 from torch import nn
 
+from tests.xqt.svd_test_helpers import make_legacy_svd_linear
 from xqt.runtime import pack_diffusers_flux_rotary_emb
 from xqt.runtime.modules import (
     SVDQuantFluxAttention,
@@ -63,7 +64,7 @@ def _linear(
             )
             * 0.02
         )
-    module = SVDQuantLinear.from_linear(
+    module = make_legacy_svd_linear(
         source,
         rank=16,
         group_size=64,

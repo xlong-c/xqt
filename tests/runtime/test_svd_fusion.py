@@ -4,6 +4,10 @@ import pytest
 import torch
 from torch import nn
 
+from tests.xqt.svd_test_helpers import (
+    make_legacy_svd_int8,
+    make_legacy_svd_linear,
+)
 from xqt.core.errors import XQTBackendError
 from xqt.runtime.modules import SVDQuantInt8MmaLinear, SVDQuantLinear
 from xqt.runtime.svd_fusion import (
@@ -17,7 +21,7 @@ from xqt.operator_opt.kernels.tilelang.svd_fused import resolve_svd_fused_schedu
 def _make_svd_linear() -> SVDQuantLinear:
     torch.manual_seed(0)
     linear = nn.Linear(16, 8, bias=True)
-    return SVDQuantLinear.from_linear(linear, rank=4, group_size=8)
+    return make_legacy_svd_linear(linear, rank=4, group_size=8)
 
 
 def test_svd_fusion_report_marks_reference_and_unverified() -> None:
@@ -110,7 +114,11 @@ def _make_cuda_svd_linear(
 ) -> SVDQuantLinear:
     torch.manual_seed(0)
     linear = nn.Linear(in_features, out_features, bias=bias)
-    module = SVDQuantLinear.from_linear(linear, rank=rank, group_size=group_size)
+    module = make_legacy_svd_linear(
+        linear,
+        rank=rank,
+        group_size=group_size,
+    )
     return module.half().cuda().eval()
 
 
@@ -227,7 +235,7 @@ def test_svdq_w4a4_native_metadata_reports_real_backend() -> None:
     if not native_w4a4_available(build=False):
         pytest.skip("native sm_89 W4A4 backend unavailable")
 
-    module = SVDQuantLinear.from_linear(
+    module = make_legacy_svd_linear(
         nn.Linear(128, 128, bias=True).eval(),
         rank=16,
         group_size=128,
@@ -258,7 +266,7 @@ def test_svdq_w4a4_hot_cache_rebuilds_after_residual_scale_mutation() -> None:
     if not native_w4a4_available(build=False):
         pytest.skip("native sm_89 W4A4 backend unavailable")
 
-    module = SVDQuantLinear.from_linear(
+    module = make_legacy_svd_linear(
         nn.Linear(128, 128, bias=True).eval(),
         rank=16,
         group_size=128,
@@ -288,7 +296,7 @@ def test_svdq_w4a4_hot_cache_rebuilds_after_residual_scale_mutation() -> None:
 def _make_native_w8_svd(rank: int) -> SVDQuantInt8MmaLinear:
     torch.manual_seed(53 + int(rank))
     source = nn.Linear(128, 128, bias=True).eval()
-    return SVDQuantInt8MmaLinear.from_linear(
+    return make_legacy_svd_int8(
         source,
         rank=rank,
         group_size=128,
@@ -389,7 +397,7 @@ def test_svdq_w8a8_native_pads_mnk_and_rank() -> None:
     if not _native_svdq_w8a8_test_available():
         pytest.skip("native sm_89 SVDQuant W8A8 backend unavailable")
 
-    module = SVDQuantInt8MmaLinear.from_linear(
+    module = make_legacy_svd_int8(
         nn.Linear(132, 132, bias=True).eval(),
         rank=17,
         group_size=132,
@@ -432,14 +440,14 @@ def test_svdq_w8a8_native_contract_falls_back_explicitly(
         pytest.skip("CUDA required")
 
     monkeypatch.setattr(torch, "compile", lambda function, mode: function)
-    fp16_module = SVDQuantInt8MmaLinear.from_linear(
+    fp16_module = make_legacy_svd_int8(
         nn.Linear(128, 128, bias=False).eval(),
         rank=16,
         group_size=128,
         engine="torch_int_mm",
         activation_scale_mode="dynamic",
     ).half().cuda().eval()
-    static_bf16_module = SVDQuantInt8MmaLinear.from_linear(
+    static_bf16_module = make_legacy_svd_int8(
         nn.Linear(128, 128, bias=False).eval(),
         rank=16,
         group_size=128,
@@ -447,7 +455,7 @@ def test_svdq_w8a8_native_contract_falls_back_explicitly(
         activation_scale_mode="static",
         activation_scale=0.02,
     ).bfloat16().cuda().eval()
-    misaligned_module = SVDQuantInt8MmaLinear.from_linear(
+    misaligned_module = make_legacy_svd_int8(
         nn.Linear(130, 126, bias=False).eval(),
         rank=16,
         group_size=130,

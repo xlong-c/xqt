@@ -8,6 +8,11 @@ from .channel import (
     compute_hybrid_linear,
     normalize_channel_axis,
 )
+from .composite import (
+    CompositeAddLinear,
+    CompositeAddModule,
+    initialize_composite_add_storage,
+)
 from .compute import (
     COMPUTE_CONFIG_SCHEMA_VERSION,
     ComputeConfig,
@@ -92,6 +97,8 @@ from .contract_consume import (
 
 __all__ = [
     "COMPUTE_CONFIG_SCHEMA_VERSION",
+    "CompositeAddLinear",
+    "CompositeAddModule",
     "ChannelAxis",
     "ChannelHybridSpec",
     "ComputeConfig",

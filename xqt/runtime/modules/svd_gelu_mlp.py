@@ -9,7 +9,53 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .svd_composite import SVDQuantLinear
+from xqt.contracts.composite import CompositeAddLinear, CompositeAddModule
+from .composite_add import materialize_composite_w4a4
+from .composite_add_w4a4 import CompositeAddW4A4Linear
+from .svd_w4a4_legacy import SVDQuantLinear
+
+
+def _is_native_only(module: CompositeAddModule) -> bool:
+    """Read the optional frozen-state flag shared by native modules."""
+
+    return bool(getattr(module, "native_only", False))
+
+
+def _has_fused_norm(module: CompositeAddModule) -> bool:
+    checker = getattr(module, "_native_w4a4_has_fused_norm", None)
+    return bool(checker()) if callable(checker) else False
+
+
+def _state_signature(
+    module: CompositeAddModule,
+    inputs: torch.Tensor,
+) -> tuple[Any, ...]:
+    if isinstance(module, CompositeAddW4A4Linear):
+        return module._state_signature(inputs)
+    checker = getattr(module, "_native_w4a4_state_signature", None)
+    if not callable(checker):
+        raise TypeError("module does not expose a native W4A4 state signature")
+    return checker()
+
+
+def _pack_native(
+    module: CompositeAddModule,
+    inputs: torch.Tensor,
+) -> Any:
+    if isinstance(module, CompositeAddW4A4Linear):
+        return module._pack(inputs)
+    packer = getattr(module, "_native_w4a4_packed", None)
+    if not callable(packer):
+        raise TypeError("module does not expose a native W4A4 packer")
+    return packer(inputs, smalln=False)
+
+
+def _materialize_gelu_projection(module: CompositeAddModule) -> CompositeAddModule:
+    if isinstance(module, (SVDQuantLinear, CompositeAddW4A4Linear)):
+        return module
+    if isinstance(module, CompositeAddLinear):
+        return materialize_composite_w4a4(module)
+    return module
 
 
 class SVDQuantGeluMLP(nn.Module):
@@ -27,15 +73,18 @@ class SVDQuantGeluMLP(nn.Module):
 
     def __init__(
         self,
-        fc1: SVDQuantLinear,
-        fc2: SVDQuantLinear,
+        fc1: CompositeAddModule,
+        fc2: CompositeAddModule,
         *,
         approximate: str = "tanh",
         native_fusion: bool = True,
     ) -> None:
         super().__init__()
-        if not isinstance(fc1, SVDQuantLinear) or not isinstance(fc2, SVDQuantLinear):
-            raise TypeError("fc1 and fc2 must both be SVDQuantLinear modules")
+        if not isinstance(fc1, CompositeAddModule) or not isinstance(
+            fc2,
+            CompositeAddModule,
+        ):
+            raise TypeError("fc1 and fc2 must both be additive composite modules")
         if fc1.output_features != fc2.input_features:
             raise ValueError("fc1 output_features must match fc2 input_features")
         if approximate not in {"none", "tanh"}:
@@ -73,7 +122,7 @@ class SVDQuantGeluMLP(nn.Module):
         self._native_hot_cache.clear()
 
     def _apply(self, fn: Any) -> "SVDQuantGeluMLP":
-        if self.fc1.native_only or self.fc2.native_only:
+        if _is_native_only(self.fc1) or _is_native_only(self.fc2):
             raise RuntimeError(
                 "native-only SVDQuantGeluMLP cannot be moved or cast; "
                 "freeze a canonical module again for the target device and dtype"
@@ -88,7 +137,7 @@ class SVDQuantGeluMLP(nn.Module):
         """Enable the native fastpath and report whether it is usable now."""
 
         del mode
-        if self.fc1.native_only or self.fc2.native_only:
+        if _is_native_only(self.fc1) or _is_native_only(self.fc2):
             raise RuntimeError(
                 "native-only SVDQuantGeluMLP execution configuration is immutable"
             )
@@ -107,7 +156,7 @@ class SVDQuantGeluMLP(nn.Module):
     def disable_fusion(self) -> None:
         """Disable the native fused path without changing either Linear."""
 
-        if self.fc1.native_only or self.fc2.native_only:
+        if _is_native_only(self.fc1) or _is_native_only(self.fc2):
             raise RuntimeError(
                 "native-only SVDQuantGeluMLP cannot disable its only execution path"
             )
@@ -115,10 +164,10 @@ class SVDQuantGeluMLP(nn.Module):
         self._last_fused_gelu_mlp_used = False
         self._last_fallback_reason = "native fused GELU MLP is disabled"
 
-    def _state_signature(self) -> tuple[Any, ...]:
+    def _state_signature(self, inputs: torch.Tensor) -> tuple[Any, ...]:
         return (
-            self.fc1._native_w4a4_state_signature(),
-            self.fc2._native_w4a4_state_signature(),
+            _state_signature(self.fc1, inputs),
+            _state_signature(self.fc2, inputs),
         )
 
     @staticmethod
@@ -138,13 +187,19 @@ class SVDQuantGeluMLP(nn.Module):
     def _requires_autograd_fallback(self, inputs: torch.Tensor) -> bool:
         if not torch.is_grad_enabled():
             return False
-        if self.fc1.native_only or self.fc2.native_only:
+        if _is_native_only(self.fc1) or _is_native_only(self.fc2):
             return True
         if inputs.requires_grad:
             return True
         return any(parameter.requires_grad for parameter in self.parameters())
 
     def _native_gate(self, inputs: torch.Tensor) -> tuple[bool, str]:
+        supported_types = (SVDQuantLinear, CompositeAddW4A4Linear)
+        if not isinstance(self.fc1, supported_types) or not isinstance(
+            self.fc2,
+            supported_types,
+        ):
+            return False, "native fused GELU MLP requires W4A4 executor modules"
         if not self._native_fusion_enabled:
             return False, "native fused GELU MLP is disabled"
         if not inputs.is_cuda:
@@ -159,13 +214,16 @@ class SVDQuantGeluMLP(nn.Module):
             return False, "native fused GELU MLP requires approximate='tanh'"
         if self.fc1.quant_dtype != "int4" or self.fc2.quant_dtype != "int4":
             return False, "native fused GELU MLP currently supports INT4 weights only"
-        if (
-            self.fc1._native_w4a4_has_fused_norm()
-            or self.fc2._native_w4a4_has_fused_norm()
-        ):
+        if _has_fused_norm(self.fc1) or _has_fused_norm(self.fc2):
             return False, "native fused GELU MLP does not yet compose with fused_norm"
         for name, module in (("fc1", self.fc1), ("fc2", self.fc2)):
-            if module.native_only:
+            if isinstance(module, CompositeAddW4A4Linear):
+                if module.layout != "main":
+                    return False, f"{name} requires the main W4A4 layout"
+                allowed, reason = module._native_gate(inputs)
+                if not allowed:
+                    return False, f"{name}: {reason}"
+            elif module.native_only:
                 if module._native_only_device != inputs.device:
                     return False, f"{name} frozen device must match activations"
                 if module._native_only_dtype != inputs.dtype:
@@ -217,15 +275,15 @@ class SVDQuantGeluMLP(nn.Module):
         original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
         flat = inputs.reshape(-1, self.input_features).contiguous()
         key = self._hot_key(flat)
-        signature = self._state_signature()
+        signature = self._state_signature(flat)
         cached = self._native_hot_cache.get(key)
         if cached is not None and cached[0] == signature:
             output = cached[4](flat)
         else:
             if cached is not None:
                 self._native_hot_cache.pop(key, None)
-            packed_fc1 = self.fc1._native_w4a4_packed(flat, smalln=False)
-            packed_fc2 = self.fc2._native_w4a4_packed(flat, smalln=False)
+            packed_fc1 = _pack_native(self.fc1, flat)
+            packed_fc2 = _pack_native(self.fc2, flat)
             workspace = allocate_svdq_w4a4_gelu_mlp_workspace(
                 int(flat.shape[0]),
                 packed_fc1,
@@ -254,7 +312,7 @@ class SVDQuantGeluMLP(nn.Module):
         return output.reshape(*original_shape, self.output_features)
 
     def _fallback_forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        if self.fc1.native_only or self.fc2.native_only:
+        if _is_native_only(self.fc1) or _is_native_only(self.fc2):
             raise RuntimeError(
                 "native-only SVDQuantGeluMLP cannot use the sequential fallback"
             )
@@ -277,7 +335,7 @@ class SVDQuantGeluMLP(nn.Module):
                 reason = f"native fused GELU MLP execution failed: {exc}"
         self._last_fused_gelu_mlp_used = False
         self._last_fallback_reason = reason
-        if self.fc1.native_only or self.fc2.native_only:
+        if _is_native_only(self.fc1) or _is_native_only(self.fc2):
             raise RuntimeError(
                 f"native-only SVDQuantGeluMLP cannot fall back: {reason}"
             )
@@ -301,7 +359,9 @@ class SVDQuantGeluMLP(nn.Module):
             "input_features": self.input_features,
             "hidden_features": self.hidden_features,
             "output_features": self.output_features,
-            "native_only": bool(self.fc1.native_only and self.fc2.native_only),
+            "native_only": bool(
+                _is_native_only(self.fc1) and _is_native_only(self.fc2)
+            ),
         }
 
 

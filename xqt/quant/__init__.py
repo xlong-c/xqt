@@ -144,9 +144,6 @@ from .bridges.nvfp4 import (
     unpack_nvfp4e2m1,
 )
 from .quantizers.svd import (
-    LowRankBranch,
-    SVDQuantInt8MmaLinear,
-    SVDQuantLinear,
     SVDQuantResult,
     quantize_with_svd,
 )
@@ -212,7 +209,6 @@ __all__ = [
     "KvScaleArtifact",
     "LayerAnalysisRecord",
     "LayerSensitivityRecord",
-    "LowRankBranch",
     "MoEExpertQuantizationResult",
     "MXFPQuantizationResult",
     "DEFAULT_MOE_EXPERT_NAME_PATTERNS",
@@ -234,8 +230,6 @@ __all__ = [
     "QuantizationReport",
     "FP4WeightOnlyLinear",
     "MXFPWeightOnlyLinear",
-    "SVDQuantLinear",
-    "SVDQuantInt8MmaLinear",
     "SVDQuantResult",
     "TorchAOQuantizationResult",
     "W4StorageInt8MmaLinear",

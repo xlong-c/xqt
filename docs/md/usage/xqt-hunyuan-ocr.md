@@ -201,7 +201,7 @@ result = optimize_hunyuan_ocr_dflash_svd_int4_blocks(
 | --- | --- |
 | Hunyuan helper | `xqt/model/hunyuan_ocr.py` |
 | SVD quant method | `xqt/quant/quantizers/svd.py` |
-| Runtime dual-branch modules | `xqt/runtime/modules/svd_composite.py` |
+| Runtime dual-branch modules | `xqt/runtime/modules/svd_w4a4_legacy.py` |
 | Residual INT8 module | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
 | torch.compile backend | `xqt/operator_opt/compile_backend.py` |
 | TileLang Hunyuan decode pipeline | `xqt/model/hunyuan_ocr_tilelang.py` |

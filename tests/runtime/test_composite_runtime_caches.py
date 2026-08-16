@@ -3,9 +3,22 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from tests.xqt.svd_test_helpers import (
+    make_legacy_svd_int8,
+    make_legacy_svd_linear,
+)
 from xqt.quant.quantizers.convrot_int8 import ConvRotInt8Linear
 from xqt.quant.quantizers.convrot_4bit import ConvRotMixedPrecisionLinear
-from xqt.runtime.modules.svd_composite import SVDQuantInt8MmaLinear, SVDQuantLinear
+from xqt.runtime.modules.svd_legacy import SVDQuantInt8MmaLinear, SVDQuantLinear
+from xqt.runtime.modules.svd_composite import (
+    SVDQuantInt8MmaLinear as CompatSVDQuantInt8MmaLinear,
+    SVDQuantLinear as CompatSVDQuantLinear,
+)
+
+
+def test_svd_runtime_compat_facade_points_to_legacy_implementation() -> None:
+    assert CompatSVDQuantLinear is SVDQuantLinear
+    assert CompatSVDQuantInt8MmaLinear is SVDQuantInt8MmaLinear
 
 
 def test_convrot_dequantized_weight_cache_reuses_and_invalidates() -> None:
@@ -72,7 +85,7 @@ def test_convrot_int8_dtype_conversion_updates_output_contract() -> None:
 
 
 def test_svd_reference_residual_cache_reuses_and_invalidates() -> None:
-    module = SVDQuantLinear.from_linear(
+    module = make_legacy_svd_linear(
         nn.Linear(16, 12, bias=False).eval(),
         rank=4,
         group_size=8,
@@ -91,7 +104,7 @@ def test_svd_reference_residual_cache_reuses_and_invalidates() -> None:
 
 
 def test_svd_group_size_is_normalized_for_narrow_linear() -> None:
-    module = SVDQuantLinear.from_linear(
+    module = make_legacy_svd_linear(
         nn.Linear(16, 12, bias=False).eval(),
         rank=4,
         group_size=128,
@@ -104,7 +117,7 @@ def test_svd_group_size_is_normalized_for_narrow_linear() -> None:
 
 
 def test_svd_int8_compute_view_rebuilds_after_storage_mutation() -> None:
-    module = SVDQuantInt8MmaLinear.from_linear(
+    module = make_legacy_svd_int8(
         nn.Linear(16, 12, bias=False).eval(),
         rank=4,
         group_size=8,
@@ -125,7 +138,7 @@ def test_svd_int8_compute_view_rebuilds_after_storage_mutation() -> None:
 
 
 def test_svd_int8_half_updates_cuda_output_dtype_contract() -> None:
-    module = SVDQuantInt8MmaLinear.from_linear(
+    module = make_legacy_svd_int8(
         nn.Linear(16, 12, bias=False).eval(),
         rank=4,
         group_size=8,
@@ -141,7 +154,7 @@ def test_svd_int8_half_updates_cuda_output_dtype_contract() -> None:
 
 
 def test_svd_reference_fusion_metadata_is_explicit_on_cpu() -> None:
-    module = SVDQuantLinear.from_linear(
+    module = make_legacy_svd_linear(
         nn.Linear(16, 12, bias=False).eval(),
         rank=4,
         group_size=8,

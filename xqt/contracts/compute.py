@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 SUPPORTED_COMPUTE_PRECISIONS: frozenset[str] = frozenset(
-    {"w4a4", "w4a16", "w8a8", "bf16"}
+    {"w4a4", "w4a16", "w8a8", "fp8", "bf16"}
 )
 
 # Compute / MMA contracts (axis 3). Extensible; not tied to quant method names.

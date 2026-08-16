@@ -26,17 +26,19 @@ from xqt.contracts.compute import (
     compute_config_from_mapping,
     normalize_composite_mode,
 )
+from xqt.contracts.composite import CompositeAddLinear, CompositeAddModule
 from xqt.runtime.composite_branch import (
     SupportsStaticActivationCalibration,
     replace_submodule,
 )
 from xqt.runtime.composite_materialize import materialize_composite_compute
-from xqt.runtime.modules import SVDQuantGeluMLP, SVDQuantLinear
+from xqt.runtime.modules import SVDQuantGeluMLP
+from xqt.runtime.modules.composite_add import materialize_composite_w4a4
 
 
 def _match_diffusers_svd_gelu_mlp(
     module: nn.Module,
-) -> tuple[SVDQuantLinear, SVDQuantLinear] | None:
+) -> tuple[CompositeAddModule, CompositeAddModule] | None:
     module_type = type(module)
     if module_type.__name__ != "FeedForward" or not module_type.__module__.startswith(
         "diffusers."
@@ -55,12 +57,23 @@ def _match_diffusers_svd_gelu_mlp(
         return None
     fc1 = getattr(activation, "proj", None)
     fc2 = net[2]
-    if not isinstance(fc1, SVDQuantLinear) or not isinstance(fc2, SVDQuantLinear):
+    if not isinstance(fc1, CompositeAddModule) or not isinstance(
+        fc2,
+        CompositeAddModule,
+    ):
         return None
     for dropout in (net[1], *net[3:]):
         if not isinstance(dropout, nn.Dropout) or float(dropout.p) != 0.0:
             return None
     return fc1, fc2
+
+
+def _prepare_gelu_projection(module: CompositeAddModule) -> CompositeAddModule:
+    """Give generic artifacts the executor protocol expected by native GELU."""
+
+    if type(module) is CompositeAddLinear:
+        return materialize_composite_w4a4(module)
+    return module
 
 
 def materialize_svd_gelu_mlps(
@@ -71,15 +84,19 @@ def materialize_svd_gelu_mlps(
     """Replace eligible Diffusers GELU FFNs with the native SVDQuant wrapper.
 
     Matching is deliberately strict: only Diffusers ``FeedForward`` modules
-    with tanh-approximate GELU, two ``SVDQuantLinear`` projections, and
-    inference-identity dropout are rewritten. Exact GELU, gated FFNs, and
+    with tanh-approximate GELU, two additive composite projections, and
+    inference-identity dropout are rewritten. Generic artifacts are promoted
+    to explicit W4A4 executors at this boundary. Exact GELU, gated FFNs, and
     nonzero dropout retain their original module graph.
     """
 
     target = model if inplace else copy.deepcopy(model)
     root_match = _match_diffusers_svd_gelu_mlp(target)
     if root_match is not None:
-        replacement = SVDQuantGeluMLP(*root_match, approximate="tanh")
+        replacement = SVDQuantGeluMLP(
+            *(_prepare_gelu_projection(item) for item in root_match),
+            approximate="tanh",
+        )
         replacement.train(target.training)
         return replacement
     candidates = [
@@ -88,7 +105,10 @@ def materialize_svd_gelu_mlps(
         if name and (match := _match_diffusers_svd_gelu_mlp(module)) is not None
     ]
     for name, module, match in candidates:
-        replacement = SVDQuantGeluMLP(*match, approximate="tanh")
+        replacement = SVDQuantGeluMLP(
+            *(_prepare_gelu_projection(item) for item in match),
+            approximate="tanh",
+        )
         replacement.train(module.training)
         replace_submodule(target, name, replacement)
     return target

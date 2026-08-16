@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from xqt.contracts import ComputeConfig, QuantizedModel
+from xqt.contracts import CompositeAddLinear, ComputeConfig, QuantizedModel
 from xqt.analysis.svd_analysis import (
     SVDQuantAnalysis,
     decompose_weight_svd,
@@ -30,12 +30,7 @@ from ..execution.selection import (
     selection_policy_metadata,
 )
 from ..execution.reporting import optional_calibration_summary
-from xqt.runtime.modules import (
-    LowRankBranch,
-    SVDQuantInt8MmaLinear,
-    SVDQuantLinear,
-    W4StorageInt8MmaLinear,
-)
+from xqt.contracts.packing_int4 import _pack_int4
 from ..policy import QuantizationPolicy, should_quantize_module
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
@@ -86,6 +81,79 @@ def _model_device(model: nn.Module) -> torch.device:
         return parameter.device
     buffer = next(model.buffers(), None)
     return torch.device("cpu") if buffer is None else buffer.device
+
+
+def _quantize_residual_int4(
+    weight_residual: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Quantize one SVD residual into the generic composite artifact format."""
+
+    output_features, input_features = weight_residual.shape
+    normalized_group_size = max(1, min(int(group_size), int(input_features)))
+    padded_input_features = (
+        (int(input_features) + normalized_group_size - 1)
+        // normalized_group_size
+    ) * normalized_group_size
+    residual = weight_residual.detach().to(torch.float32)
+    if padded_input_features != input_features:
+        residual = F.pad(
+            residual,
+            (0, padded_input_features - input_features),
+        )
+    grouped = residual.reshape(
+        int(output_features),
+        -1,
+        normalized_group_size,
+    )
+    max_abs = grouped.abs().amax(dim=2, keepdim=True)
+    scale = torch.where(
+        max_abs > 0,
+        max_abs / 7.0,
+        torch.ones_like(max_abs),
+    )
+    quantized = torch.clamp(
+        torch.round(grouped / (scale + 1e-12)),
+        min=-8,
+        max=7,
+    ).to(torch.int8)
+    packed = _pack_int4(
+        quantized.reshape(int(output_features), padded_input_features)
+    )
+    return packed, scale.squeeze(-1).to(torch.float32), padded_input_features
+
+
+def _build_composite_add_linear(
+    module: nn.Linear,
+    *,
+    rank: int,
+    group_size: int,
+    quant_dtype: str,
+) -> tuple[CompositeAddLinear, Any]:
+    """Create a generic composite artifact from one dense Linear module."""
+
+    weight = module.weight.detach().reshape(module.out_features, module.in_features)
+    decomposition = decompose_weight_svd(weight, rank=rank)
+    down_weight, up_weight = decomposition.low_rank_components()
+    residual = decomposition.residual_weight(weight).to(torch.float32)
+    packed_residual, residual_scale, padded_input_features = _quantize_residual_int4(
+        residual,
+        group_size=group_size,
+    )
+    normalized_group_size = max(1, min(int(group_size), int(module.in_features)))
+    artifact = CompositeAddLinear.from_packed_parts(
+        down_weight=down_weight,
+        up_weight=up_weight,
+        packed_residual=packed_residual,
+        residual_scale=residual_scale,
+        bias=None if module.bias is None else module.bias.detach(),
+        input_features=module.in_features,
+        output_features=module.out_features,
+        group_size=normalized_group_size,
+        padded_input_features=padded_input_features,
+        quant_dtype=quant_dtype,
+    )
+    return artifact, decomposition
 
 
 def _move_calibration_batch(value: Any, device: torch.device) -> Any:
@@ -260,7 +328,7 @@ def quantize_with_svd(
     For each Linear layer:
       1. SVD decompose weight -> low-rank branch (L1, L2) + residual
       2. Quantize residual to INT4/FP4 with per-group scales
-      3. Replace module with SVDQuantLinear
+      3. Replace the reference path with a generic CompositeAddLinear artifact
 
     Args:
         model: PyTorch model to quantize.
@@ -359,7 +427,7 @@ def quantize_with_svd(
         if name not in selected_module_name_set or not isinstance(module, nn.Linear):
             continue
 
-        svd_module = SVDQuantLinear.from_linear(
+        svd_module, decomposition = _build_composite_add_linear(
             module,
             rank=configured_rank,
             group_size=configured_group_size,
@@ -387,16 +455,7 @@ def quantize_with_svd(
         quantized_modules.append(name)
 
         if svd_analysis is not None:
-            weight = module.weight.detach()
-            try:
-                decomp = decompose_weight_svd(
-                    weight.reshape(module.out_features, module.in_features),
-                    rank=configured_rank,
-                )
-                svd_analysis.decompositions[name] = decomp
-            except ValueError:
-                # Layer too small for SVD at this rank — skip analysis
-                pass
+            svd_analysis.decompositions[name] = decomposition
 
     configured_engine = str(policy_mapping.get("engine", engine))
     preferred_engines = (
@@ -484,26 +543,13 @@ def quantize_with_svd(
             ),
         },
     )
+    for spec in compute_config.modules:
+        spec.metadata.update(compute_config.metadata)
 
-    if configured_residual_compute == "int8_mma" and bool(
-        policy_mapping.get("materialize_compute", True)
-    ):
-        from xqt.runtime.composite_materialize import materialize_composite_compute
-
-        for name in quantized_modules:
-            module = target_model.get_submodule(name)
-            hint = module_activation_hints.get(name, {})
-            if hasattr(module, "set_activation_materialize_hint"):
-                module.set_activation_materialize_hint(
-                    activation_scale_mode=str(
-                        hint.get("activation_scale_mode", activation_scale_mode)
-                    ),
-                    activation_scale=hint.get("activation_scale"),
-                )
-        target_model = materialize_composite_compute(
-            target_model,
-            compute_config,
-            inplace=True,
+    if bool(policy_mapping.get("materialize_compute", False)):
+        raise ValueError(
+            "SVDQuant quantizer returns storage artifacts only; "
+            "materialize compute in xqt.runtime"
         )
 
     return SVDQuantResult(
@@ -516,11 +562,7 @@ def quantize_with_svd(
         svd_analysis=svd_analysis,
         compute_config=compute_config,
         metadata={
-            "implementation": (
-                "composite_add_svd_w4_residual_int8_mma"
-                if configured_residual_compute == "int8_mma"
-                else "composite_add_svd_storage"
-            ),
+            "implementation": "composite_add_svd_artifact",
             "quant_method": "svd",
             "rank": configured_rank,
             "group_size": configured_group_size,
@@ -677,11 +719,7 @@ def execute_svdquant_component(
             "selection_policy": selection_policy_metadata(component),
             "module_selection_reasons": module_selection_reasons,
             "executed": True,
-            "execution_state": (
-                "composite_add_materialized_int8_residual"
-                if is_int8_mma
-                else "composite_add_storage_shell"
-            ),
+            "execution_state": "composite_add_artifact",
             "rank": configured_rank,
             "group_size": configured_group_size,
             "quant_dtype": configured_quant_dtype,
@@ -691,9 +729,6 @@ def execute_svdquant_component(
 
 
 __all__ = [
-    "LowRankBranch",
-    "SVDQuantInt8MmaLinear",
-    "SVDQuantLinear",
     "SVDQuantResult",
     "execute_svdquant_component",
     "quantize_with_svd",

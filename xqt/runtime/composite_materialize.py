@@ -18,6 +18,10 @@ from xqt.contracts.compute import (
     normalize_compute_contract,
 )
 from xqt.runtime.composite_branch import replace_submodule
+from xqt.contracts.composite import CompositeAddLinear
+from xqt.runtime.modules.composite_add import (
+    materialize_composite_compute as _materialize_composite_compute,
+)
 
 
 @runtime_checkable
@@ -52,10 +56,13 @@ def materialize_composite_compute(
             module = target.get_submodule(spec.name)
         except AttributeError:
             continue
-        materialize = getattr(module, "materialize_compute", None)
-        if not callable(materialize):
-            continue
-        replacement = materialize(spec)
+        if type(module) is CompositeAddLinear:
+            replacement = _materialize_composite_compute(module, spec)
+        else:
+            materialize = getattr(module, "materialize_compute", None)
+            if not callable(materialize):
+                continue
+            replacement = materialize(spec)
         if replacement is not None and replacement is not module:
             replace_submodule(target, spec.name, replacement)
     return target

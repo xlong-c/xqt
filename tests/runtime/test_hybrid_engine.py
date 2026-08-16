@@ -38,6 +38,7 @@ def test_normalize_compute_precision_aliases() -> None:
     assert normalize_compute_precision("W4A4") == "w4a4"
     assert normalize_compute_precision("w4") == "w4a16"
     assert normalize_compute_precision("int8") == "w8a8"
+    assert normalize_compute_precision("fp8") == "fp8"
     assert normalize_compute_precision("bfloat16") == "bf16"
 
 

@@ -2482,7 +2482,7 @@ storage 或 scale 会触发重建.
 
 - [ConvRot runtime](../../../xqt/quant/quantizers/convrot_4bit.py)
 - [ConvRot INT8 runtime](../../../xqt/quant/quantizers/convrot_int8.py)
-- [SVDQuant runtime](../../../xqt/runtime/modules/svd_composite.py)
+- [SVDQuant runtime](../../../xqt/runtime/modules/svd_w4a4_legacy.py)
 - [W4 storage cache](../../../xqt/runtime/modules/w4_storage_int8_mma_linear.py)
 - [FP8 fallback cache](../../../xqt/runtime/modules/fp8_mma_linear.py)
 - [runtime cache tests](../../../tests/xqt/runtime/test_composite_runtime_caches.py)
@@ -3404,7 +3404,7 @@ roofline,register pressure 或 tensor-pipe utilization;管理员启用 counter p
 
 - [ConvRot W8A8 runtime](../../../xqt/quant/quantizers/convrot_int8.py)
 - [ConvRot W8A8 native kernel](../../../xqt/operator_opt/kernels/cute/convrot_w8a8_sm89.py)
-- [SVDQuant runtime](../../../xqt/runtime/modules/svd_composite.py)
+- [SVDQuant runtime](../../../xqt/runtime/modules/svd_w4a4_legacy.py)
 - [SVDQuant W4A4 native kernel](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89.py)
 - [SVDQuant W8A8 native kernel](../../../xqt/operator_opt/kernels/cute/svdq_w8a8_sm89.py)
 - [CUDA benchmark/profile entry](../../../research/xqt-gemm/bench_sm89_convrot_svdq_fusion.py)
@@ -3954,7 +3954,7 @@ CUDA 13.0.
 
 ### 验证落点
 
-- [production wrapper](../../../xqt/runtime/modules/svd_composite.py)
+- [production wrapper](../../../xqt/runtime/modules/svd_w4a4_legacy.py)
 - [native runner](../../../xqt/operator_opt/kernels/cute/svdq_w4a4_sm89.py)
 - [same-layer benchmark](../../../research/xqt-gemm/bench_sm89_svdq_norm_runner.py)
 - [tracked result](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-norm-runner/result.json)

@@ -5,11 +5,13 @@ import torch
 from diffusers.models.transformers.transformer_flux import FluxAttention
 from torch import nn
 
+from tests.xqt.svd_test_helpers import make_legacy_svd_linear
 from xqt.runtime import (
     SVDQuantFluxAttention,
+    materialize_svd_flux_attention,
     pack_diffusers_flux_rotary_emb,
 )
-from xqt.runtime.modules import SVDQuantLinear
+from xqt.runtime.modules import CompositeAddW4A4Linear, SVDQuantLinear
 
 
 def _make_linear(
@@ -26,7 +28,7 @@ def _make_linear(
         dtype=dtype,
         device=device,
     )
-    return SVDQuantLinear.from_linear(
+    return make_legacy_svd_linear(
         base,
         rank=8,
         group_size=64,
@@ -93,6 +95,34 @@ def test_constructor_requires_pre_only_for_explicit_output_projection() -> None:
             add_qkv_proj=add_qkv_proj,
             output_projection=_make_linear(128, 128),
         )
+
+
+def test_flux_materializer_promotes_generic_artifact_to_w4a4_executor() -> None:
+    attention = FluxAttention(
+        query_dim=128,
+        heads=1,
+        dim_head=128,
+        added_kv_proj_dim=None,
+    ).eval()
+    base = nn.Linear(128, 384)
+    from xqt.quant.quantizers.svd import quantize_with_svd
+
+    result = quantize_with_svd(
+        nn.Sequential(base),
+        strategy="w4a16_int4",
+        compute="dequant_fp16",
+        rank=8,
+        group_size=64,
+        quant_dtype="int4",
+        inplace=False,
+    )
+    module = materialize_svd_flux_attention(
+        attention,
+        to_qkv=result.model[0],
+        native_fusion=False,
+    )
+
+    assert isinstance(module.to_qkv, CompositeAddW4A4Linear)
 
 
 def test_rotary_helper_preserves_context_then_hidden_order() -> None:

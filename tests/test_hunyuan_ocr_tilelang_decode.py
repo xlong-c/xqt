@@ -6,6 +6,7 @@ import pytest
 import torch
 from torch import nn
 
+from tests.xqt.svd_test_helpers import make_legacy_svd_int8
 from xqt.model.hunyuan_ocr_tilelang import (
     HunyuanOcrTileLangCudaGraphRunner,
     HunyuanOcrTileLangDecodeBlock,
@@ -50,7 +51,7 @@ def _quantized_linear(
         device="cuda",
         dtype=dtype,
     )
-    return SVDQuantInt8MmaLinear.from_linear(
+    return make_legacy_svd_int8(
         linear,
         rank=16,
         group_size=64,
