@@ -117,8 +117,18 @@ from .package import (
     ModelPackageManifest,
     ONNXRuntimeRunner,
     create_inference_runner,
+    create_inference_session,
     load_model_package,
     write_model_package,
+)
+from .inference import (
+    ImageClassificationAdapter,
+    InferenceAdapter,
+    InferenceSession,
+    TensorInferenceAdapter,
+    create_inference_adapter,
+    inference_adapter_names,
+    register_inference_adapter,
 )
 from .quant_pair import (
     DEFAULT_SIDECAR_NAME,
@@ -218,6 +228,14 @@ __all__ = [
     "ModelPackageManifest",
     "ONNXRuntimeRunner",
     "create_inference_runner",
+    "create_inference_session",
+    "ImageClassificationAdapter",
+    "InferenceAdapter",
+    "InferenceSession",
+    "TensorInferenceAdapter",
+    "create_inference_adapter",
+    "inference_adapter_names",
+    "register_inference_adapter",
     "load_model_package",
     "write_model_package",
     "DEFAULT_SIDECAR_NAME",

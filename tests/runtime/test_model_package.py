@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 import pytest
 import torch
 
-from xqt.core.errors import XQTArtifactError
+from xqt.core.errors import XQTArtifactError, XQTConfigError
+from xqt.contracts import InferenceContractConfig
 from xqt.core.schema import ExportTargetConfig
 from xqt.core.types import XQTContext
 import xqt.pipeline.export_pass as export_pass_module
@@ -11,7 +13,7 @@ from xqt.pipeline.passes import run_export_stage
 from xqt.pipeline.runner import create_context
 from xqt.runtime import create_inference_runner, load_model_package, write_model_package
 from xqt.workflows import load_optimization_config
-from xqt.workflows.stage_specs import ExportStageSpec
+from xqt.workflows.stage_specs import ExportStageSpec, build_stage_spec
 
 
 def _runtime_context(tmp_path: Path) -> XQTContext:
@@ -61,6 +63,8 @@ def test_write_and_load_model_package_roundtrip(tmp_path: Path) -> None:
     assert package.runtime_config["providers"] == ["CPUExecutionProvider"]
     assert package.manifest.entrypoints["model"] == "model/model.onnx"
     assert package.manifest.model["input_names"] == ["input"]
+    assert package.manifest.inference["adapter"] == "tensor"
+    assert package.manifest.inference["inputs"] == [{"name": "input"}]
 
 
 def test_load_model_package_rejects_entrypoint_escape(tmp_path: Path) -> None:
@@ -94,6 +98,54 @@ def test_load_model_package_rejects_entrypoint_escape(tmp_path: Path) -> None:
 
     with pytest.raises(XQTArtifactError, match="escapes the model package root"):
         load_model_package(package_dir)
+
+
+def test_load_model_package_rejects_invalid_inference_contract(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"fake-onnx")
+    package_dir = write_model_package(
+        model_path=model_path,
+        output_dir=tmp_path / "invalid_inference.xqtpkg",
+        model_format="onnx",
+        runtime_name="onnxruntime",
+        io={"inputs": [{"name": "input"}], "outputs": [{"name": "output"}]},
+    )
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["inference"]["adapter"] = ""
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(XQTArtifactError, match="manifest.inference is invalid"):
+        load_model_package(package_dir)
+
+
+def test_load_model_package_legacy_manifest_falls_back_to_io(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"fake-onnx")
+    package_dir = write_model_package(
+        model_path=model_path,
+        output_dir=tmp_path / "legacy.xqtpkg",
+        model_format="onnx",
+        runtime_name="onnxruntime",
+        io={
+            "inputs": [{"name": "input"}],
+            "outputs": [{"name": "output"}],
+        },
+    )
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("inference")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    package = load_model_package(package_dir)
+
+    assert package.inference_contract.adapter == "tensor"
+    assert package.inference_contract.input_names == ("input",)
+    assert package.inference_contract.output_names == ("output",)
 
 
 def test_create_inference_runner_uses_package_runtime_config(
@@ -154,6 +206,13 @@ def test_run_export_stage_attaches_onnx_model_package(
                 format="onnx",
                 output_path=str(tmp_path / "artifacts" / "export" / "model.onnx"),
                 opset=17,
+                inference={
+                    "family": "vision",
+                    "adapter": "vision.classification",
+                    "inputs": [{"name": "input", "semantic": "image"}],
+                    "outputs": [{"name": "output", "semantic": "logits"}],
+                    "config": {"resize": [224, 224]},
+                },
             )
         ]
     )
@@ -192,11 +251,52 @@ def test_run_export_stage_attaches_onnx_model_package(
     assert package_dir.is_dir()
     package = load_model_package(package_dir)
     assert package.runtime_config["providers"] == ["CPUExecutionProvider"]
+    assert package.manifest.inference["family"] == "vision"
+    assert package.manifest.inference["adapter"] == "vision.classification"
+    assert package.manifest.inference["config"] == {"resize": [224, 224]}
     assert context.metrics["export"]["targets"][0]["model_package"] == str(package_dir)
     assert any(
         artifact.format == "xqt_model_package"
         for artifact in context.manifest.artifacts
     )
+
+
+def test_export_stage_loads_and_validates_inference_contract() -> None:
+    spec = build_stage_spec(
+        "export",
+        {
+            "targets": [
+                {
+                    "format": "onnx",
+                    "inference": {
+                        "family": "transformer",
+                        "adapter": "tensor",
+                        "inputs": [{"name": "input", "semantic": "tokens"}],
+                    },
+                }
+            ]
+        },
+    )
+
+    assert isinstance(spec, ExportStageSpec)
+    assert isinstance(spec.targets[0].inference, InferenceContractConfig)
+    assert spec.targets[0].inference.family == "transformer"
+    assert spec.targets[0].inference.inputs[0]["semantic"] == "tokens"
+
+    with pytest.raises(XQTConfigError, match="inference is invalid"):
+        build_stage_spec(
+            "export",
+            {
+                "targets": [
+                    {
+                        "format": "onnx",
+                        "inference": {
+                            "adapter": "",
+                        },
+                    }
+                ]
+            },
+        )
 
 
 def test_write_and_load_model_package_with_compute_config(tmp_path: Path) -> None:

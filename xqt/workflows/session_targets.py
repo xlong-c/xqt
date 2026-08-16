@@ -33,6 +33,7 @@ def build_session_export_targets(
     targets: list[Mapping[str, Any]] | None,
     target_params: Mapping[str, Any] | None,
     opset: int | None,
+    inference: Mapping[str, Any] | None = None,
     onnx: Mapping[str, Any] | None = None,
     openvino: Mapping[str, Any] | None = None,
     tensorrt: Mapping[str, Any] | None = None,
@@ -61,9 +62,10 @@ def build_session_export_targets(
         for name in _TYPED_TARGET_CONFIG_NAMES
         if typed_target_configs[name] is not None
     ]
-    if targets is not None and selected_typed_configs:
+    if targets is not None and (selected_typed_configs or inference is not None):
         raise ValueError(
-            f"{operation} accepts a typed target config only with format + output_path"
+            f"{operation} accepts typed target config and inference only with "
+            "format + output_path"
         )
     if len(selected_typed_configs) > 1:
         raise ValueError(f"{operation} accepts only one typed target config")
@@ -80,6 +82,8 @@ def build_session_export_targets(
     }
     if opset is not None:
         target["opset"] = opset
+    if inference is not None:
+        target["inference"] = dict(inference)
     if target_params is not None:
         target["params"] = dict(target_params)
     for name in _TYPED_TARGET_CONFIG_NAMES:

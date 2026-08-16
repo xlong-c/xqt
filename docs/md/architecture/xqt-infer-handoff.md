@@ -1,6 +1,6 @@
 # XQT Infer 交接面方案 (model + compute_config)
 
-**状态**: planned → 与 DEBT-001/002/003 同批落地  
+**状态**: implemented (2026-08-16)
 **用途**: 统一 quant→infer 交接契约; 代码与测试以本页 + 源码为准.  
 **不是**: recipe 全量重写说明, 也不替代 [xqt-design-debt.md](xqt-design-debt.md) 台账.
 词表与禁止项: [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md).
@@ -98,7 +98,7 @@
 | 内存 quant 结果 | `QuantizedModel.compute_config` |
 | Hybrid policy | `ExecutionPolicyPayload.required_capabilities` + 可选 `compute_config` |
 | Operator plan | `RuntimePlanPayload.required_capabilities`; `engine` 为 materialize **结果**, 可 `unresolved` |
-| 模型包 | `runtime/compute.json` (可选 entrypoint); `runtime/config.json` 仍可含 ORT providers |
+| 模型包 | `runtime/compute.json` (可选 entrypoint); `runtime/config.json` 仍可含 ORT providers; `manifest.json.inference` 保存模型侧语义 contract |
 | 扁平 quant pair | `model.pt` + `quant.json` (`artifact_type=xqt_quant_sidecar`); API: `write_quant_pair` / `load_quant_pair` / `load_quant_pair_into_model`; sidecar metadata 可含 `runtime_quant_contract` |
 | Runtime manifest | `build_runtime_manifest(...)` 聚合 contract + layout + kernels + prefill/decode |
 | Module 内嵌 | `_xqt_module_contract` 继续承载 module contract; compute_config 可从 modules 投影 |
@@ -137,7 +137,7 @@ Quant method (`svd`) 只在 quant report. Infer 通过 `materialize_composite_co
 
 本交接面 **只消费轴 2+3 的执行视图**. 轴 1 不得成为 Infer 输入主键.
 
-quant capability 表 (`backend → methods` 含 awq/gptq) 仍是债; 已删除 quant backend 名 `tilelang` / `svdquant` (awq/gptq/svd 只在 pytorch method). recipe 字段名 `backend`+`strategy` 仍保留; 文档禁止把 method 写成 engine methods.
+quant capability 已按三轴事实源拆分为 method / storage / compute; 已删除 quant backend 名 `tilelang` / `svdquant` (awq/gptq/svd 只在 pytorch method). recipe 字段名 `backend`+`strategy` 仍保留为兼容配置面; 文档禁止把 method 写成 engine methods.
 
 ---
 
@@ -190,6 +190,7 @@ quant capability 表 (`backend → methods` 含 awq/gptq) 仍是债; 已删除 q
 | --- | --- |
 | `preferred_backend` | ORT/TRT 等 **文件 runtime 名** 保留 (外部 backend, 非 operator engine) |
 | `compute_config` | 可选写入 `runtime/compute.json` + entrypoints |
+| `inference` | 写入 `manifest.json.inference`; 描述 `family` / `adapter` / 语义 IO / adapter config, 不描述 quant method 或 serving |
 | 不解析 | quant recipe YAML |
 
 ### 5.7 扁平 quant pair (`weights` + `quant.json`)
@@ -250,10 +251,11 @@ def resolve_engine(required_capabilities, preferred_engines=None, device=...):
 
 ## 8. 验收清单
 
-- [ ] Infer 构造路径可不传 backend/method/strategy
-- [ ] compute_config 无 `required_engine` 主键; 有 `required_capabilities`
-- [ ] int8_mma quantizer 模块 import 不强制加载 tilelang/cute
-- [ ] RuntimePlan / ExecutionPolicy 可序列化 capabilities
-- [ ] 模型包可选 `runtime/compute.json`
-- [ ] 扁平 `model.pt` + `quant.json` 可 roundtrip 到 `infer_handoff()` 形状
-- [ ] 文档口径与代码一致, DEBT-003 主线 done 或 planned 带落地范围
+- [x] Infer 构造路径可不传 backend/method/strategy
+- [x] compute_config 无 `required_engine` 主键; 有 `required_capabilities`
+- [x] int8_mma quantizer 模块 import 不强制加载 tilelang/cute
+- [x] RuntimePlan / ExecutionPolicy 可序列化 capabilities
+- [x] 模型包可选 `runtime/compute.json`
+- [x] 扁平 `model.pt` + `quant.json` 可 roundtrip 到 `infer_handoff()` 形状
+- [x] 模型包可携带 `manifest.inference`,并由模型族 adapter + 声明式 contract 驱动 semantic inference
+- [x] 文档口径与代码一致, DEBT-003 主线 done

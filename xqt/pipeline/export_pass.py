@@ -78,7 +78,10 @@ def _default_package_runtime_config(
     providers = ["CPUExecutionProvider"]
     if runtime_handle_request is not None:
         resolved_runtime = runtime_handle_request.runtime or "onnxruntime"
-        if resolved_runtime == "onnxruntime" and runtime_handle_request.onnxruntime.providers:
+        if (
+            resolved_runtime == "onnxruntime"
+            and runtime_handle_request.onnxruntime.providers
+        ):
             providers = list(runtime_handle_request.onnxruntime.providers)
     return {
         "runtime": "onnxruntime",
@@ -130,6 +133,7 @@ def _attach_onnx_model_packages(
                 "inputs": _package_io_entries(input_names),
                 "outputs": _package_io_entries(output_names),
             },
+            inference=target.inference,
             metadata={
                 "project_name": context.project_name,
                 "stage_kind": stage_kind,

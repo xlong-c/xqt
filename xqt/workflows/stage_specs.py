@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, TypeAlias, cast
 from omegaconf import MISSING, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 
+from xqt.contracts.inference import InferenceContract
 from xqt.contracts.module import CompositePrecisionGemmSpec
 from xqt.core.errors import XQTConfigError
 from xqt.core.schema import (
@@ -576,6 +577,10 @@ def _validate_export_targets(
         raise XQTConfigError(f"{location} must declare at least one export target")
     for index, target in enumerate(targets):
         target_location = f"{location}.{index}"
+        _validate_inference_contract(
+            target,
+            location=f"{target_location}.inference",
+        )
         if target.format == "onnx":
             _validate_onnx_target(target, location=target_location)
         elif target.format == "tensorrt":
@@ -594,6 +599,19 @@ def _validate_export_targets(
             _validate_mnn_target(target, location=target_location)
         elif target.format == "qnn":
             _validate_qnn_target(target, location=target_location)
+
+
+def _validate_inference_contract(
+    target: ExportTargetConfig,
+    *,
+    location: str,
+) -> None:
+    if target.inference is None:
+        return
+    try:
+        InferenceContract.from_dict(target.inference)
+    except XQTConfigError as exc:
+        raise XQTConfigError(f"{location} is invalid: {exc}") from exc
 
 
 def _validate_onnx_target(target: ExportTargetConfig, *, location: str) -> None:

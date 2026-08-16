@@ -8,11 +8,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from xqt.contracts.inference import InferenceContract, InferenceContractConfig
 from xqt.core.artifact import file_sha256, utc_timestamp
-from xqt.core.errors import XQTArtifactError, XQTBackendError
+from xqt.core.errors import XQTArtifactError, XQTBackendError, XQTConfigError
 from xqt.core.serialization import json_safe_value
 from xqt.export import create_onnxruntime_session
 from xqt.export.input_utils import build_onnx_feed
+from xqt.runtime.inference import (
+    InferenceAdapter,
+    InferenceSession,
+    create_inference_adapter,
+)
 
 MODEL_PACKAGE_SCHEMA_VERSION = "1.0"
 MODEL_PACKAGE_ARTIFACT_TYPE = "xqt_model_package"
@@ -89,6 +95,7 @@ class ModelPackageManifest:
     model: dict[str, Any] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
     io: dict[str, Any] = field(default_factory=dict)
+    inference: dict[str, Any] = field(default_factory=dict)
     quantization: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -137,10 +144,21 @@ class ModelPackageManifest:
                 "model package manifest.model.format must be a non-empty string"
             )
         io = payload.get("io", {})
+        inference = payload.get("inference", {})
         quantization = payload.get("quantization", {})
         metadata = payload.get("metadata", {})
         if not isinstance(io, Mapping):
             raise XQTArtifactError("model package manifest.io must be a JSON object")
+        if not isinstance(inference, Mapping):
+            raise XQTArtifactError(
+                "model package manifest.inference must be a JSON object"
+            )
+        try:
+            InferenceContract.from_dict(inference, io=io)
+        except XQTConfigError as exc:
+            raise XQTArtifactError(
+                f"model package manifest.inference is invalid: {exc}"
+            ) from exc
         if not isinstance(quantization, Mapping):
             raise XQTArtifactError(
                 "model package manifest.quantization must be a JSON object"
@@ -157,6 +175,7 @@ class ModelPackageManifest:
             model=dict(model),
             runtime=dict(runtime),
             io=dict(io),
+            inference=dict(inference),
             quantization=dict(quantization),
             metadata=dict(metadata),
         )
@@ -190,6 +209,15 @@ class LoadedModelPackage:
             return preferred
         return "onnxruntime"
 
+    @property
+    def inference_contract(self) -> InferenceContract:
+        """Return the semantic contract, with legacy IO fallback."""
+
+        return InferenceContract.from_dict(
+            self.manifest.inference,
+            io=self.manifest.io,
+        )
+
 
 class ONNXRuntimeRunner:
     """Thin file-based runner backed by one ONNX Runtime session."""
@@ -219,6 +247,7 @@ class ONNXRuntimeRunner:
         self.package = package
         self.providers = resolved_providers
         self.input_names = _io_names(package.manifest.io.get("inputs"))
+        self.output_names = _io_names(package.manifest.io.get("outputs"))
         if not self.input_names:
             raw_names = package.manifest.model.get("input_names", [])
             if isinstance(raw_names, list):
@@ -249,6 +278,10 @@ def write_model_package(
     compute_config: Mapping[str, Any] | None = None,
     model_metadata: Mapping[str, Any] | None = None,
     io: Mapping[str, Any] | None = None,
+    inference: Mapping[str, Any]
+    | InferenceContract
+    | InferenceContractConfig
+    | None = None,
     quantization: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
     package_version: str = "1.0",
@@ -257,7 +290,9 @@ def write_model_package(
 
     source_model_path = Path(model_path)
     if not source_model_path.is_file():
-        raise XQTArtifactError(f"model file not found for packaging: {source_model_path}")
+        raise XQTArtifactError(
+            f"model file not found for packaging: {source_model_path}"
+        )
 
     package_dir = Path(output_dir)
     model_dir = package_dir / "model"
@@ -319,6 +354,14 @@ def write_model_package(
     manifest_metadata.setdefault("producer", "xqt")
     manifest_metadata.setdefault("created_at", utc_timestamp())
     manifest_metadata.setdefault("source_model_path", str(source_model_path))
+    io_payload = _json_mapping(io, name="io")
+    inference_payload = _json_mapping(
+        InferenceContract.from_dict(
+            inference,
+            io=io_payload,
+        ).to_dict(),
+        name="inference",
+    )
 
     if compute_payload is not None:
         manifest_runtime["has_compute_config"] = True
@@ -327,7 +370,8 @@ def write_model_package(
         entrypoints=entrypoints,
         model=manifest_model,
         runtime=manifest_runtime,
-        io=_json_mapping(io, name="io"),
+        io=io_payload,
+        inference=inference_payload,
         quantization=_json_mapping(quantization, name="quantization"),
         metadata=manifest_metadata,
     )
@@ -402,7 +446,11 @@ def create_inference_runner(
 ) -> ONNXRuntimeRunner:
     """Create one runtime runner from the standard package contract."""
 
-    loaded = package if isinstance(package, LoadedModelPackage) else load_model_package(package)
+    loaded = (
+        package
+        if isinstance(package, LoadedModelPackage)
+        else load_model_package(package)
+    )
     resolved_backend = str(backend or loaded.preferred_backend)
     if resolved_backend != "onnxruntime":
         raise XQTBackendError(
@@ -411,12 +459,37 @@ def create_inference_runner(
     return ONNXRuntimeRunner(loaded, providers=providers)
 
 
+def create_inference_session(
+    package: str | Path | LoadedModelPackage,
+    *,
+    backend: str | None = None,
+    providers: Sequence[str] | None = None,
+    adapter: InferenceAdapter | None = None,
+) -> InferenceSession:
+    """Create a semantic inference session from one model package."""
+
+    loaded = (
+        package
+        if isinstance(package, LoadedModelPackage)
+        else load_model_package(package)
+    )
+    runner = create_inference_runner(
+        loaded,
+        backend=backend,
+        providers=providers,
+    )
+    contract = loaded.inference_contract
+    resolved_adapter = create_inference_adapter(contract, adapter=adapter)
+    return InferenceSession(runner, contract, resolved_adapter)
+
+
 __all__ = [
     "LoadedModelPackage",
     "MODEL_PACKAGE_ARTIFACT_TYPE",
     "MODEL_PACKAGE_SCHEMA_VERSION",
     "ModelPackageManifest",
     "ONNXRuntimeRunner",
+    "create_inference_session",
     "create_inference_runner",
     "load_model_package",
     "write_model_package",

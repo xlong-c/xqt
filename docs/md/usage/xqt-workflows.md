@@ -79,12 +79,40 @@ YAML workflow 只保留一种配置项集合:
 - `XQTReadinessReport.write_artifacts()`: readiness 产物落盘
 - `ArtifactManifest` / `ArtifactRecord`: 统一产物追踪
 - `xqt.runtime.load_model_package()` / `create_inference_runner()`: 推理侧标准文件加载入口. 当前 ONNX export 会额外落一个 `*.xqtpkg/manifest.json` 包, runtime 只消费这个包, 不直接读 quant recipe 或 workflow manifest.
+- `xqt.runtime.create_inference_session()`: 语义推理入口. `create_inference_runner()` 适合已经准备好的 tensor; `create_inference_session()` 根据 package 的 `inference` contract 调用模型族 adapter, 统一处理语义输入和输出.
 
 使用原则:
 
 - benchmark 给基线
 - profiler 给瓶颈归因
 - artifact 和 report 都要进入 manifest
+
+ONNX export 可以直接声明模型族 contract,不需要为每个模型重新编写 runtime 适配:
+
+```yaml
+stages:
+  - name: export_onnx
+    kind: export
+    params:
+      targets:
+        - format: onnx
+          output_path: artifacts/model.onnx
+          inference:
+            family: vision
+            adapter: vision.classification
+            inputs:
+              - name: input
+                semantic: image
+            outputs:
+              - name: output
+                semantic: logits
+            config:
+              resize: [224, 224]
+              mean: [0.485, 0.456, 0.406]
+              std: [0.229, 0.224, 0.225]
+```
+
+导出后使用 `create_inference_session("artifacts/model.xqtpkg")` 即可传入语义请求,例如 `session.predict({"image": image})`. 新模型族只需实现并注册一个 adapter,后续模型只声明 `family`, `adapter` 和 contract config.
 
 ## 张量 3D 可视化
 

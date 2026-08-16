@@ -4,7 +4,7 @@
 
 **权威事实源是代码**. 环境与 optional 依赖会变, 请以 capability API 与运行时检查为准.
 
-## 目标契约 (严格解耦, 设计方向)
+## 目标契约 (严格解耦, 已落地边界)
 
 量化与推理应 **严格解耦**. 推理阶段的合法输入只有:
 
@@ -25,7 +25,9 @@ Infer 行为:  resolve_engine(required_capabilities) -> execute
 
 交接面方案与落地见 [../architecture/xqt-infer-handoff.md](../architecture/xqt-infer-handoff.md).  
 Engine / quant 词表与禁止项见 [../architecture/xqt-engine-quant-boundary.md](../architecture/xqt-engine-quant-boundary.md).  
-DEBT-003 主线已落地; DEBT-001/002 仍见 [../architecture/xqt-design-debt.md](../architecture/xqt-design-debt.md).
+DEBT-001/002/003 的裁决和落地范围见 [../architecture/xqt-design-debt.md](../architecture/xqt-design-debt.md).
+
+文件模型包在上述计算交接面之上,另有一个模型侧语义 contract. `compute_config` 描述模型如何执行, `inference` 描述调用方如何把语义输入映射到物理 IO 以及如何解释输出. 二者都不携带 quant method, dataset 或 serving scheduler.
 
 ## 负责什么
 
@@ -50,6 +52,7 @@ DEBT-003 主线已落地; DEBT-001/002 仍见 [../architecture/xqt-design-debt.m
 | 混合精度推理 | 已量化 PyTorch 模块上按 policy 调度 compute precision / channel hybrid | `xqt/runtime/engine.py` |
 | 计算配置 | 目标: 算子级精度 + required capabilities; 现状: 近似 `ExecutionPolicy` / module contract | `contracts/compute.py`, `ExecutionPolicyPayload` |
 | 模型包 | 文件侧标准加载契约 `manifest.json` + `runtime/config.json` | `xqt/runtime/package.py` |
+| 语义推理 contract | 模型族 adapter 的版本化 IO/schema 描述 | `xqt/contracts/inference.py`, `xqt/runtime/inference.py` |
 | runtime handle | deploy stage materialize 的可执行 session | `xqt/contracts/runtime.py`, export/deploy pass |
 | export backend | ONNX/TRT/OpenVINO/... 导出与适配 | `xqt/export/` |
 | engine | XQT 内部 kernel (见 [xqt-engines.md](xqt-engines.md)); **推理配置不应硬编码必选 engine** | `xqt/operator_opt/` |
@@ -81,8 +84,9 @@ B. File-based model package (当前最小闭环: ONNX + ORT)
    export 写出 *.xqtpkg/
      -> load_model_package()
      -> create_inference_runner() / ONNXRuntimeRunner
-     -> run(inputs)
-   # 目标: 包内可附带 compute_config; 仍不解析 quant recipe YAML
+     -> create_inference_session() / InferenceSession
+     -> preprocess -> run -> postprocess
+   # 包内可附带 compute_config 和 inference contract; 仍不解析 quant recipe YAML
 
 C. Workflow deploy runtime handle
    deploy stage (materialize)
@@ -173,7 +177,7 @@ model.xqtpkg/
   runtime/config.json       # runtime 名, providers 等
 ```
 
-`ModelPackageManifest` 字段: `schema_version`, `artifact_type`, `package_version`, `entrypoints` (`model`, `runtime_config`), `model`, `runtime`, `io`, `quantization`, `metadata`.
+`ModelPackageManifest` 字段: `schema_version`, `artifact_type`, `package_version`, `entrypoints` (`model`, `runtime_config`, 可选 `compute_config`), `model`, `runtime`, `io`, `inference`, `quantization`, `metadata`.
 
 ### 3.2 API
 
@@ -202,6 +206,30 @@ export 路径 (ONNX target) 会额外落 `*.xqtpkg/manifest.json` (见 FRAMEWORK
 `write_model_package(...)` 可手动打包.
 
 **当前最小闭环保证**: ONNX + ONNX Runtime. 其它 format 的 package runner 未同等承诺.
+
+### 3.4 语义推理 contract
+
+每个模型只声明 contract,不重复编写 runtime runner:
+
+```json
+{
+  "schema_version": "1.0",
+  "family": "vision",
+  "adapter": "vision.classification",
+  "adapter_version": "1",
+  "inputs": [{"name": "input", "semantic": "image"}],
+  "outputs": [{"name": "output", "semantic": "logits"}],
+  "config": {
+    "resize": [224, 224],
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225]
+  }
+}
+```
+
+`tensor` adapter 负责通用 tensor IO 映射和命名输出; `vision.classification` 负责图像 layout,dtype,resize,normalize 和 logits 解码. 新模型族实现一次 `InferenceAdapter`,通过 `register_inference_adapter()` 注册并声明 adapter version;后续模型只修改 manifest 的 `family`, `adapter`, `adapter_version` 和 `config`.
+
+contract 不负责 tokenizer,prompt 模板,采样循环,dataset,batch scheduler 或准确率评测. 这些属于调用方或外部 serving runtime.
 
 ---
 
@@ -279,6 +307,7 @@ for row in deployment_capability_matrix():
 | 导出 ONNX 并落包 | `session.export(format="onnx", ...)` 或 YAML export stage |
 | materialize ORT/TRT session | `session.deploy(..., runtime_handle=...)` |
 | 只读文件推理 | `load_model_package` + `create_inference_runner` |
+| 语义文件推理 | `create_inference_session` + `manifest.inference` |
 | 环境是否具备某路径 | `assess_xqt_readiness()` / `session.readiness()` |
 
 校准与 example 输入由调用方传入; recipe 不声明 dataset.
@@ -292,7 +321,8 @@ xqt/runtime/
   engine.py      # HybridInferenceEngine, HybridInferenceResult
   policy.py      # execution policy apply / build
   channel.py     # channel hybrid
-  package.py     # model package + ONNXRuntimeRunner
+  package.py     # model package + ONNXRuntimeRunner + InferenceSession factory
+  inference.py   # semantic contract adapters
 
 xqt/export/
   capability.py  # export format matrix
@@ -301,6 +331,7 @@ xqt/export/
 xqt/contracts/
   runtime.py     # RuntimeHandlePayload, RuntimePlanPayload, ExportBundlePayload, ...
   compute.py     # compute precision contracts
+  inference.py   # model-family semantic IO contract
   channel.py     # channel hybrid contracts
   quantized.py   # QuantizedModel / payload
 
@@ -312,7 +343,7 @@ xqt/workflows/optimization.py # Session.export / deploy
 
 ## 8. 已知边界与常见误区
 
-1. **模型包最小闭环只有 ONNX+ORT**; 不要假设 TRT engine 已有同等 `create_inference_runner`.
+1. **模型包 runtime 最小闭环只有 ONNX+ORT**; 不要假设 TRT engine 已有同等 `create_inference_runner`. `inference` contract 本身是 format-independent,但 runner 仍受 backend capability 限制.
 2. **ArtifactManifest ≠ 推理加载契约**.
 3. **Hybrid engine 不量化**; 先 quant 再 bind policy.
 4. **export precisions 是 capability 声明**, 不是 "本机一定能跑出该精度 TRT engine".

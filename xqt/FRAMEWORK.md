@@ -15,9 +15,9 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 
 ## 重要类/方法注释
 
-- **GemmKernelRegistration**: 跟踪内核成熟度、能力矩阵、tile 参数和 executor。用于 dispatch 过滤和 fallback。
-- **GemmCapability.supports()**: 检查能力是否匹配 problem/quant/epilogue。
-- **GemmProblem.__post_init__**: 校验维度,处理 MoE grouped case (M=0 allowed)。
+- **GemmKernelRegistration**: 跟踪内核成熟度,能力矩阵,tile 参数和 executor.用于 dispatch 过滤和 fallback.
+- **GemmCapability.supports()**: 检查能力是否匹配 problem/quant/epilogue.
+- **GemmProblem.__post_init__**: 校验维度,处理 MoE grouped case (M=0 allowed).
 | `OptimizationConfig` | 对外唯一 YAML workflow schema,包含 `project` / `model` / `task` / `compression_axes` / `hardware` / `stages`. |
 | `StageSpec` | `stages[*].params` 经 loader 解析后的 typed stage 参数. |
 | `load_optimization_config()` | `OptimizationConfig` 加载器. |
@@ -61,6 +61,7 @@ XQT 消费训练后的模型/checkpoint/导出产物,做压缩,变换,导出,误
 | `StageComparison` | session 内 stage-to-stage 结构化比较结果. |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪. |
 | `ModelPackageManifest` / `load_model_package()` | 推理侧文件包加载标准, 当前最小闭环为 `manifest.json + runtime/config.json`; 可选 `runtime/compute.json` (compute_config). |
+| `InferenceContract` / `create_inference_session()` | 模型侧语义推理标准. `InferenceContract` 描述模型族, adapter, 语义输入输出和 adapter config; `InferenceSession` 位于低层 runtime runner 之上, 不负责 serving 调度, dataset 或 task-level validation. |
 | `write_quant_pair` / `load_quant_pair` | 扁平 Infer 交付: `model.pt` + `quant.json` (`artifact_type=xqt_quant_sidecar`). `quant.json` 含 compute_config + lineage + 可选 `runtime_quant_contract`; 不是 quant recipe; 加载不跑 quantizer. 外部权重: 单文件或 `model.safetensors.index.json` 分片 merge (`weight_io`). |
 | `MetricRecord` | 结构化指标记录. |
 | `OptimizationCapability` | 统一 capability 投影,覆盖 quant / prune / operator / export 的 engine,status,maturity,runtime,artifact_kind 和硬件/校准/导出要求. |
@@ -95,6 +96,8 @@ XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQ
 - `xqt.runtime.engine_resolve` 按 `required_capabilities` (+ 可选 preferred_engines hint) 解析 operator engine; 不是 quant method 选择.
 - Operator engine 只管算子实现 / 融合 / MMA lowering. AWQ / GPTQ / SVD 是 quant **method**, 不是 engine methods.
 - `ArtifactManifest` 只用于 workflow / experiment 追踪, 不是 file-based inference 的加载契约. 推理侧文件入口二选一: (1) 模型包 `manifest.json` (`load_model_package`); (2) 扁平 `model.pt` + `quant.json` (`load_quant_pair` / `load_quant_pair_into_model`). 二者都只消费已量化存储 + 可选 `compute_config`, 不解析 quant recipe YAML.
+- 模型包的推理调用分为两层: `create_inference_runner()` 只接受已经准备好的 tensor, `create_inference_session()` 通过 `InferenceContract` 和模型族 adapter 完成语义输入预处理与输出规范化. 内置 adapter 目前为 `tensor` 和 `vision.classification`; 模型专用逻辑应优先落成 manifest config, 不复制完整推理入口.
+- `InferenceContract` 是模型侧 IO contract, 不是 task registry. tokenizer, 采样循环, dataset, batch scheduler 和 accuracy / mAP 评测仍归调用方或外部 runtime.
 - 通道级混合精度: 部分 channel 走 16-bit (或更高), 其余走 4-bit. Quant 侧选 outlier channel 并写入 mask; Runtime 侧 dual-path reference 前向 (`channel_hybrid_linear_reference`), 后续可替换为真实 kernel.
 
 - `backend`: 外部 quant/export/runtime 选择, 例如 `torchao`, `pytorch`, `onnxruntime_qdq`, `tensorrt`, `openvino`. Quant recipe 继续使用 `quant.params.backend`. **`tilelang` / `svdquant` 不是 quant backend**; AWQ/GPTQ/SVD 写 `backend=pytorch` + `method=awq|gptq|svd`.
@@ -144,6 +147,7 @@ YAML workflow 只保留一种配置形态:
 - Triton dense FP16/BF16 GEMM 的 reduction 由 `accum_dtype` 控制,bias 和 activation epilogue 在 FP32 中执行,output 只在 store 时转换. BF16 no-override 路径在真实或显式 `sm_89` 上为五个受测 `(M,N,K,bias,activation)` exact signature 使用 evidence-backed schedule preset. FP16 resolver 的 exact key 额外包含 `transpose_b`:M1/M4/M8/M64 preset 覆盖 K,N 和 N,K,M256 GELU 只覆盖 K,N. 六个显式调度字段逐项优先,其他 shape/SM 保留 `128x128x32/group_m=8/4w/3s`. N,K weight 通过逻辑 stride 交换直接传入 kernel,无状态 dispatcher 不 materialize transpose,也不保存 tensor 或 hidden weight cache. Stateful `_TritonLinearWrapper` 默认 `weight_layout="transpose_stride"` 和 `linear_fastpath="eager"`;显式 `prepacked_kn` 保存 non-persistent 派生权重,显式 `linear_fastpath="graph"` capture 固定签名的完整 Linear forward. Graph key 必须覆盖 input layout/dtype/device,kernel/layout/SM/schedule 和 weight/bias identity/version;参数更新,prepack refresh 和 module `_apply()` 必须清缓存. Replay 返回 graph-owned output,只验证顺序 inference. SM89 BF16/FP16 三层 gate 都仅 M1 通过 promotion,M4/M64 被拒绝,所以 `gemm_with_precision(engine="auto")` 和全 shape Linear auto route 保持不变.
 - `xqt.model.optimize_hunyuan_ocr_svd_int4_blocks(...)` 是模型专用例外: 它以 `w4a16_int4` 储存 SVD residual, 物化 INT8 MMA residual compute view, 然后对外层 `nn.ModuleList` 中每个逻辑 block 分别执行 `torch.compile` 并用真实模型前向 warmup. 该优化是内存中的 block composition, 不是单个 fused block kernel, 且没有可识别 block 时必须显式失败. `HunyuanOcrTileLangDecodeBlock` 则是独立的实验性 `sm_89` 单 token decode API: 它将量化投影和 TileLang norm, GQA attention, SwiGLU, residual 串为固定 KV 长度的多核 CUDA Graph pipeline, 不会自动替换远程代码模型的 `generate`.
 - ONNX target 的已知字段统一写在 `targets[*].onnx`: `input_names`, `output_names`, `dynamo`, `validate`, `runtime_diff`, pre-export fusion/lowering 和 ONNX optimization. target `params` 不再承载这些键. `pre_export_lowering` 中当前的 `fp4_weight_only_to_dense_linear` 会复制 export model, 将 `FP4WeightOnlyLinear` materialize 成等价的 dense dequantized `nn.Linear`, 并在 artifact metadata 记录 lowering. 这让通用 ONNX / TensorRT adapter 可消费该模型, 但 resulting artifact 不是 packed-FP4 runtime.
+- `targets[*].inference` 是模型侧推理 contract, 与 backend export 配置分离. 它声明 `schema_version`, `family`, `adapter`, `adapter_version`, `inputs`, `outputs`, `config` 和 `metadata`; ONNX model package 生成时自动把它写入 `manifest.json.inference`. `InferenceContract` 只需按模型族声明一次, 不要为每个模型复制 runtime runner.
 - 当前 export 会为 ONNX target 额外落一个 `*.xqtpkg/manifest.json` 标准模型包, 并附带 `model/*` 与 `runtime/config.json`. file-based inference 通过 `load_model_package()` / `create_inference_runner()` 只消费该包; 现阶段最小闭环只保证 `ONNX + ONNX Runtime`.
 - TensorRT engine-build 的已知字段统一写在 `targets[*].tensorrt`: `onnx_path`, `backend`, `trtexec_path`, `extra_args`, `timeout`, `dry_run`, `performance_thresholds`, `workspace_mib`, `builder_optimization_level`, `timing_cache_path`, `log_level`, `plugin_libraries`, `serialize_plugin_libraries`, `validate_plugin_libraries_loadable` 与 `runtime_benchmark`. loader 明确拒绝 target `params` 中的同名旧键; `params` 只保留其他 export backend 的专有选项. `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口也通过 `tensorrt` 参数构造同一个 typed `StageSpec`.
 - OpenVINO target 的已知字段统一写在 `targets[*].openvino`: `onnx_path`, `input_shape`, `dry_run`, `runtime_diff`, `device` 与 `benchmark` (`enabled` / `warmup` / `iterations` / `measure_memory`). loader 明确拒绝 target `params` 中的同名旧键; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口通过 `openvino` 参数构造同一个 typed `StageSpec`. `openvino.onnx_path` 缺失时, export pass 使用同 workflow 的先前 ONNX artifact, 再回退到当前模型转换; `runtime_diff` 只在 materialized IR 与可用 reference output 时执行. `openvino_runtime_layer_report` 的 `runtime_benchmark` 层从 `not_configured` 变为配置化状态 (`not_run_dry_run` / `not_run_missing_ir` / `not_run_missing_dependency` / `configured`), 真实 benchmark 执行仍属目标机可选里程碑.

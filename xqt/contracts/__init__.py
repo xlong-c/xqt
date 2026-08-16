@@ -94,6 +94,12 @@ from .contract_consume import (
     ContractConsumeReport,
     consume_runtime_quant_contract,
 )
+from .inference import (
+    DEFAULT_INFERENCE_ADAPTER,
+    INFERENCE_CONTRACT_SCHEMA_VERSION,
+    InferenceContract,
+    InferenceContractConfig,
+)
 
 __all__ = [
     "COMPUTE_CONFIG_SCHEMA_VERSION",
@@ -143,6 +149,10 @@ __all__ = [
     "layout_report_from_module_shapes",
     "scale_time_payload",
     "ContractConsumeReport",
+    "DEFAULT_INFERENCE_ADAPTER",
+    "INFERENCE_CONTRACT_SCHEMA_VERSION",
+    "InferenceContract",
+    "InferenceContractConfig",
     "attach_runtime_quant_contract",
     "build_runtime_quant_contract",
     "consume_runtime_quant_contract",

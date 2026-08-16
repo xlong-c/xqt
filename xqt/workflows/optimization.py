@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass, field, is_dataclass
+from itertools import count
 from pathlib import Path
 from typing import Any, Mapping, Optional, TypeVar, cast
 
@@ -768,6 +769,7 @@ class XQTOptimizationSession:
         output_path: str | Path | None = None,
         targets: list[Mapping[str, Any]] | None = None,
         target_params: Mapping[str, Any] | None = None,
+        inference: Mapping[str, Any] | None = None,
         onnx: Mapping[str, Any] | None = None,
         openvino: Mapping[str, Any] | None = None,
         tensorrt: Mapping[str, Any] | None = None,
@@ -791,6 +793,7 @@ class XQTOptimizationSession:
             targets=targets,
             target_params=target_params,
             opset=opset,
+            inference=inference,
             onnx=onnx,
             openvino=openvino,
             tensorrt=tensorrt,
@@ -819,6 +822,7 @@ class XQTOptimizationSession:
         output_path: str | Path | None = None,
         targets: list[Mapping[str, Any]] | None = None,
         target_params: Mapping[str, Any] | None = None,
+        inference: Mapping[str, Any] | None = None,
         onnx: Mapping[str, Any] | None = None,
         openvino: Mapping[str, Any] | None = None,
         tensorrt: Mapping[str, Any] | None = None,
@@ -843,6 +847,7 @@ class XQTOptimizationSession:
             targets=targets,
             target_params=target_params,
             opset=opset,
+            inference=inference,
             onnx=onnx,
             openvino=openvino,
             tensorrt=tensorrt,

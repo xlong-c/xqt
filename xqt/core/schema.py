@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from xdl.metric.detection_utils import DetectionPostprocessConfig
 
+from xqt.contracts.inference import InferenceContractConfig
+
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
 TASK_TYPES = ("classification", "detection")
 PRUNE_GRANULARITIES = (
@@ -478,9 +480,7 @@ class OpenVINOExportConfig:
     dry_run: bool = False
     runtime_diff: bool = True
     device: str = "CPU"
-    benchmark: OpenVINOBenchmarkConfig = field(
-        default_factory=OpenVINOBenchmarkConfig
-    )
+    benchmark: OpenVINOBenchmarkConfig = field(default_factory=OpenVINOBenchmarkConfig)
 
 
 @dataclass
@@ -590,6 +590,7 @@ class ExportTargetConfig:
     precision: Optional[str] = None
     dynamic_shapes: Dict[str, Any] = field(default_factory=dict)
     profiles: Dict[str, Any] = field(default_factory=dict)
+    inference: Optional[InferenceContractConfig] = None
     onnx: ONNXExportConfig = field(default_factory=ONNXExportConfig)
     openvino: OpenVINOExportConfig = field(default_factory=OpenVINOExportConfig)
     tensorrt: TensorRTExportConfig = field(default_factory=TensorRTExportConfig)
