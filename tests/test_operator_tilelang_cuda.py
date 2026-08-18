@@ -40,7 +40,7 @@ def _tilelang_cuda_operator_config(
             "artifact_dir": "artifacts/xqt/tests/tilelang_operator_cuda",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_attention_classifier",
+            "target": "xqt.model.toy_models.build_toy_attention_classifier",
             "params": {
                 "hidden_dim": 64,
                 "num_heads": 4,

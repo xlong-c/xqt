@@ -64,7 +64,7 @@ def assess_export_readiness(model: nn.Module) -> ExportReadinessReport:
             continue
         if _is_packed_dequant(module):
             packed.append(name)
-        elif _is_specialized_non_export(module):
+        if _is_specialized_non_export(module):
             specialized.append(name)
 
     blockers: list[str] = []

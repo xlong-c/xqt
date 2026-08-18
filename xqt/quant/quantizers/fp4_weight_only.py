@@ -11,6 +11,13 @@ import torch.nn.functional as F
 from torch import nn
 
 from xqt.contracts import QuantizedModel
+from xqt.contracts.packing_int4 import (
+    _normalize_group_size,
+    _pad_weight_for_groups,
+    _quantize_grouped_fp4_weight,
+    _safe_positive,
+    _unpack_int4,
+)
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.types import XQTContext
 
@@ -20,7 +27,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -29,6 +36,13 @@ from ..execution.selection import (
 from ..policy import QuantizationPolicy, should_quantize_module
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
+from .base import (
+    call_model as _call_model,
+    iter_calibration_batches as _iter_calibration_batches,
+    move_batch_to_device as _move_batch_to_device,
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 
 def _can_mutate_runtime_cache() -> bool:
@@ -59,135 +73,6 @@ class _LinearCalibrationStats:
     activation_abs_mean: torch.Tensor
     activation_hessian_diag: torch.Tensor
     sample_count: int
-
-
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
-
-
-def _encode_signed_nibble(values: torch.Tensor) -> torch.Tensor:
-    encoded = torch.where(values < 0, values + 16, values)
-    return encoded.to(torch.uint8)
-
-
-def _decode_signed_nibble(values: torch.Tensor) -> torch.Tensor:
-    signed = torch.where(values >= 8, values.to(torch.int16) - 16, values.to(torch.int16))
-    return signed.to(torch.float32)
-
-
-def _pack_int4(values: torch.Tensor) -> torch.Tensor:
-    encoded = _encode_signed_nibble(values)
-    if encoded.shape[-1] % 2 != 0:
-        encoded = F.pad(encoded, (0, 1), value=0)
-    low = encoded[..., 0::2]
-    high = encoded[..., 1::2] << 4
-    return (low | high).contiguous()
-
-
-def _unpack_int4(packed: torch.Tensor, input_features: int) -> torch.Tensor:
-    low = packed & 0x0F
-    high = (packed >> 4) & 0x0F
-    unpacked = torch.stack((low, high), dim=-1).reshape(*packed.shape[:-1], -1)
-    unpacked = unpacked[..., :input_features]
-    return _decode_signed_nibble(unpacked)
-
-
-def _safe_positive(value: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
-    return torch.clamp(value, min=eps)
-
-
-def _normalize_group_size(group_size: int, input_features: int) -> int:
-    return max(1, min(int(group_size), int(input_features)))
-
-
-def _pad_weight_for_groups(
-    weight: torch.Tensor,
-    *,
-    input_features: int,
-    group_size: int,
-) -> tuple[torch.Tensor, int]:
-    padded_input_features = (
-        (int(input_features) + int(group_size) - 1) // int(group_size)
-    ) * int(group_size)
-    if padded_input_features != input_features:
-        weight = F.pad(weight, (0, padded_input_features - input_features))
-    return weight, padded_input_features
-
-
-def _quantize_grouped_fp4_weight(
-    weight: torch.Tensor,
-    *,
-    group_size: int,
-    input_features: int,
-    output_features: int,
-    group_multiplier: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    weight, padded_input_features = _pad_weight_for_groups(
-        weight.detach().to(torch.float32),
-        input_features=input_features,
-        group_size=group_size,
-    )
-    grouped_weight = weight.reshape(output_features, -1, group_size)
-    max_abs = grouped_weight.abs().amax(dim=2, keepdim=True)
-    scale = torch.where(max_abs > 0, max_abs / 7.0, torch.ones_like(max_abs))
-    if group_multiplier is not None:
-        multiplier = group_multiplier.to(device=scale.device, dtype=scale.dtype)
-        if multiplier.ndim == 2:
-            multiplier = multiplier.unsqueeze(-1)
-        scale = scale * _safe_positive(multiplier)
-    quantized = torch.clamp(torch.round(grouped_weight / scale), min=-8, max=7).to(torch.int8)
-    packed_weight = _pack_int4(quantized.reshape(output_features, padded_input_features))
-    return packed_weight, scale, padded_input_features
-
-
-def _iter_calibration_batches(
-    calibration_inputs: Iterable[Any],
-    *,
-    sample_limit: int | None,
-) -> Iterable[Any]:
-    for index, batch in enumerate(calibration_inputs):
-        if sample_limit is not None and index >= sample_limit:
-            break
-        yield batch
-
-
-def _move_batch_to_device(batch: Any, device: torch.device) -> Any:
-    if isinstance(batch, torch.Tensor):
-        return batch.to(device=device)
-    if isinstance(batch, Mapping):
-        return {key: _move_batch_to_device(value, device) for key, value in batch.items()}
-    if isinstance(batch, tuple):
-        return tuple(_move_batch_to_device(value, device) for value in batch)
-    if isinstance(batch, list):
-        return [_move_batch_to_device(value, device) for value in batch]
-    return batch
-
-
-def _call_model(model: nn.Module, inputs: Any) -> Any:
-    if isinstance(inputs, Mapping):
-        return model(**inputs)
-    if isinstance(inputs, tuple):
-        return model(*inputs)
-    if isinstance(inputs, list):
-        return model(*inputs)
-    return model(inputs)
 
 
 def _collect_linear_calibration_stats(
@@ -568,15 +453,6 @@ class FP4WeightOnlyLinear(nn.Module):
         return F.linear(inputs, weight, bias)
 
 
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
-
-
 def quantize_with_fp4_weight_only(
     model: nn.Module,
     *,
@@ -821,27 +697,6 @@ def execute_fp4_weight_only_component(
             inplace=True,
         )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(
-        component.keep_high_precision,
-        component.target_path,
-    )
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(
-        context,
-        component,
-    )
     calibrated_method = component.method in {"awq", "gptq"}
     calibrated_module_count = int(result.metadata.get("calibrated_module_count", 0) or 0)
     algorithm_executable = (not calibrated_method) or calibrated_module_count > 0
@@ -856,33 +711,18 @@ def execute_fp4_weight_only_component(
         if component.method == "gptq"
         else "groupwise_fp4_weight_only_storage_quantization"
     )
-    report = QuantizationReport(
-        component_name=component.name,
+    report = build_component_quantization_report(
+        context,
+        component,
         backend=component.backend,
-        runtime="pytorch",
-        method=component.method,
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.PSEUDO,
         algorithm_executable=algorithm_executable,
         method_semantics=method_semantics,
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
-            "algorithm_executable": algorithm_executable,
-            "method_semantics": method_semantics,
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "executed": True,
-            "execution_state": "w4a16_fp4",
-        },
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="w4a16_fp4",
     )
     return updated_model, report
 

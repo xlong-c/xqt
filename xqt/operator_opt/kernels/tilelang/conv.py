@@ -434,6 +434,11 @@ def conv3d_1x1x1_tilelang(
         .reshape(-1, int(x.shape[1]))
     )
     flat_weight = weight.reshape(int(weight.shape[0]), int(weight.shape[1])).contiguous()
+    padded_in_channels = ((int(flat_input.shape[1]) + 15) // 16) * 16
+    channel_padding = padded_in_channels - int(flat_input.shape[1])
+    if channel_padding:
+        flat_input = F.pad(flat_input, (0, channel_padding))
+        flat_weight = F.pad(flat_weight, (0, channel_padding))
     resolved_block_m = _effective_tile_block(
         block_m, int(flat_input.shape[0]), "conv3d batch-spatiotemporal"
     )
@@ -441,7 +446,7 @@ def conv3d_1x1x1_tilelang(
         block_n, int(flat_weight.shape[0]), "conv3d out_channels"
     )
     resolved_block_k = _effective_tile_block(
-        block_k, int(flat_input.shape[1]), "conv3d reduction"
+        block_k, padded_in_channels, "conv3d reduction"
     )
     flat_output = dense_linear_epilogue_tilelang(
         flat_input,

@@ -19,7 +19,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -32,6 +32,7 @@ from ..types import (
     QuantizationNature,
     QuantizationReport,
 )
+from ..quantizers.base import policy_from_mapping as _policy_from_mapping
 
 
 @dataclass
@@ -69,27 +70,6 @@ def _get_strategy_factory(strategy: str) -> Callable[[], Any]:
         raise XQTBackendError(f"torchao.quantization.{attr_name} is not available")
 
     return getattr(quantization, attr_name)
-
-
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
 
 
 def quantize_with_torchao(
@@ -172,60 +152,28 @@ def execute_torchao_component(
         inplace=True,
     )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(
-        component.keep_high_precision,
-        component.target_path,
-    )
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(
-        context,
-        component,
-    )
     nature = _resolve_nature(component.strategy, component.policy)
     algorithm_executable = True
     method_semantics = "torchao_executable_quantization"
-    report = QuantizationReport(
-        component_name=component.name,
+    report = build_component_quantization_report(
+        context,
+        component,
         backend=result.backend,
-        runtime="pytorch",
-        method=component.method,
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=nature,
         algorithm_executable=algorithm_executable,
         method_semantics=method_semantics,
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="torchao",
+        extra_metadata={
             "quantization_nature_scope": "configured_torchao_route_not_runtime_observation",
             "runtime_precision_note": (
                 "XQT delegates kernel selection to torchao and PyTorch. The selected "
                 "strategy describes the configured W/A route, not a per-forward native "
                 "MMA or speedup guarantee."
             ),
-            "analysis_only": component.analysis_only,
-            "algorithm_executable": algorithm_executable,
-            "method_semantics": method_semantics,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
         },
     )
     return updated_model, report

@@ -27,7 +27,13 @@ from xqt.quant.strategy import (
     canonical_quant_strategies,
     resolve_scheme,
 )
-from xqt.runtime.engine_resolve import engine_registry_names
+from xqt.contracts.engine_resolve import engine_registry_names, operator_engine_names
+from xqt.contracts.quant_strategy import (
+    QUANT_STRATEGY_DEFINITIONS,
+    QuantizationNature,
+    quantization_nature_for_compute,
+    quantization_nature_for_strategy,
+)
 
 
 def test_quant_axis_report_covers_three_axes() -> None:
@@ -72,6 +78,11 @@ def test_strategy_vocabulary_is_single_sourced() -> None:
             "fp8_e4m3",
             "fp8_e5m2",
         }
+        assert scheme == QUANT_STRATEGY_DEFINITIONS[strategy].scheme
+
+    assert quantization_nature_for_strategy("w4a16_int4") is QuantizationNature.PSEUDO
+    assert quantization_nature_for_strategy("w8a8_int8") is QuantizationNature.UNKNOWN
+    assert quantization_nature_for_compute("w8a8_int8_mma") is QuantizationNature.TRUE
 
 
 def test_backend_capability_is_split_into_three_axes() -> None:
@@ -142,6 +153,7 @@ def test_engine_vocabulary_fact_sources_are_aligned() -> None:
     config_engines = set(OPERATOR_OPT_ENGINES)
 
     assert {"tilelang", "triton", "torch", "cutile", "cutlass", "cute_dsl"} <= registry
-    assert config_engines & registry == {"tilelang", "triton", "cutile", "cutlass", "cute_dsl"}
+    assert config_engines == set(operator_engine_names())
+    assert config_engines <= registry
     assert set(CONVERT_ENGINE_NAMES) <= config_engines | {"torch"}
     assert "ptx_sm89" in registry

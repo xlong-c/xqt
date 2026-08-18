@@ -9,7 +9,7 @@ import torch
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from torch import nn
 
-from xqt.runtime.svd_flux_attention import pack_diffusers_flux_rotary_emb
+from .svd_flux_api import pack_diffusers_flux_rotary_emb
 
 from .svd_flux_block import (
     SVDQuantFluxSingleTransformerBlock,

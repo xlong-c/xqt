@@ -9,10 +9,11 @@ from typing import Any
 import torch
 
 from xqt.gemm import dense_gemm_reference
+from xqt.gemm.common.tuning_cache import resolve_builtin_gemm_schedule
 from xqt.core.errors import XQTBackendError
 from xqt.operator_opt.runtime import target_arch_mismatch
 from xqt.operator_opt.kernels.fp4_quant_common import dequantize_nvfp4_codes
-from xqt.runtime.bridges.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
+from xqt.contracts.nvfp4 import expand_group_scale, unpack_nvfp4e2m1
 
 
 import triton
@@ -682,50 +683,6 @@ class TritonGemmSchedule:
         }
 
 
-_TRITON_FP16_DEFAULT_SCHEDULE = (128, 128, 32, 8, 4, 3)
-_TRITON_FP16_SM89_PRESETS: dict[
-    tuple[int, int, int, bool, str | None, bool],
-    tuple[str, tuple[int, int, int, int, int, int]],
-] = {
-    (1, 4096, 4096, False, None, True): (
-        "sm89_fp16_decode_m1",
-        (16, 64, 64, 4, 4, 3),
-    ),
-    (1, 4096, 4096, False, None, False): (
-        "sm89_fp16_decode_m1",
-        (16, 64, 64, 4, 4, 3),
-    ),
-    (4, 4096, 4096, True, None, True): (
-        "sm89_fp16_decode_m4_bias",
-        (16, 64, 64, 4, 4, 3),
-    ),
-    (4, 4096, 4096, True, None, False): (
-        "sm89_fp16_decode_m4_bias",
-        (16, 64, 64, 4, 4, 3),
-    ),
-    (8, 11008, 4096, True, "silu", True): (
-        "sm89_fp16_decode_m8_silu",
-        (32, 128, 32, 4, 4, 3),
-    ),
-    (8, 11008, 4096, True, "silu", False): (
-        "sm89_fp16_decode_m8_silu",
-        (32, 128, 32, 4, 4, 3),
-    ),
-    (64, 1024, 1024, True, None, True): (
-        "sm89_fp16_small_prefill_bias",
-        (16, 128, 32, 4, 4, 3),
-    ),
-    (64, 1024, 1024, True, None, False): (
-        "sm89_fp16_small_prefill_bias",
-        (16, 128, 32, 4, 4, 3),
-    ),
-    (256, 4096, 4096, True, "gelu", False): (
-        "sm89_fp16_medium_prefill_gelu_kn",
-        (64, 64, 32, 8, 4, 3),
-    ),
-}
-
-
 @lru_cache(maxsize=256)
 def resolve_triton_fp16_gemm_schedule(
     *,
@@ -745,21 +702,19 @@ def resolve_triton_fp16_gemm_schedule(
 ) -> TritonGemmSchedule:
     """Resolve evidence-backed SM89 FP16 defaults and explicit overrides."""
 
-    preset = "default"
-    defaults = _TRITON_FP16_DEFAULT_SCHEDULE
-    if target_arch == "sm_89":
-        resolved = _TRITON_FP16_SM89_PRESETS.get(
-            (
-                int(m),
-                int(n),
-                int(k),
-                bool(has_bias),
-                activation,
-                bool(transpose_b),
-            )
-        )
-        if resolved is not None:
-            preset, defaults = resolved
+    preset, defaults = resolve_builtin_gemm_schedule(
+        kernel_family="triton_fp16",
+        target_arch=target_arch,
+        signature=(
+            int(m),
+            int(n),
+            int(k),
+            bool(has_bias),
+            activation,
+            bool(transpose_b),
+        ),
+        default=(128, 128, 32, 8, 4, 3),
+    )
 
     return TritonGemmSchedule(
         block_m=defaults[0] if block_m is None else int(block_m),
@@ -771,34 +726,6 @@ def resolve_triton_fp16_gemm_schedule(
         target_arch=target_arch,
         preset=preset,
     )
-
-
-_TRITON_BF16_DEFAULT_SCHEDULE = (128, 128, 32, 8, 4, 3)
-_TRITON_BF16_SM89_PRESETS: dict[
-    tuple[int, int, int, bool, str | None],
-    tuple[str, tuple[int, int, int, int, int, int]],
-] = {
-    (1, 4096, 4096, False, None): (
-        "sm89_bf16_decode_m1",
-        (16, 64, 64, 4, 4, 3),
-    ),
-    (4, 4096, 4096, True, None): (
-        "sm89_bf16_decode_m4_bias",
-        (16, 64, 64, 4, 4, 3),
-    ),
-    (8, 11008, 4096, True, "silu"): (
-        "sm89_bf16_decode_m8_silu",
-        (32, 128, 32, 4, 4, 3),
-    ),
-    (64, 1024, 1024, True, None): (
-        "sm89_bf16_small_prefill_bias",
-        (16, 64, 32, 4, 4, 3),
-    ),
-    (256, 4096, 4096, True, "gelu"): (
-        "sm89_bf16_medium_prefill_gelu",
-        (64, 64, 32, 8, 4, 3),
-    ),
-}
 
 
 @lru_cache(maxsize=256)
@@ -819,14 +746,12 @@ def resolve_triton_bf16_gemm_schedule(
 ) -> TritonGemmSchedule:
     """Resolve evidence-backed SM89 BF16 defaults and explicit overrides."""
 
-    preset = "default"
-    defaults = _TRITON_BF16_DEFAULT_SCHEDULE
-    if target_arch == "sm_89":
-        resolved = _TRITON_BF16_SM89_PRESETS.get(
-            (int(m), int(n), int(k), bool(has_bias), activation)
-        )
-        if resolved is not None:
-            preset, defaults = resolved
+    preset, defaults = resolve_builtin_gemm_schedule(
+        kernel_family="triton_bf16",
+        target_arch=target_arch,
+        signature=(int(m), int(n), int(k), bool(has_bias), activation),
+        default=(128, 128, 32, 8, 4, 3),
+    )
 
     return TritonGemmSchedule(
         block_m=defaults[0] if block_m is None else int(block_m),

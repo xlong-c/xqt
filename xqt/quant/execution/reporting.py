@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from xqt.core.types import XQTContext
 from xqt.quant.calibration.summary import build_calibration_summary
-from xqt.quant.types import QuantizationComponentPlan, QuantizationReport
+from xqt.quant.component import ordered_unique, prefix_module_names
+from xqt.quant.selection import (
+    module_selection_reason_metadata,
+    selection_policy_metadata,
+)
+from xqt.quant.types import (
+    QuantizationComponentPlan,
+    QuantizationNature,
+    QuantizationReport,
+)
 
 
 def optional_calibration_summary(
@@ -27,6 +36,97 @@ def optional_calibration_summary(
         observer_type=f"{component.backend}.calibration_inputs",
     )
     return int(summary["sample_count"]), summary
+
+
+def build_component_quantization_report(
+    context: XQTContext,
+    component: QuantizationComponentPlan,
+    *,
+    backend: str,
+    strategy: str | None,
+    quantized_modules: Iterable[str],
+    nature: QuantizationNature,
+    algorithm_executable: bool | None,
+    method_semantics: str | None,
+    effective_policy: Mapping[str, Any] | None = None,
+    result_metadata: Mapping[str, Any] | None = None,
+    extra_metadata: Mapping[str, Any] | None = None,
+    execution_state: str | None = None,
+    method: str | None = None,
+    runtime: str | None = "pytorch",
+    additional_high_precision_modules: Iterable[str] = (),
+    additional_skipped_modules: Iterable[str] = (),
+) -> QuantizationReport:
+    """Build the shared component report shape for one quantizer algorithm."""
+
+    high_precision_modules = ordered_unique(
+        [
+            *prefix_module_names(
+                component.keep_high_precision,
+                component.target_path,
+            ),
+            *prefix_module_names(
+                additional_high_precision_modules,
+                component.target_path,
+            ),
+        ]
+    )
+    skipped_modules = ordered_unique(
+        [
+            *prefix_module_names(component.skip_quantize, component.target_path),
+            *prefix_module_names(
+                additional_skipped_modules,
+                component.target_path,
+            ),
+            *high_precision_modules,
+        ]
+    )
+    resolved_quantized_modules = prefix_module_names(
+        quantized_modules,
+        component.target_path,
+    )
+    calibration_samples, calibration_summary = optional_calibration_summary(
+        context,
+        component,
+    )
+    metadata: dict[str, Any] = {
+        **dict(result_metadata or {}),
+        "analysis_only": component.analysis_only,
+        "selection_policy": selection_policy_metadata(component),
+        "module_selection_reasons": module_selection_reason_metadata(
+            component,
+            quantized_modules=resolved_quantized_modules,
+            skipped_modules=skipped_modules,
+            high_precision_modules=high_precision_modules,
+        ),
+        "executed": True,
+        "algorithm_executable": algorithm_executable,
+        "method_semantics": method_semantics,
+    }
+    if effective_policy is not None:
+        metadata["policy"] = dict(effective_policy)
+    if execution_state is not None:
+        metadata["execution_state"] = execution_state
+    if extra_metadata:
+        metadata.update(dict(extra_metadata))
+    return QuantizationReport(
+        component_name=component.name,
+        backend=backend,
+        runtime=runtime,
+        method=component.method if method is None else method,
+        strategy=strategy,
+        target_path=component.target_path,
+        quantized_modules=resolved_quantized_modules,
+        skipped_modules=skipped_modules,
+        high_precision_modules=high_precision_modules,
+        calibration_samples=calibration_samples,
+        calibration_summary=calibration_summary,
+        nature=nature,
+        algorithm_executable=algorithm_executable,
+        method_semantics=method_semantics,
+        compute_speedup_expected=None,
+        metadata=metadata,
+    )
 
 
 def summarize_quantization_reports(reports: list[QuantizationReport]) -> dict[str, Any]:
@@ -107,6 +207,7 @@ def summarize_quantization_reports(reports: list[QuantizationReport]) -> dict[st
 
 
 __all__ = [
+    "build_component_quantization_report",
     "optional_calibration_summary",
     "summarize_quantization_reports",
 ]

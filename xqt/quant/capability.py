@@ -11,44 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
 
-from xqt.core.schema import CANONICAL_QUANT_STRATEGIES
+from xqt.contracts.quant_strategy import (
+    CANONICAL_QUANT_METHODS,
+    CANONICAL_QUANT_STRATEGIES,
+    QuantizationNature,
+    quantization_nature_for_compute,
+    quantization_nature_for_strategy,
+)
 from xqt.core.reporting import OptimizationCapability
 
 from .strategy import normalize_quant_compute, normalize_quant_method, normalize_quant_strategy
-from .types import QuantizationNature
-
-
-# ── strategy → nature mapping ─────────────────────────────────────────────
-# TRUE  = requested native low-precision MMA compute contract.
-# PSEUDO = current XQT route uses dequantized/reference floating-point compute.
-# UNKNOWN = strategy/storage alone cannot establish the runtime compute path.
-# This is a quantization-time classification. Per-forward runtime metadata is the
-# evidence for selected operands, native MMA, and fallback behavior.
-# ───────────────────────────────────────────────────────────────────────────
-_STRATEGY_NATURE: dict[str, QuantizationNature] = {
-    "w4a16_int4": QuantizationNature.PSEUDO,
-    "w8a16_int8": QuantizationNature.PSEUDO,
-    "w4a16_fp4": QuantizationNature.PSEUDO,
-    "w4a16_nvfp4": QuantizationNature.PSEUDO,
-    "w4a16_mxfp4": QuantizationNature.PSEUDO,
-    "w8a16_mxfp8": QuantizationNature.PSEUDO,
-    "w8a16_fp8_e4m3": QuantizationNature.PSEUDO,
-    "w8a16_fp8_e5m2": QuantizationNature.PSEUDO,
-    "w8a8_int8": QuantizationNature.UNKNOWN,
-    "w8a8_fp8_e4m3": QuantizationNature.UNKNOWN,
-    "w8a8_fp8_e5m2": QuantizationNature.UNKNOWN,
-    "w4a4_int4": QuantizationNature.PSEUDO,
-    "w4a4_fp4": QuantizationNature.PSEUDO,
-    "w4a4_nvfp4": QuantizationNature.PSEUDO,
-    "w4a4_mxfp4": QuantizationNature.PSEUDO,
-}
-
-_COMPUTE_TRUE_NATURE = frozenset(
-    {
-        "w8a8_int8_mma",
-        "fp8_mma",
-    }
-)
 
 
 # Load-time online weight quant (T14): advertised as planned only - not an
@@ -105,16 +77,18 @@ def _resolve_nature(
     normalized_compute = normalize_quant_compute(compute) if compute else None
     if normalized_compute is None and policy is not None:
         normalized_compute = normalize_quant_compute(policy.get("compute"))
-    if normalized_compute in _COMPUTE_TRUE_NATURE:
-        return QuantizationNature.TRUE
+    if normalized_compute is not None:
+        compute_nature = quantization_nature_for_compute(normalized_compute)
+        if compute_nature is not QuantizationNature.UNKNOWN:
+            return compute_nature
     if strategy is not None:
         normalized = normalize_quant_strategy(strategy, policy)
         if normalized is not None:
-            return _STRATEGY_NATURE.get(normalized, _DEFAULT_NATURE)
+            return quantization_nature_for_strategy(normalized)
         return _DEFAULT_NATURE
     normalized = normalize_quant_strategy(None, policy)
     if normalized is not None:
-        return _STRATEGY_NATURE.get(normalized, _DEFAULT_NATURE)
+        return quantization_nature_for_strategy(normalized)
     return _DEFAULT_NATURE
 
 
@@ -286,16 +260,7 @@ _BASE_CAPABILITIES: dict[str, QuantBackendCapability] = {
         maturity="reference_guarded",
         runtime="pytorch",
         artifact_kind="pytorch_model",
-        methods=(
-            "none",
-            "awq",
-            "gptq",
-            "svd",
-            "convrot",
-            "turboquant",
-            "moe",
-            "moe_weight_only",
-        ),
+        methods=CANONICAL_QUANT_METHODS,
         storage_strategies=CANONICAL_QUANT_STRATEGIES,
         compute_contracts=(
             "dequant_fp16",

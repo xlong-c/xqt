@@ -62,7 +62,11 @@ def _layout_from_metadata(metadata: Mapping[str, Any]) -> LayoutKernelReport | N
 
 
 class ModelRunner:
-    """Eager forward + contract/layout diagnostics for self-owned quantized models."""
+    """Reference eager forward plus contract/layout diagnostics.
+
+    This convenience wrapper is intended for interactive inspection. It is not
+    a serving engine and does not replace a materialized deploy runtime handle.
+    """
 
     def __init__(
         self,

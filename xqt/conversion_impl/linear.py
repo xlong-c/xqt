@@ -6,7 +6,7 @@ conv2d, and layernorm modules.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from torch import nn
 
@@ -16,6 +16,9 @@ import xqt.operator_opt as _opt
 from xqt.quant import FP4WeightOnlyLinear, infer_nvfp4_tensor_layout
 
 from .runtime_linear import _RuntimeLinearModule
+
+if TYPE_CHECKING:
+    from xqt.conversion import ConvertResult
 
 
 class _LinearConversionMixin:

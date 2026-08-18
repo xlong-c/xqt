@@ -10,14 +10,14 @@ import torch
 from torch import nn
 
 from xqt.contracts import QuantizedModel
-from xqt.core.errors import XQTArtifactError
-from xqt.runtime import (
-    HybridInferenceEngine,
+from xqt.contracts.quant_pair import (
     load_quant_pair,
     load_quant_pair_into_model,
     write_quant_pair,
     write_quant_pair_from_quantized,
 )
+from xqt.core.errors import XQTArtifactError
+from xqt.runtime import HybridInferenceEngine
 
 
 class _TinyLinear(nn.Module):

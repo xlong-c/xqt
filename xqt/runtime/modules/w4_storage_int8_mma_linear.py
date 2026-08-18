@@ -7,13 +7,16 @@ from typing import Any
 import torch
 from torch import nn
 
-from xqt.core.errors import XQTBackendError
-from xqt.runtime.modules.int8_mma_linear import Int8MmaLinear
-from xqt.runtime.modules.packing_int4 import (
+from xqt.contracts.packing_int4 import (
     _normalize_group_size,
     _quantize_grouped_fp4_weight,
     _unpack_int4,
 )
+from xqt.contracts.w4_storage import (
+    W4StorageInt8MmaLinear as W4StorageInt8MmaStorageLinear,
+)
+from xqt.core.errors import XQTBackendError
+from xqt.runtime.modules.int8_mma_linear import Int8MmaLinear
 
 _ACTIVATION_SCALE_MODES = {"dynamic", "static"}
 
@@ -69,7 +72,7 @@ def _float_weight_from_packed_w4(
     dequantized = grouped * scale
     return dequantized.reshape(output_features, padded_input_features)[:, :input_features]
 
-class W4StorageInt8MmaLinear(nn.Module):
+class W4StorageInt8MmaLinear(W4StorageInt8MmaStorageLinear):
     """Packed W4 storage Linear that delegates a requested W8A8 INT8 retarget."""
 
     def __init__(
@@ -97,7 +100,7 @@ class W4StorageInt8MmaLinear(nn.Module):
         cache_int8_compute_view: bool = True,
         min_int8_rows: int = 0,
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         if str(activation_scale_mode) not in _ACTIVATION_SCALE_MODES:
             raise ValueError("activation_scale_mode must be dynamic or static")
         self.input_features = int(input_features)
@@ -139,6 +142,40 @@ class W4StorageInt8MmaLinear(nn.Module):
         self._compute = None
         self._compute_signature = None
         return self
+
+    @classmethod
+    def from_storage(
+        cls,
+        module: W4StorageInt8MmaStorageLinear,
+        *,
+        engine: str | None = None,
+        fallback_engine: str | None = None,
+    ) -> "W4StorageInt8MmaLinear":
+        """Materialize a backend execution view from a contracts storage shell."""
+
+        return cls(
+            module.packed_weight.detach(),
+            module.group_scale.detach(),
+            bias=None if module.bias is None else module.bias.detach(),
+            input_features=module.input_features,
+            output_features=module.output_features,
+            group_size=module.group_size,
+            padded_input_features=module.padded_input_features,
+            engine=engine or module.engine,
+            fallback_engine=fallback_engine or module.fallback_engine,
+            block_m=module.block_m,
+            block_n=module.block_n,
+            block_k=module.block_k,
+            threads=module.threads,
+            num_stages=module.num_stages,
+            output_dtype=module.output_dtype,
+            activation_scale_mode=module.activation_scale_mode,
+            activation_scale=module._activation_scale,
+            activation_quant_block_size=module.activation_quant_block_size,
+            eps=module.eps,
+            cache_int8_compute_view=module.cache_int8_compute_view,
+            min_int8_rows=module.min_int8_rows,
+        )
 
     @classmethod
     def from_linear(
@@ -325,7 +362,9 @@ class W4StorageInt8MmaLinear(nn.Module):
         return output
 
     def execution_metadata(self) -> dict[str, Any]:
-        return dict(self.last_execution)
+        metadata = dict(self.last_execution)
+        metadata["artifact_view"] = "runtime"
+        return metadata
 
     def tilelang_packed_dequant_gemm_args(
         self,

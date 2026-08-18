@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-import xqt.gemm.tuning_cache as tuning_cache_module
+import xqt.gemm.common.tuning_cache as tuning_cache_module
 from xqt.core.errors import XQTArtifactError
 from xqt.gemm import (
     GemmArtifactManifest,
@@ -26,13 +26,13 @@ from xqt.gemm import (
     dispatch_grouped_gemm,
     resolve_tuning_record,
 )
-from xqt.gemm.backends.fp8_grouped_sm89 import (
+from xqt.gemm.backends.sm89.fp8_grouped_sm89 import (
     _resolve_cached_configuration as _resolve_fp8_configuration,
 )
-from xqt.gemm.backends.w4a16_grouped_sm89 import (
+from xqt.gemm.backends.sm89.w4a16_grouped_sm89 import (
     _resolve_cached_configuration as _resolve_w4a16_configuration,
 )
-from xqt.gemm.backends.w8a8_grouped_sm89 import (
+from xqt.gemm.backends.sm89.w8a8_grouped_sm89 import (
     _resolve_cached_configuration as _resolve_w8a8_configuration,
 )
 

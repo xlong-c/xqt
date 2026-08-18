@@ -9,10 +9,11 @@ from typing import Any, Optional, Sequence
 import torch
 
 from xqt.core.artifact import file_sha256
+from xqt.export.base import ExportResultBase
 
 
 @dataclass
-class TensorRTBuildResult:
+class TensorRTBuildResult(ExportResultBase):
     """Result from a TensorRT engine build attempt."""
 
     engine_path: Path
@@ -23,6 +24,10 @@ class TensorRTBuildResult:
     checksum: Optional[str] = None
     dry_run: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (self.engine_path,)
 
 
 @dataclass(frozen=True)

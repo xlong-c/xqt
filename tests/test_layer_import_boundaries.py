@@ -6,11 +6,8 @@ Ensures transform (quant) and inference (runtime) layers remain decoupled:
 - xqt.runtime must not import from xqt.export
 - xqt.contracts must not import from xqt.quant / xqt.runtime / xqt.export
 
-Known current violations (expected RED on this todo):
-  - xqt/quant/quantizers/convrot_4bit.py imports xqt.runtime.channel / xqt.runtime.policy
-  - xqt/runtime/package.py imports xqt.export / xqt.export.input_utils
-
-These are NOT fixed here -- the guard must fail to confirm the boundary break.
+Quantizers produce contracts-layer storage artifacts. Runtime modules subclass
+those storage shells and add backend-specific execution views.
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ def _scan_imports_ast(
     """Scan Python source files via AST for Import/ImportFrom violations.
 
     Returns a list of human-readable violation strings like
-    ``xqt/runtime/package.py:14: from xqt.export import create_onnxruntime_session``.
+    ``quant/quantizers/int8_mma.py:19: from xqt.runtime.modules import ...``.
     """
     violations: list[str] = []
     for fp in sorted(py_files):
@@ -116,7 +113,7 @@ def _contracts_py_files() -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# quant → runtime  (expected FAIL — convrot_4bit.py)
+# quant → runtime
 # ---------------------------------------------------------------------------
 
 def test_quant_no_runtime_imports_ast() -> None:
@@ -160,7 +157,7 @@ def test_runtime_no_quant_imports_string() -> None:
 
 
 # ---------------------------------------------------------------------------
-# runtime → export  (expected FAIL — package.py)
+# runtime → export  (expected PASS — no current violations)
 # ---------------------------------------------------------------------------
 
 def test_runtime_no_export_imports_ast() -> None:

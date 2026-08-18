@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
-from xdl.metric.detection_utils import DetectionPostprocessConfig
-
 from xqt.contracts.inference import InferenceContractConfig
+from xqt.contracts.engine_resolve import convert_engine_names, operator_engine_names
+from xqt.contracts.quant_strategy import (
+    CANONICAL_QUANT_COMPUTES,
+    CANONICAL_QUANT_METHODS,
+    CANONICAL_QUANT_STRATEGIES,
+)
 
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
 TASK_TYPES = ("classification", "detection")
@@ -25,27 +29,8 @@ PRUNE_GRANULARITIES = (
     "block_sparse",
 )
 PRUNE_SCOPES = ("global", "per_layer", "per_stage", "custom")
-OPERATOR_OPT_ENGINES = (
-    "torch_compile",
-    "deployment_engine",
-    "triton",
-    "tilelang",
-    "cutile",
-    "cutlass",
-    "cute_dsl",
-    "custom_cuda",
-)
-# DEBT-001: convert() accepts a materialize *preference* subset. The full
-# implementation vocabulary lives in xqt.runtime.engine_resolve; this tuple is
-# the config-facing subset for xqt.convert and must stay in sync with the
-# operator capability matrix (regression test).
-CONVERT_ENGINE_NAMES = (
-    "torch",
-    "triton",
-    "tilelang",
-    "cutile",
-    "cute_dsl",
-)
+OPERATOR_OPT_ENGINES = operator_engine_names()
+CONVERT_ENGINE_NAMES = convert_engine_names()
 TILELANG_PASS_CONFIG_KEYS = (
     "TL_ENABLE_FAST_MATH",
     "TL_DISABLE_WARP_SPECIALIZED",
@@ -64,46 +49,11 @@ CUTE_DSL_PASS_CONFIG_KEYS = (
     "CUTE_DSL_ENABLE_EPILOGUE_FUSION",
     "CUTE_DSL_ENABLE_PERSISTENT_CACHE",
 )
-CANONICAL_QUANT_STRATEGIES = (
-    "w4a16_int4",
-    "w8a16_int8",
-    "w4a16_fp4",
-    "w4a16_nvfp4",
-    "w4a16_mxfp4",
-    "w8a16_mxfp8",
-    "w8a16_fp8_e4m3",
-    "w8a16_fp8_e5m2",
-    "w8a8_int8",
-    "w8a8_fp8_e4m3",
-    "w8a8_fp8_e5m2",
-    "w4a4_int4",
-    "w4a4_fp4",
-    "w4a4_nvfp4",
-    "w4a4_mxfp4",
-)
 OPTIONAL_QUANT_STRATEGIES: tuple[str, ...] = ()
 SUPPORTED_QUANT_STRATEGIES = CANONICAL_QUANT_STRATEGIES + OPTIONAL_QUANT_STRATEGIES
 
-CANONICAL_QUANT_COMPUTES = (
-    "dequant_fp16",
-    "w8a8_int8_mma",
-    "fp8_mma",
-    "qdq_static",
-    "qdq_dynamic",
-    "dequant_gemm",
-)
 SUPPORTED_QUANT_COMPUTES = CANONICAL_QUANT_COMPUTES
 
-CANONICAL_QUANT_METHODS = (
-    "none",
-    "awq",
-    "gptq",
-    "svd",
-    "convrot",
-    "turboquant",
-    "moe",
-    "moe_weight_only",
-)
 SUPPORTED_QUANT_METHODS = CANONICAL_QUANT_METHODS
 
 _QUANT_STRATEGY_ALIASES = {
@@ -233,6 +183,21 @@ class ModelConfig(ComponentConfig):
     checkpoint: Optional[str] = None
     dtype: str = "float32"
     device: str = "cpu"
+
+
+@dataclass
+class DetectionPostprocessConfig:
+    """Postprocess settings for detection model outputs."""
+
+    format: str = "auto"
+    box_format: str = "xyxy"
+    score_threshold: float = 0.25
+    iou_threshold: float = 0.45
+    max_detections: int = 300
+    score_activation: str = "identity"
+    has_objectness: bool = False
+    class_agnostic_nms: bool = False
+    rescale_to_original: bool = True
 
 
 @dataclass
@@ -460,7 +425,6 @@ class ONNXExportConfig:
     optimization: ONNXOptimizationConfig = field(default_factory=ONNXOptimizationConfig)
 
 
-@dataclass
 @dataclass
 class OpenVINOBenchmarkConfig:
     """Optional OpenVINO runtime benchmark configuration for one export target."""

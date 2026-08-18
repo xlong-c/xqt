@@ -19,7 +19,7 @@ from xqt.quant import (
     summarize_quantization_reports,
 )
 from xqt.quant.backends.onnx_qdq import quantize_onnx_qdq_static
-from xqt.workflows.stage_specs import QuantStageSpec
+from xqt.core.stage_specs import QuantStageSpec
 
 from .context import (
     _context_analysis_config,

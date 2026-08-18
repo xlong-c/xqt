@@ -11,10 +11,10 @@ import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 
-from ..contracts import GemmSpec, PackedWeight
-from ..layout import validate_w4a16_packed_weight
-from ..preflight import artifact_manifest_path, artifact_ready_for_execution
-from ..registry import GemmKernelRegistration, GemmKernelRegistry
+from xqt.gemm.common.contracts import GemmSpec, PackedWeight
+from xqt.gemm.common.layout import validate_w4a16_packed_weight
+from xqt.gemm.common.preflight import artifact_manifest_path, artifact_ready_for_execution
+from xqt.gemm.common.registry import GemmKernelRegistration, GemmKernelRegistry
 
 
 _SYMBOL = "xqt_w4a16_cutlass_fused_sm89_fp16_run"

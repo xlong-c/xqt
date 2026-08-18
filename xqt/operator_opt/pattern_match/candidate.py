@@ -7,24 +7,7 @@ from typing import Any, Iterable, Optional
 
 from torch import fx
 
-
-_PATTERN_TO_BACKEND = {
-    "linear_gemm": "torch_compile",
-    "bias_gelu": "triton",
-    "swiglu": "triton",
-    "rmsnorm": "triton",
-    "rmsnorm_residual": "triton",
-    "rope": "triton",
-    "attention": "tilelang",
-    "dequant_gemm": "tilelang",
-    "dequant_gemm_epilogue": "tilelang",
-    "qdq_epilogue": "deployment_backend",
-    "weight_only_matmul_epilogue": "tilelang",
-    "fp8_scale_cast_matmul_epilogue": "tilelang",
-    "bias_silu": "cutile",
-    "gemm_epilogue": "cutlass",
-    "grouped_gemm": "cutlass",
-}
+from xqt.contracts.engine_resolve import recommended_engine_for_pattern
 
 _HIGH_FREQUENCY_OPERATOR_GROUPS = {
     "linear_gemm": {"linear_gemm"},
@@ -136,7 +119,7 @@ def _build_candidate(
         device=device,
         estimated_memory_io=estimated_memory_io,
         estimated_kernel_count=estimated_kernel_count,
-        recommended_backend=_PATTERN_TO_BACKEND[pattern],
+        recommended_backend=recommended_engine_for_pattern(pattern),
     )
 
 

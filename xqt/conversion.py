@@ -72,7 +72,7 @@ def convert(
 
     ``engine`` is an optional materialize *preference* (DEBT-001), not a quant/infer
     handoff primary key. When omitted, defaults to ``"torch"`` (intent / minimal path).
-    Capability-based engine selection for Infer lives in ``xqt.runtime.engine_resolve``.
+    Capability-based engine selection for Infer lives in ``xqt.contracts.engine_resolve``.
 
     This public API is intentionally function-shaped. Internally it delegates to a
     stateful converter class so future recursive model conversion can share lowering

@@ -8,7 +8,14 @@ strategy (plus policy overrides) onto it at plan time.
 
 from __future__ import annotations
 
+from dataclasses import asdict, fields
 from typing import Any, Mapping
+
+from xqt.contracts.quant_strategy import (
+    QUANT_STRATEGY_DEFINITIONS,
+    canonical_quant_strategies,
+    strategy_scheme_templates,
+)
 
 from xqt.core.schema import (
     CANONICAL_QUANT_COMPUTES,
@@ -32,127 +39,7 @@ from xqt.core.schema import (
 from .types import QuantScheme
 
 
-# ── canonical strategy -> QuantScheme templates ─────────────────────────────
-# groupwise default group_size matches the quantizer defaults (128). Block
-# sizes are format-inherent: nvfp4 uses 16-element blocks, mxfp formats 32.
-# ───────────────────────────────────────────────────────────────────────────
-_STRATEGY_SCHEME_TEMPLATES: dict[str, dict[str, Any]] = {
-    "w4a16_int4": {
-        "weight_dtype": "int4",
-        "weight_granularity": "groupwise",
-        "group_size": 128,
-    },
-    "w8a16_int8": {
-        "weight_dtype": "int8",
-        "weight_granularity": "per_channel",
-    },
-    "w4a16_fp4": {
-        "weight_dtype": "fp4",
-        "weight_granularity": "groupwise",
-        "group_size": 128,
-    },
-    "w4a16_nvfp4": {
-        "weight_dtype": "nvfp4",
-        "weight_granularity": "block",
-        "group_size": 16,
-    },
-    "w4a16_mxfp4": {
-        "weight_dtype": "mxfp4",
-        "weight_granularity": "block",
-        "group_size": 32,
-    },
-    "w8a16_mxfp8": {
-        "weight_dtype": "mxfp8",
-        "weight_granularity": "block",
-        "group_size": 32,
-    },
-    "w8a16_fp8_e4m3": {
-        "weight_dtype": "fp8_e4m3",
-        "weight_granularity": "per_channel",
-    },
-    "w8a16_fp8_e5m2": {
-        "weight_dtype": "fp8_e5m2",
-        "weight_granularity": "per_channel",
-    },
-    "w8a8_int8": {
-        "weight_dtype": "int8",
-        "weight_granularity": "per_channel",
-        "activation_dtype": "int8",
-        "activation_mode": "dynamic",
-    },
-    "w8a8_fp8_e4m3": {
-        "weight_dtype": "fp8_e4m3",
-        "weight_granularity": "per_channel",
-        "activation_dtype": "fp8_e4m3",
-        "activation_mode": "dynamic",
-    },
-    "w8a8_fp8_e5m2": {
-        "weight_dtype": "fp8_e5m2",
-        "weight_granularity": "per_channel",
-        "activation_dtype": "fp8_e5m2",
-        "activation_mode": "dynamic",
-    },
-    "w4a4_int4": {
-        "weight_dtype": "int4",
-        "weight_granularity": "groupwise",
-        "group_size": 128,
-        "activation_dtype": "int4",
-        "activation_mode": "dynamic",
-    },
-    "w4a4_fp4": {
-        "weight_dtype": "fp4",
-        "weight_granularity": "groupwise",
-        "group_size": 128,
-        "activation_dtype": "fp4",
-        "activation_mode": "dynamic",
-    },
-    "w4a4_nvfp4": {
-        "weight_dtype": "nvfp4",
-        "weight_granularity": "block",
-        "group_size": 16,
-        "activation_dtype": "nvfp4",
-        "activation_mode": "dynamic",
-    },
-    "w4a4_mxfp4": {
-        "weight_dtype": "mxfp4",
-        "weight_granularity": "block",
-        "group_size": 32,
-        "activation_dtype": "mxfp4",
-        "activation_mode": "dynamic",
-    },
-}
-
-_SCHEME_FIELD_NAMES = frozenset(
-    {
-        "weight_dtype",
-        "weight_granularity",
-        "group_size",
-        "activation_dtype",
-        "activation_mode",
-        "sym",
-    }
-)
-
-
-def canonical_quant_strategies() -> tuple[str, ...]:
-    """Return the canonical strategy names (single fact source).
-
-    ``CANONICAL_QUANT_STRATEGIES`` in ``xqt/core/schema.py`` must stay aligned
-    with this set; a regression test asserts the two never drift. Strategy
-    strings are config-facing aliases of a ``QuantScheme`` (storage +
-    activation axes), not a mixed-axis execution enum.
-    """
-
-    return tuple(_STRATEGY_SCHEME_TEMPLATES)
-
-
-def strategy_scheme_templates() -> dict[str, dict[str, Any]]:
-    """Return copies of the canonical strategy -> QuantScheme templates."""
-
-    return {
-        name: dict(template)
-        for name, template in _STRATEGY_SCHEME_TEMPLATES.items()
-    }
+_SCHEME_FIELD_NAMES = frozenset(field.name for field in fields(QuantScheme))
 
 
 def resolve_scheme(
@@ -168,14 +55,14 @@ def resolve_scheme(
     normalized = normalize_quant_strategy(strategy, policy)
     if normalized is None:
         return None
-    template = _STRATEGY_SCHEME_TEMPLATES.get(normalized)
-    if template is None:
-        allowed = ", ".join(sorted(_STRATEGY_SCHEME_TEMPLATES))
+    definition = QUANT_STRATEGY_DEFINITIONS.get(normalized)
+    if definition is None:
+        allowed = ", ".join(sorted(QUANT_STRATEGY_DEFINITIONS))
         raise ValueError(
             f"Cannot resolve a QuantScheme from strategy {normalized!r}. "
             f"Known scheme strategies: {allowed}"
         )
-    data = dict(template)
+    data = asdict(definition.scheme)
     policy = policy or {}
     if data["weight_granularity"] == "groupwise" and policy.get("group_size") is not None:
         data["group_size"] = int(policy["group_size"])

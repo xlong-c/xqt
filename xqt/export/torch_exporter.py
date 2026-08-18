@@ -11,15 +11,16 @@ from torch import nn
 
 from xqt.core.artifact import file_sha256
 from xqt.analysis.compare import TensorDiff, compare_tensors
-from xqt.export.input_utils import (
+from xqt.contracts.input_utils import (
     call_model_with_example_input,
     first_tensor_output,
     split_example_input,
 )
+from xqt.export.base import ExportResultBase
 
 
 @dataclass
-class TorchExportResult:
+class TorchExportResult(ExportResultBase):
     """torch.export artifact metadata."""
 
     path: Path
@@ -28,15 +29,23 @@ class TorchExportResult:
     output_diff: Optional[TensorDiff] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (self.path,)
+
 
 @dataclass
-class TorchScriptExportResult:
+class TorchScriptExportResult(ExportResultBase):
     """TorchScript artifact metadata."""
 
     path: Path
     checksum: str
     output_diff: Optional[TensorDiff] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (self.path,)
 
 
 def export_torch_program(

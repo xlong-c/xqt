@@ -37,7 +37,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -47,6 +47,10 @@ from ..policy import QuantizationPolicy, should_quantize_module
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
 from .convrot_4bit import build_regular_hadamard_matrix
+from .base import (
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 
 _ROTATION_KINDS = ("randomized_hadamard", "dense_orthogonal")
@@ -500,36 +504,6 @@ class TurboQuantWeightOnlyLinear(nn.Module):
         )
 
 
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
-
-
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
-
-
 def quantize_with_turboquant(
     model: nn.Module,
     *,
@@ -630,49 +604,19 @@ def execute_turboquant_component(
         inplace=True,
     )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(
-        component.keep_high_precision, component.target_path
-    )
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
-    module_selection_reasons = module_selection_reason_metadata(
+    report = build_component_quantization_report(
+        context,
         component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(context, component)
-    report = QuantizationReport(
-        component_name=component.name,
         backend=result.backend,
-        runtime="pytorch",
         method=component.method or "turboquant",
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.PSEUDO,
         algorithm_executable=True,
         method_semantics="data_oblivious_rotation_scalar_quantization_weight_only",
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
-            "algorithm_executable": True,
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "execution_state": "turboquant",
-            "executed": True,
-        },
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="turboquant",
     )
     return updated_model, report
 
@@ -685,5 +629,3 @@ __all__ = [
     "execute_turboquant_component",
     "quantize_with_turboquant",
 ]
-
-

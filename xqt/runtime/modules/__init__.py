@@ -10,6 +10,11 @@ from .composite_add import (
 from .composite_add_fp8 import CompositeAddFp8Linear
 from .composite_add_w4a4 import CompositeAddW4A4Linear
 from .composite_norm import RMSNormCompositeLinear
+from .convrot import (
+    ConvRotExecutionView,
+    ConvRotInt8ExecutionView,
+    ConvRotW4A4ExecutionView,
+)
 from .fp8_mma_linear import Fp8MmaLinear
 from .int8_mma_linear import Int8MmaLinear
 from .kv_attention import KvCacheMetadata, KvScaleAttention
@@ -39,6 +44,9 @@ __all__ = [
     "materialize_composite_w4a4",
     "CompositeAddFp8Linear",
     "CompositeAddW4A4Linear",
+    "ConvRotExecutionView",
+    "ConvRotInt8ExecutionView",
+    "ConvRotW4A4ExecutionView",
     "RMSNormCompositeLinear",
     "Fp8MmaLinear",
     "Int8MmaLinear",

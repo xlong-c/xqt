@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Optional, Sequence
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
+from xqt.contracts.engine_resolve import (
+    get_engine_registration,
+    operator_contract_patterns,
+)
 
 from .block_kernels import build_block_kernel_candidate
 from .compile_backend import compile_with_torch
@@ -18,32 +22,6 @@ from .types import OperatorOptimizationTargetPlan
 
 if TYPE_CHECKING:
     from xqt.contracts import ModuleContract
-
-
-_CONTRACT_PATTERNS: dict[str, frozenset[str]] = {
-    "linear": frozenset(
-        {
-            "linear",
-            "gemm_fp16",
-            "gemm_bf16",
-            "dense_linear_epilogue",
-            "dequant_gemm_epilogue",
-            "fp4_packed_dequant_gemm_epilogue",
-            "mxfp4_packed_dequant_gemm_epilogue",
-            "nvfp4_packed_dequant_gemm_epilogue",
-            "gemm_int4_dequant",
-            "gemm_mxfp8",
-            "gemm_mxfp6",
-            "gemm_mxfp4",
-            "gemm_nvfp4_packed_dequant",
-        }
-    ),
-    "conv2d": frozenset({"conv"}),
-    "feedforward": frozenset({"feedforward"}),
-    "layernorm": frozenset({"norm"}),
-    "attention": frozenset({"attention"}),
-    "transformer_block": frozenset({"attention", "feedforward"}),
-}
 
 
 def _resolve_component_model(
@@ -75,15 +53,17 @@ def _materialize_target(
     target_model: nn.Module,
     target: OperatorOptimizationTargetPlan,
 ) -> tuple[nn.Module, float | None]:
-    if target.engine == "torch_compile":
+    registration = get_engine_registration(target.engine)
+    materializer = None if registration is None else registration.materializer
+    if materializer == "torch_compile":
         return compile_with_torch(target_model, target)
     if target.candidate_kind == "block_kernel":
         return build_block_kernel_candidate(target_model, target), None
-    if target.engine == "tilelang":
+    if materializer == "tilelang":
         return build_tilelang_candidate_model(target_model, target), None
-    if target.engine == "triton":
+    if materializer == "triton":
         return build_triton_candidate_model(target_model, target), None
-    if target.engine in {"cutile", "cute_dsl"}:
+    if materializer == "reference_guarded":
         return (
             build_reference_guarded_linear_candidate_model(
                 target_model,
@@ -120,7 +100,7 @@ def materialize_module(
 ) -> tuple[nn.Module, float | None]:
     """Materialize one module from a shared module contract and target plan."""
 
-    allowed_patterns = _CONTRACT_PATTERNS.get(contract.operator_kind)
+    allowed_patterns = operator_contract_patterns(contract.operator_kind)
     if allowed_patterns is None:
         raise XQTBackendError(
             "operator materialization does not support module contract kind "

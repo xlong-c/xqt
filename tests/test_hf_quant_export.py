@@ -11,7 +11,7 @@ from torch import nn
 
 from xqt.core.errors import XQTArtifactError
 from xqt.export.hf_quant import export_compressed_tensors
-from xqt.quant.external import probe_external_quant_config
+from xqt.contracts.external import probe_external_quant_config
 from xqt.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
 from xqt.runtime.serving_config import generate_serving_config, write_serving_config
 

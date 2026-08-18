@@ -29,7 +29,7 @@ def _tilelang_operator_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/tilelang_capability_preflight",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_attention_classifier",
+            "target": "xqt.model.toy_models.build_toy_attention_classifier",
             "params": {
                 "hidden_dim": 16,
                 "num_heads": 4,

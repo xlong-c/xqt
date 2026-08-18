@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 import torch
 from torch import nn
 
-from xqt.export.input_utils import split_example_input
+from xqt.contracts.input_utils import split_example_input
 
 from .backends.tilelang import tilelang_validation_thresholds
 from .types import OperatorOptimizationTargetPlan

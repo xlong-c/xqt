@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from xqt.runtime.engine_resolve import (
+from xqt.contracts.engine_resolve import (
     EngineRegistration,
     engine_resolve_from_compute_config,
     engines_providing_all,
@@ -14,6 +14,7 @@ from xqt.runtime.engine_resolve import (
 
 
 _EXPECTED_PROVIDES: dict[str, frozenset[str]] = {
+    "custom_cuda": frozenset({"custom_cuda", "generic"}),
     "cuda_sm89": frozenset({"int8_mma", "true_int8_mma"}),
     "ptx_sm89": frozenset({"int8_mma", "true_int8_mma"}),
     "native_sm89": frozenset({"int8_mma", "true_int8_mma"}),
@@ -43,7 +44,9 @@ _EXPECTED_PROVIDES: dict[str, frozenset[str]] = {
     "cutlass": frozenset({"int8_mma", "fp4_mma", "int4_mma", "fp16_mma"}),
     "cute_dsl": frozenset({"int8_mma", "fp4_mma"}),
     "cutile": frozenset({"generic", "fp16_mma"}),
+    "deployment_engine": frozenset({"deployment", "graph_export"}),
     "reference": frozenset({"int8_mma", "generic"}),
+    "torch_compile": frozenset({"generic", "graph_compile"}),
 }
 
 
@@ -66,11 +69,27 @@ def test_registry_preserves_the_previous_capability_matrix() -> None:
 
 
 def test_unwired_engines_are_honestly_nondispatchable() -> None:
-    for name in ("ptx_sm89", "cuda_sm89", "native_sm89", "cutlass", "cute_dsl", "cutile"):
+    for name in (
+        "ptx_sm89",
+        "cuda_sm89",
+        "native_sm89",
+        "cutlass",
+        "cute_dsl",
+        "cutile",
+        "custom_cuda",
+        "deployment_engine",
+    ):
         registration = get_engine_registration(name)
         assert registration is not None, name
         assert registration.dispatchable is False, name
-    for name in ("triton", "tilelang", "torch", "torch_int_mm", "reference"):
+    for name in (
+        "triton",
+        "tilelang",
+        "torch",
+        "torch_int_mm",
+        "torch_compile",
+        "reference",
+    ):
         registration = get_engine_registration(name)
         assert registration is not None, name
         assert registration.dispatchable is True, name
@@ -166,7 +185,7 @@ def test_resolve_compute_engine_defaults_match_int8_path() -> None:
 
 
 def test_primary_kernel_maps_onto_engine_registry() -> None:
-    from xqt.runtime.engine_resolve import map_primary_kernel_to_engine
+    from xqt.contracts.engine_resolve import map_primary_kernel_to_engine
 
     assert map_primary_kernel_to_engine("tilelang_fp4") == "tilelang"
     assert map_primary_kernel_to_engine("w8a8_int8_mma") == "tilelang"
@@ -198,7 +217,7 @@ def test_c10_cutile_cute_cutlass_not_pretend_executable_auto_head() -> None:
 def test_hadamard_groupwise_provided_by_tilelang_and_triton() -> None:
     """V3: C6 online kernel capability is declared on fusion DSL + portable line."""
 
-    from xqt.runtime.engine_resolve import engines_providing
+    from xqt.contracts.engine_resolve import engines_providing
 
     providers = engines_providing("hadamard_groupwise")
     assert "tilelang" in providers

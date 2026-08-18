@@ -26,6 +26,7 @@ from xqt.quant.types import (
     QuantizationExecutionPlan,
     QuantizationReport,
 )
+from xqt.quant.quantizers.base import component_route_handler
 
 
 def _query(
@@ -81,7 +82,7 @@ def test_route_resolution_miss_returns_none() -> None:
 def test_executable_primary_kernel_maps_to_engine_or_torch() -> None:
     """U4: every executable route primary_kernel is engine-resolvable or mapped."""
 
-    from xqt.runtime.engine_resolve import (
+    from xqt.contracts.engine_resolve import (
         get_engine_registration,
         map_primary_kernel_to_engine,
     )
@@ -193,6 +194,40 @@ def _component(strategy: str, compute: str = "dequant_fp16") -> QuantizationComp
         strategy=strategy,
         compute=compute,
     )
+
+
+def test_component_route_handler_applies_static_algorithm_kwargs() -> None:
+    def _executor(
+        context: XQTContext,
+        model: nn.Module | None,
+        component: QuantizationComponentPlan,
+        *,
+        execution_state: str,
+    ) -> tuple[nn.Module | None, QuantizationReport]:
+        del context
+        return model, QuantizationReport(
+            component_name=component.name,
+            backend=component.backend,
+            strategy=component.strategy,
+            algorithm_executable=True,
+            metadata={"execution_state": execution_state},
+        )
+
+    handler = component_route_handler(
+        _executor,
+        executor_kwargs={"execution_state": "factory"},
+    )
+    model = nn.Identity()
+    returned_model, report, artifacts = handler(
+        _context(model),
+        model,
+        _component("w4a16_fp4"),
+        runtime={"ignored": True},
+    )
+
+    assert returned_model is model
+    assert report.metadata["execution_state"] == "factory"
+    assert artifacts == {}
 
 
 def test_executor_falls_back_to_planned_report_for_unregistered_route() -> None:

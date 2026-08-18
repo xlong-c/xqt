@@ -17,7 +17,7 @@ from xqt.gemm import (
     dispatch_gemm,
     reference_w8a16_gemm,
 )
-from xqt.gemm.backends import w8a16_sm89 as backend
+from xqt.gemm.backends.sm89 import w8a16_sm89 as backend
 
 
 def _quant(dtype: str = "fp16") -> QuantSpec:

@@ -13,10 +13,9 @@ from torch import nn
 
 from xqt.core.artifact import ArtifactRecord, MetricRecord
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
-from xqt.core.registry import register_pass
 from xqt.core.schema import ExportTargetConfig, OutputDiffConfig
 from xqt.core.types import XQTContext
-from xqt.workflows.stage_specs import (
+from xqt.core.stage_specs import (
     DeployRuntimeHandleSpec,
     DeployStageSpec,
     ExportStageSpec,
@@ -26,7 +25,6 @@ from xqt.export import (
     build_tensorrt_engine,
     compare_onnxruntime_outputs,
     compare_openvino_outputs,
-    create_onnxruntime_session,
     create_tensorrt_runtime_session,
     export_executorch_program,
     export_mnn_from_onnx,
@@ -45,7 +43,8 @@ from xqt.export import (
     tensorrt_runtime_layer_report,
     validate_tensorrt_plugin_libraries,
 )
-from xqt.export.input_utils import first_tensor_output
+from xqt.contracts.input_utils import first_tensor_output
+from xqt.runtime.onnx_session import create_onnxruntime_session
 from xqt.runtime.package import write_model_package
 
 from .export_handlers._context import (
@@ -283,7 +282,6 @@ _FORMATS_NEEDING_MODEL = frozenset(
 )
 
 
-@register_pass("export")
 class ExportPass:
     """Export configured artifacts."""
 

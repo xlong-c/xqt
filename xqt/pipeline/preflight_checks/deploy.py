@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from xqt.export.tensorrt import validate_tensorrt_plugin_libraries
-from xqt.workflows.stage_specs import DeployRuntimeHandleSpec
+from xqt.core.stage_specs import DeployRuntimeHandleSpec
 
 from ._base import PreflightReport, _check_dependency
 

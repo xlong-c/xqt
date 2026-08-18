@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-from xqt.model import (
+from examples.xqt_models.unlimited_ocr import (
     UNLIMITED_OCR_CONVROT_INT8_STRATEGY,
     UNLIMITED_OCR_REPO_ID,
     calibrate_unlimited_ocr_convrot_activation_scales,

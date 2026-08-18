@@ -20,12 +20,13 @@ from torch import nn
 
 from xqt.contracts import QuantizedModel
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.external import probe_external_quant_config
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.contracts.external import probe_external_quant_config
+from xqt.contracts.weight_only import AWQGPTQWeightOnlyLinear
+from xqt.export.base import ExportResultBase
 
 
 @dataclass(frozen=True)
-class HFQuantExportReport:
+class HFQuantExportReport(ExportResultBase):
     """Result of exporting one XQT quantized model to HF quant layout."""
 
     output_dir: str
@@ -33,6 +34,10 @@ class HFQuantExportReport:
     module_count: int
     files: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (Path(self.output_dir),)
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
-from xqt.model import (
+from examples.xqt_models.wan21_vae import (
     WAN21_VAE_OPTIMIZATION_KINDS,
     WAN21_VAE_REPO_ID,
     WAN21_VAE_RUN_MODES,
@@ -273,7 +273,7 @@ def test_compile_wan21_vae_runner_delegates_to_compile_backend(
         return module, 5.5
 
     runner, _ = build_wan21_vae_runner(_FakeWanPipeline(), run_mode="decode")
-    monkeypatch.setattr("xqt.model.wan21.runtime.compile_with_torch", fake_compile_with_torch)
+    monkeypatch.setattr("examples.xqt_models.wan21.runtime.compile_with_torch", fake_compile_with_torch)
 
     result = compile_wan21_vae_runner(
         runner,
@@ -366,8 +366,8 @@ def test_optimize_wan21_vae_compiles_and_warms_up(
         captured["warmup_iterations"] = warmup_iterations
         return 7.0
 
-    monkeypatch.setattr("xqt.model.wan21.optimize.compile_wan21_vae_runner", fake_compile)
-    monkeypatch.setattr("xqt.model.wan21.optimize.warmup_wan21_vae_runner", fake_warmup)
+    monkeypatch.setattr("examples.xqt_models.wan21.optimize.compile_wan21_vae_runner", fake_compile)
+    monkeypatch.setattr("examples.xqt_models.wan21.optimize.warmup_wan21_vae_runner", fake_warmup)
 
     result, summary = optimize_wan21_vae(
         pipeline,
@@ -418,7 +418,7 @@ def test_optimize_wan21_vae_captures_cuda_graph(
             to_dict=lambda: {"capture_time_ms": 9.0, "run_mode": run_mode},
         )
 
-    monkeypatch.setattr("xqt.model.wan21.optimize.capture_wan21_vae_cuda_graph", fake_capture)
+    monkeypatch.setattr("examples.xqt_models.wan21.optimize.capture_wan21_vae_cuda_graph", fake_capture)
 
     result, summary = optimize_wan21_vae(
         pipeline,

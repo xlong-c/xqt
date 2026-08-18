@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -18,6 +18,9 @@ from xqt.core.errors import XQTBackendError
 import xqt.operator_opt as _opt
 
 from .precision import _projection_precision_dict
+
+if TYPE_CHECKING:
+    from xqt.conversion import ConvertResult
 
 
 class _FeedForwardConversionMixin:

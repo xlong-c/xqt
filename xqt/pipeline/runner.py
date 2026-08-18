@@ -18,10 +18,7 @@ from xqt.core.schema import (
     TaskConfig,
 )
 from xqt.core.types import XQTContext
-from xqt.workflows.config_compat import ensure_optimization_workflow_config
-
-if TYPE_CHECKING:
-    from xqt.workflows.optimization import OptimizationConfig
+from xqt.core.workflow_schema import OptimizationConfig
 
 
 def _task_to_manifest_dict(task: TaskConfig) -> dict[str, Any]:
@@ -62,10 +59,9 @@ def _create_context_from_optimization_config(
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
 ) -> XQTContext:
-    loaded = ensure_optimization_workflow_config(
-        config,
-        caller="create_context()",
-    )
+    from xqt.workflows.optimization import load_optimization_config
+
+    loaded = load_optimization_config(config)
     project = dict(loaded.project)
     project_name = str(project.get("name", "xqt_optimization"))
     artifact_dir = str(project.get("artifact_dir", "artifacts/xqt/optimization"))

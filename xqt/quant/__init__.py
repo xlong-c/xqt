@@ -8,7 +8,7 @@ from .calibration import (
     calibrate_activation_scales,
     calibrate_activation_statistics,
 )
-from .external import (
+from xqt.contracts.external import (
     ExternalQuantInfo,
     iter_config_filenames,
     list_supported_external_formats,
@@ -134,7 +134,7 @@ from .quantizers.fp4_dynamic import (
     quantize_with_mxfp4_dynamic,
     quantize_with_nvfp4_dynamic,
 )
-from .bridges.nvfp4 import (
+from xqt.contracts.nvfp4 import (
     NVFP4LinearBridge,
     NVFP4TensorLayout,
     bridge_module_to_nvfp4_linear,

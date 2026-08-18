@@ -3,6 +3,7 @@ import torch
 
 from xqt.core.errors import XQTBackendError
 from xqt.quant.quantizers.int8_mma import Int8MmaLinear, quantize_with_int8_mma
+from xqt.runtime.modules import Int8MmaLinear as RuntimeInt8MmaLinear
 from xqt.workflows import XQTOptimizationSession
 
 from examples.unlimited_ocr_int8_inference import _ocr_text_quality_gate
@@ -41,6 +42,18 @@ def test_quantize_with_int8_mma_replaces_linear_on_cpu() -> None:
         "condition": "input_rows < min_int8_rows",
         "note": "quantize_with_int8_mma constructs min_int8_rows=0",
     }
+
+
+def test_int8_storage_materializes_runtime_execution_view() -> None:
+    source = torch.nn.Linear(16, 32, bias=True).eval()
+    storage = Int8MmaLinear.from_linear(source, engine="torch_int_mm").eval()
+
+    runtime = RuntimeInt8MmaLinear.from_storage(storage).eval()
+    output = runtime(torch.randn(3, 16))
+
+    assert isinstance(runtime, Int8MmaLinear)
+    assert output.shape == (3, 32)
+    assert runtime.execution_metadata()["artifact_view"] == "runtime"
 
 
 def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
@@ -163,7 +176,7 @@ def test_int8_mma_linear_static_activation_scale_cpu() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_int8_mma_auto_static_uses_fastpath_cuda() -> None:
     source = torch.nn.Linear(128, 96, bias=True, dtype=torch.float16, device="cuda").eval()
-    qlinear = Int8MmaLinear.from_linear(
+    qlinear = RuntimeInt8MmaLinear.from_linear(
         source,
         engine="auto",
         activation_scale_mode="static",
@@ -200,7 +213,7 @@ def test_int8_mma_cuda_sm89_static_path_caches_fused_scale_bias() -> None:
 
     torch.manual_seed(41)
     source = torch.nn.Linear(256, 256, bias=True, dtype=torch.float16, device="cuda").eval()
-    qlinear = Int8MmaLinear.from_linear(
+    qlinear = RuntimeInt8MmaLinear.from_linear(
         source,
         engine="cuda_sm89",
         activation_scale_mode="static",
@@ -342,7 +355,9 @@ def test_unlimited_ocr_text_quality_gate_rejects_missing_content() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for true INT8 MMA")
 def test_int8_mma_linear_tilelang_cuda_reports_true_mma() -> None:
     source = torch.nn.Linear(64, 64, bias=False, dtype=torch.bfloat16, device="cuda").eval()
-    qlinear = Int8MmaLinear.from_linear(source, engine="tilelang").cuda().eval()
+    qlinear = RuntimeInt8MmaLinear.from_linear(
+        source, engine="tilelang"
+    ).cuda().eval()
 
     output = qlinear(torch.randn(5, 64, device="cuda", dtype=torch.bfloat16))
     torch.cuda.synchronize()

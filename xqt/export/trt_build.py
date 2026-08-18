@@ -10,9 +10,10 @@ from typing import Any, Mapping, Optional, Sequence
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
 
-from .trt_inspect import inspect_tensorrt_engine
-from .trt_perf import evaluate_tensorrt_performance_thresholds, parse_trtexec_performance
-from .trt_plugins import (
+from .trt_diagnostics import (
+    evaluate_tensorrt_performance_thresholds,
+    inspect_tensorrt_engine,
+    parse_trtexec_performance,
     _import_tensorrt,
     _load_tensorrt_plugin_libraries,
     _normalize_plugin_libraries,

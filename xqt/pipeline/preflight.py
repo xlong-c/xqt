@@ -8,11 +8,8 @@ from xqt.core.schema import (
     QuantConfig,
     TASK_TYPES,
 )
-from xqt.workflows.optimization import (
-    OptimizationConfig,
-    load_optimization_config,
-)
-from xqt.workflows.stage_specs import (
+from xqt.core.workflow_schema import OptimizationConfig
+from xqt.core.stage_specs import (
     AnalyzeStageSpec,
     BenchmarkStageSpec,
     DeployStageSpec,
@@ -20,7 +17,7 @@ from xqt.workflows.stage_specs import (
     OperatorStageSpec,
     PruneStageSpec,
     QuantStageSpec,
-    ensure_stage_spec,
+    stage_spec_to_config,
 )
 
 from .preflight_checks._base import (
@@ -41,11 +38,9 @@ def preflight_optimization_config(
 ) -> PreflightReport:
     """Run lightweight dependency and target checks for a stage workflow."""
 
-    loaded = (
-        config
-        if isinstance(config, OptimizationConfig)
-        else load_optimization_config(config)
-    )
+    from xqt.workflows.optimization import load_optimization_config
+
+    loaded = load_optimization_config(config)
     report = PreflightReport()
     report.add(
         "project.artifact_dir",
@@ -76,7 +71,9 @@ def preflight_optimization_config(
     _check_model_device(report, loaded.device or loaded.model.device)
 
     for index, stage in enumerate(loaded.stages):
-        spec = ensure_stage_spec(stage)
+        spec = getattr(stage, "spec", None)
+        if spec is None:
+            raise RuntimeError(f"stage {stage.name!r} has no typed spec")
         prefix = f"stages.{index}.{stage.name}"
         report.add(
             f"{prefix}.kind",
@@ -87,14 +84,22 @@ def preflight_optimization_config(
         if isinstance(spec, QuantStageSpec):
             _check_quant_config(
                 report,
-                QuantConfig(enabled=True, **spec.__dict__),
+                stage_spec_to_config(
+                    spec,
+                    QuantConfig,
+                    overrides={"enabled": True},
+                ),
                 prefix=prefix,
                 cuda_name="hardware.cuda",
             )
         elif isinstance(spec, PruneStageSpec):
             _check_prune_config(
                 report,
-                PruneConfig(enabled=True, **spec.__dict__),
+                stage_spec_to_config(
+                    spec,
+                    PruneConfig,
+                    overrides={"enabled": True},
+                ),
                 device=loaded.device or loaded.model.device,
                 task_type=loaded.task.type,
                 prefix=prefix,

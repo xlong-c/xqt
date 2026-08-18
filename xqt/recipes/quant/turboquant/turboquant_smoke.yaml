@@ -2,7 +2,7 @@ project:
   name: turboquant_smoke
   artifact_dir: artifacts/xqt/quant/turboquant/turboquant_smoke
 model:
-  target: xqt.operator_opt.toy_models.build_toy_linear_block
+  target: xqt.model.toy_models.build_toy_linear_block
   params:
     input_dim: 16
     hidden_dim: 32

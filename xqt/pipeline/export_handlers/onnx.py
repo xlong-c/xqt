@@ -12,7 +12,7 @@ from torch import nn
 from xqt.core.artifact import ArtifactRecord
 from xqt.core.schema import ExportTargetConfig, OutputDiffConfig
 from xqt.core.types import XQTContext
-from xqt.export.input_utils import default_input_names
+from xqt.contracts.input_utils import default_input_names
 
 from .. import export_pass as _ep
 

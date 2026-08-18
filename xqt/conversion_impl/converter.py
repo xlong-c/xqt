@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from torch import nn
 
@@ -16,6 +16,9 @@ from .attention import _AttentionConversionMixin
 from .block import _TransformerBlockConversionMixin
 from .feedforward import _FeedForwardConversionMixin
 from .linear import _LinearConversionMixin
+
+if TYPE_CHECKING:
+    from xqt.conversion import ConvertResult
 
 
 class _ModuleConverter(

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass, field, is_dataclass
-from itertools import count
 from pathlib import Path
 from typing import Any, Mapping, Optional, TypeVar, cast
 
 from omegaconf import OmegaConf
 
-from xdl.config.resolver import register_default_resolvers
+from xqt.core.config import register_default_resolvers
 from xqt.core.config import ConfigInput
 from xqt.core.errors import XQTConfigError
 from xqt.core.schema import (
@@ -24,6 +23,11 @@ from xqt.core.schema import (
     TaskConfig,
 )
 from xqt.core.types import XQTContext
+from xqt.core.workflow_schema import (
+    OptimizationConfig,
+    OptimizationStageConfig,
+    StageAcceptanceConfig,
+)
 from xqt.pipeline.passes import (
     run_analyze_stage,
     run_benchmark_stage,
@@ -94,58 +98,6 @@ _StageSpecT = TypeVar("_StageSpecT", bound=StageSpec)
 
 
 @dataclass
-class StageAcceptanceConfig:
-    """Acceptance thresholds for one model-side stage.
-
-    Four policy dimensions are supported: numeric diff (``max_mean_abs`` /
-    ``max_max_abs`` / ``max_relative_error``), speedup (``min_speedup``),
-    peak memory (``max_memory_mb``) and accuracy drop
-    (``max_accuracy_drop``). Missing evidence fails the corresponding check.
-    """
-
-    min_speedup: Optional[float] = None
-    max_mean_abs: Optional[float] = None
-    max_max_abs: Optional[float] = None
-    max_relative_error: Optional[float] = None
-    max_memory_mb: Optional[float] = None
-    max_accuracy_drop: Optional[float] = None
-
-
-@dataclass
-class OptimizationStageConfig:
-    """One independent optimization stage."""
-
-    name: str
-    kind: str
-    enabled: bool = True
-    compare_to: Optional[str] = None
-    from_stage: Optional[str] = None
-    save_model: bool = True
-    revert_on_reject: bool = False
-    params: dict[str, Any] = field(default_factory=dict)
-    accept: StageAcceptanceConfig = field(default_factory=StageAcceptanceConfig)
-
-
-@dataclass
-class OptimizationConfig:
-    """User-facing config for XQT model optimization."""
-
-    project: dict[str, Any] = field(
-        default_factory=lambda: {
-            "name": "xqt_optimization",
-            "artifact_dir": "artifacts/xqt/optimization",
-        }
-    )
-    model: ModelConfig = field(default_factory=ModelConfig)
-    task: TaskConfig = field(default_factory=TaskConfig)
-    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
-    compression_axes: list[str] = field(default_factory=list)
-    hardware: dict[str, Any] = field(default_factory=dict)
-    stages: list[OptimizationStageConfig] = field(default_factory=list)
-    device: Optional[str] = None
-
-
-@dataclass
 class OptimizationStageResult:
     """Runtime result for one stage."""
 
@@ -182,22 +134,6 @@ class OptimizedModelResult:
         if self.best_stage is None:
             return self.model
         return self.models.get(self.best_stage, self.model)
-
-
-@dataclass
-class _OptimizationRunState:
-    """Mutable execution state shared by workflow and session entrypoints."""
-
-    config: OptimizationConfig
-    context: XQTContext
-    stage_results: list[OptimizationStageResult] = field(default_factory=list)
-    model_snapshots: dict[str, Any] = field(default_factory=dict)
-    benchmark_results: dict[str, dict[str, Any]] = field(default_factory=dict)
-    stages_by_name: dict[str, SessionStage] = field(default_factory=dict)
-    stage_order: list[str] = field(default_factory=list)
-    baseline_stage: Optional[str] = None
-    best_stage: Optional[str] = None
-    stage_counter: Any = field(default_factory=lambda: count(1))
 
 
 def load_optimization_config(

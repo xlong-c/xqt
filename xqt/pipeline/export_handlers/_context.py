@@ -12,7 +12,7 @@ from torch import nn
 
 from xqt.core.schema import ExportTargetConfig, OutputDiffConfig
 from xqt.core.types import XQTContext
-from xqt.export.input_utils import default_input_names, first_tensor_output
+from xqt.contracts.input_utils import default_input_names, first_tensor_output
 
 
 def call_model(model: nn.Module, inputs: Any) -> Any:

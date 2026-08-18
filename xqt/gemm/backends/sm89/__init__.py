@@ -1,7 +1,7 @@
-"""Optional native GEMM backends.
+"""SM89 native GEMM backend implementations.
 
-Backend modules are lazy and artifact-driven.  Importing ``xqt.gemm`` never
-loads a shared object or compiles CUDA code.
+Modules are lazy and artifact-driven: importing this package never loads a
+shared object or compiles CUDA code.
 """
 
 from .sm89 import (
@@ -15,6 +15,11 @@ from .w8a16_sm89 import (
     sm89_w8a16_artifact_available,
     sm89_w8a16_executor,
 )
+from .w4a8_sm89 import (
+    install_sm89_w4a8_executors,
+    sm89_w4a8_artifact_available,
+    sm89_w4a8_executor,
+)
 from .sm89_build import (
     Sm89BuildConfig,
     Sm89DenseBuildConfig,
@@ -23,6 +28,7 @@ from .sm89_build import (
     Sm89W4A16FusedBuildConfig,
     Sm89GroupedW4A16BuildConfig,
     Sm89GroupedW8A8BuildConfig,
+    Sm89W4A8BuildConfig,
     Sm89W8A16BuildConfig,
     Sm89Fp8ProbeBuildConfig,
     Sm89Fp8BuildConfig,
@@ -33,6 +39,7 @@ from .sm89_build import (
     build_sm89_w4a16_fused_artifact,
     build_sm89_grouped_w4a16_artifact,
     build_sm89_grouped_w8a8_artifact,
+    build_sm89_w4a8_artifact,
     build_sm89_w8a16_artifact,
     build_sm89_fp8_probe_artifact,
     build_sm89_fp8_artifact,
@@ -50,6 +57,12 @@ from .w4a16_sm89 import (
     query_sm89_w4a16_resources,
     sm89_w4a16_dequant_artifact_available,
     sm89_w4a16_dequant_executor,
+)
+from .awq_w4a16_decode_sm89 import (
+    prepare_sm89_awq_w4a16_decode_parameters,
+    prepack_sm89_awq_w4a16_decode,
+    sm89_awq_w4a16_decode_executor,
+    sm89_awq_w4a16_metadata,
 )
 from .w4a16_fused_sm89 import (
     install_sm89_w4a16_fused_executor,
@@ -69,10 +82,12 @@ from .w4a16_grouped_sm89 import (
     build_sm89_grouped_w4a16_schedule,
     dispatch_sm89_grouped_w4a16,
     pack_sm89_grouped_w4a16_weights,
+    pack_sm89_grouped_w4a16_weights_multi_stream,
     query_sm89_grouped_w4a16_persistent_resources,
     query_sm89_grouped_w4a16_resources,
     sm89_grouped_w4a16_artifact_available,
     sm89_grouped_w4a16_executor,
+    warmup_sm89_grouped_w4a16,
 )
 from .w8a8_grouped_sm89 import (
     Sm89GroupedW8A8DispatchReport,
@@ -91,7 +106,10 @@ from .mixed_input_probe_sm89 import (
     run_sm89_mixed_input_probe,
     sm89_mixed_input_probe_artifact_available,
 )
-from .fp8_probe_sm89 import run_sm89_fp8_probe, sm89_fp8_probe_artifact_available
+from .fp8_probe_sm89 import (
+    run_sm89_fp8_probe,
+    sm89_fp8_probe_artifact_available,
+)
 from .fp8_sm89 import (
     Sm89Fp8BlockwiseResourceReport,
     fp8_blockwise_split_k_partition,
@@ -114,30 +132,18 @@ from .fp8_grouped_sm89 import (
     sm89_grouped_fp8_artifact_available,
     sm89_grouped_fp8_executor,
 )
-from .sm90_fp8_wgmma import (
-    Sm90Fp8WgmmaBuildConfig,
-    Sm90Fp8WgmmaContract,
-    Sm90GroupedFp8WgmmaBuildConfig,
-    Sm90GroupedFp8WgmmaContract,
-    build_sm90_fp8_wgmma_artifact,
-    build_sm90_grouped_fp8_wgmma_artifact,
-    install_sm90_fp8_wgmma_executor,
-    install_sm90_grouped_fp8_wgmma_executor,
-    sm90_fp8_wgmma_artifact_available,
-    sm90_fp8_wgmma_executor,
-    sm90_fp8_wgmma_reference,
-    sm90_grouped_fp8_wgmma_artifact_available,
-    sm90_grouped_fp8_wgmma_reference,
-)
 
 __all__ = [
     "install_sm89_w8a8_executor",
+    "prepack_sm89_int8_weight",
     "sm89_artifact_available",
     "sm89_w8a8_executor",
     "install_sm89_w8a16_executor",
     "sm89_w8a16_artifact_available",
     "sm89_w8a16_executor",
-    "prepack_sm89_int8_weight",
+    "install_sm89_w4a8_executors",
+    "sm89_w4a8_artifact_available",
+    "sm89_w4a8_executor",
     "Sm89BuildConfig",
     "Sm89DenseBuildConfig",
     "Sm89MixedInputProbeBuildConfig",
@@ -145,6 +151,7 @@ __all__ = [
     "Sm89W4A16FusedBuildConfig",
     "Sm89GroupedW4A16BuildConfig",
     "Sm89GroupedW8A8BuildConfig",
+    "Sm89W4A8BuildConfig",
     "Sm89W8A16BuildConfig",
     "Sm89Fp8ProbeBuildConfig",
     "Sm89Fp8BuildConfig",
@@ -155,6 +162,7 @@ __all__ = [
     "build_sm89_w4a16_fused_artifact",
     "build_sm89_grouped_w4a16_artifact",
     "build_sm89_grouped_w8a8_artifact",
+    "build_sm89_w4a8_artifact",
     "build_sm89_w8a16_artifact",
     "build_sm89_fp8_probe_artifact",
     "build_sm89_fp8_artifact",
@@ -163,11 +171,15 @@ __all__ = [
     "dense_sm89_artifact_available",
     "dense_sm89_executor",
     "install_sm89_dense_executors",
-    "install_sm89_w4a16_dequant_executor",
     "Sm89W4A16ResourceReport",
+    "install_sm89_w4a16_dequant_executor",
     "query_sm89_w4a16_resources",
     "sm89_w4a16_dequant_artifact_available",
     "sm89_w4a16_dequant_executor",
+    "prepare_sm89_awq_w4a16_decode_parameters",
+    "prepack_sm89_awq_w4a16_decode",
+    "sm89_awq_w4a16_decode_executor",
+    "sm89_awq_w4a16_metadata",
     "install_sm89_w4a16_fused_executor",
     "select_fused_split_k",
     "sm89_w4a16_fused_artifact_available",
@@ -180,35 +192,37 @@ __all__ = [
     "Sm89GroupedW4A16PersistentResourceReport",
     "Sm89GroupedW4A16ResourceReport",
     "Sm89GroupedW4A16Schedule",
+    "build_sm89_grouped_w4a16_schedule",
+    "dispatch_sm89_grouped_w4a16",
+    "pack_sm89_grouped_w4a16_weights",
+    "pack_sm89_grouped_w4a16_weights_multi_stream",
+    "query_sm89_grouped_w4a16_persistent_resources",
+    "query_sm89_grouped_w4a16_resources",
+    "sm89_grouped_w4a16_artifact_available",
+    "sm89_grouped_w4a16_executor",
+    "warmup_sm89_grouped_w4a16",
     "Sm89GroupedW8A8DispatchReport",
     "Sm89GroupedW8A8DispatchResult",
     "Sm89GroupedW8A8PackedWeights",
     "Sm89GroupedW8A8ResourceReport",
     "Sm89GroupedW8A8Schedule",
-    "build_sm89_grouped_w4a16_schedule",
     "build_sm89_grouped_w8a8_schedule",
-    "dispatch_sm89_grouped_w4a16",
     "dispatch_sm89_grouped_w8a8",
-    "pack_sm89_grouped_w4a16_weights",
-    "query_sm89_grouped_w4a16_persistent_resources",
     "pack_sm89_grouped_w8a8_weights",
-    "query_sm89_grouped_w4a16_resources",
     "query_sm89_grouped_w8a8_resources",
-    "sm89_grouped_w4a16_artifact_available",
     "sm89_grouped_w8a8_artifact_available",
-    "sm89_grouped_w4a16_executor",
     "sm89_grouped_w8a8_executor",
     "run_sm89_mixed_input_probe",
     "sm89_mixed_input_probe_artifact_available",
     "run_sm89_fp8_probe",
     "sm89_fp8_probe_artifact_available",
-    "fp8_sm89_executor",
-    "install_sm89_fp8_executors",
-    "sm89_fp8_artifact_available",
     "Sm89Fp8BlockwiseResourceReport",
     "fp8_blockwise_split_k_partition",
+    "fp8_sm89_executor",
+    "install_sm89_fp8_executors",
     "query_sm89_fp8_blockwise_resources",
     "select_fp8_blockwise_split_k",
+    "sm89_fp8_artifact_available",
     "Sm89GroupedFp8DispatchReport",
     "Sm89GroupedFp8DispatchResult",
     "Sm89GroupedFp8PackedWeights",
@@ -220,17 +234,4 @@ __all__ = [
     "query_sm89_grouped_fp8_resources",
     "sm89_grouped_fp8_artifact_available",
     "sm89_grouped_fp8_executor",
-    "Sm90Fp8WgmmaBuildConfig",
-    "Sm90Fp8WgmmaContract",
-    "Sm90GroupedFp8WgmmaBuildConfig",
-    "Sm90GroupedFp8WgmmaContract",
-    "build_sm90_fp8_wgmma_artifact",
-    "build_sm90_grouped_fp8_wgmma_artifact",
-    "install_sm90_fp8_wgmma_executor",
-    "install_sm90_grouped_fp8_wgmma_executor",
-    "sm90_fp8_wgmma_artifact_available",
-    "sm90_fp8_wgmma_executor",
-    "sm90_fp8_wgmma_reference",
-    "sm90_grouped_fp8_wgmma_artifact_available",
-    "sm90_grouped_fp8_wgmma_reference",
 ]

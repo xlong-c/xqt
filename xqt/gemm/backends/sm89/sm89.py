@@ -17,13 +17,13 @@ import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 
-from ..contracts import GemmSpec, PackedWeight
-from ..preflight import artifact_manifest_path, artifact_ready_for_execution
-from ..registry import GemmKernelRegistration, GemmKernelRegistry
+from xqt.gemm.common.contracts import GemmSpec, PackedWeight
+from xqt.gemm.common.preflight import artifact_manifest_path, artifact_ready_for_execution
+from xqt.gemm.common.registry import GemmKernelRegistration, GemmKernelRegistry
 
 
 _DEFAULT_ARTIFACT = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).resolve().parents[3]
     / "operator_opt"
     / "kernels"
     / "cute"
@@ -80,7 +80,7 @@ def prepack_sm89_int8_weight(
 
     canonical = weight.contiguous()
     packed = binding.prepack_qweight_t_for_ptx_sm89(canonical.transpose(0, 1).contiguous())
-    from ..contracts import PackedWeightMetadata
+    from xqt.gemm.common.contracts import PackedWeightMetadata
 
     metadata = PackedWeightMetadata(
         logical_shape=(int(weight.shape[0]), int(weight.shape[1])),

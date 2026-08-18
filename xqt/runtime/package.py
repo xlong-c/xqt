@@ -9,16 +9,16 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from xqt.contracts.inference import InferenceContract, InferenceContractConfig
+from xqt.contracts.input_utils import build_onnx_feed
 from xqt.core.artifact import file_sha256, utc_timestamp
 from xqt.core.errors import XQTArtifactError, XQTBackendError, XQTConfigError
 from xqt.core.serialization import json_safe_value
-from xqt.export import create_onnxruntime_session
-from xqt.export.input_utils import build_onnx_feed
 from xqt.runtime.inference import (
     InferenceAdapter,
     InferenceSession,
     create_inference_adapter,
 )
+from xqt.runtime.onnx_session import create_onnxruntime_session
 
 MODEL_PACKAGE_SCHEMA_VERSION = "1.0"
 MODEL_PACKAGE_ARTIFACT_TYPE = "xqt_model_package"

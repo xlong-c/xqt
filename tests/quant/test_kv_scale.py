@@ -16,7 +16,7 @@ from xqt.quant.quantizers.kv_scale import (
     kv_scales_to_compute_metadata,
 )
 from xqt.quant.types import QuantizationComponentPlan
-from xqt.runtime.quant_pair import write_quant_pair
+from xqt.contracts.quant_pair import write_quant_pair
 
 
 class _ToyAttentionBlock(nn.Module):

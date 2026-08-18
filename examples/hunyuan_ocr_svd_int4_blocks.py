@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from xqt.model.hunyuan_ocr import (
+from examples.xqt_models.hunyuan_ocr import (
     HUNYUAN_OCR_REPO_ID,
     load_hunyuan_ocr,
     optimize_hunyuan_ocr_svd_int4_blocks,

@@ -134,7 +134,7 @@ def preflight_hadamard_kernel() -> dict[str, Any]:
     """
 
     try:
-        from xqt.runtime.engine_resolve import engines_providing
+        from xqt.contracts.engine_resolve import engines_providing
     except ImportError:
         engines_providing = None  # type: ignore[assignment]
 

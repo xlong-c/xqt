@@ -76,7 +76,7 @@ def _tilelang_linear_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/tilelang_linear_{device}",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_linear_block",
+            "target": "xqt.model.toy_models.build_toy_linear_block",
             "params": {
                 "input_dim": 64,
                 "hidden_dim": 64,

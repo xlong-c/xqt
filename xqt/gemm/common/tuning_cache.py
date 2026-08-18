@@ -29,6 +29,85 @@ _LOOKUP_STATUSES = frozenset(
 )
 _SHA256_HEX_LENGTH = 64
 
+_BUILTIN_GEMM_SCHEDULES: dict[
+    tuple[str, str, tuple[Any, ...]],
+    tuple[str, tuple[int, int, int, int, int, int]],
+] = {
+    ("triton_fp16", "sm_89", (1, 4096, 4096, False, None, True)): (
+        "sm89_fp16_decode_m1",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (1, 4096, 4096, False, None, False)): (
+        "sm89_fp16_decode_m1",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (4, 4096, 4096, True, None, True)): (
+        "sm89_fp16_decode_m4_bias",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (4, 4096, 4096, True, None, False)): (
+        "sm89_fp16_decode_m4_bias",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (8, 11008, 4096, True, "silu", True)): (
+        "sm89_fp16_decode_m8_silu",
+        (32, 128, 32, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (8, 11008, 4096, True, "silu", False)): (
+        "sm89_fp16_decode_m8_silu",
+        (32, 128, 32, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (64, 1024, 1024, True, None, True)): (
+        "sm89_fp16_small_prefill_bias",
+        (16, 128, 32, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (64, 1024, 1024, True, None, False)): (
+        "sm89_fp16_small_prefill_bias",
+        (16, 128, 32, 4, 4, 3),
+    ),
+    ("triton_fp16", "sm_89", (256, 4096, 4096, True, "gelu", False)): (
+        "sm89_fp16_medium_prefill_gelu_kn",
+        (64, 64, 32, 8, 4, 3),
+    ),
+    ("triton_bf16", "sm_89", (1, 4096, 4096, False, None)): (
+        "sm89_bf16_decode_m1",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    ("triton_bf16", "sm_89", (4, 4096, 4096, True, None)): (
+        "sm89_bf16_decode_m4_bias",
+        (16, 64, 64, 4, 4, 3),
+    ),
+    ("triton_bf16", "sm_89", (8, 11008, 4096, True, "silu")): (
+        "sm89_bf16_decode_m8_silu",
+        (32, 128, 32, 4, 4, 3),
+    ),
+    ("triton_bf16", "sm_89", (64, 1024, 1024, True, None)): (
+        "sm89_bf16_small_prefill_bias",
+        (16, 64, 32, 4, 4, 3),
+    ),
+    ("triton_bf16", "sm_89", (256, 4096, 4096, True, "gelu")): (
+        "sm89_bf16_medium_prefill_gelu",
+        (64, 64, 32, 8, 4, 3),
+    ),
+}
+
+
+def resolve_builtin_gemm_schedule(
+    *,
+    kernel_family: str,
+    target_arch: str | None,
+    signature: tuple[Any, ...],
+    default: tuple[int, int, int, int, int, int],
+) -> tuple[str, tuple[int, int, int, int, int, int]]:
+    """Resolve a versioned built-in schedule when no offline record is supplied."""
+
+    if target_arch is None:
+        return "default", default
+    return _BUILTIN_GEMM_SCHEDULES.get(
+        (kernel_family, target_arch, signature),
+        ("default", default),
+    )
+
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -915,5 +994,6 @@ __all__ = [
     "GemmTuningLookup",
     "GemmTuningRecord",
     "build_grouped_tuning_key",
+    "resolve_builtin_gemm_schedule",
     "resolve_tuning_record",
 ]

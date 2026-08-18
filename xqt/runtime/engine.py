@@ -1,4 +1,4 @@
-"""Hybrid inference engine for quantized model artifacts."""
+"""Interactive reference wrapper for quantized model artifacts."""
 
 from __future__ import annotations
 
@@ -31,13 +31,15 @@ class HybridInferenceResult:
 
 
 class HybridInferenceEngine:
-    """Run mixed-precision inference over quantized modules.
+    """Run reference mixed-precision inference over quantized modules.
 
     The engine consumes:
     - a model that already holds quantized storage (for example ConvRot buffers)
     - an optional execution policy describing per-module compute precision
 
     It never calls quantizers, calibration hooks, or sensitivity analysis.
+    It is a Python-side inspection convenience, not a deploy runtime handle,
+    serving scheduler, or production engine abstraction.
     """
 
     def __init__(

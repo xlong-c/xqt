@@ -29,11 +29,17 @@ from ..execution.selection import (
     module_selection_reason_metadata,
     selection_policy_metadata,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from xqt.contracts.packing_int4 import _pack_int4
 from ..policy import QuantizationPolicy, should_quantize_module
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
+from .base import (
+    call_model as _call_model,
+    move_batch_to_device as _move_calibration_batch,
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 
 # ── SVDQuant result dataclass ────────────────────────────────────────────
@@ -156,31 +162,6 @@ def _build_composite_add_linear(
     return artifact, decomposition
 
 
-def _move_calibration_batch(value: Any, device: torch.device) -> Any:
-    if isinstance(value, torch.Tensor):
-        return value.to(device=device)
-    if isinstance(value, Mapping):
-        return {
-            key: _move_calibration_batch(item, device)
-            for key, item in value.items()
-        }
-    if isinstance(value, tuple):
-        return tuple(_move_calibration_batch(item, device) for item in value)
-    if isinstance(value, list):
-        return [_move_calibration_batch(item, device) for item in value]
-    return value
-
-
-def _call_model(model: nn.Module, inputs: Any) -> Any:
-    if isinstance(inputs, Mapping):
-        return model(**inputs)
-    if isinstance(inputs, tuple):
-        return model(*inputs)
-    if isinstance(inputs, list):
-        return model(*inputs)
-    return model(inputs)
-
-
 def _collect_static_activation_scales(
     model: nn.Module,
     *,
@@ -258,39 +239,6 @@ def _collect_static_activation_scales(
 
 
 # ── Submodule replacement ─────────────────────────────────────────────────
-
-
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
-
-
-# ── Policy from mapping ──────────────────────────────────────────────────
-
-
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
 
 
 # ── Main quantization entry point ────────────────────────────────────────
@@ -660,27 +608,6 @@ def execute_svdquant_component(
         collect_analysis=True,
     )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(
-        component.keep_high_precision,
-        component.target_path,
-    )
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(
-        context,
-        component,
-    )
     is_int8_mma = result.compute == "w8a8_int8_mma" or str(
         result.metadata.get("residual_compute", "")
     ) == "int8_mma"
@@ -694,32 +621,20 @@ def execute_svdquant_component(
         if is_int8_mma
         else "svd_method_composite_add_reference"
     )
-    report = QuantizationReport(
-        component_name=component.name,
+    report = build_component_quantization_report(
+        context,
+        component,
         backend="pytorch",
-        runtime="pytorch",
         method=component.method or result.method or "svd",
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=nature,
         algorithm_executable=True,
         method_semantics=method_semantics,
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
-            "analysis_only": component.analysis_only,
-            "algorithm_executable": True,
-            "method_semantics": method_semantics,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "executed": True,
-            "execution_state": "composite_add_artifact",
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="composite_add_artifact",
+        extra_metadata={
             "rank": configured_rank,
             "group_size": configured_group_size,
             "quant_dtype": configured_quant_dtype,

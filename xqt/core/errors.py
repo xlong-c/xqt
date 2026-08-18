@@ -1,9 +1,7 @@
 """XQT error types."""
 
-from xdl.errors import XDLError
 
-
-class XQTError(XDLError):
+class XQTError(Exception):
     """Base error for XQT."""
 
 

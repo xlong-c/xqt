@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 from omegaconf import OmegaConf
 
 from xqt.core.schema import QuantComponentPolicyConfig, QuantConfig
-from xqt.workflows.stage_specs import QuantStageSpec
+from xqt.core.stage_specs import QuantStageSpec
 
 from .capability import describe_quant_backend_capability
 from .strategy import (

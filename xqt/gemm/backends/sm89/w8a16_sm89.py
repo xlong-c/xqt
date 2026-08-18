@@ -16,10 +16,10 @@ import torch
 
 from xqt.core.errors import XQTBackendError
 
-from ..contracts import GemmSpec, PackedWeight, QuantSpec
-from ..preflight import artifact_manifest_path, artifact_ready_for_execution
-from ..quantize import quantize_int8_activation
-from ..registry import GemmKernelRegistration, GemmKernelRegistry
+from xqt.gemm.common.contracts import GemmSpec, PackedWeight, QuantSpec
+from xqt.gemm.common.preflight import artifact_manifest_path, artifact_ready_for_execution
+from xqt.gemm.common.quantize import quantize_int8_activation
+from xqt.gemm.common.registry import GemmKernelRegistration, GemmKernelRegistry
 from .sm89 import prepack_sm89_int8_weight, sm89_artifact_available, sm89_w8a8_executor
 
 

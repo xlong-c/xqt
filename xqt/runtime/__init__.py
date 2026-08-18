@@ -71,18 +71,21 @@ from .composite_inference import (
     materialize_svd_for_inference,
     override_composite_execution,
 )
-from .svd_flux_attention import (
+from .modules.svd_flux_api import (
     materialize_svd_flux_attention,
     pack_diffusers_flux_rotary_emb,
     svd_flux_attention_metadata,
 )
-from .svd_flux_transformer import materialize_svd_flux_transformer
+from .modules.svd_flux_transformer_api import materialize_svd_flux_transformer
 from .modules import (
     AWQW4A16Linear,
     CompositeAddLinear,
     CompositeAddModule,
     CompositeAddFp8Linear,
     CompositeAddW4A4Linear,
+    ConvRotExecutionView,
+    ConvRotInt8ExecutionView,
+    ConvRotW4A4ExecutionView,
     RMSNormCompositeLinear,
     Fp8MmaLinear,
     Int8MmaLinear,
@@ -99,11 +102,6 @@ from .modules import (
     SVDQuantInt8MmaLinear,
     SVDQuantLinear,
     W4StorageInt8MmaLinear,
-)
-from .engine_resolve import (
-    EngineResolveResult,
-    resolve_engine,
-    resolve_int8_mma_engine,
 )
 
 # ---------------------------------------------------------------------------
@@ -129,18 +127,6 @@ from .inference import (
     create_inference_adapter,
     inference_adapter_names,
     register_inference_adapter,
-)
-from .quant_pair import (
-    DEFAULT_SIDECAR_NAME,
-    DEFAULT_WEIGHTS_NAME,
-    QUANT_SIDECAR_ARTIFACT_TYPE,
-    QUANT_SIDECAR_SCHEMA_VERSION,
-    LoadedQuantPair,
-    QuantPairManifest,
-    load_quant_pair,
-    load_quant_pair_into_model,
-    write_quant_pair,
-    write_quant_pair_from_quantized,
 )
 from xqt.contracts.runtime_manifest import (
     RUNTIME_MANIFEST_KEY,
@@ -170,7 +156,6 @@ __all__ = [
     "precision_overrides_to_map",
     "set_module_compute_precision",
     # engine
-    "EngineResolveResult",
     "HybridInferenceEngine",
     "HybridInferenceResult",
     "ModelRunner",
@@ -187,6 +172,9 @@ __all__ = [
     "CompositeAddModule",
     "CompositeAddFp8Linear",
     "CompositeAddW4A4Linear",
+    "ConvRotExecutionView",
+    "ConvRotInt8ExecutionView",
+    "ConvRotW4A4ExecutionView",
     "RMSNormCompositeLinear",
     "W4StorageInt8MmaLinear",
     "SVDQuantLinear",
@@ -207,8 +195,6 @@ __all__ = [
     "svd_flux_attention_metadata",
     "Fp8MmaLinear",
     "Int8MmaLinear",
-    "resolve_engine",
-    "resolve_int8_mma_engine",
     # composite branch protocol + registry
     "AddCombine",
     "CombineStrategy",
@@ -238,16 +224,6 @@ __all__ = [
     "register_inference_adapter",
     "load_model_package",
     "write_model_package",
-    "DEFAULT_SIDECAR_NAME",
-    "DEFAULT_WEIGHTS_NAME",
-    "LoadedQuantPair",
-    "QUANT_SIDECAR_ARTIFACT_TYPE",
-    "QUANT_SIDECAR_SCHEMA_VERSION",
-    "QuantPairManifest",
-    "load_quant_pair",
-    "load_quant_pair_into_model",
-    "write_quant_pair",
-    "write_quant_pair_from_quantized",
     "RUNTIME_MANIFEST_KEY",
     "RUNTIME_MANIFEST_SCHEMA_VERSION",
     "RuntimeManifest",

@@ -17,7 +17,7 @@ def _base_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/quant_method_schema",
         },
         "model": {
-            "target": "xqt.quant.toy_models.build_hetero_quant_toy_model",
+            "target": "xqt.model.toy_models.build_hetero_quant_toy_model",
             "params": {
                 "in_features": 4,
                 "hidden_features": 4,

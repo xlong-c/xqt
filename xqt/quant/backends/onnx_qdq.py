@@ -15,7 +15,7 @@ from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.types import XQTContext
-from xqt.export.input_utils import build_onnx_feed, default_input_names
+from xqt.contracts.input_utils import build_onnx_feed, default_input_names
 from ..calibration.summary import build_calibration_summary
 from ..capability import _resolve_nature
 from ..execution.artifacts import (

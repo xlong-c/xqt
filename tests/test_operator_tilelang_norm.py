@@ -73,7 +73,7 @@ def _tilelang_norm_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/tilelang_norm_{device}",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_norm_block",
+            "target": "xqt.model.toy_models.build_toy_norm_block",
             "params": {
                 "hidden_dim": 64,
             },

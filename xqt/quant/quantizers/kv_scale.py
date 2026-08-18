@@ -15,7 +15,7 @@ from torch import nn
 
 from xqt.core.types import XQTContext
 from xqt.quant.calibration.scale_artifact import run_calibration_batches
-from xqt.quant.execution.reporting import optional_calibration_summary
+from xqt.quant.execution.reporting import build_component_quantization_report
 from xqt.quant.types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
 
 
@@ -360,38 +360,30 @@ def execute_kv_scale_component(
     )
     attached = attach_kv_scale_buffers(target, artifacts)
     updated = replace_component_model(root_model, component.target_path, target)
-    calibration_samples, calibration_summary = optional_calibration_summary(
-        context, component
-    )
     lineage = {
         "kv_scales": {path: art.to_dict() for path, art in artifacts.items()},
         "attached_layers": attached,
         **kv_scales_to_compute_metadata(artifacts),
     }
-    if calibration_summary is None:
-        calibration_summary = {}
-    else:
-        calibration_summary = dict(calibration_summary)
-    calibration_summary["kv_scale_lineage"] = lineage
-    report = QuantizationReport(
-        component_name=component.name,
+    report = build_component_quantization_report(
+        context,
+        component,
         backend="pytorch",
-        runtime="pytorch",
         method=component.method or "kv_scale",
         strategy=component.strategy or "kv_scale",
-        target_path=component.target_path,
         quantized_modules=attached,
-        calibration_samples=calibration_samples or len(batches),
-        calibration_summary=calibration_summary,
         nature=QuantizationNature.PSEUDO,
         algorithm_executable=True,
         method_semantics="kv_cache_scale_artifact_only",
-        metadata={
-            "executed": True,
+        execution_state="kv_scale",
+        extra_metadata={
             "kv_scale_lineage": lineage,
             "field_convention": "vllm.attn.k_scale",
         },
     )
+    report.calibration_samples = report.calibration_samples or len(batches)
+    report.calibration_summary = dict(report.calibration_summary or {})
+    report.calibration_summary["kv_scale_lineage"] = lineage
     return updated, report
 
 

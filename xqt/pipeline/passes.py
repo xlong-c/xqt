@@ -21,7 +21,6 @@ from xqt.benchmark import benchmark_callable, benchmark_memory
 from xqt.core.artifact import ArtifactRecord, MetricRecord
 from xqt.core.imports import build_target
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
-from xqt.core.registry import register_pass
 from xqt.core.schema import (
     AnalysisConfig,
     BenchmarkConfig,
@@ -65,7 +64,7 @@ from .pass_helpers.prune_stage import (
     _update_structured_prune_benchmark_status,
 )
 from .pass_helpers.quant_stage import _run_quant_with_resolved_config
-from xqt.workflows.stage_specs import (
+from xqt.core.stage_specs import (
     AnalyzeStageSpec,
     BenchmarkStageSpec,
     OperatorStageSpec,
@@ -74,7 +73,6 @@ from xqt.workflows.stage_specs import (
 )
 
 
-@register_pass("load_model")
 class LoadModelPass:
     """Build the configured PyTorch model."""
 
@@ -96,7 +94,6 @@ class LoadModelPass:
         return context
 
 
-@register_pass("analyze")
 class AnalyzePass:
     """Analyze current model outputs against the baseline snapshot."""
 
@@ -242,7 +239,6 @@ class AnalyzePass:
         return context
 
 
-@register_pass("operator_optimization")
 class OperatorOptimizationPass:
     """Apply configured operator optimization engine."""
 
@@ -343,7 +339,6 @@ class OperatorOptimizationPass:
         return context
 
 
-@register_pass("benchmark")
 class BenchmarkPass:
     """Benchmark current model latency on the configured example inputs."""
 
@@ -486,7 +481,6 @@ def run_benchmark_stage(
     return BenchmarkPass().run(context, benchmark_config=benchmark_config)
 
 
-@register_pass("write_reports")
 class WriteReportsPass:
     """Write JSON and Markdown reports for collected metrics."""
 

@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.external import probe_external_quant_config
-from xqt.runtime.quant_pair_schema import (
+from xqt.contracts.external import probe_external_quant_config
+from xqt.contracts.quant_pair_schema import (
     DEFAULT_SIDECAR_NAME,
     QuantPairManifest,
 )

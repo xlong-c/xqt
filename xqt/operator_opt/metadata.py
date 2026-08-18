@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
+from xqt.contracts.engine_resolve import get_engine_registration
 
 from .backends.cutile import (
     CuTileCompileSettings,
@@ -340,7 +341,8 @@ def operator_engine_execution_metadata(
             if isinstance(module, wrappers):
                 return module.execution_metadata()
         return {"execution_mode": "unknown", "execution_reason": None}
-    if engine in {"cutile", "cute_dsl"}:
+    registration = get_engine_registration(engine)
+    if registration is not None and registration.materializer == "reference_guarded":
         for module in model.modules():
             if isinstance(module, _ReferenceGuardedLinearWrapper) and module.engine == engine:
                 return module.execution_metadata()
@@ -363,7 +365,7 @@ def torch_compile_explain_report(module: nn.Module, inputs: Any) -> dict[str, An
             "op_count": None,
             "compile_times": None,
         }
-    from xqt.export.input_utils import split_example_input
+    from xqt.contracts.input_utils import split_example_input
 
     normalized = split_example_input(inputs)
     try:

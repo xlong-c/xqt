@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, TypeVar, cast
 
-from omegaconf import OmegaConf
 import torch
 
 from xqt.core.schema import (
@@ -18,12 +16,12 @@ from xqt.core.schema import (
     QuantConfig,
 )
 from xqt.core.types import XQTContext
-from xqt.workflows.stage_specs import (
+from xqt.core.stage_specs import (
     AnalyzeStageSpec,
     BenchmarkStageSpec,
     OperatorStageSpec,
     QuantStageSpec,
-    stage_spec_to_params,
+    stage_spec_to_config,
 )
 
 
@@ -93,18 +91,10 @@ def _quant_runtime_config(
 ) -> QuantConfig:
     if isinstance(resolved_quant, QuantConfig):
         return copy.deepcopy(resolved_quant)
-    return QuantConfig(
-        enabled=True,
-        backend=resolved_quant.backend,
-        method=resolved_quant.method,
-        strategy=resolved_quant.strategy,
-        policy=dict(resolved_quant.policy),
-        composite_gemm=resolved_quant.composite_gemm,
-        keep_high_precision=list(resolved_quant.keep_high_precision),
-        skip_quantize=list(resolved_quant.skip_quantize),
-        force_quantize=list(resolved_quant.force_quantize),
-        analysis_only_modules=list(resolved_quant.analysis_only_modules),
-        component_policies=list(resolved_quant.component_policies),
+    return stage_spec_to_config(
+        resolved_quant,
+        QuantConfig,
+        overrides={"enabled": True},
     )
 
 
@@ -113,38 +103,21 @@ def _benchmark_runtime_config(
     *,
     base: BenchmarkConfig | None = None,
 ) -> BenchmarkConfig:
-    try:
-        nodes: list[Any] = [OmegaConf.structured(BenchmarkConfig)]
-        if base is not None:
-            nodes.append(asdict(base) if is_dataclass(base) else base)
-        nodes.append(OmegaConf.create(stage_spec_to_params(spec)))
-        merged = OmegaConf.merge(*nodes)
-        return cast(BenchmarkConfig, OmegaConf.to_object(merged))
-    except Exception as exc:
-        raise ValueError(f"failed to load benchmark stage params: {exc}") from exc
+    return stage_spec_to_config(spec, BenchmarkConfig, base=base)
 
 
 def _analysis_runtime_config(spec: AnalyzeStageSpec) -> AnalysisConfig:
-    try:
-        merged = OmegaConf.merge(
-            OmegaConf.structured(AnalysisConfig),
-            {"enabled": True},
-            OmegaConf.create(stage_spec_to_params(spec)),
-        )
-        return cast(AnalysisConfig, OmegaConf.to_object(merged))
-    except Exception as exc:
-        raise ValueError(f"failed to load analyze stage params: {exc}") from exc
+    return stage_spec_to_config(
+        spec,
+        AnalysisConfig,
+        overrides={"enabled": True},
+    )
 
 
 def _operator_runtime_config(spec: OperatorStageSpec) -> OperatorOptimizationConfig:
-    params = stage_spec_to_params(spec)
-    params.pop("benchmark", None)
-    try:
-        merged = OmegaConf.merge(
-            OmegaConf.structured(OperatorOptimizationConfig),
-            {"enabled": True},
-            OmegaConf.create(params),
-        )
-        return cast(OperatorOptimizationConfig, OmegaConf.to_object(merged))
-    except Exception as exc:
-        raise ValueError(f"failed to load operator stage params: {exc}") from exc
+    return stage_spec_to_config(
+        spec,
+        OperatorOptimizationConfig,
+        overrides={"enabled": True},
+        exclude={"benchmark"},
+    )

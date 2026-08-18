@@ -2,7 +2,7 @@ project:
   name: quant_int8_qdq_export_guard
   artifact_dir: artifacts/xqt/quant/int8/qdq_export_guard
 model:
-  target: xqt.quant.toy_models.build_hetero_quant_toy_model
+  target: xqt.model.toy_models.build_hetero_quant_toy_model
   params:
     in_features: 4
     hidden_features: 4

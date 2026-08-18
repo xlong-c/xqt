@@ -7,8 +7,8 @@ from typing import Mapping
 import torch
 from torch import nn
 
+from xqt.contracts.packing_int4 import _unpack_int4
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.quantizers.fp4_weight_only import _unpack_int4
 
 
 def awq_reverse_pack_order(bits: int) -> list[int]:

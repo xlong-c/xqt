@@ -12,7 +12,7 @@ from torch import nn
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
-from xqt.workflows.stage_specs import QuantStageSpec
+from xqt.core.stage_specs import QuantStageSpec
 
 from ..plan import build_quantization_plan
 from ..policy import QuantizationPolicy, list_quantizable_modules

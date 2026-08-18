@@ -2,7 +2,7 @@ project:
   name: fp4_tilelang_workflow
   artifact_dir: artifacts/xqt/operator/tilelang/fp4_workflow
 model:
-  target: xqt.operator_opt.toy_models.build_toy_fp4_mlp
+  target: xqt.model.toy_models.build_toy_fp4_mlp
   params:
     hidden_dim: 64
 stages:

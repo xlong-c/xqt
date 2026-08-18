@@ -298,7 +298,7 @@ def test_convrot_int8_defaults_to_static_with_calibration_inputs() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_convrot_int8_auto_static_uses_cuda_sm89_gemm_after_fused_rotation() -> None:
+def test_convrot_int8_storage_artifact_uses_reference_forward_on_cuda() -> None:
     from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
 
     if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
@@ -318,15 +318,13 @@ def test_convrot_int8_auto_static_uses_cuda_sm89_gemm_after_fused_rotation() -> 
     metadata = module.execution_metadata()
 
     assert output.shape == (64, 256)
-    assert metadata["engine"] == "cuda_sm89"
-    assert metadata["activation_quant_engine"] == "tilelang_hadamard_static"
-    assert metadata["fused_static_status"] == "tilelang_rotation_quant_then_cuda_gemm"
-    assert metadata["rotation_fused"] is True
-    assert metadata["prepacked_b"] is True
+    assert metadata["engine"] == "torch_int_mm"
+    assert metadata["true_int8_mma"] is False
+    assert metadata["artifact_view"] == "contracts_reference"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_convrot_int8_cuda_sm89_static_bf16_uses_triton_gemm_after_fused_rotation() -> None:
+def test_convrot_int8_storage_artifact_bf16_reference_forward_on_cuda() -> None:
     from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
 
     if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
@@ -352,15 +350,16 @@ def test_convrot_int8_cuda_sm89_static_bf16_uses_triton_gemm_after_fused_rotatio
     metadata = module.execution_metadata()
 
     assert output.shape == (64, 256)
-    assert metadata["engine"] == "triton"
-    assert metadata["activation_quant_engine"] == "tilelang_hadamard_static"
-    assert metadata["fused_static_status"] == "tilelang_rotation_quant_then_triton_gemm"
-    assert metadata["rotation_fused"] is True
+    assert metadata["engine"] == "torch_int_mm"
+    assert metadata["true_int8_mma"] is False
+    assert metadata["artifact_view"] == "contracts_reference"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("rot_size", [4, 16])
-def test_convrot_norm_fusion_uses_fused_triton_input_path(rot_size: int) -> None:
+def test_convrot_norm_storage_artifact_keeps_reference_input_path(
+    rot_size: int,
+) -> None:
     model = torch.nn.Sequential(
         torch.nn.RMSNorm(64, eps=1e-5, device="cuda", dtype=torch.float16),
         torch.nn.Linear(64, 128, device="cuda", dtype=torch.float16),
@@ -385,10 +384,8 @@ def test_convrot_norm_fusion_uses_fused_triton_input_path(rot_size: int) -> None
     metadata = result.model[0].execution_metadata()
 
     assert output.shape == (32, 128)
-    assert metadata["norm_fused"] is True
-    assert metadata["activation_quant_engine"] == "triton_norm_hadamard_static"
-    assert metadata["fused_static_status"] == "norm_hadamard_quant_then_gemm"
-    assert metadata["fused_norm_fallback_reason"] is None
+    assert metadata["norm_fused"] is False
+    assert metadata["artifact_view"] == "contracts_reference"
 
 
 def test_session_quant_convrot_w8a8_replaces_linear(tmp_path) -> None:

@@ -99,11 +99,13 @@ workflow 的 `ArtifactManifest` 是 **实验追踪**, 不是文件推理加载�
 
 ---
 
-## 2. 路径 A: HybridInferenceEngine
+## 2. 路径 A: HybridInferenceEngine reference/交互式封装
 
 ### 2.1 职责边界
 
 源码: `xqt/runtime/engine.py`
+
+该路径用于 Python 交互式检查与 reference forward. 它不是 deploy runtime handle,serving scheduler 或生产引擎主入口;生产部署由 workflow deploy stage 产出的 `RuntimeHandlePayload` 承担.
 
 - **消费**: 已带量化存储的 `nn.Module`, 可选 `ExecutionPolicyPayload`.
 - **不做**: quantizer, calibration, sensitivity.

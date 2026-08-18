@@ -9,7 +9,7 @@ import torch
 
 from xqt.core.errors import XQTBackendError
 
-from ..fp8 import fp8_format_spec
+from xqt.gemm.common.fp8 import fp8_format_spec
 
 
 _SYMBOL = "xqt_fp8_cutlass_probe_sm89_run"

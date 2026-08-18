@@ -109,6 +109,110 @@ def pack_int4_unsigned(values: torch.Tensor) -> torch.Tensor:
     return (encoded[:, 0::2] | (encoded[:, 1::2] << 4)).contiguous()
 
 
+def pack_int2_signed(values: torch.Tensor) -> torch.Tensor:
+    """Pack signed INT2 values in ``[-2, 1]`` with four low-bit-first codes per byte."""
+
+    if values.ndim != 2:
+        raise ValueError("INT2 values must be rank-2 [N,K]")
+    if values.dtype not in {torch.int8, torch.int16, torch.int32, torch.int64}:
+        raise TypeError("INT2 values must use an integer dtype")
+    values_i = values.to(torch.int16)
+    if bool(((values_i < -2) | (values_i > 1)).any()):
+        raise ValueError("signed INT2 values must be in [-2, 1]")
+    if values_i.shape[1] % 4:
+        values_i = F.pad(values_i, (0, 4 - values_i.shape[1] % 4), value=0)
+    codes = (values_i + 2).to(torch.uint8)
+    groups = codes.reshape(codes.shape[0], -1, 4)
+    packed = (
+        groups[:, :, 0]
+        | (groups[:, :, 1] << 2)
+        | (groups[:, :, 2] << 4)
+        | (groups[:, :, 3] << 6)
+    )
+    return packed.contiguous()
+
+
+def unpack_int2(packed: torch.Tensor, *, logical_k: int) -> torch.Tensor:
+    """Decode canonical INT2 storage back to signed INT8 ``[N, logical_k]`` codes."""
+
+    if packed.ndim != 2 or packed.dtype != torch.uint8:
+        raise TypeError("INT2 storage must be uint8 rank-2")
+    if int(logical_k) <= 0 or int(packed.shape[1]) != (int(logical_k) + 3) // 4:
+        raise ValueError("INT2 storage columns must match ceil(logical_k / 4)")
+    codes = torch.stack(
+        (
+            packed & 0x03,
+            (packed >> 2) & 0x03,
+            (packed >> 4) & 0x03,
+            (packed >> 6) & 0x03,
+        ),
+        dim=-1,
+    ).reshape(packed.shape[0], -1)[:, : int(logical_k)]
+    signed = (codes.to(torch.int16) - 2).to(torch.int8)
+    return signed.contiguous()
+
+
+def pack_int3_signed(values: torch.Tensor) -> torch.Tensor:
+    """Pack signed INT3 values in ``[-4, 3]`` with eight codes per three bytes."""
+
+    if values.ndim != 2:
+        raise ValueError("INT3 values must be rank-2 [N,K]")
+    if values.dtype not in {torch.int8, torch.int16, torch.int32, torch.int64}:
+        raise TypeError("INT3 values must use an integer dtype")
+    values_i = values.to(torch.int16)
+    if bool(((values_i < -4) | (values_i > 3)).any()):
+        raise ValueError("signed INT3 values must be in [-4, 3]")
+    if values_i.shape[1] % 8:
+        values_i = F.pad(values_i, (0, 8 - values_i.shape[1] % 8), value=0)
+    codes = (values_i + 4).to(torch.uint8)
+    groups = codes.reshape(codes.shape[0], -1, 8)
+    byte0 = (
+        groups[:, :, 0]
+        | (groups[:, :, 1] << 3)
+        | ((groups[:, :, 2] & 0x03) << 6)
+    )
+    byte1 = (
+        ((groups[:, :, 2] >> 2) & 0x01)
+        | (groups[:, :, 3] << 1)
+        | (groups[:, :, 4] << 4)
+        | ((groups[:, :, 5] & 0x01) << 7)
+    )
+    byte2 = (
+        ((groups[:, :, 5] >> 1) & 0x03)
+        | (groups[:, :, 6] << 2)
+        | (groups[:, :, 7] << 5)
+    )
+    packed = torch.stack((byte0, byte1, byte2), dim=-1).reshape(codes.shape[0], -1)
+    return packed.contiguous()
+
+
+def unpack_int3(packed: torch.Tensor, *, logical_k: int) -> torch.Tensor:
+    """Decode canonical INT3 storage back to signed INT8 ``[N, logical_k]`` codes."""
+
+    if packed.ndim != 2 or packed.dtype != torch.uint8:
+        raise TypeError("INT3 storage must be uint8 rank-2")
+    groups_per_row = (int(logical_k) + 7) // 8
+    if int(logical_k) <= 0 or int(packed.shape[1]) != groups_per_row * 3:
+        raise ValueError("INT3 storage columns must match ceil(logical_k / 8) * 3")
+    groups = packed.reshape(packed.shape[0], groups_per_row, 3)
+    byte0, byte1, byte2 = groups[:, :, 0], groups[:, :, 1], groups[:, :, 2]
+    codes = torch.stack(
+        (
+            byte0 & 0x07,
+            (byte0 >> 3) & 0x07,
+            ((byte0 >> 6) & 0x03) | ((byte1 & 0x01) << 2),
+            (byte1 >> 1) & 0x07,
+            (byte1 >> 4) & 0x07,
+            ((byte1 >> 7) & 0x01) | ((byte2 & 0x03) << 1),
+            (byte2 >> 2) & 0x07,
+            (byte2 >> 5) & 0x07,
+        ),
+        dim=-1,
+    ).reshape(packed.shape[0], -1)[:, : int(logical_k)]
+    signed = (codes.to(torch.int16) - 4).to(torch.int8)
+    return signed.contiguous()
+
+
 def _unpack_int32_codes(
     packed: torch.Tensor,
     *,
@@ -507,6 +611,27 @@ def _validate_scale_tensor(
         raise ValueError(f"{name} shape {actual} is incompatible; expected one of {sorted(accepted)}")
 
 
+def validate_sparse2_4_mask(
+    mask: torch.Tensor,
+    *,
+    logical_shape: tuple[int, int],
+) -> torch.Tensor:
+    """Validate a channel-wise 2:4 mask: exactly two nonzeros per K quad."""
+
+    n, k = (int(logical_shape[0]), int(logical_shape[1]))
+    if not isinstance(mask, torch.Tensor) or mask.ndim != 2 or mask.dtype != torch.bool:
+        raise TypeError("sparse 2:4 mask must be a rank-2 torch.bool tensor")
+    if tuple(mask.shape) != (n, k):
+        raise ValueError(f"sparse 2:4 mask must have shape {(n, k)}, got {tuple(mask.shape)}")
+    if k % 4 != 0:
+        raise ValueError("sparse 2:4 logical K must be divisible by four")
+    quads = mask.reshape(n, k // 4, 4)
+    counts = quads.to(dtype=torch.int64).sum(dim=-1)
+    if bool((counts != 2).any()):
+        raise ValueError("sparse 2:4 mask must keep exactly two values per K quad")
+    return mask.contiguous()
+
+
 def build_packed_weight(
     qweight: torch.Tensor,
     *,
@@ -520,6 +645,8 @@ def build_packed_weight(
     local_shape: tuple[int, int] | None = None,
     shard_axis: int | None = None,
     global_scale: torch.Tensor | None = None,
+    sparse_mask: torch.Tensor | None = None,
+    codebook: torch.Tensor | None = None,
 ) -> PackedWeight:
     """Create a versioned packed-weight object without changing tensor values."""
 
@@ -538,12 +665,64 @@ def build_packed_weight(
             )
         packed_bits: int | None = 4
         nibble_order: str | None = "low_high"
+    elif spec.weight_dtype == "int2":
+        if qweight.dtype != torch.uint8:
+            raise TypeError("INT2 qweight must use torch.uint8 packed storage")
+        expected_columns = (int(padded_k) + 3) // 4
+        if int(qweight.shape[1]) != expected_columns:
+            raise ValueError(
+                f"packed INT2 qweight must have {expected_columns} columns, got {qweight.shape[1]}"
+            )
+        packed_bits = 2
+        nibble_order = None
+    elif spec.weight_dtype == "int3":
+        if qweight.dtype != torch.uint8:
+            raise TypeError("INT3 qweight must use torch.uint8 packed storage")
+        expected_columns = ((int(padded_k) + 7) // 8) * 3
+        if int(qweight.shape[1]) != expected_columns:
+            raise ValueError(
+                f"packed INT3 qweight must have {expected_columns} columns, got {qweight.shape[1]}"
+            )
+        packed_bits = 3
+        nibble_order = None
+    elif spec.weight_dtype == "codebook":
+        if qweight.dtype != torch.uint8:
+            raise TypeError("codebook indices must use torch.uint8")
+        if codebook is None or codebook.ndim != 2:
+            raise ValueError("codebook packed weights require a rank-2 codebook tensor")
+        if codebook.dtype not in {torch.float16, torch.float32, torch.bfloat16}:
+            raise TypeError("codebook must use a floating dtype")
+        vector_size = int(codebook.shape[1])
+        if vector_size <= 0 or int(padded_k) % vector_size != 0:
+            raise ValueError("codebook vector_size must evenly divide padded_k")
+        if spec.group_size is None or int(spec.group_size) % vector_size != 0:
+            raise ValueError("codebook group_size must be a multiple of vector_size")
+        expected_columns = int(padded_k) // vector_size
+        if int(qweight.shape[1]) != expected_columns:
+            raise ValueError(
+                f"codebook indices must have {expected_columns} columns, got {qweight.shape[1]}"
+            )
+        if bool((qweight.to(torch.int64) >= codebook.shape[0]).any()):
+            raise ValueError("codebook indices out of range")
+        packed_bits = None
+        nibble_order = None
     else:
         if int(qweight.shape[1]) != int(padded_k):
             raise ValueError("non-INT4 qweight must use padded logical K columns")
         packed_bits = None
         nibble_order = None
-    if spec.weight_dtype in {"int4", "int8", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "nvfp4"}:
+    if spec.weight_dtype in {
+        "int4",
+        "int8",
+        "int3",
+        "int2",
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "fp4",
+        "mxfp4",
+        "nvfp4",
+        "codebook",
+    }:
         _validate_scale_tensor(
             scales,
             logical_shape=(n, int(padded_k)),
@@ -559,6 +738,10 @@ def build_packed_weight(
                 group_size=spec.group_size,
                 name="zero_points",
             )
+    if sparse_mask is not None:
+        validate_sparse2_4_mask(sparse_mask, logical_shape=(n, k))
+        if int(padded_k) != k:
+            raise ValueError("2:4 sparse weights require padded_k == logical K")
     metadata = PackedWeightMetadata(
         logical_shape=(n, k),
         storage_layout=storage_layout or spec.storage_layout,
@@ -577,6 +760,7 @@ def build_packed_weight(
         ),
         local_shape=local_shape,
         shard_axis=shard_axis,
+        global_scale=global_scale,
     )
     if spec.weight_dtype == "nvfp4":
         if global_scale is None:
@@ -594,6 +778,8 @@ def build_packed_weight(
         zero_points=zero_points,
         metadata=metadata,
         global_scale=global_scale,
+        sparse_mask=sparse_mask,
+        codebook=codebook,
     )
 
 

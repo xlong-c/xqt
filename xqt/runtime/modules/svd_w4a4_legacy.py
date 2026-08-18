@@ -15,7 +15,7 @@ from xqt.contracts.composite import (
     CompositeAddModule,
     initialize_composite_add_storage,
 )
-from xqt.runtime.modules.packing_int4 import _unpack_int4
+from xqt.contracts.packing_int4 import _unpack_int4
 
 _SUPPORTED_RESIDUAL_QUANT_DTYPES = frozenset({"fp4", "int4"})
 _NATIVE_W4A4_LAYOUTS = frozenset({"main", "smalln"})

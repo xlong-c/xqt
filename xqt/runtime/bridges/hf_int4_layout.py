@@ -7,9 +7,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from xqt.contracts.packing_int4 import _pack_int4
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
-from xqt.quant.quantizers.fp4_weight_only import _pack_int4
+from xqt.contracts.weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.hf_int4_pack import (
     apply_zero_points,
     awq_qweight_to_codes_matrix,

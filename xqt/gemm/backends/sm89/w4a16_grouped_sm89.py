@@ -19,22 +19,22 @@ import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 
-from ..contracts import (
+from xqt.gemm.common.contracts import (
     GroupedGemmProblem,
     PackedWeight,
     PackedWeightMetadata,
     QuantSpec,
 )
-from ..grouped_dispatch import (
+from xqt.gemm.common.grouped_dispatch import (
     GroupedGemmCandidateOutput,
     GroupedGemmDispatchResult,
     GroupedGemmNativeCandidate,
     dispatch_grouped_gemm,
 )
-from ..layout import validate_w4a16_packed_weight
-from ..preflight import artifact_ready_for_execution
-from ..reference import reference_packed_grouped_gemm
-from ..tuning_cache import (
+from xqt.gemm.common.layout import validate_w4a16_packed_weight
+from xqt.gemm.common.preflight import artifact_ready_for_execution
+from xqt.gemm.common.reference import reference_packed_grouped_gemm
+from xqt.gemm.common.tuning_cache import (
     GemmTuningCache,
     GemmTuningLookup,
     build_grouped_tuning_key,

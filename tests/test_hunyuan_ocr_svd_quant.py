@@ -7,9 +7,9 @@ import pytest
 import torch
 from torch import nn
 
-import xqt.model.hunyuan_ocr as hunyuan_ocr
+import examples.xqt_models.hunyuan_ocr as hunyuan_ocr
 from xqt.core.errors import XQTBackendError
-from xqt.model import (
+from examples.xqt_models.hunyuan_ocr import (
     HUNYUAN_OCR_DFLASH_SUBFOLDER,
     HUNYUAN_OCR_REPO_ID,
     HUNYUAN_OCR_SVD_INT4_STRATEGY,

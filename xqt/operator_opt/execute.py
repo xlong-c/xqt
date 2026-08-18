@@ -12,7 +12,8 @@ from xqt.analysis.compare import compare_tensors
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import BenchmarkConfig
 from xqt.core.types import XQTContext
-from xqt.export.input_utils import first_tensor_output
+from xqt.contracts.input_utils import first_tensor_output
+from xqt.contracts.engine_resolve import get_engine_registration
 
 from ._benchmark import (
     _benchmark_callable_for_execution,
@@ -97,7 +98,12 @@ def _runtime_fallback_reason(execution_detail: dict[str, Any]) -> str | None:
 
 def _candidate_layer(target: OperatorOptimizationTargetPlan) -> str:
     if target.candidate_kind == "block_kernel":
-        if target.engine == "torch_compile" and target.block_kernel is None:
+        registration = get_engine_registration(target.engine)
+        if (
+            registration is not None
+            and registration.materializer == "torch_compile"
+            and target.block_kernel is None
+        ):
             return "automatic_block_graph"
         return "manual_block_kernel"
     return "single_kernel"
@@ -146,6 +152,10 @@ def execute_operator_optimization_plan(
         if target.fallback_for is not None and target_applied.get(target.fallback_for):
             continue
         capability = describe_operator_engine_capability(target.engine)
+        engine_registration = get_engine_registration(target.engine)
+        if engine_registration is None:
+            raise ValueError(f"operator engine {target.engine!r} is not registered")
+        materializer = engine_registration.materializer
         fallback_policy = _normalize_fallback_policy(target.fallback_policy)
         replacement_target = _resolve_component_model(
             current_model,
@@ -182,7 +192,7 @@ def execute_operator_optimization_plan(
         }
         compile_explain = (
             torch_compile_explain_report(benchmark_target, module_inputs)
-            if target.engine == "torch_compile"
+            if materializer == "torch_compile"
             else {
                 "status": "not_applicable",
                 "error": None,
@@ -203,12 +213,12 @@ def execute_operator_optimization_plan(
         )
         if (
             skip_reason is None
-            and target.engine == "torch_compile"
+            and materializer == "torch_compile"
             and not capability.available
         ):
             skip_reason = "torch.compile is not available in the current PyTorch build"
-        if skip_reason is None and target.engine in {"cutlass", "custom_cuda"}:
-            if not torch.cuda.is_available():
+        if skip_reason is None and materializer is None:
+            if engine_registration.requires_cuda and not torch.cuda.is_available():
                 skip_reason = f"{target.engine} requires CUDA-capable hardware"
             else:
                 skip_reason = planned_operator_skip_reason(target) or (
@@ -216,13 +226,11 @@ def execute_operator_optimization_plan(
                 )
         if (
             skip_reason is None
-            and target.engine in {"cutile", "cute_dsl"}
+            and materializer == "reference_guarded"
             and not torch.cuda.is_available()
             and target.fallback != "eager"
         ):
             skip_reason = f"{target.engine} requires CUDA-capable hardware"
-        if skip_reason is None and target.engine == "deployment_engine":
-            skip_reason = "deployment_engine is metadata-only in the built-in executor"
         fallback_reason = _fallback_policy_reason(
             skip_reason,
             fallback_policy=fallback_policy,
@@ -252,7 +260,7 @@ def execute_operator_optimization_plan(
             "mean_abs": 0.0,
         }
         baseline_execution_detail: dict[str, Any] = {}
-        if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
+        if materializer in {"tilelang", "triton", "reference_guarded"}:
             baseline_execution_detail = operator_engine_execution_metadata(
                 benchmark_target,
                 engine=target.engine,
@@ -407,7 +415,7 @@ def execute_operator_optimization_plan(
             call_module_no_grad(candidate_block, module_inputs)
         )
         execution_detail: dict[str, Any] = {}
-        if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
+        if materializer in {"tilelang", "triton", "reference_guarded"}:
             execution_detail = operator_engine_execution_metadata(
                 candidate_block,
                 engine=target.engine,
@@ -418,7 +426,7 @@ def execute_operator_optimization_plan(
             baseline_output=baseline_output,
             optimized_output=optimized_output,
         )
-        if target.engine == "tilelang":
+        if materializer == "tilelang":
             engine_metadata["validation_thresholds"] = dict(effective_thresholds)
         numeric_diff = compare_tensors(
             baseline_output,
@@ -529,7 +537,7 @@ def execute_operator_optimization_plan(
                     else None
                 ),
             }
-        if target.engine in {"tilelang", "triton", "cutile", "cute_dsl"}:
+        if materializer in {"tilelang", "triton", "reference_guarded"}:
             execution_detail = operator_engine_execution_metadata(
                 candidate_block,
                 engine=target.engine,

@@ -16,7 +16,7 @@ from xqt.quant.execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from xqt.quant.execution.reporting import optional_calibration_summary
+from xqt.quant.execution.reporting import build_component_quantization_report
 from xqt.quant.execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -208,49 +208,21 @@ def execute_moe_weight_only_component(
         inplace=True,
     )
     updated = replace_component_model(root_model, component.target_path, result.model)
-    high_precision = ordered_unique(
-        [
-            *prefix_module_names(component.keep_high_precision, component.target_path),
-            *prefix_module_names(result.router_modules, component.target_path),
-        ]
-    )
-    skipped = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision,
-        ]
-    )
-    quantized = prefix_module_names(result.quantized_modules, component.target_path)
-    calibration_samples, calibration_summary = optional_calibration_summary(
-        context, component
-    )
-    report = QuantizationReport(
-        component_name=component.name,
+    report = build_component_quantization_report(
+        context,
+        component,
         backend=result.backend,
-        runtime="pytorch",
         method=component.method or "moe_weight_only",
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized,
-        skipped_modules=skipped,
-        high_precision_modules=high_precision,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.PSEUDO,
         algorithm_executable=True,
         method_semantics="moe_expert_weight_only_router_high_precision",
-        metadata={
-            **dict(result.metadata),
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reason_metadata(
-                component,
-                quantized_modules=quantized,
-                skipped_modules=skipped,
-                high_precision_modules=high_precision,
-            ),
-            "executed": True,
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="moe_weight_only",
+        additional_high_precision_modules=result.router_modules,
+        extra_metadata={
             "expert_modules": prefix_module_names(
                 result.expert_modules, component.target_path
             ),

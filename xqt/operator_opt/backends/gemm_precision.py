@@ -11,7 +11,15 @@ import torch.nn.functional as F
 
 from xqt.contracts import PrecisionPolicy
 from xqt.core.errors import XQTBackendError
-from xqt.gemm import dense_gemm_reference
+from xqt.gemm import (
+    EpilogueSpec,
+    GemmProblem,
+    GemmSpec,
+    QuantSpec,
+    default_registry,
+    dense_gemm_reference,
+    dispatch_gemm,
+)
 
 from . import run_tilelang_kernel, run_triton_kernel
 from .gemm_selector import GemmShape, select_gemm_engine
@@ -401,6 +409,92 @@ def _resolve_requested_pattern(
     return resolved
 
 
+def _tensor_gemm_dtype(tensor: torch.Tensor) -> str:
+    mapping = {
+        torch.float32: "fp32",
+        torch.float16: "fp16",
+        torch.bfloat16: "bf16",
+        torch.int8: "int8",
+    }
+    try:
+        return mapping[tensor.dtype]
+    except KeyError as exc:
+        raise XQTBackendError(
+            f"GEMM contract does not support tensor dtype {tensor.dtype}"
+        ) from exc
+
+
+def _gemm_spec_from_precision_call(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    precision: MatmulPrecisionSpec,
+    activation: str | None,
+    transpose_b: bool,
+    has_bias: bool,
+    runtime_kwargs: Mapping[str, Any],
+) -> GemmSpec:
+    shape = _gemm_shape_from_tensors(a, b, transpose_b)
+    sm = None
+    if a.device.type == "cuda":
+        major, minor = torch.cuda.get_device_capability(a.device)
+        sm = major * 10 + minor
+    weight_dtype = {
+        "fp8": "fp8_e4m3",
+    }.get(precision.mma, precision.mma)
+    if precision.mma in {"fp16", "bf16", "fp32"}:
+        weight_dtype = _tensor_gemm_dtype(b)
+    activation_dtype = _tensor_gemm_dtype(a)
+    quantized_weights = weight_dtype not in {"fp16", "bf16", "fp32"}
+    group_size_value = runtime_kwargs.get("group_size")
+    group_size = None if group_size_value is None else int(group_size_value)
+    weight_granularity = "groupwise" if group_size is not None else "per_tensor"
+    activation_granularity = (
+        "per_token" if activation_dtype in {"int8", "fp8_e4m3", "fp8_e5m2"}
+        else "per_tensor"
+    )
+    output_dtype = (
+        precision.output
+        if precision.output in {"fp16", "bf16", "fp32"}
+        else "bf16"
+        if a.dtype == torch.bfloat16
+        else "fp16"
+    )
+    return GemmSpec(
+        problem=GemmProblem(
+            m=shape.m,
+            n=shape.n,
+            k=shape.k,
+            batch=shape.batch,
+            device=str(a.device),
+            sm=sm,
+        ),
+        quant=QuantSpec(
+            weight_dtype=weight_dtype,
+            activation_dtype=activation_dtype,
+            compute_dtype={"fp8": "fp8_e4m3"}.get(
+                precision.mma, precision.mma
+            ),
+            accum_dtype=precision.accum,
+            output_dtype=output_dtype,
+            weight_granularity=weight_granularity,
+            activation_granularity=activation_granularity,
+            group_size=group_size,
+            weight_scale_source=("weight_load_time" if quantized_weights else "none"),
+            activation_scale_source=(
+                "activation_dynamic"
+                if activation_dtype in {"int8", "fp8_e4m3", "fp8_e5m2"}
+                else "none"
+            ),
+        ),
+        epilogue=EpilogueSpec(
+            activation="none" if activation is None else activation,
+            has_bias=has_bias,
+            output_dtype=output_dtype,
+        ),
+    )
+
+
 def gemm_with_precision(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -436,49 +530,65 @@ def gemm_with_precision(
     """
     precision_spec = _resolve_matmul_precision(precision)
     resolved_engine = _resolve_gemm_engine(engine=engine)
+    selection = None
     if resolved_engine == "auto":
-        resolved_engine = _select_engine(
-            precision_spec,
-            a.device,
+        selection = select_gemm_engine(
+            precision=precision_spec,
+            device=a.device,
             shape=_gemm_shape_from_tensors(a, b, transpose_b),
             fused_ops=_fused_ops_from_call(a, precision_spec.mma, activation),
         )
+        resolved_engine = selection.selected_engine
 
-    match resolved_engine:
-        case "triton":
-            return _gemm_triton(
-                a,
-                b,
-                bias,
-                precision_spec,
-                activation,
-                transpose_b,
-                kwargs,
-                pattern=pattern,
+    registry = default_registry()
+    if selection is None:
+        registrations = tuple(
+            entry
+            for entry in registry.entries()
+            if entry.scope == "precision"
+            and precision_spec.mma in entry.precision_mmas
+            and entry.backend == resolved_engine
+            and entry.dispatchable_by_precision
+        )
+        if not registrations:
+            raise XQTBackendError(
+                f"Unsupported GEMM engine {resolved_engine!r} for precision "
+                f"{precision_spec.mma!r}"
             )
-        case "tilelang":
-            return _gemm_tilelang(
-                a,
-                b,
-                bias,
-                precision_spec,
-                activation,
-                transpose_b,
-                kwargs,
-                pattern=pattern,
-            )
-        case "torch":
-            return _gemm_torch(
-                a,
-                b,
-                bias,
-                precision_spec,
-                activation,
-                transpose_b,
-                kwargs,
-            )
-        case _:
-            raise XQTBackendError(f"Unsupported GEMM engine: {resolved_engine}")
+        candidate_kernels = (registrations[0].name,)
+    else:
+        candidate_kernels = tuple(
+            candidate.kernel_name
+            for candidate in selection.candidates
+            if candidate.dispatchable_by_gemm_with_precision
+        )
+    spec = _gemm_spec_from_precision_call(
+        a,
+        b,
+        precision=precision_spec,
+        activation=activation,
+        transpose_b=transpose_b,
+        has_bias=bias is not None,
+        runtime_kwargs=kwargs,
+    )
+    result = dispatch_gemm(
+        a,
+        b,
+        spec=spec,
+        bias=bias,
+        registry=registry,
+        requested_kernel=candidate_kernels[0],
+        candidate_kernels=candidate_kernels,
+        executor_kwargs={
+            "precision_policy": precision_spec,
+            "activation_name": activation,
+            "transpose_b": transpose_b,
+            "runtime_kwargs": dict(kwargs),
+            "pattern": pattern,
+        },
+        allow_reference=False,
+    )
+    return result.output
 
 
 def list_gemm_variant_dispatch_specs() -> dict[str, dict[str, Any]]:
@@ -1999,6 +2109,57 @@ def _gemm_torch(
         lhs, rhs, bias_value, activation=activation, transpose_b=transpose_b
     )
     return output.to(_precision_name_to_dtype(precision.output, role="output"))
+
+
+def _execute_registered_gemm_engine(
+    engine: str,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    precision: MatmulPrecisionSpec,
+    activation: str | None,
+    transpose_b: bool,
+    runtime_kwargs: dict[str, Any],
+    *,
+    pattern: str | None,
+) -> torch.Tensor:
+    """Execute one engine selected by the canonical GEMM registry."""
+
+    match engine:
+        case "triton":
+            return _gemm_triton(
+                a,
+                b,
+                bias,
+                precision,
+                activation,
+                transpose_b,
+                runtime_kwargs,
+                pattern=pattern,
+            )
+        case "tilelang":
+            return _gemm_tilelang(
+                a,
+                b,
+                bias,
+                precision,
+                activation,
+                transpose_b,
+                runtime_kwargs,
+                pattern=pattern,
+            )
+        case "torch":
+            return _gemm_torch(
+                a,
+                b,
+                bias,
+                precision,
+                activation,
+                transpose_b,
+                runtime_kwargs,
+            )
+        case _:
+            raise XQTBackendError(f"Unsupported registered GEMM engine: {engine}")
 
 
 def describe_gemm_precision_capability(

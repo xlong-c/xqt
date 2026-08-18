@@ -17,7 +17,7 @@ from xqt.quant.quantizers.int8_mma import (
     quantize_with_int8_mma,
 )
 from xqt.quant.types import QuantScheme, QuantizationComponentPlan
-from xqt.runtime.quant_pair import write_quant_pair
+from xqt.contracts.quant_pair import write_quant_pair
 
 
 class _TinyLinearModel(nn.Module):

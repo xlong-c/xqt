@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import torch
 
 from xqt.core.inputs import extract_model_inputs
-from xqt.export.input_utils import default_input_names, split_example_input
+from xqt.contracts.input_utils import default_input_names, split_example_input
 
 
 def _as_tensor_record(

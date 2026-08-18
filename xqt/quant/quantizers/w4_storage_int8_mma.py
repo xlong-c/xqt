@@ -10,6 +10,8 @@ import torch
 from torch import nn
 
 from xqt.contracts import QuantizedModel
+from xqt.contracts.int8_mma import Int8MmaLinear
+from xqt.contracts.w4_storage import W4StorageInt8MmaLinear
 from xqt.core.errors import XQTBackendError
 from xqt.core.types import XQTContext
 
@@ -19,7 +21,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -28,13 +30,16 @@ from ..execution.selection import (
 from ..policy import QuantizationPolicy
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
-from xqt.runtime.modules import Int8MmaLinear, W4StorageInt8MmaLinear
-from xqt.runtime.modules.packing_int4 import (
+from xqt.contracts.packing_int4 import (
     _normalize_group_size,
     _quantize_grouped_fp4_weight,
     _unpack_int4,
 )
 from .fp4_weight_only import FP4WeightOnlyLinear
+from .base import (
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 
 _ACTIVATION_SCALE_MODES = {"dynamic", "static"}
@@ -47,27 +52,6 @@ class W4StorageInt8MmaQuantizationResult(QuantizedModel):
     backend: str = "pytorch"
     strategy: str = "w4a16_int4"
     compute: str = "w8a8_int8_mma"
-
-
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
 
 
 def _matches_name_patterns(name: str, patterns: tuple[str, ...]) -> bool:
@@ -120,18 +104,6 @@ def _should_quantize_module(
     if policy.include_module_types and "Linear" not in policy.include_module_types:
         return False
     return _module_parameter_count(module) >= policy.min_parameters
-
-
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
-
-
-
 
 
 
@@ -356,52 +328,19 @@ def execute_w4_storage_int8_mma_component(
         source=str(component.policy.get("source", "auto")),
     )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(component.keep_high_precision, component.target_path)
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(
+    method_semantics = "w4_storage_int8_mma_compute_retarget"
+    report = build_component_quantization_report(
         context,
         component,
-    )
-    method_semantics = "w4_storage_int8_mma_compute_retarget"
-    report = QuantizationReport(
-        component_name=component.name,
         backend=result.backend,
-        runtime="pytorch",
-        method=component.method,
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.TRUE,
         algorithm_executable=True,
         method_semantics=method_semantics,
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "executed": True,
-            "execution_state": result.strategy,
-            "algorithm_executable": True,
-            "method_semantics": method_semantics,
-        },
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state=result.strategy,
     )
     return updated_model, report
 

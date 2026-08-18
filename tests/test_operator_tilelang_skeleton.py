@@ -49,7 +49,7 @@ def _base_tilelang_operator_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/tilelang_operator_skeleton",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_attention_classifier",
+            "target": "xqt.model.toy_models.build_toy_attention_classifier",
             "params": {
                 "hidden_dim": 16,
                 "num_heads": 4,

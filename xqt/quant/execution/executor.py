@@ -15,7 +15,6 @@ from typing import Any
 from torch import nn
 
 from xqt.core.types import XQTContext
-from xqt.export import export_onnx
 from xqt.quant import quantizers as _quantizers  # noqa: F401  # register routes
 from xqt.quant.backends.onnx_qdq import (
     onnx_qdq_graph_summary as _onnx_qdq_graph_summary,
@@ -80,11 +79,15 @@ def execute_quantization_plan(
     context: XQTContext,
     plan: QuantizationExecutionPlan,
     *,
-    export_onnx_fn: Any = export_onnx,
+    export_onnx_fn: Any = None,
     quantize_onnx_qdq_static_fn: Any = quantize_onnx_qdq_static,
 ) -> QuantizationExecutionResult:
     """Execute a normalized quantization plan and return unified reports."""
 
+    if export_onnx_fn is None:
+        from xqt.export import export_onnx
+
+        export_onnx_fn = export_onnx
     current_model = context.model if isinstance(context.model, nn.Module) else None
     runtime = {
         "export_onnx_fn": export_onnx_fn,

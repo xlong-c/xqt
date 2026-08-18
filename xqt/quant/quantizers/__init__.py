@@ -1,6 +1,12 @@
 """Model-side quantizer algorithms."""
 
-from .base import Quantizer, QuantizerOptions, QuantizerResult
+from .base import (
+    Quantizer,
+    QuantizerOptions,
+    QuantizerResult,
+    QuantizerTemplate,
+    component_route_handler,
+)
 from .fake_qdq import FakeQDQSurrogateResult, build_fake_qdq_surrogate
 from .fp4_weight_only import (
     FP4QuantizationResult,
@@ -82,6 +88,7 @@ __all__ = [
     "Quantizer",
     "QuantizerOptions",
     "QuantizerResult",
+    "QuantizerTemplate",
     "FP4WeightOnlyLinear",
     "MXFPWeightOnlyLinear",
     "SVDQuantResult",
@@ -126,7 +133,6 @@ from typing import Any, Mapping, Optional  # noqa: E402
 from torch import nn  # noqa: E402
 
 from xqt.core.types import XQTContext  # noqa: E402
-from xqt.export import export_onnx  # noqa: E402
 from xqt.quant.backends.onnx_qdq import (  # noqa: E402
     execute_onnx_qdq_component,
     onnx_qdq_graph_summary,
@@ -175,180 +181,45 @@ def _torchao_route_handler(
     return current_model, report, {}
 
 
-def _svd_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_svdquant_component(context, model, component)
-    return current_model, report, {}
-
-
-def _convrot_int8_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_convrot_int8_component(context, model, component)
-    return current_model, report, {}
-
-
-def _convrot_4bit_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_convrot_4bit_component(context, model, component)
-    return current_model, report, {}
-
-
-def _turboquant_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_turboquant_component(context, model, component)
-    return current_model, report, {}
-
-
-def _fp4_weight_only_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_fp4_weight_only_component(context, model, component)
-    return current_model, report, {}
-
-
-def _awq_gptq_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_awq_gptq_weight_only_component(
-        context, model, component
-    )
-    return current_model, report, {}
-
-
-def _mxfp_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_mxfp_weight_only_component(context, model, component)
-    return current_model, report, {}
-
-
-def _fp4_dynamic_nvfp4_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_dynamic_fp4_component(
-        context,
-        model,
-        component,
-        fp4_format="nvfp4",
-        quantize_fn=quantize_with_nvfp4_dynamic,
-    )
-    return current_model, report, {}
-
-
-def _fp4_dynamic_mxfp4_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_dynamic_fp4_component(
-        context,
-        model,
-        component,
-        fp4_format="mxfp4",
-        quantize_fn=quantize_with_mxfp4_dynamic,
-    )
-    return current_model, report, {}
-
-
-def _int8_mma_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_int8_mma_component(context, model, component)
-    return current_model, report, {}
-
-
-def _w4_storage_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    current_model, report = execute_w4_storage_int8_mma_component(
-        context, model, component
-    )
-    return current_model, report, {}
-
-
-def _kv_scale_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    if model is None:
-        raise ValueError("kv_scale route requires a PyTorch model")
-    current_model, report = execute_kv_scale_component(context, model, component)
-    return current_model, report, {}
-
-
-def _moe_weight_only_route_handler(
-    context: XQTContext,
-    model: Optional[nn.Module],
-    component: QuantizationComponentPlan,
-    *,
-    runtime: Optional[Mapping[str, Any]] = None,
-) -> _RouteResult:
-    del runtime
-    if model is None:
-        raise ValueError("moe_weight_only route requires a PyTorch model")
-    current_model, report = execute_moe_weight_only_component(context, model, component)
-    return current_model, report, {}
+_svd_route_handler = component_route_handler(execute_svdquant_component)
+_convrot_int8_route_handler = component_route_handler(execute_convrot_int8_component)
+_convrot_4bit_route_handler = component_route_handler(execute_convrot_4bit_component)
+_turboquant_route_handler = component_route_handler(execute_turboquant_component)
+_fp4_weight_only_route_handler = component_route_handler(
+    execute_fp4_weight_only_component
+)
+_awq_gptq_route_handler = component_route_handler(
+    execute_awq_gptq_weight_only_component
+)
+_mxfp_route_handler = component_route_handler(execute_mxfp_weight_only_component)
+_fp4_dynamic_nvfp4_route_handler = component_route_handler(
+    execute_dynamic_fp4_component,
+    executor_kwargs={
+        "fp4_format": "nvfp4",
+        "quantize_fn": quantize_with_nvfp4_dynamic,
+    },
+)
+_fp4_dynamic_mxfp4_route_handler = component_route_handler(
+    execute_dynamic_fp4_component,
+    executor_kwargs={
+        "fp4_format": "mxfp4",
+        "quantize_fn": quantize_with_mxfp4_dynamic,
+    },
+)
+_int8_mma_route_handler = component_route_handler(execute_int8_mma_component)
+_w4_storage_route_handler = component_route_handler(
+    execute_w4_storage_int8_mma_component
+)
+_kv_scale_route_handler = component_route_handler(
+    execute_kv_scale_component,
+    require_model=True,
+    missing_model_message="kv_scale route requires a PyTorch model",
+)
+_moe_weight_only_route_handler = component_route_handler(
+    execute_moe_weight_only_component,
+    require_model=True,
+    missing_model_message="moe_weight_only route requires a PyTorch model",
+)
 
 
 def _onnx_qdq_route_handler(
@@ -358,6 +229,8 @@ def _onnx_qdq_route_handler(
     *,
     runtime: Optional[Mapping[str, Any]] = None,
 ) -> _RouteResult:
+    from xqt.export import export_onnx
+
     runtime = runtime or {}
     return execute_onnx_qdq_component(
         context,

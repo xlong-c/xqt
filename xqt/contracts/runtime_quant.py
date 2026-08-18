@@ -2,20 +2,15 @@
 
 Consumers (Linear/MoE/Attention modules, quant pair sidecars) should read this
 object instead of parsing external ``quantization_config`` dictionaries.
-
-``QuantScheme`` is loaded lazily to avoid import cycles
-(``contracts`` -> ``quant.types`` -> ``quant`` package -> ``export`` -> ``contracts``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
+from xqt.contracts.quant_scheme import QuantScheme
 from xqt.core.errors import XQTConfigError
-
-if TYPE_CHECKING:
-    from xqt.quant.types import QuantScheme
 
 RUNTIME_QUANT_CONTRACT_KEY = "runtime_quant_contract"
 RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION = 1
@@ -65,14 +60,7 @@ def _as_bool(value: Any, *, field_name: str) -> bool:
     )
 
 
-def _load_quant_scheme_type() -> type:
-    from xqt.quant.types import QuantScheme
-
-    return QuantScheme
-
-
 def _quant_scheme_from_mapping(raw: Any) -> QuantScheme:
-    QuantScheme = _load_quant_scheme_type()
     if isinstance(raw, QuantScheme):
         return raw
     if not isinstance(raw, Mapping):

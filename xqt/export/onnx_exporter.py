@@ -13,20 +13,21 @@ from torch import nn
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
 from xqt.analysis.compare import TensorDiff, compare_tensors
-from xqt.export.fusion import apply_pre_export_fusion
-from xqt.export.input_utils import (
+from xqt.contracts.input_utils import (
     build_onnx_feed,
     default_input_names,
     split_example_input,
 )
+from xqt.export.fusion import apply_pre_export_fusion
 from xqt.export.lowering import apply_pre_export_lowering
+from xqt.export.base import ExportResultBase
 
 
 _STANDARD_ONNX_DOMAINS = frozenset({"", "ai.onnx", "ai.onnx.ml"})
 
 
 @dataclass
-class ONNXExportResult:
+class ONNXExportResult(ExportResultBase):
     """ONNX export metadata."""
 
     path: Path
@@ -35,6 +36,10 @@ class ONNXExportResult:
     checked: bool
     output_diff: Optional[TensorDiff] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (self.path,)
 
 
 def _legacy_dynamic_axes(
@@ -326,32 +331,9 @@ def compare_onnxruntime_outputs(
     return compare_tensors(reference_output, candidate, atol=atol, rtol=rtol)
 
 
-def create_onnxruntime_session(
-    onnx_path: str | Path,
-    *,
-    providers: Sequence[str] | None = None,
-) -> Any:
-    """Materialize an ONNX Runtime inference session for one exported model."""
-
-    path = Path(onnx_path)
-    if not path.is_file():
-        raise XQTBackendError(f"ONNX model file not found: {path}")
-    try:
-        import onnxruntime as ort
-    except ImportError as exc:
-        raise XQTBackendError(
-            "onnxruntime is required to materialize an ONNX Runtime handle"
-        ) from exc
-    return ort.InferenceSession(
-        str(path),
-        providers=list(providers or ["CPUExecutionProvider"]),
-    )
-
-
 __all__ = [
     "ONNXExportResult",
     "compare_onnxruntime_outputs",
-    "create_onnxruntime_session",
     "convert_onnx_to_fp16",
     "export_onnx",
     "onnx_graph_diagnostics_report",

@@ -2,7 +2,7 @@ project:
   name: quant_layer_statistics_workflow
   artifact_dir: artifacts/xqt/analysis/quant_layer_statistics_workflow
 model:
-  target: xqt.operator_opt.toy_models.build_toy_fp4_mlp
+  target: xqt.model.toy_models.build_toy_fp4_mlp
   params:
     hidden_dim: 64
 stages:

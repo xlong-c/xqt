@@ -1,5 +1,7 @@
 """Export helpers for XQT."""
 
+from .base import ExportAdapter, ExportResultBase, FunctionExportAdapter
+
 from .capability import (
     DEFAULT_EXPORT_CAPABILITIES,
     ExportCapability,
@@ -24,7 +26,6 @@ from .mobile import (
 from .onnx_exporter import (
     ONNXExportResult,
     compare_onnxruntime_outputs,
-    create_onnxruntime_session,
     convert_onnx_to_fp16,
     export_onnx,
     onnx_graph_diagnostics_report,
@@ -79,6 +80,9 @@ __all__ = [
     "DEFAULT_EXPORT_CAPABILITIES",
     "CommandExportResult",
     "ExecuTorchExportResult",
+    "ExportAdapter",
+    "ExportResultBase",
+    "FunctionExportAdapter",
     "ExportCapability",
     "ExportReadinessReport",
     "ONNXExportResult",
@@ -114,7 +118,6 @@ __all__ = [
     "assess_export_readiness",
     "compare_openvino_outputs",
     "compare_onnxruntime_outputs",
-    "create_onnxruntime_session",
     "convert_onnx_to_fp16",
     "deployment_capability_matrix",
     "evaluate_tensorrt_performance_thresholds",

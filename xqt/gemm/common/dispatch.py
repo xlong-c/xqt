@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 
@@ -76,8 +76,13 @@ def _reference_entry(
     *,
     weight: torch.Tensor | PackedWeight,
 ) -> GemmKernelRegistration | None:
+    has_sparse_mask = isinstance(weight, PackedWeight) and weight.sparse_mask is not None
     for entry in matches:
         if entry.implementation == "reference" and entry.maturity == "reference_guarded":
+            if entry.kernel_family == "sparse2_4_reference" and not has_sparse_mask:
+                continue
+            if entry.kernel_family != "sparse2_4_reference" and has_sparse_mask:
+                continue
             if entry.kernel_family in {"w4a16_reference", "w8a16_reference"}:
                 if not isinstance(weight, PackedWeight):
                     continue
@@ -160,6 +165,8 @@ def dispatch_gemm(
     residual: torch.Tensor | None = None,
     registry: GemmKernelRegistry | None = None,
     requested_kernel: str | None = None,
+    candidate_kernels: tuple[str, ...] | None = None,
+    executor_kwargs: Mapping[str, Any] | None = None,
     allow_reference: bool = True,
 ) -> GemmDispatchResult:
     """Dispatch one GEMM and return output plus a transparent selection report."""
@@ -168,7 +175,19 @@ def dispatch_gemm(
         raise TypeError("dispatch_gemm requires a complete GemmSpec")
     active_registry = default_registry() if registry is None else registry
     all_matches = active_registry.matching(spec.problem, spec.quant, spec.epilogue)
-    if requested_kernel is not None:
+    if candidate_kernels is not None:
+        matches = tuple(active_registry.get(name) for name in candidate_kernels)
+        unsupported = tuple(
+            entry.name
+            for entry in matches
+            if not entry.supports(spec.problem, spec.quant, spec.epilogue)
+        )
+        if unsupported:
+            raise ValueError(
+                "candidate kernels do not support problem/quant/epilogue: "
+                f"{unsupported}"
+            )
+    elif requested_kernel is not None:
         requested = active_registry.get(requested_kernel)
         if not requested.supports(spec.problem, spec.quant, spec.epilogue):
             raise ValueError(
@@ -227,6 +246,7 @@ def dispatch_gemm(
                 activation_zero_points=activation_zero_points,
                 bias=bias,
                 residual=residual,
+                **dict(executor_kwargs or {}),
             )
             report_entry = candidate
             native = True

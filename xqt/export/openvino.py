@@ -13,10 +13,11 @@ from torch import nn
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
 from xqt.analysis.compare import TensorDiff, compare_tensors
+from xqt.export.base import ExportResultBase
 
 
 @dataclass
-class OpenVINOExportResult:
+class OpenVINOExportResult(ExportResultBase):
     """OpenVINO IR export metadata."""
 
     xml_path: Path
@@ -26,6 +27,10 @@ class OpenVINOExportResult:
     dry_run: bool = False
     source_path: Optional[Path] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (self.xml_path,) if self.bin_path is None else (self.xml_path, self.bin_path)
 
 
 def _import_openvino() -> Any:

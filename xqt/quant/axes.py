@@ -19,6 +19,7 @@ from xqt.core.schema import (
     CANONICAL_QUANT_COMPUTES,
     CANONICAL_QUANT_METHODS,
 )
+from xqt.contracts.quant_strategy import quantization_nature_for_compute
 
 from .strategy import canonical_quant_strategies, strategy_scheme_templates
 from .types import QuantizationNature
@@ -77,9 +78,6 @@ _COMPUTE_NOTES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_TRUE_NATURE_COMPUTES = frozenset({"w8a8_int8_mma", "fp8_mma"})
-
-
 def _registered_quant_methods() -> list[str]:
     """Registered route method names (axis 1 union with config canonical list)."""
 
@@ -136,11 +134,7 @@ def quant_compute_specs() -> list[dict[str, Any]]:
 
     specs: list[dict[str, Any]] = []
     for compute in CANONICAL_QUANT_COMPUTES:
-        nature = (
-            QuantizationNature.TRUE
-            if compute in _TRUE_NATURE_COMPUTES
-            else QuantizationNature.PSEUDO
-        )
+        nature = quantization_nature_for_compute(compute)
         specs.append(
             {
                 "name": compute,

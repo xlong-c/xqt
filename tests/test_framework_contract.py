@@ -451,6 +451,36 @@ def test_run_quant_stage_does_not_require_prepopulated_runtime_quant_config(
     assert output.quant_config.backend == "pytorch"
 
 
+def test_stage_spec_to_config_derives_all_shared_fields() -> None:
+    from xqt.core.schema import QuantConfig
+    from xqt.core.stage_specs import stage_spec_to_config
+
+    spec = QuantStageSpec(
+        backend="pytorch",
+        method="none",
+        strategy="w8a8_int8",
+        compute="w8a8_int8_mma",
+        scheme="w8a8_int8",
+        policy={"engine": "torch_int_mm"},
+        keep_high_precision=["head"],
+    )
+
+    config = stage_spec_to_config(
+        spec,
+        QuantConfig,
+        overrides={"enabled": True},
+    )
+
+    assert config.enabled is True
+    assert config.backend == spec.backend
+    assert config.method == spec.method
+    assert config.strategy == spec.strategy
+    assert config.compute == spec.compute
+    assert config.scheme == spec.scheme
+    assert config.policy == spec.policy
+    assert config.keep_high_precision == spec.keep_high_precision
+
+
 def test_run_prune_stage_updates_runtime_prune_and_task_config() -> None:
     context = _legacy_context(
         model=torch.nn.Linear(4, 2).eval(),

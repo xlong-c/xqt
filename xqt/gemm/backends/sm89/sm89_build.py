@@ -15,7 +15,7 @@ from typing import Sequence
 
 from xqt.core.errors import XQTBackendError
 
-from ..preflight import (
+from xqt.gemm.common.preflight import (
     GemmArtifactManifest,
     build_compile_flags,
     default_cache_dir,
@@ -24,7 +24,7 @@ from ..preflight import (
 
 
 _SEED_SOURCE = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).resolve().parents[3]
     / "operator_opt"
     / "kernels"
     / "cute"
@@ -36,6 +36,7 @@ _W4A16_FUSED_SOURCE = Path(__file__).resolve().with_name("w4a16_cutlass_fused_sm
 _W4A16_GROUPED_SOURCE = Path(__file__).resolve().with_name("w4a16_grouped_sm89.cu")
 _W8A8_GROUPED_SOURCE = Path(__file__).resolve().with_name("w8a8_grouped_sm89.cu")
 _W8A16_SOURCE = _SEED_SOURCE
+_W4A8_SOURCE = Path(__file__).resolve().with_name("w4a8_sm89.cu")
 _FP8_PROBE_SOURCE = Path(__file__).resolve().with_name("fp8_cutlass_probe_sm89.cu")
 _FP8_SOURCE = Path(__file__).resolve().with_name("fp8_cutlass_sm89.cu")
 _FP8_GROUPED_SOURCE = Path(__file__).resolve().with_name("fp8_grouped_sm89.cu")
@@ -140,6 +141,18 @@ class Sm89W8A16BuildConfig:
         "-lcublas",
         "-lcudart",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Sm89W4A8BuildConfig:
+    """Inputs for the SM89 native W4A8 INT8/FP8 group-scale mainloop artifact."""
+
+    source: Path = _W4A8_SOURCE
+    output: Path = field(
+        default_factory=lambda: default_cache_dir() / "sm89" / "w4a8_sm89.so"
+    )
+    target_arch: str = "sm_89"
+    extra_flags: tuple[str, ...] = ("-use_fast_math", "-lineinfo", "-lcudart")
 
 
 @dataclass(frozen=True, slots=True)
@@ -865,6 +878,74 @@ def build_sm89_w8a16_artifact(
     )
     manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))
     return manifest
+
+
+def build_sm89_w4a8_artifact(
+    config: Sm89W4A8BuildConfig | None = None,
+) -> GemmArtifactManifest:
+    """Compile the SM89 W4A8 INT8/FP8 group-scale MMA artifact."""
+
+    resolved = config or Sm89W4A8BuildConfig()
+    report = probe_cuda_cutlass(resolved.target_arch, require_device=False)
+    if not report.ready_for_compile:
+        raise XQTBackendError(
+            "SM89 W4A8 build preflight failed: " + "; ".join(report.reasons)
+        )
+    source = resolved.source.expanduser().resolve()
+    output = resolved.output.expanduser().resolve()
+    if not source.is_file():
+        raise XQTBackendError(f"SM89 W4A8 CUDA source not found: {source}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    flags = build_compile_flags(
+        report,
+        source=source,
+        output=output,
+        extra_flags=resolved.extra_flags,
+    )
+    try:
+        subprocess.run(list(flags), check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise XQTBackendError(f"SM89 W4A8 nvcc build failed: {exc}") from exc
+    if not output.is_file():
+        raise XQTBackendError(f"nvcc completed without producing W4A8 artifact: {output}")
+    manifest = GemmArtifactManifest(
+        kernel_name="sm89_w4a8_cutlass",
+        target_arch=report.target_arch,
+        maturity="metadata_only",
+        source=str(source),
+        artifact=str(output),
+        compile_flags=flags,
+        tile_shape=(16, 8, 32),
+        warp_count=1,
+        stage_count=1,
+        preflight=report,
+        metadata={
+            "build_status": "compiled_pending_correctness_gate",
+            "correctness_verified": False,
+            "kernel_role": "w4a8_native_group_scale_mainloop",
+            "implementation": "custom_cuda_cutlass_mma",
+            "weight_layout": {
+                "qweight": "[N, padded_K/2] uint8 signed-int4 low-nibble-first",
+                "weight_scales": "[N, padded_K/group_size] float32",
+            },
+            "activation_paths": {
+                "int8": "mma.m16n8k32 s8s8s32, per_tensor/per_token dynamic scale",
+                "fp8": "mma.m16n8k32 e4m3/e5m2, per_tensor/per_token/blockwise scale",
+            },
+            "shape_gates": {
+                "m": "multiple of 16",
+                "n": "multiple of 8",
+                "padded_k": "multiple of 32 and group_size",
+                "group_size": "multiple of 32",
+            },
+            "instruction_shape": [16, 8, 32],
+            "tensor_core_mma": True,
+        },
+    )
+    manifest.write_json(output.with_suffix(output.suffix + ".manifest.json"))
+    return manifest
+
+
 __all__ = [
     "Sm89BuildConfig",
     "Sm89DenseBuildConfig",
@@ -872,6 +953,7 @@ __all__ = [
     "Sm89W4A16FusedBuildConfig",
     "Sm89GroupedW4A16BuildConfig",
     "Sm89GroupedW8A8BuildConfig",
+    "Sm89W4A8BuildConfig",
     "Sm89Fp8ProbeBuildConfig",
     "Sm89Fp8BuildConfig",
     "Sm89GroupedFp8BuildConfig",
@@ -882,6 +964,7 @@ __all__ = [
     "build_sm89_w4a16_fused_artifact",
     "build_sm89_grouped_w4a16_artifact",
     "build_sm89_grouped_w8a8_artifact",
+    "build_sm89_w4a8_artifact",
     "build_sm89_fp8_probe_artifact",
     "build_sm89_fp8_artifact",
     "build_sm89_grouped_fp8_artifact",

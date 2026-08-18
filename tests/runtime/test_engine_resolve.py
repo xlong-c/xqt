@@ -5,7 +5,7 @@ import sys
 
 
 def test_resolve_int8_mma_auto_prefers_capability_order() -> None:
-    from xqt.runtime.engine_resolve import (
+    from xqt.contracts.engine_resolve import (
         default_auto_engine_order,
         resolve_int8_mma_engine,
     )
@@ -19,7 +19,7 @@ def test_resolve_int8_mma_auto_prefers_capability_order() -> None:
 
 
 def test_resolve_engine_preferred_is_hint_not_hard_requirement() -> None:
-    from xqt.runtime.engine_resolve import resolve_engine
+    from xqt.contracts.engine_resolve import resolve_engine
 
     # preferred engine that cannot provide int8_mma is skipped
     result = resolve_engine(
@@ -31,7 +31,7 @@ def test_resolve_engine_preferred_is_hint_not_hard_requirement() -> None:
 
 
 def test_resolve_engine_fp4_mma_prefers_supported_engine() -> None:
-    from xqt.runtime.engine_resolve import resolve_engine
+    from xqt.contracts.engine_resolve import resolve_engine
 
     result = resolve_engine(
         required_capabilities=["fp4_mma"],

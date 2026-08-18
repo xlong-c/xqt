@@ -24,7 +24,7 @@ from xqt.model import (
     visual_token_compression_metadata,
 )
 import torch
-from xqt.operator_opt.toy_models import (
+from xqt.model.toy_models import (
     ToyAttentionClassifier,
     ToyConvBlock,
     ToyTransformerClassifier,

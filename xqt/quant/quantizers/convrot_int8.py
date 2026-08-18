@@ -30,7 +30,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -50,6 +50,10 @@ from .convrot_4bit import (
     build_regular_hadamard_matrix,
 )
 from .int8_mma import Int8MmaLinear
+from .base import (
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 
 @dataclass
@@ -101,6 +105,8 @@ class ConvRotInt8Linear(nn.Module):
         comfy_quant_marker: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        self._xqt_runtime_execution_enabled = True
+        self._xqt_convrot_storage_kind = "int8"
         self.input_features = int(input_features)
         self.output_features = int(output_features)
         self.padded_input_features = int(
@@ -461,6 +467,11 @@ class ConvRotInt8Linear(nn.Module):
     def _can_use_tilelang_hadamard_static_quant(
         self, flat_inputs: torch.Tensor
     ) -> bool:
+        if not all(
+            hasattr(self.int8_compute, name)
+            for name in ("_can_use_cuda_sm89", "_run_cuda_sm89", "_run_triton")
+        ):
+            return False
         if self.input_already_rotated:
             return False
         min_rows = self.int8_compute.min_int8_rows
@@ -1058,6 +1069,9 @@ class ConvRotInt8Linear(nn.Module):
             raise ValueError(
                 "ConvRotInt8Linear input trailing dimension does not match input_features"
             )
+        if not self._xqt_runtime_execution_enabled:
+            rotated = self._rotate_inputs(inputs)
+            return self.int8_compute(rotated)
         min_rows = self.int8_compute.min_int8_rows
         rows = int(inputs.numel() // self.input_features)
         if 0 < min_rows and rows < min_rows:
@@ -1472,36 +1486,6 @@ def _quantize_int8_per_row(
     return best_q.to(torch.int8), best_scale.reshape(-1)
 
 
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
-
-
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
-
-
 def _select_convrot_candidate_names(
     model: nn.Module,
     *,
@@ -1723,6 +1707,7 @@ def quantize_with_convrot_int8(
                 mse_clip=use_mse,
                 mse_clip_grid=grid,
             )
+            replacement.linear._xqt_runtime_execution_enabled = False
             replacement.train(norm_module.training)
             _replace_submodule(target_model, norm_path, replacement)
             _replace_submodule(target_model, name, nn.Identity())
@@ -1740,6 +1725,7 @@ def quantize_with_convrot_int8(
                 mse_clip=use_mse,
                 mse_clip_grid=grid,
             )
+            replacement._xqt_runtime_execution_enabled = False
             replacement.train(module.training)
             if name:
                 _replace_submodule(target_model, name, replacement)
@@ -1892,55 +1878,19 @@ def execute_convrot_int8_component(
     updated_model = replace_component_model(
         root_model, component.target_path, result.model
     )
-    high_precision_modules = prefix_module_names(
-        component.keep_high_precision,
-        component.target_path,
-    )
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(
-        result.quantized_modules, component.target_path
-    )
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(
+    report = build_component_quantization_report(
         context,
         component,
-    )
-    report = QuantizationReport(
-        component_name=component.name,
         backend=component.backend,
-        runtime="pytorch",
         method=component.method or "convrot",
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.TRUE,
         algorithm_executable=True,
         method_semantics="groupwise_regular_hadamard_rotation_w8a8_int8_mma",
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
-            "execution_state": "convrot_int8",
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "executed": True,
-            "algorithm_executable": True,
-        },
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="convrot_int8",
     )
     return updated_model, report
 

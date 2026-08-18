@@ -13,10 +13,10 @@ import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
 
-from ..contracts import GemmSpec, PackedWeight
-from ..preflight import artifact_manifest_path, artifact_ready_for_execution
-from ..registry import GemmCapability, GemmKernelRegistration, GemmKernelRegistry
-from ..fp8 import fp8_block_count, fp8_format_spec, validate_fp8_block_k
+from xqt.gemm.common.contracts import GemmSpec, PackedWeight
+from xqt.gemm.common.preflight import artifact_manifest_path, artifact_ready_for_execution
+from xqt.gemm.common.registry import GemmCapability, GemmKernelRegistration, GemmKernelRegistry
+from xqt.gemm.common.fp8 import fp8_block_count, fp8_format_spec, validate_fp8_block_k
 
 
 _SYMBOLS = {

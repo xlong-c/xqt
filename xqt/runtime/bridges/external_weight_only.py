@@ -24,8 +24,8 @@ from xqt.contracts.layout_kernel_report import (
     layout_report_from_module_shapes,
 )
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.external import resolve_external_quantization
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.contracts.external import resolve_external_quantization
+from xqt.contracts.weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.external_materialize import (
     create_weight_plans,
     materialize_plans,
@@ -253,11 +253,11 @@ def load_external_quantized_model(
         scale_time="weight_offline",
         activation_granularity=None,
     )
+    from xqt.contracts.quant_scheme import QuantScheme
     from xqt.contracts.runtime_quant import (
         build_runtime_quant_contract,
         first_linear_shapes,
     )
-    from xqt.quant.types import QuantScheme
 
     global_shape, local_shape = first_linear_shapes(base_model)
     weight_dtype = "int4" if resolved_bits == 4 else "int8"

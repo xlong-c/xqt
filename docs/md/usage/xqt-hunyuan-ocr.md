@@ -35,7 +35,7 @@
 `example_inputs` 必须是一次可直接调用 HunyuanOCR `model.forward` 的真实输入. helper 优先用它 warmup; 未提供时可使用 `calibration_inputs[0]`. 这是 block materialization 的必需条件, 因为 XQT 不会猜测远程代码的图像和 prompt 输入结构.
 
 ```python
-from xqt.model.hunyuan_ocr import (
+from examples.xqt_models.hunyuan_ocr import (
     load_hunyuan_ocr,
     optimize_hunyuan_ocr_svd_int4_blocks,
 )
@@ -139,7 +139,7 @@ reshape 契约:
 `tencent/HunyuanOCR/tree/main/dflash` 中的模型包可通过专用入口加载. 该入口将 Hugging Face `subfolder` 明确设为 `dflash`, 不复制或推断目录内的模型代码:
 
 ```python
-from xqt.model.hunyuan_ocr import (
+from examples.xqt_models.hunyuan_ocr import (
     load_hunyuan_ocr_dflash,
     optimize_hunyuan_ocr_dflash_svd_int4_blocks,
 )
@@ -199,12 +199,12 @@ result = optimize_hunyuan_ocr_dflash_svd_int4_blocks(
 
 | 主题 | 路径 |
 | --- | --- |
-| Hunyuan helper | `xqt/model/hunyuan_ocr.py` |
+| Hunyuan helper | `examples/xqt_models/hunyuan_ocr.py` |
 | SVD quant method | `xqt/quant/quantizers/svd.py` |
 | Runtime dual-branch modules | `xqt/runtime/modules/svd_w4a4_legacy.py` |
 | Residual INT8 module | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
 | torch.compile backend | `xqt/operator_opt/compile_backend.py` |
-| TileLang Hunyuan decode pipeline | `xqt/model/hunyuan_ocr_tilelang.py` |
+| TileLang Hunyuan decode pipeline | `examples/xqt_models/hunyuan_ocr_tilelang.py` |
 | TileLang Hunyuan kernels | `xqt/operator_opt/kernels/tilelang/hunyuan_block.py` |
 
 ## 验证

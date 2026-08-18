@@ -1,29 +1,41 @@
 """Experimental model compression and deployment toolkit."""
 
+from __future__ import annotations
+
 import importlib
 from typing import Any
 
-from .workflows import (
-    OptimizedModelResult,
-    OptimizationConfig,
-    OptimizationStageConfig,
-    OptimizationStageResult,
-    StageAcceptanceConfig,
-    XQTOptimizationSession,
-    load_optimization_config,
-    optimize_model,
-)
-from .core.artifact import ArtifactManifest, ArtifactRecord, MetricRecord
-from .readiness import (
-    XQTReadinessReport,
-    XQTReadinessScenario,
-    assess_xqt_readiness,
-)
-from .xdl_adapter import (
-    load_checkpoint_into_model,
-    xdl_checkpoint_to_xqt_context,
-    xdl_setup_to_xqt_context,
-)
+
+_LAZY_EXPORTS = {
+    "ArtifactManifest": (".core.artifact", "ArtifactManifest"),
+    "ArtifactRecord": (".core.artifact", "ArtifactRecord"),
+    "MetricRecord": (".core.artifact", "MetricRecord"),
+    "OptimizedModelResult": (".workflows", "OptimizedModelResult"),
+    "OptimizationConfig": (".workflows", "OptimizationConfig"),
+    "OptimizationStageConfig": (".workflows", "OptimizationStageConfig"),
+    "OptimizationStageResult": (".workflows", "OptimizationStageResult"),
+    "StageAcceptanceConfig": (".workflows", "StageAcceptanceConfig"),
+    "XQTOptimizationSession": (".workflows", "XQTOptimizationSession"),
+    "XQTReadinessReport": (".readiness", "XQTReadinessReport"),
+    "XQTReadinessScenario": (".readiness", "XQTReadinessScenario"),
+    "assess_xqt_readiness": (".readiness", "assess_xqt_readiness"),
+    "load_checkpoint_into_model": (".xdl_adapter", "load_checkpoint_into_model"),
+    "load_optimization_config": (".workflows", "load_optimization_config"),
+    "optimize_model": (".workflows", "optimize_model"),
+    "xdl_checkpoint_to_xqt_context": (
+        ".xdl_adapter",
+        "xdl_checkpoint_to_xqt_context",
+    ),
+    "xdl_setup_to_xqt_context": (".xdl_adapter", "xdl_setup_to_xqt_context"),
+    "convert": (".conversion", "convert"),
+    "ConvertResult": (".conversion", "ConvertResult"),
+    "FeedForwardPrecisionPolicy": (
+        ".conversion",
+        "FeedForwardPrecisionPolicy",
+    ),
+    "MatmulPrecisionSpec": (".conversion", "MatmulPrecisionSpec"),
+    "PrecisionPolicy": (".conversion", "PrecisionPolicy"),
+}
 
 __all__ = [
     "XQTOptimizationSession",
@@ -47,19 +59,18 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name == "convert":
-        from .conversion import convert
-
-        return convert
-    if name in {
-        "ConvertResult",
-        "FeedForwardPrecisionPolicy",
-        "MatmulPrecisionSpec",
-        "PrecisionPolicy",
-    }:
-        from . import conversion
-
-        return getattr(conversion, name)
     if name == "nn":
-        return importlib.import_module(".nn", __name__)
-    raise AttributeError(f"module 'xqt' has no attribute {name!r}")
+        module = importlib.import_module(".nn", __name__)
+        globals()[name] = module
+        return module
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'xqt' has no attribute {name!r}")
+    module_name, attribute = target
+    value = getattr(importlib.import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_LAZY_EXPORTS, "nn"})

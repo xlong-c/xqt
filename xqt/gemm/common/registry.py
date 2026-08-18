@@ -57,8 +57,20 @@ class GemmCapability:
     def to_dict(self) -> dict[str, Any]:
         """Return capability as dict for registry serialization."""
 
+        return {
+            "architectures": list(self.architectures),
+            "weight_dtypes": list(self.weight_dtypes),
+            "activation_dtypes": list(self.activation_dtypes),
+            "scale_modes": list(self.scale_modes),
+            "phases": list(self.phases),
+            "epilogues": list(self.epilogues),
+            "min_sm": self.min_sm,
+        }
+
 
 GemmExecutor = Callable[..., Any]
+GemmPrecisionScore = Callable[[GemmProblem, frozenset[str], str], int | None]
+GemmPrecisionCaveats = Callable[[GemmProblem, frozenset[str]], tuple[str, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +94,16 @@ class GemmKernelRegistration:
     alignment: tuple[int, int, int] = (1, 1, 1)
     priority: int = 0
     implementation: str = "reference"
+    scope: str = "contract"
+    precision_mmas: tuple[str, ...] = ()
+    precision_score: GemmPrecisionScore | None = field(
+        default=None, compare=False, repr=False
+    )
+    precision_caveats: GemmPrecisionCaveats | None = field(
+        default=None, compare=False, repr=False
+    )
+    selection_reason: str = ""
+    dispatchable_by_precision: bool = False
     executor: GemmExecutor | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -99,6 +121,10 @@ class GemmKernelRegistration:
             raise ValueError("tile_shape values must be positive")
         if self.maturity == "executable" and self.executor is None:
             raise ValueError("executable GEMM registration requires an executor")
+        if self.scope not in {"contract", "precision"}:
+            raise ValueError("GEMM registration scope must be contract or precision")
+        if self.scope == "precision" and not self.precision_mmas:
+            raise ValueError("precision GEMM registration requires precision_mmas")
 
     @property
     def executable(self) -> bool:
@@ -122,6 +148,9 @@ class GemmKernelRegistration:
             "alignment": list(self.alignment),
             "priority": self.priority,
             "implementation": self.implementation,
+            "scope": self.scope,
+            "precision_mmas": list(self.precision_mmas),
+            "dispatchable_by_precision": self.dispatchable_by_precision,
             "executable": self.executable,
             "capability": self.capability.to_dict(),
         }
@@ -169,12 +198,37 @@ class GemmKernelRegistry:
                 (
                     entry
                     for entry in self._entries.values()
-                    if entry.supports(problem, quant, epilogue)
+                    if entry.scope == "contract"
+                    and entry.supports(problem, quant, epilogue)
                 ),
                 key=lambda entry: entry.priority,
                 reverse=True,
             )
         )
+
+    def matching_precision(
+        self,
+        *,
+        mma: str,
+        problem: GemmProblem,
+        fused_ops: frozenset[str],
+        goal: str,
+    ) -> tuple[GemmKernelRegistration, ...]:
+        """Return precision-dispatch entries in declaration-driven rank order."""
+
+        ranked: list[tuple[int, GemmKernelRegistration]] = []
+        for entry in self._entries.values():
+            if entry.scope != "precision" or mma not in entry.precision_mmas:
+                continue
+            score = (
+                entry.priority
+                if entry.precision_score is None
+                else entry.precision_score(problem, fused_ops, goal)
+            )
+            if score is not None:
+                ranked.append((score, entry))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return tuple(entry for _, entry in ranked)
 
     def to_dict(self) -> list[dict[str, Any]]:
         return [entry.to_dict() for entry in self.entries()]
@@ -196,6 +250,277 @@ def _reference_capability(
         phases=phases,
         epilogues=epilogues,
     )
+
+
+def _precision_executor(engine: str) -> GemmExecutor:
+    def execute(
+        activation: Any,
+        weight: Any,
+        *,
+        bias: Any = None,
+        precision_policy: Any,
+        activation_name: str | None,
+        transpose_b: bool,
+        runtime_kwargs: dict[str, Any],
+        pattern: str | None,
+        **_: Any,
+    ) -> Any:
+        from xqt.operator_opt.backends.gemm_precision import (
+            _execute_registered_gemm_engine,
+        )
+
+        return _execute_registered_gemm_engine(
+            engine,
+            activation,
+            weight,
+            bias,
+            precision_policy,
+            activation_name,
+            transpose_b,
+            runtime_kwargs,
+            pattern=pattern,
+        )
+
+    return execute
+
+
+def _cuda_score(score: int) -> GemmPrecisionScore:
+    def resolve(
+        problem: GemmProblem, fused_ops: frozenset[str], goal: str
+    ) -> int | None:
+        del fused_ops, goal
+        return score if problem.device.startswith("cuda") else None
+
+    return resolve
+
+
+def _cpu_score(score: int) -> GemmPrecisionScore:
+    def resolve(
+        problem: GemmProblem, fused_ops: frozenset[str], goal: str
+    ) -> int | None:
+        del fused_ops, goal
+        return score if not problem.device.startswith("cuda") else None
+
+    return resolve
+
+
+def _int8_tilelang_score(
+    problem: GemmProblem, fused_ops: frozenset[str], goal: str
+) -> int | None:
+    del goal
+    if not problem.device.startswith("cuda"):
+        return None
+    aligned = all(dimension % 64 == 0 for dimension in problem.shape)
+    return 120 if aligned and "activation_quant" not in fused_ops else 80
+
+
+def _int8_tilelang_caveats(
+    problem: GemmProblem, fused_ops: frozenset[str]
+) -> tuple[str, ...]:
+    aligned = all(dimension % 64 == 0 for dimension in problem.shape)
+    if aligned and "activation_quant" not in fused_ops:
+        return ()
+    return (
+        "requires pre-quantized int8 inputs and M/N/K aligned to 64",
+    )
+
+
+def _tilelang_dense_caveats(
+    problem: GemmProblem, fused_ops: frozenset[str]
+) -> tuple[str, ...]:
+    del fused_ops
+    if problem.k % 64 == 0:
+        return ()
+    return ("default TileLang dense schedule requires K aligned to 64",)
+
+
+def _fp4_torch_score(
+    problem: GemmProblem, fused_ops: frozenset[str], goal: str
+) -> int | None:
+    del fused_ops
+    return 20 if problem.device.startswith("cuda") and goal == "accuracy" else None
+
+
+def _precision_capability(weight_dtypes: tuple[str, ...]) -> GemmCapability:
+    return GemmCapability(
+        architectures=("any",),
+        weight_dtypes=weight_dtypes,
+        activation_dtypes=(
+            "fp32",
+            "fp16",
+            "bf16",
+            "int8",
+            "fp8_e4m3",
+            "fp8_e5m2",
+        ),
+        scale_modes=("any",),
+        phases=("any",),
+        epilogues=("any",),
+    )
+
+
+def _precision_registrations() -> list[GemmKernelRegistration]:
+    dense = ("fp16", "bf16")
+    triton_quant = ("int8", "int4", "fp8", "mxfp8", "mxfp6", "mxfp4")
+    packed = ("fp4", "nvfp4")
+    return [
+        GemmKernelRegistration(
+            name="precision_triton_dense",
+            backend="triton",
+            maturity="executable",
+            capability=_precision_capability(("fp32", *dense)),
+            kernel_family="operator_precision_dense",
+            priority=100,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=dense,
+            precision_score=_cuda_score(100),
+            selection_reason="{mma} dense GEMM uses the registered Triton path",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("triton"),
+        ),
+        GemmKernelRegistration(
+            name="precision_tilelang_dense",
+            backend="tilelang",
+            maturity="executable",
+            capability=_precision_capability(("fp32", *dense)),
+            kernel_family="operator_precision_dense",
+            priority=90,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=dense,
+            precision_score=_cuda_score(90),
+            precision_caveats=_tilelang_dense_caveats,
+            selection_reason="registered TileLang dense GEMM alternative",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("tilelang"),
+        ),
+        GemmKernelRegistration(
+            name="precision_torch_dense_cpu",
+            backend="torch",
+            maturity="executable",
+            capability=_precision_capability(("fp32", *dense, *triton_quant)),
+            kernel_family="operator_precision_reference",
+            priority=100,
+            implementation="torch_reference",
+            scope="precision",
+            precision_mmas=("fp32", *dense, *triton_quant),
+            precision_score=_cpu_score(100),
+            selection_reason="non-CUDA device uses the registered torch reference",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("torch"),
+        ),
+        GemmKernelRegistration(
+            name="precision_triton_quantized",
+            backend="triton",
+            maturity="executable",
+            capability=_precision_capability(
+                ("int8", "int4", "fp8_e4m3", "mxfp8", "mxfp6", "mxfp4")
+            ),
+            kernel_family="operator_precision_quantized",
+            priority=100,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=triton_quant,
+            precision_score=_cuda_score(100),
+            selection_reason="{mma} uses the registered Triton guarded path",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("triton"),
+        ),
+        GemmKernelRegistration(
+            name="precision_tilelang_int8",
+            backend="tilelang",
+            maturity="executable",
+            capability=_precision_capability(("int8",)),
+            kernel_family="operator_precision_w8a8",
+            priority=80,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=("int8",),
+            precision_score=_int8_tilelang_score,
+            precision_caveats=_int8_tilelang_caveats,
+            selection_reason="registered TileLang true-W8A8 path",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("tilelang"),
+        ),
+        GemmKernelRegistration(
+            name="precision_ptx_sm89_int8",
+            backend="ptx_sm89",
+            maturity="planned",
+            capability=_precision_capability(("int8",)),
+            kernel_family="operator_precision_w8a8",
+            priority=110,
+            implementation="stateful_prepack_required",
+            scope="precision",
+            precision_mmas=("int8",),
+            precision_score=_cuda_score(110),
+            selection_reason=(
+                "SM89 PTX W8A8 exists as a stateful prepacked runtime path but "
+                "is not callable from the stateless precision wrapper"
+            ),
+            dispatchable_by_precision=False,
+        ),
+        GemmKernelRegistration(
+            name="precision_tilelang_packed_fp4",
+            backend="tilelang",
+            maturity="executable",
+            capability=_precision_capability(packed),
+            kernel_family="operator_precision_packed_fp4",
+            priority=120,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=packed,
+            precision_score=lambda problem, fused_ops, goal: 120,
+            selection_reason="{mma} goal={goal} uses registered TileLang fused dequant GEMM",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("tilelang"),
+        ),
+        GemmKernelRegistration(
+            name="precision_tilelang_mxfp4_explicit",
+            backend="tilelang",
+            maturity="executable",
+            capability=_precision_capability(("mxfp4",)),
+            kernel_family="operator_precision_packed_fp4",
+            priority=70,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=("mxfp4",),
+            precision_score=lambda problem, fused_ops, goal: None,
+            selection_reason="explicit TileLang MXFP4 packed dequant GEMM",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("tilelang"),
+        ),
+        GemmKernelRegistration(
+            name="precision_tilelang_int4_explicit",
+            backend="tilelang",
+            maturity="executable",
+            capability=_precision_capability(("int4",)),
+            kernel_family="operator_precision_packed_int4",
+            priority=70,
+            implementation="operator_opt_registered",
+            scope="precision",
+            precision_mmas=("int4",),
+            precision_score=lambda problem, fused_ops, goal: None,
+            selection_reason="explicit TileLang INT4 Marlin-style GEMM",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("tilelang"),
+        ),
+        GemmKernelRegistration(
+            name="precision_torch_fp4_accuracy",
+            backend="torch",
+            maturity="executable",
+            capability=_precision_capability(packed),
+            kernel_family="operator_precision_reference",
+            priority=20,
+            implementation="torch_reference",
+            scope="precision",
+            precision_mmas=packed,
+            precision_score=_fp4_torch_score,
+            selection_reason="{mma} goal=accuracy exposes the torch numeric reference",
+            dispatchable_by_precision=True,
+            executor=_precision_executor("torch"),
+        ),
+    ]
 
 
 def default_registry() -> GemmKernelRegistry:
@@ -300,11 +625,55 @@ def default_registry() -> GemmKernelRegistry:
             implementation="cutlass_artifact_pending",
         ),
         GemmKernelRegistration(
+            name="sm90_dense_fp16_wgmma",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_90",),
+                weight_dtypes=("fp16",),
+                activation_dtypes=("fp16",),
+                scale_modes=dense_modes,
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=90,
+            ),
+            kernel_family="dense_fp16_wgmma",
+            layout="sm90_dense_row_col_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(8, 8, 8),
+            priority=90,
+            implementation="cutlass_sm90_wgmma_collective_builder_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm90_dense_bf16_wgmma",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_90",),
+                weight_dtypes=("bf16",),
+                activation_dtypes=("bf16",),
+                scale_modes=dense_modes,
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=90,
+            ),
+            kernel_family="dense_bf16_wgmma",
+            layout="sm90_dense_row_col_v1",
+            tile_shape=(128, 128, 64),
+            warp_count=4,
+            stage_count=4,
+            alignment=(8, 8, 8),
+            priority=90,
+            implementation="cutlass_sm90_wgmma_collective_builder_pending",
+        ),
+        GemmKernelRegistration(
             name="quantized_dequant_reference",
             backend="torch",
             maturity="reference_guarded",
             capability=_reference_capability(
-                weight_dtypes=("int4", "int8", "fp8_e4m3", "fp8_e5m2"),
+                weight_dtypes=("int4", "int8", "int3", "int2", "fp8_e4m3", "fp8_e5m2"),
                 activation_dtypes=(
                     "fp16",
                     "bf16",
@@ -317,6 +686,23 @@ def default_registry() -> GemmKernelRegistry:
             ),
             kernel_family="quantized_dequant",
             priority=5,
+        ),
+        GemmKernelRegistration(
+            name="fp8_blockwise_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("fp8_e4m3", "fp8_e5m2"),
+                activation_dtypes=("fp8_e4m3", "fp8_e5m2"),
+                scale_modes=(
+                    "w:blockwise/a:blockwise",
+                    "w:blockwise/a:per_token",
+                ),
+            ),
+            kernel_family="fp8_blockwise_reference",
+            layout="xqt_fp8_rowmajor_v1",
+            priority=6,
+            implementation="reference",
         ),
         GemmKernelRegistration(
             name="w4a16_packed_reference",
@@ -420,10 +806,10 @@ def default_registry() -> GemmKernelRegistry:
             ),
             kernel_family="fp8_wgmma",
             layout="xqt_fp8_rowmajor_v1",
-            tile_shape=(128, 128, 64),
+            tile_shape=(128, 128, 128),
             warp_count=4,
             stage_count=4,
-            alignment=(64, 128, 32),
+            alignment=(16, 16, 32),
             priority=100,
             implementation="cutlass_sm90_wgmma_tma_pending",
         ),
@@ -443,10 +829,10 @@ def default_registry() -> GemmKernelRegistry:
             ),
             kernel_family="fp8_wgmma",
             layout="xqt_fp8_rowmajor_v1",
-            tile_shape=(128, 128, 64),
+            tile_shape=(128, 128, 128),
             warp_count=4,
             stage_count=4,
-            alignment=(64, 128, 32),
+            alignment=(16, 16, 32),
             priority=100,
             implementation="cutlass_sm90_wgmma_tma_pending",
         ),
@@ -695,6 +1081,75 @@ def default_registry() -> GemmKernelRegistry:
             implementation="cutlass_sm89_w4a8_fp8_artifact_pending",
         ),
         GemmKernelRegistration(
+            name="w3a16_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("int3",),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=(
+                    "w:groupwise/a:per_tensor",
+                    "w:per_channel/a:per_tensor",
+                ),
+            ),
+            kernel_family="w3a16_reference",
+            layout="xqt_int3_nk_v1",
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="w2a16_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("int2",),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=(
+                    "w:groupwise/a:per_tensor",
+                    "w:per_channel/a:per_tensor",
+                ),
+            ),
+            kernel_family="w2a16_reference",
+            layout="xqt_int2_nk_v1",
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="sparse2_4_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("fp16", "bf16", "int8"),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=(
+                    "w:per_tensor/a:per_tensor",
+                    "w:per_channel/a:per_tensor",
+                    "w:groupwise/a:per_tensor",
+                ),
+            ),
+            kernel_family="sparse2_4_reference",
+            layout="xqt_sparse2_4_v1",
+            priority=3,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
+            name="vector_codebook_reference",
+            backend="torch",
+            maturity="reference_guarded",
+            capability=_reference_capability(
+                weight_dtypes=("codebook",),
+                activation_dtypes=("fp16", "bf16"),
+                scale_modes=(
+                    "w:groupwise/a:per_tensor",
+                    "w:per_channel/a:per_tensor",
+                ),
+            ),
+            kernel_family="vector_codebook_reference",
+            layout="xqt_codebook_v1",
+            priority=8,
+            implementation="reference",
+        ),
+        GemmKernelRegistration(
             name="fp4_e2m1_reference",
             backend="torch",
             maturity="reference_guarded",
@@ -821,10 +1276,10 @@ def default_registry() -> GemmKernelRegistry:
             ),
             kernel_family="fp8_grouped_wgmma",
             layout="xqt_fp8_rowmajor_v1",
-            tile_shape=(128, 128, 64),
+            tile_shape=(128, 128, 128),
             warp_count=4,
             stage_count=4,
-            alignment=(64, 128, 32),
+            alignment=(16, 16, 32),
             priority=105,
             implementation="cutlass_sm90_grouped_wgmma_tma_pending",
         ),
@@ -847,12 +1302,78 @@ def default_registry() -> GemmKernelRegistry:
             ),
             kernel_family="fp8_grouped_wgmma",
             layout="xqt_fp8_rowmajor_v1",
-            tile_shape=(128, 128, 64),
+            tile_shape=(128, 128, 128),
             warp_count=4,
             stage_count=4,
-            alignment=(64, 128, 32),
+            alignment=(16, 16, 32),
             priority=105,
             implementation="cutlass_sm90_grouped_wgmma_tma_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm120_fp8_e4m3_tcgen05",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_120",),
+                weight_dtypes=("fp8_e4m3",),
+                activation_dtypes=("fp8_e4m3",),
+                scale_modes=("w:blockwise/a:blockwise",),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=120,
+            ),
+            kernel_family="fp8_tcgen05_blockwise",
+            layout="xqt_fp8_sm120_blockwise_1x128x128_v1",
+            tile_shape=(128, 128, 128),
+            warp_count=4,
+            stage_count=2,
+            alignment=(16, 16, 32),
+            priority=115,
+            implementation="cutlass_sm120_fp8_blockwise_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm120_fp8_e5m2_tcgen05",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_120",),
+                weight_dtypes=("fp8_e5m2",),
+                activation_dtypes=("fp8_e5m2",),
+                scale_modes=("w:blockwise/a:blockwise",),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=120,
+            ),
+            kernel_family="fp8_tcgen05_blockwise",
+            layout="xqt_fp8_sm120_blockwise_1x128x128_v1",
+            tile_shape=(128, 128, 128),
+            warp_count=4,
+            stage_count=2,
+            alignment=(16, 16, 32),
+            priority=115,
+            implementation="cutlass_sm120_fp8_blockwise_pending",
+        ),
+        GemmKernelRegistration(
+            name="sm120_nvfp4_tcgen05",
+            backend="cutlass",
+            maturity="metadata_only",
+            capability=GemmCapability(
+                architectures=("sm_120",),
+                weight_dtypes=("nvfp4",),
+                activation_dtypes=("fp16",),
+                scale_modes=("w:groupwise/a:per_tensor",),
+                phases=("generic", "prefill", "decode"),
+                epilogues=("any",),
+                min_sm=120,
+            ),
+            kernel_family="nvfp4_tcgen05",
+            layout="xqt_nvfp4_sm120_sfvec16_v1",
+            tile_shape=(128, 128, 128),
+            warp_count=4,
+            stage_count=4,
+            alignment=(32, 32, 8),
+            priority=115,
+            implementation="cutlass_sm120_nvfp4_k128_k256_pending",
         ),
         GemmKernelRegistration(
             name="svd_dual_path_reference",
@@ -873,12 +1394,15 @@ def default_registry() -> GemmKernelRegistry:
             implementation="reference",
         ),
     ]
+    entries.extend(_precision_registrations())
     return GemmKernelRegistry(entries)
 
 
 __all__ = [
     "GemmCapability",
     "GemmExecutor",
+    "GemmPrecisionCaveats",
+    "GemmPrecisionScore",
     "GemmKernelRegistration",
     "GemmKernelRegistry",
     "default_registry",

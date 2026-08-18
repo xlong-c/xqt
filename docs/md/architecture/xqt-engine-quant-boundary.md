@@ -85,6 +85,7 @@ Infer 只消费: 已量化模型 + 可选计算配置; 不回流量化, 不强�
 ### 4.1 负责
 
 - 标定, 打包, 模块替换, quant report / lineage.
+- 产出 `xqt.contracts` storage shell;其 `forward()` 只定义 artifact reference 语义. backend-specific execution view 由 `xqt.runtime.modules.*.from_storage()` 显式 materialize.
 - 可选写出 `compute_config` (精度 + `required_capabilities` + 可选 `preferred_engines` hint).
 - 算法身份 (`method`) 留在 quant 报告; **不是** Infer 构造必选.
 - 写 `W?A?` 时必须分开说明量化时 storage, forward 时 activation encoding, 实际 compute path 和 fallback 条件. `compute_contract` / `nature` 是声明, 不得替代 per-forward execution metadata.
@@ -93,6 +94,7 @@ Infer 只消费: 已量化模型 + 可选计算配置; 不回流量化, 不强�
 
 - 不选择 operator engine 作为硬约束主键 (`required_engine` 禁止).
 - 不实现 triton/tilelang kernel materialize (那是 operator / convert).
+- 不 import `xqt.runtime`,也不让 quantizer 返回 runtime execution view.
 - 不做训练 / QAT / dataset / task eval.
 
 ### 4.3 推荐 recipe 形态
@@ -131,7 +133,7 @@ stages:
 
 - 算子 pattern 实现, 融合, materialize, MMA / dequant-gemm 等 **计算路径**.
 - capability 矩阵: `list_operator_engine_capabilities()`.
-- 按 `required_capabilities` (+ 可选 preferred hint) **resolve** engine (`xqt/runtime/engine_resolve.py`).
+- 按 `required_capabilities` (+ 可选 preferred hint) **resolve** engine (`xqt/contracts/engine_resolve.py`).
 
 ### 5.2 不负责
 
@@ -184,7 +186,7 @@ Infer 行为:  resolve(required_capabilities) -> execute
 | quant 执行分发 | `xqt/quant/execution/executor.py` |
 | quant methods 实现 | `xqt/quant/quantizers/` |
 | operator engine 矩阵 | `xqt/operator_opt/capability.py` |
-| engine resolve | `xqt/runtime/engine_resolve.py` |
+| engine resolve | `xqt/contracts/engine_resolve.py` |
 | compute_config | `xqt/contracts/compute.py` |
 | Infer handoff | `xqt/contracts/quantized.py` `infer_handoff` |
 | Hybrid runtime | `xqt/runtime/engine.py` |

@@ -38,8 +38,8 @@ def test_sm90_and_sm120_build_configs_are_architecture_specific() -> None:
 
 def test_target_manifests_declare_stream_aware_runtime_abi() -> None:
     root = Path(__file__).resolve().parents[3]
-    sm90_source = (root / "xqt/gemm/backends/sm90_fp8_wgmma.py").read_text()
-    sm120_source = (root / "xqt/gemm/backends/sm120.py").read_text()
+    sm90_source = (root / "xqt/gemm/backends/sm90/sm90_fp8_wgmma.py").read_text()
+    sm120_source = (root / "xqt/gemm/backends/sm120/sm120.py").read_text()
 
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm90_source
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm120_source
@@ -193,8 +193,8 @@ def test_sm120_nvfp4_metadata_candidate_is_architecture_isolated() -> None:
 
 def test_arch_sources_keep_runtime_probe_abi_explicit() -> None:
     root = Path(__file__).resolve().parents[3]
-    sm90_source = (root / "xqt/gemm/backends/sm90_fp8_wgmma.cu").read_text()
-    sm120_source = (root / "xqt/gemm/backends/sm120_gemm.cu").read_text()
+    sm90_source = (root / "xqt/gemm/backends/sm90/sm90_fp8_wgmma.cu").read_text()
+    sm120_source = (root / "xqt/gemm/backends/sm120/sm120_gemm.cu").read_text()
 
     assert "Gemm::get_workspace_size(arguments)" in sm90_source
     assert "gemm.can_implement(arguments)" in sm90_source

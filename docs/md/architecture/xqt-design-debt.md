@@ -108,7 +108,7 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 
 ### 全量落地 (2026-08-03)
 
-- 词表合一: 实现侧 `engine_registry_names()` (`xqt/runtime/engine_resolve.py`), 配置面 `OPERATOR_OPT_ENGINES` (`xqt/core/schema.py`), convert materialize 子集 `CONVERT_ENGINE_NAMES` (`torch` / `triton` / `tilelang` / `cutile` / `cute_dsl`); `xqt.convert` 对非子集 engine 显式报错.
+- 词表合一: 实现侧 `engine_registry_names()` (`xqt/contracts/engine_resolve.py`), 配置面 `OPERATOR_OPT_ENGINES` (`xqt/core/schema.py`), convert materialize 子集 `CONVERT_ENGINE_NAMES` (`torch` / `triton` / `tilelang` / `cutile` / `cute_dsl`); `xqt.convert` 对非子集 engine 显式报错.
 - 回归测试 `tests/xqt/quant/test_quant_axes.py::test_engine_vocabulary_fact_sources_are_aligned` 断言三份词表不漂移; `test_convert_engine_preference_uses_canonical_subset` 锁定 convert 子集.
 - 文档: `xqt/FRAMEWORK.md` Backend / Engine 术语注明词表事实源.
 
@@ -342,7 +342,7 @@ InferRuntime:
 | --- | --- |
 | Infer 交接面方案 | `docs/md/architecture/xqt-infer-handoff.md` |
 | `ComputeConfig` / contracts | `xqt/contracts/compute.py`, `QuantizedModel.infer_handoff()` |
-| capability resolve | `xqt/runtime/engine_resolve.py` |
+| capability resolve | `xqt/contracts/engine_resolve.py` |
 | ExecutionPolicy / RuntimePlan capabilities | `xqt/contracts/runtime.py` |
 | int8_mma 解耦 | `xqt/quant/quantizers/int8_mma.py` lazy kernel + default `auto` |
 | 模型包 compute.json | `xqt/runtime/package.py` |
@@ -419,7 +419,7 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | `Int8MmaLinear` | `xqt/runtime/modules/int8_mma_linear.py` |
 | `W4StorageInt8MmaLinear` | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
 | 旧 `SVDQuantLinear` / `SVDQuantInt8MmaLinear` 执行壳 | `xqt/runtime/modules/svd_w4a4_legacy.py`, `xqt/runtime/modules/svd_w8a8_legacy.py` |
-| pure packing helpers + runtime compatibility exports | `xqt/contracts/packing_int4.py`, `xqt/runtime/modules/packing_int4.py` |
+| pure packing helpers (唯一实体, runtime 兼容导出已删) | `xqt/contracts/packing_int4.py` |
 | quantizers 仅导出算法入口和量化结果类型, runtime 类从 `xqt.runtime` 访问 | `xqt/quant/quantizers/{int8_mma,w4_storage_int8_mma,svd}.py` |
 | `runtime/*` 静态无 `quant.quantizers` import | 扫描通过 |
 
@@ -477,7 +477,7 @@ W4A4 executor, 但 QKV/RoPE 和 CUDA Graph 仍是特例, 默认 SVD reference
 1. ~~公开主键 method=svd + storage/compute; strategy 仅 WxAy~~ 执行层已用 `method=svd` + `composite_add` compute_config; `strategy` 为 WxAy 别名 (非 `svd_*` 主键). hunyuan helper 仍有 `scheme: svd_int4_int8_mma` 字符串, 可后续收敛.
 2. ~~additive vs k-group 词表~~ 已写入 `xqt/FRAMEWORK.md` composite 词表与 `xqt-infer-handoff.md` §3.4. fused FUSE_DOWN/UP 内核实现仍后续.
 3. hunyuan helper / recipes 文档: usage `xqt-hunyuan-ocr.md` 已 composite 口径; helper 函数名 `*_svd_int4_*` 可保留为样板名.
-4. ~~切断 `operator_opt` → `xqt.quant.bridges`~~ 已迁到 `xqt.runtime.bridges.nvfp4`; quant.bridges 仅兼容 re-export. `tilelang_validation` 内对 FP4 quantizer 的 import 保持 lazy (仅 validation fixture).
+4. ~~切断 `operator_opt` → `xqt.quant.bridges`~~ NVFP4 存储壳 + reference 已下沉为 `xqt/contracts/nvfp4.py`; `xqt.quant.bridges` 整目录已删除. `tilelang_validation` 内对 FP4 quantizer 的 import 保持 lazy (仅 validation fixture).
 
 ### 相关
 

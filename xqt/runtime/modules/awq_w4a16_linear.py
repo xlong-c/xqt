@@ -10,7 +10,7 @@ from torch import nn
 
 from xqt.core.errors import XQTBackendError
 from xqt.gemm import EpilogueSpec, GemmProblem, GemmSpec, PackedWeight, QuantSpec
-from xqt.gemm.backends.awq_w4a16_decode_sm89 import (
+from xqt.gemm.backends.sm89.awq_w4a16_decode_sm89 import (
     prepare_sm89_awq_w4a16_decode_parameters,
     prepack_sm89_awq_w4a16_decode,
     sm89_awq_w4a16_metadata,

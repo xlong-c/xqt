@@ -15,13 +15,13 @@ from xqt.gemm import (
     default_registry,
     reference_gemm,
 )
-from xqt.gemm.backends.fp8_sm89 import (
+from xqt.gemm.backends.sm89.fp8_sm89 import (
     _scale_scalar,
     fp8_sm89_executor,
     install_sm89_fp8_executors,
     sm89_fp8_artifact_available,
 )
-from xqt.gemm.fp8 import quantize_fp8
+from xqt.gemm.common.fp8 import quantize_fp8
 
 
 _ARTIFACT = Path.home() / ".cache/xqt/gemm/sm89/fp8_cutlass_sm89.so"

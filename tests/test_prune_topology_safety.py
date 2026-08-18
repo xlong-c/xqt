@@ -25,7 +25,7 @@ from xqt.prune import (
     snapshot_module_dimensions,
     supported_prune_granularities,
 )
-from xqt.prune.toy_models import StructuredPruningToyCNN
+from xqt.model.toy_models import StructuredPruningToyCNN
 from xqt.pipeline.passes import run_prune_stage
 from xqt.workflows.stage_specs import PruneStageSpec
 

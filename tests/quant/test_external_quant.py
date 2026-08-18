@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.external import (
+from xqt.contracts.external import (
     ExternalQuantInfo,
     iter_config_filenames,
     list_supported_external_formats,

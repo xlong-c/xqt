@@ -81,7 +81,6 @@ from .sparsity import (
 from .dimensions import diff_module_dimensions, snapshot_module_dimensions
 from .flops import estimate_model_flops, estimate_module_flops
 from .safety import PruneSafetyCheck, PruneSafetyReport, assess_prune_safety
-from .toy_models import StructuredPruningToyCNN
 
 __all__ = [
     "PruneScheduleReport",
@@ -141,7 +140,6 @@ __all__ = [
     "StructuredPruningAction",
     "StructuredPruningPlan",
     "StructuredPruningReport",
-    "StructuredPruningToyCNN",
     "structured_prune_support_matrix",
     "describe_prune_method",
     "prune_method_report_fields",

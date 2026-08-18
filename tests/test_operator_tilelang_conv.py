@@ -74,7 +74,7 @@ def _tilelang_conv_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/tilelang_conv_{device}",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_conv_block",
+            "target": "xqt.model.toy_models.build_toy_conv_block",
             "params": {
                 "in_channels": in_channels,
                 "hidden_channels": hidden_channels,

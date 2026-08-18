@@ -10,7 +10,8 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
-from xqt.runtime.bridges.nvfp4 import (
+from xqt.contracts.engine_resolve import get_engine_registration
+from xqt.contracts.nvfp4 import (
     NVFP4LinearBridge,
     bridge_module_to_nvfp4_linear,
     bridge_module_to_nvfp4_linear_shared,
@@ -43,7 +44,8 @@ class _ReferenceGuardedLinearWrapper(nn.Module):
         settings: dict[str, Any],
     ) -> None:
         super().__init__()
-        if engine not in {"cutile", "cute_dsl"}:
+        registration = get_engine_registration(engine)
+        if registration is None or registration.materializer != "reference_guarded":
             raise XQTBackendError(f"unsupported reference-guarded engine: {engine}")
         self.module = module
         self.engine = engine

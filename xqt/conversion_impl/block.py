@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from torch import nn
 
@@ -10,6 +10,9 @@ import xqt.nn as xqt_nn
 from xqt.contracts import OperatorContract, TensorStorageSpec
 from xqt.core.errors import XQTBackendError
 import xqt.operator_opt as _opt
+
+if TYPE_CHECKING:
+    from xqt.conversion import ConvertResult
 
 
 class _TransformerBlockConversionMixin:

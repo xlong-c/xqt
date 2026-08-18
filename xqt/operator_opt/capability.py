@@ -1,13 +1,19 @@
-"""Engine capability matrix for XQT operator optimization."""
+"""Environment projection of the canonical operator engine registry."""
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
 
+from xqt.contracts.engine_resolve import (
+    EngineRegistration,
+    get_engine_registration,
+    operator_engine_names,
+)
 from xqt.core.reporting import OptimizationCapability
 
 
@@ -20,7 +26,7 @@ def _package_available(package_name: str) -> bool:
 
 @dataclass(frozen=True)
 class OperatorOptimizationEngineCapability:
-    """Static and environment-derived capability description for one engine."""
+    """Static registration plus environment availability for one engine."""
 
     engine: str
     status: str
@@ -36,7 +42,7 @@ class OperatorOptimizationEngineCapability:
     limitations: tuple[str, ...] = ()
 
     def to_optimization_capability(self) -> OptimizationCapability:
-        """Project operator engine capability onto the shared optimization schema."""
+        """Project the engine onto the shared optimization schema."""
 
         return OptimizationCapability(
             kind="operator",
@@ -53,9 +59,7 @@ class OperatorOptimizationEngineCapability:
             supported=self.available or self.status == "available",
             notes=self.notes,
             limitations=self.limitations,
-            metadata={
-                "exportable": self.exportable,
-            },
+            metadata={"exportable": self.exportable},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -76,151 +80,41 @@ class OperatorOptimizationEngineCapability:
         }
 
 
-_BASE_CAPABILITIES: dict[str, OperatorOptimizationEngineCapability] = {
-    "torch_compile": OperatorOptimizationEngineCapability(
-        engine="torch_compile",
-        status="available",
-        maturity="executable",
-        runtime="pytorch",
-        exportable=False,
-        notes=(
-            "Uses torch.compile over the current PyTorch runtime module.",
-            "Whole-model and component-level compile are supported in the built-in pass.",
+def _registered_pattern_note(engine: str) -> str | None:
+    module_functions = {
+        "triton": ("xqt.operator_opt.backends.triton", "list_triton_kernel_specs"),
+        "tilelang": (
+            "xqt.operator_opt.backends.tilelang",
+            "list_tilelang_kernel_specs",
         ),
-        limitations=(
-            "Dynamic Python control flow or graph breaks can reduce optimization effectiveness.",
+        "cutile": ("xqt.operator_opt.backends.cutile", "list_cutile_kernel_specs"),
+        "cutlass": (
+            "xqt.operator_opt.backends.cutlass",
+            "list_cutlass_kernel_specs",
         ),
-    ),
-    "deployment_engine": OperatorOptimizationEngineCapability(
-        engine="deployment_engine",
-        status="planned",
-        maturity="metadata_only",
-        runtime="deployment_engine",
-        exportable=True,
-        artifact_kind="deployment_artifact",
-        requires_exportable_graph=True,
-        notes=(
-            "Represents TensorRT, OpenVINO, or ONNX Runtime deployment fusion rather than PyTorch custom kernels.",
+        "cute_dsl": (
+            "xqt.operator_opt.backends.cute_dsl",
+            "list_cute_dsl_kernel_specs",
         ),
-        limitations=(
-            "Built-in executor records capability only and does not rewrite the runtime module.",
-        ),
-    ),
-    "triton": OperatorOptimizationEngineCapability(
-        engine="triton",
-        status="available",
-        maturity="executable",
-        runtime="pytorch",
-        exportable=False,
-        requires_cuda=True,
-        notes=(
-            "Built-in executor ships limited CUDA-only Triton fused kernels.",
-            "Current built-in execution covers direct float16/bfloat16 Linear with zero-materialization transpose strides, explicit prepacked K,N weights, and an explicit fixed-signature CUDA Graph replay mode; standalone float16/bfloat16 RMSNorm; the xqt.nn.FeedForward Triton runtime composition; true W8A8 INT8 GEMM; and packed low-bit dequant GEMM wrappers for INT4/MXFP/NVFP4, all with eager reference fallback metadata where applicable.",
-        ),
-        limitations=(
-            "Current built-in materialization is limited to direct half Linear, rmsnorm, xqt.nn.FeedForward, true W8A8 INT8 Linear, and low-bit linear dequant GEMM patterns; other registered kernel patterns do not yet have a general-purpose operator wrapper.",
-            "Direct half Linear prepacked K,N weights duplicate the dense weight storage and are explicit opt-in; transpose-stride is the default zero-extra-memory layout.",
-            "Direct half Linear CUDA Graph replay is explicit opt-in, requires a fixed input/layout/parameter contract, returns graph-owned output storage, and is not promoted as an all-shape automatic route.",
-            "Current low-bit Triton execution is a composed runtime: packed weights are unpacked and dequantized on device before dispatching to Triton dense GEMM, rather than a single fused tensor-core kernel.",
-        ),
-    ),
-    "tilelang": OperatorOptimizationEngineCapability(
-        engine="tilelang",
-        status="available",
-        maturity="executable",
-        runtime="pytorch",
-        exportable=False,
-        requires_cuda=True,
-        notes=(
-            "Built-in executor ships operator-family routing for attention, conv, direct FP16/BF16 linear, direct half norm, and dequant/dense linear targets with reference fallback metadata.",
-            "Ada-class GPUs can use native runtime fastpaths under the TileLang engine for attention, conv, direct FP16/BF16 linear, direct half norm, and one-time-dequantized dense Linear paths.",
-            "Explicit TileLang attention accepts matching float16 or bfloat16 Q/K/V tensors; Ada auto routing remains on native SDPA because the validated BF16 result is shape-dependent.",
-            "Explicit TileLang dense Linear accepts matching float16 or bfloat16 activation, weight, bias, and output tensors with FP32 accumulation and partial M/N tiles. On sm_89, BF16 flattened M<=4 and the exact FP16 M<=4,K=N=4096,activation=None signature default to the validated 16x64x32 schedule; Linear auto routing remains unchanged.",
-            "Packed FP4/MXFP4/NVFP4 TileLang kernels remain available for explicit pattern selection and future low-bit fused GEMM extensions.",
-        ),
-        limitations=(
-            "Current built-in execution is limited to the attention, conv, linear, norm, and dequant_gemm_epilogue operator families/patterns.",
-            "Current CUDA attention execution is limited to matching float16/bfloat16 Q/K/V with dropout_p=0 and seq_kv >= seq_q; bfloat16 head_dim must be divisible by 16. Direct dense Linear requires matching float16/bfloat16 tensors and K divisible by block_k; the sm_89 BF16 decode preset is validated only for M<=4, while the FP16 preset additionally requires K=N=4096 and activation=None. N=11008 and fused activation keep the default schedule. Half norm paths, dequant GEMM constraints, and packed FP4 runtime correctness/performance keep their existing hardware-specific limits.",
-        ),
-    ),
-    "cutile": OperatorOptimizationEngineCapability(
-        engine="cutile",
-        status="planned",
-        maturity="reference_guarded",
-        runtime="pytorch",
-        exportable=False,
-        requires_cuda=True,
-        notes=(
-            "Reserved for CUDA-only nvvc CuTile Python DSL kernels.",
-            "Built-in executor can materialize reference-guarded linear/dequant GEMM inference wrappers, including packed NVFP4 fallback paths.",
-        ),
-        limitations=(
-            "CuTile linear/dequant execution is reference-guarded until real CuTile codegen is validated on target hardware.",
-            "CuTile package availability and target architecture must be checked per environment.",
-        ),
-    ),
-    "cutlass": OperatorOptimizationEngineCapability(
-        engine="cutlass",
-        status="planned",
-        maturity="metadata_only",
-        runtime="pytorch",
-        exportable=False,
-        requires_cuda=True,
-        notes=("Reserved for CUDA-only CUTLASS Python/CuTe DSL kernels.",),
-        limitations=(
-            "Built-in executor records metadata and reference fallback only.",
-            "CUTLASS Python DSL support is version and architecture sensitive.",
-        ),
-    ),
-    "cute_dsl": OperatorOptimizationEngineCapability(
-        engine="cute_dsl",
-        status="planned",
-        maturity="reference_guarded",
-        runtime="pytorch",
-        exportable=False,
-        requires_cuda=True,
-        notes=(
-            "Reserved for CUDA-only CUTLASS CuTe DSL kernels through cutlass.cute.",
-            "Built-in executor can materialize reference-guarded dense GEMM epilogue inference wrappers for NVFP4 dense-cache bridges.",
-        ),
-        limitations=(
-            "CuTe DSL linear execution is reference-guarded and does not yet consume packed NVFP4 weights directly.",
-            "CuTe DSL support is version, Python package, CUDA toolkit, and architecture sensitive.",
-        ),
-    ),
-    "custom_cuda": OperatorOptimizationEngineCapability(
-        engine="custom_cuda",
-        status="planned",
-        maturity="planned",
-        runtime="pytorch",
-        exportable=False,
-        requires_cuda=True,
-        notes=("Reserved for optional custom CUDA extensions.",),
-        limitations=(
-            "Built-in executor does not yet build or load custom CUDA extensions.",
-        ),
-    ),
-}
-
-
-def describe_operator_engine_capability(
-    engine: str,
-    *,
-    torch_compile_available: Optional[bool] = None,
-) -> OperatorOptimizationEngineCapability:
-    """Return a capability description for an operator optimization engine."""
-
+    }
+    target = module_functions.get(engine)
+    if target is None:
+        return None
     try:
-        base = _BASE_CAPABILITIES[engine]
-    except KeyError as exc:
-        allowed = ", ".join(sorted(_BASE_CAPABILITIES))
-        raise ValueError(
-            f"Unsupported operator optimization engine: {engine}. Known: {allowed}"
-        ) from exc
+        module = importlib.import_module(target[0])
+        patterns = getattr(module, target[1])()
+    except Exception:
+        return None
+    return "Registered patterns: " + ", ".join(sorted(patterns))
 
-    available = False
-    status = base.status
-    notes = list(base.notes)
+
+def _environment_availability(
+    registration: EngineRegistration,
+    *,
+    torch_compile_available: Optional[bool],
+) -> tuple[bool, list[str]]:
+    engine = registration.name
+    notes: list[str] = []
     if engine == "torch_compile":
         available = (
             bool(torch_compile_available)
@@ -228,104 +122,119 @@ def describe_operator_engine_capability(
             else hasattr(torch, "compile")
         )
         if not available:
-            status = "unavailable"
             notes.append("torch.compile is not available in the current PyTorch build.")
-    elif engine == "triton":
-        available = _package_available("triton")
-        try:
-            from .backends.triton import list_triton_kernel_specs
-
-            notes.append(
-                "Registered patterns: " + ", ".join(sorted(list_triton_kernel_specs()))
-            )
-        except Exception:
-            pass
-    elif engine == "tilelang":
-        available = True
+        return available, notes
+    if engine == "triton":
+        return _package_available("triton"), notes
+    if engine == "tilelang":
         if not _package_available("tilelang"):
             notes.append(
-                "tilelang package is not importable; built-in execution is limited to reference fallback."
+                "tilelang package is not importable; execution is limited to reference fallback."
             )
-        else:
-            try:
-                from .kernels.tilelang._common import (
-                    tilelang_runtime_unavailability_reason,
-                    tilelang_runtime_usable,
+            return True, notes
+        try:
+            from .kernels.tilelang._common import (
+                tilelang_runtime_unavailability_reason,
+                tilelang_runtime_usable,
+            )
+
+            if not tilelang_runtime_usable():
+                notes.append(
+                    tilelang_runtime_unavailability_reason()
+                    or "TileLang runtime is unavailable; execution is limited to reference fallback."
                 )
-
-                if not tilelang_runtime_usable():
-                    notes.append(
-                        tilelang_runtime_unavailability_reason()
-                        or "TileLang runtime is unavailable; built-in execution is limited to reference fallback."
-                    )
-            except Exception:
-                pass
-        try:
-            from .backends.tilelang import list_tilelang_kernel_specs
-
-            notes.append(
-                "Registered patterns: "
-                + ", ".join(sorted(list_tilelang_kernel_specs()))
-            )
         except Exception:
             pass
-    elif engine == "cutile":
+        return True, notes
+    if engine == "cutile":
         try:
-            from .backends.cutile import cutile_available, list_cutile_kernel_specs
+            from .backends.cutile import cutile_available
 
-            available = cutile_available()
-            notes.append(
-                "Registered patterns: " + ", ".join(sorted(list_cutile_kernel_specs()))
-            )
+            return cutile_available(), notes
         except Exception:
-            available = _package_available("cutile")
-    elif engine == "cutlass":
-        available = _package_available("cutlass")
-        try:
-            from .backends.cutlass import list_cutlass_kernel_specs
-
-            notes.append(
-                "Registered patterns: " + ", ".join(sorted(list_cutlass_kernel_specs()))
-            )
-        except Exception:
-            pass
-    elif engine == "cute_dsl":
+            return _package_available("cutile"), notes
+    if engine == "cutlass":
+        return _package_available("cutlass"), notes
+    if engine == "cute_dsl":
         available = _package_available("cutlass.cute")
-        try:
-            from .backends.cute_dsl import list_cute_dsl_kernel_specs
-
-            notes.append(
-                "Registered patterns: "
-                + ", ".join(sorted(list_cute_dsl_kernel_specs()))
-            )
-        except Exception:
-            pass
-    elif engine == "custom_cuda":
+        if not available:
+            notes.append("cutlass.cute runtime is not importable.")
+        return available, notes
+    if engine == "custom_cuda":
         try:
             from .cuda_extension import describe_custom_cuda_extension_capability
 
             extension = describe_custom_cuda_extension_capability()
-            available = extension.available
             notes.extend(extension.notes)
-            notes.append(
-                "Registered custom ops: " + ", ".join(extension.registered_ops)
-            )
+            notes.append("Registered custom ops: " + ", ".join(extension.registered_ops))
             if not extension.compiled:
                 notes.append("Optional nvcc extension module is not compiled.")
+            return extension.available, notes
         except Exception:
-            available = False
-    elif engine == "deployment_engine":
-        available = True
+            return False, notes
+    if engine == "deployment_engine":
+        return True, notes
+    return False, notes
 
-    return replace(base, status=status, available=available, notes=tuple(notes))
+
+def _capability_from_registration(
+    registration: EngineRegistration,
+    *,
+    available: bool,
+    notes: list[str],
+) -> OperatorOptimizationEngineCapability:
+    status = registration.status
+    if registration.name == "torch_compile" and not available:
+        status = "unavailable"
+    return OperatorOptimizationEngineCapability(
+        engine=registration.name,
+        status=status,
+        maturity=registration.maturity,
+        runtime=registration.runtime,
+        exportable=registration.exportable,
+        artifact_kind=registration.artifact_kind,
+        requires_cuda=registration.requires_cuda,
+        requires_calibration=registration.requires_calibration,
+        requires_exportable_graph=registration.requires_exportable_graph,
+        available=available,
+        notes=tuple([*registration.notes, *notes]),
+        limitations=registration.limitations,
+    )
+
+
+def describe_operator_engine_capability(
+    engine: str,
+    *,
+    torch_compile_available: Optional[bool] = None,
+) -> OperatorOptimizationEngineCapability:
+    """Project one config-visible engine registration into the environment."""
+
+    registration = get_engine_registration(engine)
+    if registration is None or not registration.operator_visible:
+        allowed = ", ".join(operator_engine_names())
+        raise ValueError(
+            f"Unsupported operator optimization engine: {engine}. Known: {allowed}"
+        )
+    available, environment_notes = _environment_availability(
+        registration,
+        torch_compile_available=torch_compile_available,
+    )
+    pattern_note = _registered_pattern_note(registration.name)
+    if pattern_note is not None:
+        environment_notes.append(pattern_note)
+    return _capability_from_registration(
+        registration,
+        available=available,
+        notes=environment_notes,
+    )
 
 
 def list_operator_engine_capabilities() -> dict[str, dict[str, Any]]:
-    """Return the operator optimization engine matrix as plain dictionaries."""
+    """Return the operator engine matrix as plain dictionaries."""
 
     return {
         name: describe_operator_engine_capability(name).to_dict()
-        for name in sorted(_BASE_CAPABILITIES)
+        for name in operator_engine_names()
     }
 
 

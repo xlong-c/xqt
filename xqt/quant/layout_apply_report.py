@@ -17,12 +17,12 @@ from xqt.contracts.layout_kernel_report import (
     LayoutKernelReport,
     layout_report_from_module_shapes,
 )
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
-from xqt.runtime.engine_resolve import (
+from xqt.contracts.engine_resolve import (
     get_engine_registration,
     map_primary_kernel_to_engine,
     normalize_engine_name,
 )
+from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
 
 
 def resolve_selected_kernel_name(

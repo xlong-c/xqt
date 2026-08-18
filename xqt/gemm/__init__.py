@@ -5,7 +5,7 @@ compiled or imported.  Native backends are registered explicitly at a later
 stage and must provide an executable callable before dispatch can select them.
 """
 
-from .contracts import (
+from .common.contracts import (
     EpilogueSpec,
     GemmProblem,
     GemmSpec,
@@ -14,16 +14,16 @@ from .contracts import (
     PackedWeightMetadata,
     QuantSpec,
 )
-from .benchmark import CudaEventBenchmark, benchmark_cuda_callable, benchmark_cuda_callables
-from .dispatch import GemmDispatchReport, GemmDispatchResult, dispatch_gemm, select_kernel
-from .grouped_dispatch import (
+from .common.benchmark import CudaEventBenchmark, benchmark_cuda_callable, benchmark_cuda_callables
+from .common.dispatch import GemmDispatchReport, GemmDispatchResult, dispatch_gemm, select_kernel
+from .common.grouped_dispatch import (
     GroupedGemmCandidateOutput,
     GroupedGemmDispatchReport,
     GroupedGemmDispatchResult,
     GroupedGemmNativeCandidate,
     dispatch_grouped_gemm,
 )
-from .fp8 import (
+from .common.fp8 import (
     FP8FormatSpec,
     FP8QuantizedTensor,
     calibrate_fp8_scale,
@@ -32,7 +32,7 @@ from .fp8 import (
     fp8_format_spec,
     quantize_fp8,
 )
-from .layout import (
+from .common.layout import (
     build_packed_weight,
     canonical_weight_view,
     cutlass_weight_view,
@@ -53,7 +53,7 @@ from .layout import (
     validate_w4a16_packed_weight,
     validate_logical_shapes,
 )
-from .lowbit import (
+from .common.lowbit import (
     Sparse2_4Contract,
     VectorCodebookContract,
     W2A16Contract,
@@ -68,7 +68,7 @@ from .lowbit import (
     reference_w2a16_gemm,
     reference_w3a16_gemm,
 )
-from .reference import (
+from .common.reference import (
     apply_epilogue_reference,
     dense_gemm_reference,
     dequantize_weight_reference,
@@ -78,7 +78,7 @@ from .reference import (
     reference_w4a16_gemm,
     reference_w8a16_gemm,
 )
-from .p4 import (
+from .common.p4 import (
     FP4_E2M1_CODEBOOK,
     FP4_FORMATS,
     FP4QuantizedTensor,
@@ -100,7 +100,7 @@ from .p4 import (
     reference_svd_outlier_hybrid,
     reference_w4a8_gemm,
 )
-from .preflight import (
+from .common.preflight import (
     GemmArtifactManifest,
     GemmPreflightReport,
     artifact_manifest_path,
@@ -111,7 +111,7 @@ from .preflight import (
     probe_cuda_cutlass,
     promote_artifact_manifest,
 )
-from .tuning_cache import (
+from .common.tuning_cache import (
     GEMM_TUNING_CACHE_VERSION,
     GemmTuningArtifactIdentity,
     GemmTuningCache,
@@ -249,12 +249,12 @@ from .backends import (
     sm120_gemm_executor,
     sm120_gemm_reference,
 )
-from .quantize import (
+from .common.quantize import (
     Int8ActivationQuantization,
     dequantize_int8_activation,
     quantize_int8_activation,
 )
-from .registry import (
+from .common.registry import (
     GemmCapability,
     GemmExecutor,
     GemmKernelRegistration,

@@ -18,7 +18,7 @@ from xqt.gemm import (
     pack_w4a8_weight,
     reference_w4a8_gemm,
 )
-from xqt.gemm.backends import w4a8_sm89 as backend
+from xqt.gemm.backends.sm89 import w4a8_sm89 as backend
 
 
 _CUDA_SM89 = torch.cuda.is_available() and torch.cuda.get_device_capability(0) == (8, 9)

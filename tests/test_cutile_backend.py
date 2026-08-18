@@ -25,7 +25,7 @@ def _cutile_operator_config() -> dict[str, object]:
             "artifact_dir": "artifacts/xqt/tests/cutile_operator",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_dequant_gemm_block",
+            "target": "xqt.model.toy_models.build_toy_dequant_gemm_block",
             "params": {
                 "input_dim": 16,
                 "output_dim": 8,

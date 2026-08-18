@@ -13,11 +13,12 @@ from torch import nn
 
 from xqt.core.artifact import file_sha256
 from xqt.core.errors import XQTBackendError
-from xqt.export.input_utils import split_example_input
+from xqt.contracts.input_utils import split_example_input
+from xqt.export.base import ExportResultBase
 
 
 @dataclass
-class CommandExportResult:
+class CommandExportResult(ExportResultBase):
     """Result for command-line based export adapters."""
 
     output_paths: list[Path]
@@ -29,15 +30,23 @@ class CommandExportResult:
     dry_run: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return tuple(self.output_paths)
+
 
 @dataclass
-class ExecuTorchExportResult:
+class ExecuTorchExportResult(ExportResultBase):
     """ExecuTorch export metadata."""
 
     pte_path: Path
     checksum: Optional[str] = None
     dry_run: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def artifact_paths(self) -> tuple[Path, ...]:
+        return (self.pte_path,)
 
 
 def _ensure_input_file(path: str | Path, *, description: str) -> Path:

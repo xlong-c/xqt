@@ -27,7 +27,7 @@ from xqt.prune import (
     run_structured_prune_schedule,
     summarize_pruning,
 )
-from xqt.workflows.stage_specs import PruneStageSpec
+from xqt.core.stage_specs import PruneStageSpec
 
 from .context import _context_prune_config, _context_task_type, _move_to_device
 

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from tests.xqt.svd_test_helpers import make_legacy_svd_int8
-from xqt.model.hunyuan_ocr_tilelang import (
+from examples.xqt_models.hunyuan_ocr_tilelang import (
     HunyuanOcrTileLangCudaGraphRunner,
     HunyuanOcrTileLangDecodeBlock,
     HunyuanOcrTileLangDecodeSpec,
@@ -424,6 +424,8 @@ def test_hunyuan_tilelang_decode_real_qo_cuda_graph_replays() -> None:
 
 
 def test_hunyuan_tilelang_decode_graph_benchmark_is_model_exported() -> None:
-    from xqt.model import benchmark_hunyuan_ocr_tilelang_decode_graph as exported
+    from examples.xqt_models.hunyuan_ocr_tilelang import (
+        benchmark_hunyuan_ocr_tilelang_decode_graph as exported,
+    )
 
     assert exported is benchmark_hunyuan_ocr_tilelang_decode_graph

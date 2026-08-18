@@ -37,7 +37,7 @@ def _tilelang_conv3d_operator_config(device: str) -> dict:
             "artifact_dir": f"artifacts/xqt/tests/tilelang_conv3d_{device}",
         },
         "model": {
-            "target": "xqt.operator_opt.toy_models.build_toy_conv3d_block",
+            "target": "xqt.model.toy_models.build_toy_conv3d_block",
             "params": {
                 "in_channels": 8,
                 "hidden_channels": 64,
@@ -124,7 +124,7 @@ def test_tilelang_conv3d_operator_stage_uses_reference_fallback_on_cpu() -> None
 
 
 def test_materialize_tilelang_conv3d_candidate_replaces_named_conv() -> None:
-    import xqt.operator_opt.toy_models as toy_models
+    import xqt.model.toy_models as toy_models
 
     module = toy_models.build_toy_conv3d_block()
     target = OperatorOptimizationTargetPlan(

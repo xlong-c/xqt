@@ -8,11 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from xqt.core.errors import XQTBackendError
-from xqt.runtime.engine_resolve import (
+from xqt.contracts.int8_mma import Int8MmaLinear as Int8MmaStorageLinear
+from xqt.contracts.engine_resolve import (
     normalize_engine_name,
     resolve_int8_mma_engine,
 )
+from xqt.core.errors import XQTBackendError
 
 _PTX_SM89_ENGINES = frozenset({"ptx_sm89", "native_sm89"})
 _CUDA_SM89_ENGINES = frozenset({"cuda_sm89"})
@@ -63,7 +64,7 @@ def _target_arch_from_device(device: torch.device) -> str | None:
     major, minor = torch.cuda.get_device_capability(device)
     return f"sm_{major}{minor}"
 
-class Int8MmaLinear(nn.Module):
+class Int8MmaLinear(Int8MmaStorageLinear):
     """W8A8 INT8 Linear replacement that records the realized runtime path."""
 
     quant_max: float = 127.0
@@ -91,7 +92,7 @@ class Int8MmaLinear(nn.Module):
         preferred_engines: list[str] | tuple[str, ...] | None = None,
         min_int8_rows: int = 0,
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         normalized_engine = normalize_engine_name(engine)
         if normalized_engine == "native_sm89":
             normalized_engine = "ptx_sm89"
@@ -149,6 +150,43 @@ class Int8MmaLinear(nn.Module):
             self.register_buffer("bias", None)
         else:
             self.register_buffer("bias", bias.detach().to(torch.float32).contiguous())
+
+    @classmethod
+    def from_storage(
+        cls,
+        module: Int8MmaStorageLinear,
+        *,
+        engine: str | None = None,
+        fallback_engine: str | None = None,
+    ) -> "Int8MmaLinear":
+        """Materialize a backend execution view from a contracts storage shell."""
+
+        activation_scale = (
+            module.static_activation_scale.detach()
+            if module._has_static_activation_scale
+            else None
+        )
+        return cls(
+            module.qweight_t.detach(),
+            module.weight_scale.detach(),
+            bias=None if module.bias is None else module.bias.detach(),
+            input_features=module.input_features,
+            output_features=module.output_features,
+            engine=engine or module.engine,
+            fallback_engine=fallback_engine or module.fallback_engine,
+            block_m=module.block_m,
+            block_n=module.block_n,
+            block_k=module.block_k,
+            threads=module.threads,
+            num_stages=module.num_stages,
+            output_dtype=module.output_dtype,
+            activation_scale_mode=module.activation_scale_mode,
+            activation_scale=activation_scale,
+            activation_quant_block_size=module.activation_quant_block_size,
+            eps=module.eps,
+            preferred_engines=module.preferred_engines,
+            min_int8_rows=module.min_int8_rows,
+        )
 
     @classmethod
     def from_linear(
@@ -1296,6 +1334,7 @@ class Int8MmaLinear(nn.Module):
     def execution_metadata(self) -> dict[str, Any]:
         metadata = dict(self.last_execution)
         metadata["runtime_precision"] = self._runtime_precision_summary()
+        metadata["artifact_view"] = "runtime"
         return metadata
 
 __all__ = ["Int8MmaLinear"]

@@ -41,7 +41,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -55,13 +55,20 @@ from ..sensitivity import (
 )
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
-from .fp4_weight_only import (
-    _can_mutate_runtime_cache,
+from xqt.contracts.packing_int4 import (
     _pack_int4,
     _quantize_grouped_fp4_weight,
     _unpack_int4,
 )
+from .fp4_weight_only import _can_mutate_runtime_cache
 from .int8_mma import Int8MmaLinear
+from .base import (
+    call_model as _call_model,
+    iter_calibration_batches as _iter_calibration_batches,
+    move_batch_to_device as _move_batch_to_device,
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 _ACTIVATION_SCALE_MODES = frozenset({"dynamic", "static"})
 _W4A4_RUNTIME_BACKENDS = frozenset({"auto", "rowwise", "nunchaku", "reference"})
@@ -222,71 +229,6 @@ def _apply_groupwise_rotation(
     return rotated if return_padded else rotated[..., :feature_dim]
 
 
-def _move_batch_to_device(batch: Any, device: torch.device) -> Any:
-    if isinstance(batch, torch.Tensor):
-        return batch.to(device=device)
-    if isinstance(batch, Mapping):
-        return {key: _move_batch_to_device(value, device) for key, value in batch.items()}
-    if isinstance(batch, tuple):
-        return tuple(_move_batch_to_device(value, device) for value in batch)
-    if isinstance(batch, list):
-        return [_move_batch_to_device(value, device) for value in batch]
-    return batch
-
-
-def _call_model(model: nn.Module, inputs: Any) -> Any:
-    if isinstance(inputs, Mapping):
-        return model(**inputs)
-    if isinstance(inputs, tuple):
-        return model(*inputs)
-    if isinstance(inputs, list):
-        return model(*inputs)
-    return model(inputs)
-
-
-def _iter_calibration_batches(
-    calibration_inputs: Iterable[Any] | None,
-    *,
-    sample_limit: int | None,
-) -> Iterable[Any]:
-    if calibration_inputs is None:
-        return
-    for index, batch in enumerate(calibration_inputs):
-        if sample_limit is not None and index >= sample_limit:
-            break
-        yield batch
-
-
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
-
-
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
-
-
 def _module_parameter_count(module: nn.Module) -> int:
     return sum(parameter.numel() for parameter in module.parameters(recurse=False))
 
@@ -359,6 +301,8 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         channel_hybrid_enabled: bool = False,
     ) -> None:
         super().__init__()
+        self._xqt_runtime_execution_enabled = True
+        self._xqt_convrot_storage_kind = "w4a4"
         self.input_features = int(input_features)
         self.output_features = int(output_features)
         self.group_size = int(group_size)
@@ -1114,6 +1058,8 @@ class ConvRotMixedPrecisionLinear(nn.Module):
                 "ConvRotMixedPrecisionLinear input trailing dimension does not "
                 "match input_features"
             )
+        if not self._xqt_runtime_execution_enabled:
+            return self._reference_forward(inputs)
         hot_output = self._rowwise_w4a4_hot_forward(inputs)
         if hot_output is not None:
             return hot_output
@@ -1184,6 +1130,43 @@ class ConvRotMixedPrecisionLinear(nn.Module):
                 raise RuntimeError("w8a8 compute path is not materializable")
             return self._int8_compute(rotated_inputs)
 
+        allowed = ", ".join(sorted(SUPPORTED_COMPUTE_PRECISIONS))
+        raise ValueError(f"unsupported compute_precision {precision!r}; expected {allowed}")
+
+    def _reference_forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self.channel_hybrid_enabled and bool(
+            self.high_precision_channel_mask.any().item()
+        ):
+            return self._channel_hybrid_forward(inputs)
+        precision = self.compute_precision
+        bias = self._bias_for(dtype=inputs.dtype, device=inputs.device)
+        if precision == "w4a4":
+            quantized_activation = self._quantize_activation(inputs)
+            weight = self.dequantized_weight(
+                dtype=inputs.dtype,
+                device=inputs.device,
+                include_padding=True,
+            )
+            return F.linear(quantized_activation, weight, bias)
+        rotated_inputs = self._rotate_inputs(inputs).to(dtype=inputs.dtype)
+        if precision == "w4a16":
+            weight = self.dequantized_weight(
+                dtype=inputs.dtype,
+                device=inputs.device,
+                include_padding=True,
+            )
+            return F.linear(rotated_inputs, weight, bias)
+        if precision == "bf16":
+            return F.linear(
+                rotated_inputs,
+                self.reference_weight.to(device=inputs.device, dtype=inputs.dtype),
+                bias,
+            )
+        if precision == "w8a8":
+            self._ensure_int8_compute()
+            if self._int8_compute is None:
+                raise RuntimeError("w8a8 compute path is not materializable")
+            return self._int8_compute(rotated_inputs)
         allowed = ", ".join(sorted(SUPPORTED_COMPUTE_PRECISIONS))
         raise ValueError(f"unsupported compute_precision {precision!r}; expected {allowed}")
 
@@ -1444,6 +1427,7 @@ def quantize_with_convrot_4bit(
             channel_high_precision=channel_high_precision,
             channel_low_precision=channel_low_precision,
         )
+        replacement._xqt_runtime_execution_enabled = False
         if name:
             _replace_submodule(target_model, name, replacement)
         else:
@@ -1635,17 +1619,6 @@ def execute_convrot_4bit_component(
         inplace=True,
     )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(
-        component.keep_high_precision,
-        component.target_path,
-    )
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
     raw_execution_policies = result.metadata.get("execution_policies", [])
     execution_policies: list[dict[str, Any]] = []
     if isinstance(raw_execution_policies, list):
@@ -1689,43 +1662,22 @@ def execute_convrot_4bit_component(
                 for item in overrides
                 if isinstance(item, Mapping) and "module" in item
             ]
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(
+    report = build_component_quantization_report(
         context,
         component,
-    )
-    report = QuantizationReport(
-        component_name=component.name,
         backend=component.backend,
-        runtime="pytorch",
         method=component.method or "convrot",
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.PSEUDO,
         algorithm_executable=True,
         method_semantics="groupwise_regular_hadamard_rotation_w4a4_quantization",
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state="convrot_4bit",
+        extra_metadata={
             "execution_policies": execution_policies,
-            "algorithm_executable": True,
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "execution_state": "convrot_4bit",
             "recommended_high_precision_modules": recommended_high_precision,
-            "executed": True,
         },
     )
     return updated_model, report

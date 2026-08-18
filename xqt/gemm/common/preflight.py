@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 
 _ARCH_RE = re.compile(r"^sm_(?P<sm>[0-9]+)$")
+_COMPILE_ARCH_RE = re.compile(r"^sm_(?P<sm>[0-9]+)(?P<variant>[af])?$")
 
 
 def _normalize_arch(value: str | int) -> str:
@@ -34,6 +35,27 @@ def _normalize_arch(value: str | int) -> str:
     if sm < 50:
         raise ValueError(f"target SM must be >= 50, got {sm}")
     return f"sm_{sm}"
+
+
+def _normalize_compile_arch(value: str | int, *, target_arch: str) -> str:
+    """Normalize a CUDA codegen target while preserving the logical SM."""
+
+    if isinstance(value, bool):
+        raise ValueError("compile target SM must be an integer or sm_<number>[a|f] string")
+    if isinstance(value, int):
+        compile_arch = f"sm_{value}"
+    else:
+        compile_arch = str(value).strip()
+    match = _COMPILE_ARCH_RE.fullmatch(compile_arch)
+    if match is None:
+        raise ValueError(
+            "compile target_arch must look like sm_89, sm_120a, or sm_120f"
+        )
+    if int(match.group("sm")) != int(target_arch[3:]):
+        raise ValueError(
+            f"compile target {compile_arch} does not match logical target {target_arch}"
+        )
+    return compile_arch
 
 
 def _command_output(command: Sequence[str]) -> str | None:
@@ -66,7 +88,7 @@ def _find_cutlass_include(repo_root: Path | None = None) -> Path | None:
         candidates.append(Path(env_path))
     if repo_root is not None:
         candidates.append(repo_root / "third_party" / "cutlass" / "include")
-    candidates.append(Path(__file__).resolve().parents[2] / "third_party" / "cutlass" / "include")
+    candidates.append(Path(__file__).resolve().parents[3] / "third_party" / "cutlass" / "include")
     for package_name in ("tilelang", "cuda_tile"):
         module_spec = importlib.util.find_spec(package_name)
         if module_spec is None or module_spec.origin is None:
@@ -126,7 +148,14 @@ class GemmPreflightReport:
 
     @property
     def ready_for_compile(self) -> bool:
-        return self.status == "ready"
+        """Whether nvcc and CUTLASS headers are sufficient for compilation.
+
+        A host GPU with a different SM is an execution limitation, not a
+        cross-compilation limitation.  Executable promotion still requires a
+        fully ready target-device preflight.
+        """
+
+        return self.nvcc_path is not None and self.cutlass_include is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -250,7 +279,7 @@ class GemmArtifactManifest:
             return False
         if not self.artifact or not Path(self.artifact).expanduser().is_file():
             return False
-        return self.preflight.ready_for_compile
+        return self.preflight.status == "ready"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -413,11 +442,21 @@ def build_compile_flags(
     source: str | Path,
     output: str | Path,
     extra_flags: Sequence[str] = (),
+    compile_target_arch: str | int | None = None,
 ) -> tuple[str, ...]:
-    """Build a deterministic nvcc command tuple for manifest/build tooling."""
+    """Build deterministic nvcc flags for a logical target and its codegen."""
 
     if preflight.nvcc_path is None or preflight.cutlass_include is None:
         raise RuntimeError("cannot build compile flags before CUDA/CUTLASS preflight is ready")
+    codegen_arch = _normalize_compile_arch(
+        preflight.target_arch if compile_target_arch is None else compile_target_arch,
+        target_arch=preflight.target_arch,
+    )
+    cutlass_include = Path(preflight.cutlass_include)
+    utility_include = cutlass_include.parent / "tools" / "util" / "include"
+    include_flags = ["-I", str(cutlass_include)]
+    if utility_include.is_dir():
+        include_flags.extend(["-I", str(utility_include)])
     return tuple(
         [
             preflight.nvcc_path,
@@ -426,9 +465,8 @@ def build_compile_flags(
             "-shared",
             "-Xcompiler",
             "-fPIC",
-            f"-gencode=arch=compute_{preflight.target_arch[3:]},code={preflight.target_arch}",
-            "-I",
-            preflight.cutlass_include,
+            f"-gencode=arch=compute_{codegen_arch[3:]},code={codegen_arch}",
+            *include_flags,
             str(source),
             "-o",
             str(output),

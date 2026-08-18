@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.contracts.weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.hf_int4_layout import (
     group_qweight_keys,
     normalize_scales,

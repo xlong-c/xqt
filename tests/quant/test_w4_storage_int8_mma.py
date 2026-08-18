@@ -9,6 +9,9 @@ from xqt.quant.quantizers.w4_storage_int8_mma import (
     W4StorageInt8MmaLinear,
     quantize_with_w4_storage_int8_mma,
 )
+from xqt.runtime.modules import (
+    W4StorageInt8MmaLinear as RuntimeW4StorageInt8MmaLinear,
+)
 from xqt.workflows import XQTOptimizationSession
 
 
@@ -133,6 +136,22 @@ def test_w4_storage_release_int8_compute_view_keeps_packed_storage() -> None:
     output = module(torch.randn(2, 16))
     assert output.shape == (2, 32)
     assert module._compute is not None
+
+
+def test_w4_storage_materializes_runtime_execution_view() -> None:
+    source = torch.nn.Linear(16, 32, bias=True).eval()
+    storage = W4StorageInt8MmaLinear.from_linear(
+        source,
+        group_size=8,
+        engine="torch_int_mm",
+    ).eval()
+
+    runtime = RuntimeW4StorageInt8MmaLinear.from_storage(storage).eval()
+    output = runtime(torch.randn(3, 16))
+
+    assert isinstance(runtime, W4StorageInt8MmaLinear)
+    assert output.shape == (3, 32)
+    assert runtime.execution_metadata()["artifact_view"] == "runtime"
 
 
 def test_w4_storage_weight_retarget_error_compares_fp4_to_int8_view() -> None:

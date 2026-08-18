@@ -167,7 +167,7 @@ operator engine (tilelang/triton/...)  --resolve(capabilities)-->  kernels
 | `backend=tilelang` 做 quant | 禁止; 用 `engine=tilelang` 做 operator |
 | `backend=svdquant` | 禁止; 用 `method=svd` |
 
-capability resolve: `xqt.runtime.engine_resolve` (按 `required_capabilities`, 可选 preferred hint).  
+capability resolve: `xqt.contracts.engine_resolve` (按 `required_capabilities`, 可选 preferred hint).
 convert 的 `engine=` 是 materialize **preference**, 不是 quant 输出主键.
 
 ---

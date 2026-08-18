@@ -66,6 +66,23 @@ def test_xqt_top_level_import_remains_lightweight_with_lazy_convert() -> None:
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
+def test_xqt_top_level_import_does_not_eagerly_load_framework_modules() -> None:
+    script = (
+        "import sys; import xqt; "
+        "assert [m for m in sys.modules if m == 'xqt' or m.startswith('xqt.')] == ['xqt']; "
+        "assert not any(m == 'xdl' or m.startswith('xdl.') for m in sys.modules)"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_quantizer_aggregation_does_not_eagerly_load_export() -> None:
+    script = (
+        "import sys; import xqt.quant.quantizers; "
+        "assert not any(m == 'xqt.export' or m.startswith('xqt.export.') for m in sys.modules)"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
 def test_convert_linear_torch_engine_returns_copy_by_default() -> None:
     module = nn.Linear(4, 3)
     converted = xqt.convert(module, engine="torch")

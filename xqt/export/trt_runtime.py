@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import torch
 
 from xqt.core.errors import XQTBackendError
 
-from .trt_inspect import inspect_tensorrt_engine
-from .trt_plugins import _import_tensorrt, _load_tensorrt_plugin_libraries
+from .trt_diagnostics import (
+    _import_tensorrt,
+    _load_tensorrt_plugin_libraries,
+    inspect_tensorrt_engine,
+)
 from .trt_types import (
     TensorRTRuntimeBenchmarkResult,
     TensorRTRuntimeExecutionResult,

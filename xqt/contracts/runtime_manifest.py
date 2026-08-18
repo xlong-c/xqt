@@ -221,7 +221,7 @@ def build_runtime_manifest(
     else:
         from pathlib import Path
 
-        from xqt.runtime.quant_pair import load_quant_pair
+        from xqt.contracts.quant_pair import load_quant_pair
 
         loaded = load_quant_pair(Path(source) if not isinstance(source, Path) else source)
         contract = loaded.resolve_runtime_quant_contract()

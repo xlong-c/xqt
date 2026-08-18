@@ -1,10 +1,6 @@
 """Evaluation helpers for XQT."""
 
 from .compare import TensorDiff, TensorSummary, compare_tensors, summarize_tensor
-from .detection import (
-    DecodedDetectionDiff,
-    compare_decoded_detections,
-)
 from .layer_analysis import (
     build_avoid_list,
     build_layer_analysis_events,
@@ -72,3 +68,14 @@ __all__ = [
     "write_json_report",
     "write_markdown_report",
 ]
+
+# detection diff 依赖 xdl.metric.detection_utils, 降级为使用时才加载的可选依赖.
+_LAZY = {"DecodedDetectionDiff", "compare_decoded_detections"}
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        from . import detection
+
+        return getattr(detection, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

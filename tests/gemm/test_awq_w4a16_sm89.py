@@ -15,7 +15,7 @@ from xqt.gemm import (
     QuantSpec,
     reference_w4a16_gemm,
 )
-from xqt.gemm.backends.awq_w4a16_decode_sm89 import (
+from xqt.gemm.backends.sm89.awq_w4a16_decode_sm89 import (
     prepare_sm89_awq_w4a16_decode_parameters,
     prepack_sm89_awq_w4a16_decode,
     sm89_awq_w4a16_decode_executor,

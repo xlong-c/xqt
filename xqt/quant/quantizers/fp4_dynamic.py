@@ -18,7 +18,7 @@ from xqt.operator_opt.kernels.fp4_quant_common import (
     dequantize_nvfp4_codes,
     prepack_nvfp4_weight_for_tilelang,
 )
-from xqt.runtime.engine_resolve import resolve_engine
+from xqt.contracts.engine_resolve import resolve_engine
 
 from ..execution.component import (
     ordered_unique,
@@ -26,7 +26,7 @@ from ..execution.component import (
     replace_component_model,
     resolve_component_model,
 )
-from ..execution.reporting import optional_calibration_summary
+from ..execution.reporting import build_component_quantization_report
 from ..execution.selection import (
     build_effective_selection_policy,
     module_selection_reason_metadata,
@@ -35,6 +35,10 @@ from ..execution.selection import (
 from ..policy import QuantizationPolicy, should_quantize_module
 from ..strategy import normalize_quant_strategy
 from ..types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
+from .base import (
+    policy_from_mapping as _policy_from_mapping,
+    replace_submodule as _replace_submodule,
+)
 
 
 _VALID_ENGINES = frozenset({"auto", "tilelang", "triton", "torch"})
@@ -141,36 +145,6 @@ def _mxfp_weight_only_api() -> dict[str, Any]:
         "pack_mxfp_blocks": _pack_mxfp_blocks,
         "unpack_mxfp_blocks": _unpack_mxfp_blocks,
     }
-
-
-def _policy_from_mapping(policy: Mapping[str, Any]) -> QuantizationPolicy:
-    kwargs: dict[str, Any] = {}
-    for key, value in policy.items():
-        if key == "dtype":
-            kwargs["dtype"] = str(value)
-        elif key == "scheme":
-            kwargs["scheme"] = str(value)
-        elif key in {
-            "include_module_types",
-            "exclude_module_types",
-            "include_name_patterns",
-            "exclude_name_patterns",
-            "include_module_names",
-            "exclude_module_names",
-        }:
-            kwargs[key] = tuple(str(item) for item in value)
-        elif key == "min_parameters":
-            kwargs[key] = int(value)
-    return QuantizationPolicy(**kwargs)
-
-
-def _replace_submodule(root: nn.Module, path: str, replacement: nn.Module) -> None:
-    parent_path, _, attribute = path.rpartition(".")
-    parent = root.get_submodule(parent_path) if parent_path else root
-    if attribute.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
-        parent[int(attribute)] = replacement
-        return
-    setattr(parent, attribute, replacement)
 
 
 def _resolve_target_arch(device: torch.device) -> str | None:
@@ -899,49 +873,19 @@ def execute_dynamic_fp4_component(
         engine=str(component.policy.get("engine", "auto")),
     )
     updated_model = replace_component_model(root_model, component.target_path, result.model)
-    high_precision_modules = prefix_module_names(component.keep_high_precision, component.target_path)
-    skipped_modules = ordered_unique(
-        [
-            *prefix_module_names(component.skip_quantize, component.target_path),
-            *high_precision_modules,
-        ]
-    )
-    quantized_modules = prefix_module_names(result.quantized_modules, component.target_path)
-    module_selection_reasons = module_selection_reason_metadata(
-        component,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-    )
-    calibration_samples, calibration_summary = optional_calibration_summary(context, component)
     method_semantics = f"dynamic_{_normalize_fp4_format(fp4_format)}_activation_with_packed_weight_runtime"
-    report = QuantizationReport(
-        component_name=component.name,
+    report = build_component_quantization_report(
+        context,
+        component,
         backend=result.backend,
-        runtime="pytorch",
-        method=component.method,
         strategy=result.strategy,
-        target_path=component.target_path,
-        quantized_modules=quantized_modules,
-        skipped_modules=skipped_modules,
-        high_precision_modules=high_precision_modules,
-        calibration_samples=calibration_samples,
-        calibration_summary=calibration_summary,
+        quantized_modules=result.quantized_modules,
         nature=QuantizationNature.PSEUDO,
         algorithm_executable=True,
         method_semantics=method_semantics,
-        compute_speedup_expected=None,
-        metadata={
-            **dict(result.metadata),
-            "analysis_only": component.analysis_only,
-            "policy": effective_policy,
-            "selection_policy": selection_policy_metadata(component),
-            "module_selection_reasons": module_selection_reasons,
-            "executed": True,
-            "execution_state": result.strategy,
-            "algorithm_executable": True,
-            "method_semantics": method_semantics,
-        },
+        effective_policy=effective_policy,
+        result_metadata=result.metadata,
+        execution_state=result.strategy,
     )
     return updated_model, report
 

@@ -17,7 +17,14 @@ from .contracts import (
     QuantSpec,
 )
 from .fp8 import decode_fp8_storage, dequantize_fp8, fp8_format_spec, quantize_fp8
-from .layout import unpack_int4, validate_logical_shapes, validate_w4a16_packed_weight
+from .layout import (
+    unpack_int2,
+    unpack_int3,
+    unpack_int4,
+    validate_logical_shapes,
+    validate_sparse2_4_mask,
+    validate_w4a16_packed_weight,
+)
 from .quantize import dequantize_int8_activation, quantize_int8_activation
 
 
@@ -124,6 +131,14 @@ def _decode_weight_values(
         if qweight.ndim != 2 or int(qweight.shape[1]) != padded_k:
             raise ValueError("unpacked INT4 reference weight must have padded logical K columns")
         return _as_float32(qweight)
+    if spec.weight_dtype == "int2":
+        if packed_bits != 2:
+            raise ValueError("INT2 reference weight requires packed_bits=2 metadata")
+        return _as_float32(unpack_int2(qweight.to(torch.uint8), logical_k=padded_k))
+    if spec.weight_dtype == "int3":
+        if packed_bits != 3:
+            raise ValueError("INT3 reference weight requires packed_bits=3 metadata")
+        return _as_float32(unpack_int3(qweight.to(torch.uint8), logical_k=padded_k))
     if spec.weight_dtype in {"fp4", "mxfp4", "nvfp4"}:
         if qweight.ndim != 2 or qweight.dtype != torch.uint8:
             raise ValueError("packed FP4 reference weight must be uint8 rank-2")
@@ -187,18 +202,40 @@ def dequantize_weight_reference(
     ):
         packed_bits = 4
         padded_k = logical_k
-    values = _decode_weight_values(
-        qweight,
-        spec=spec,
-        logical_k=logical_k,
-        padded_k=padded_k,
-        packed_bits=packed_bits,
-        nibble_signed=nibble_signed,
-    )
+    sparse_mask = weight.sparse_mask if isinstance(weight, PackedWeight) else None
+    if spec.weight_dtype == "codebook":
+        if not isinstance(weight, PackedWeight) or weight.codebook is None:
+            raise ValueError("codebook reference requires a PackedWeight with a codebook")
+        codebook = weight.codebook.to(device=qweight.device)
+        vector_size = int(codebook.shape[1])
+        if vector_size <= 0 or padded_k % vector_size != 0:
+            raise ValueError("codebook vector_size must evenly divide padded_k")
+        if int(qweight.shape[1]) != padded_k // vector_size:
+            raise ValueError(
+                "codebook indices must have padded_k // vector_size columns, "
+                f"got {int(qweight.shape[1])}"
+            )
+        indices = qweight.to(dtype=torch.long)
+        if bool((indices >= codebook.shape[0]).any()):
+            raise ValueError("codebook indices out of range")
+        values = codebook[indices].reshape(n, padded_k)
+    else:
+        values = _decode_weight_values(
+            qweight,
+            spec=spec,
+            logical_k=logical_k,
+            padded_k=padded_k,
+            packed_bits=packed_bits,
+            nibble_signed=nibble_signed,
+        )
     if spec.weight_dtype in {"fp16", "bf16", "fp32"}:
         if tuple(qweight.shape) != (n, logical_k):
             raise ValueError("dense reference weight must have logical [N,K] shape")
-        return _as_float32(qweight)
+        decoded = _as_float32(qweight)
+        if sparse_mask is not None:
+            validate_sparse2_4_mask(sparse_mask, logical_shape=(n, logical_k))
+            decoded = decoded * sparse_mask.to(device=decoded.device, dtype=decoded.dtype)
+        return decoded
     if scales is None:
         raise ValueError("quantized weight reference requires scales")
     if spec.weight_zero_point and zero_points is None:
@@ -231,7 +268,11 @@ def dequantize_weight_reference(
             raise ValueError("NVFP4 PackedWeight requires global_scale")
         global_scale = weight.global_scale.to(device=decoded.device, dtype=torch.float32).reshape(())
         expanded_scale = expanded_scale / global_scale
-    return (decoded * expanded_scale)[:, :logical_k]
+    decoded = (decoded * expanded_scale)[:, :logical_k]
+    if sparse_mask is not None:
+        validate_sparse2_4_mask(sparse_mask, logical_shape=(n, logical_k))
+        decoded = decoded * sparse_mask.to(device=decoded.device, dtype=decoded.dtype)
+    return decoded
 
 
 def _quantize_activation_reference(
