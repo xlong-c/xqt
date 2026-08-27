@@ -2,7 +2,9 @@
 
 > 来源: [xqt-architecture-review.md](xqt-architecture-review.md)
 >
-> 更新日期: 2026-08-18
+> 更新日期: 2026-08-23
+>
+> 当前架构理解和后续规范化建议: [xqt-architecture-understanding.md](xqt-architecture-understanding.md)
 
 ## 第一批: 删除与迁移收尾
 
@@ -16,6 +18,7 @@
 - [x] 5. 将 StageSpec 与 workflow schema 下沉 `xqt/core/`,解除 pipeline/quant 对 workflows 类型的反向依赖.
 - [x] 6. 拆开 quant storage artifact 与 runtime execution view,统一 contracts packing 实体并删除 quant bridge shim.
   - [x] ConvRot quant artifact 默认 reference forward;native fastpath 通过 `ConvRot*ExecutionView.from_storage()` 显式开启.
+  - [x] 增加 `xqt.runtime.materialize_convrot_execution_views()` 批量完成 marker-based handoff,不让 runtime 反向 import quantizer.
 - [x] 7. 顶层公开 API 全量懒加载,解除 quant 对 export 的导入依赖.
 
 ## 第三批: 收敛抽象与事实源

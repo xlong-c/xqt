@@ -2,6 +2,7 @@ import torch
 
 from xqt.quant import quantize_with_convrot_4bit
 from xqt.runtime import (
+    ConvRotW4A4ExecutionView,
     HybridInferenceEngine,
     apply_execution_policy,
     normalize_compute_precision,
@@ -53,6 +54,7 @@ def test_hybrid_engine_from_quantized_model_applies_policy_without_requant() -> 
     precision_map = engine.precision_map()
 
     assert output.shape == (4, 32)
+    assert isinstance(engine.model.fc, ConvRotW4A4ExecutionView)
     assert precision_map["fc"] == "w8a8"
     assert engine.policy is not None
     assert engine.policy.policy_kind == "mixed_precision"
@@ -71,6 +73,18 @@ def test_hybrid_engine_switches_precision_inplace() -> None:
     assert engine.precision_map()["fc"] == "w4a16"
     assert run.output.shape == (2, 32)
     assert run.precision_map["fc"] == "w4a16"
+
+
+def test_hybrid_engine_can_keep_reference_storage_explicitly() -> None:
+    result = _quantize_tiny()
+    engine = HybridInferenceEngine.from_quantized_model(
+        result,
+        materialize_execution_views=False,
+        apply_policy_on_init=False,
+    )
+
+    assert not isinstance(engine.model.fc, ConvRotW4A4ExecutionView)
+    assert engine.model.fc._xqt_runtime_execution_enabled is False
 
 
 def test_apply_execution_policy_does_not_mutate_source_when_not_inplace() -> None:

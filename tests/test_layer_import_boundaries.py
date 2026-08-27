@@ -185,6 +185,68 @@ def test_runtime_no_export_imports_string() -> None:
 _CONTRACTS_FORBIDDEN = ["xqt.quant", "xqt.runtime", "xqt.export"]
 
 
+_CONVROT_QUANTIZER_FILES = {
+    XQT_ROOT / "quant/quantizers/convrot_int8.py",
+    XQT_ROOT / "quant/quantizers/convrot_4bit.py",
+}
+
+
+def _scan_top_level_kernel_imports(py_file: Path) -> list[str]:
+    """Find eager operator-kernel imports in the ConvRot compatibility files."""
+
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return []
+
+    violations: list[str] = []
+
+    class _Visitor(ast.NodeVisitor):
+        function_depth = 0
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.function_depth += 1
+            self.generic_visit(node)
+            self.function_depth -= 1
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Import(self, node: ast.Import) -> None:
+            if self.function_depth == 0:
+                for alias in node.names:
+                    if alias.name.startswith("xqt.operator_opt.kernels"):
+                        rel = py_file.relative_to(XQT_ROOT)
+                        violations.append(
+                            f"{rel}:{node.lineno}: import {alias.name}"
+                        )
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if self.function_depth == 0 and (node.module or "").startswith(
+                "xqt.operator_opt.kernels"
+            ):
+                rel = py_file.relative_to(XQT_ROOT)
+                violations.append(
+                    f"{rel}:{node.lineno}: from {node.module} import ..."
+                )
+
+    _Visitor().visit(tree)
+    return violations
+
+
+def test_convrot_kernel_compat_imports_are_lazy() -> None:
+    """Historical ConvRot kernel imports must stay out of module import time."""
+
+    violations = [
+        violation
+        for py_file in sorted(_CONVROT_QUANTIZER_FILES)
+        for violation in _scan_top_level_kernel_imports(py_file)
+    ]
+    assert violations == [], (
+        "ConvRot quantizers must keep optional kernel imports lazy:\n"
+        + "\n".join(f"  {violation}" for violation in violations)
+    )
+
+
 def test_contracts_no_forbidden_imports_ast() -> None:
     """xqt.contracts must not import from quant/runtime/export layers."""
     violations = _scan_imports_ast(

@@ -4,6 +4,7 @@
 - 审阅基线: `xqt/AGENTS.md`, `xqt/FRAMEWORK.md`, `docs/md/XQT.md` 宣称的设计契约
 - 审阅方法: 静态结构分析 (AST 级 import 依赖图, md5 全树对拍, 同名文件 diff, 调用方 grep), 关键结论经人工复核与实测验证
 - 原始证据表 (依赖邻接表, 重复文件清单, 文件职责表) 见 [xqt-architecture-evidence.md](xqt-architecture-evidence.md)
+- 当前架构理解, 状态机和后续规范化建议见 [xqt-architecture-understanding.md](xqt-architecture-understanding.md)
 
 ## 0. 结论摘要 (TL;DR)
 

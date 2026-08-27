@@ -111,6 +111,12 @@ workflow 的 `ArtifactManifest` 是 **实验追踪**, 不是文件推理加载�
 - **不做**: quantizer, calibration, sensitivity.
 - 默认 `default_precision="w4a4"`, `runtime="pytorch"`.
 
+`HybridInferenceEngine.from_quantized_model()` 默认复制量化模型并调用
+`materialize_convrot_execution_views()` 将带 marker 的 ConvRot storage
+替换为 runtime execution view. 原量化模型保持 reference storage; 需要严格
+reference-only 检查时传 `materialize_execution_views=False`. 这一步只完成
+模型侧 handoff, 不代表 serving runtime 或自动选择某个硬件 kernel.
+
 构造:
 
 ```python

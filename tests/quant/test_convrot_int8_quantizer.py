@@ -11,6 +11,7 @@ from xqt.quant import (
     quantize_with_convrot_int8,
 )
 from xqt.workflows import XQTOptimizationSession
+from xqt.runtime import ConvRotInt8ExecutionView
 
 
 class _TinyLinearModel(torch.nn.Module):
@@ -20,6 +21,10 @@ class _TinyLinearModel(torch.nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.fc(inputs)
+
+
+def _runtime_convrot_int8(storage: ConvRotInt8Linear) -> ConvRotInt8ExecutionView:
+    return ConvRotInt8ExecutionView.from_storage(storage).eval()
 
 
 def test_comfy_quant_marker_roundtrip_stock_shape() -> None:
@@ -449,12 +454,12 @@ def test_convrot_dynamic_native_sm89_route_cache_and_stream(
 
     torch.manual_seed(41)
     source = torch.nn.Linear(256, 256, bias=True, device="cuda", dtype=dtype).eval()
-    module = ConvRotInt8Linear.from_linear(
+    module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         source,
         rot_size=256,
         engine="auto",
         activation_scale_mode="dynamic",
-    ).eval()
+    ))
     inputs = torch.randn(37, 256, device="cuda", dtype=dtype)
 
     first = module(inputs)
@@ -510,12 +515,12 @@ def test_convrot_dynamic_native_hot_cache_invalidates_after_scale_mutation(
     if not _native_convrot_w8a8_test_available(dtype):
         pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
 
-    module = ConvRotInt8Linear.from_linear(
+    module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         torch.nn.Linear(256, 256, bias=True).eval(),
         rot_size=256,
         engine="auto",
         activation_scale_mode="dynamic",
-    ).to(device="cuda", dtype=dtype).eval()
+    ).to(device="cuda", dtype=dtype))
     inputs = torch.randn(17, 256, device="cuda", dtype=dtype)
 
     before = module(inputs)
@@ -546,12 +551,12 @@ def test_convrot_dynamic_native_sm89_prerotated_route() -> None:
         dtype=torch.float16,
     ).eval()
     source.input_already_rotated = True
-    module = ConvRotInt8Linear.from_linear(
+    module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         source,
         rot_size=16,
         engine="auto",
         activation_scale_mode="dynamic",
-    ).eval()
+    ))
 
     output = module(torch.randn(13, 64, device="cuda", dtype=torch.float16))
     torch.cuda.synchronize()
@@ -575,12 +580,12 @@ def test_convrot_dynamic_native_sm89_pads_mnk() -> None:
         device="cuda",
         dtype=torch.float16,
     ).eval()
-    module = ConvRotInt8Linear.from_linear(
+    module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         source,
         rot_size=256,
         engine="auto",
         activation_scale_mode="dynamic",
-    ).eval()
+    ))
 
     output = module(torch.randn(19, 300, device="cuda", dtype=torch.float16))
     torch.cuda.synchronize()
@@ -609,25 +614,25 @@ def test_convrot_native_dynamic_gate_keeps_explicit_fallbacks() -> None:
         dtype=torch.float16,
     ).eval()
     inputs = torch.randn(32, 256, device="cuda", dtype=torch.float16)
-    static_module = ConvRotInt8Linear.from_linear(
+    static_module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         source,
         rot_size=256,
         engine="auto",
         activation_scale_mode="static",
         activation_scale=0.02,
-    ).eval()
-    explicit_engine = ConvRotInt8Linear.from_linear(
+    ))
+    explicit_engine = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         source,
         rot_size=256,
         engine="torch_int_mm",
         activation_scale_mode="dynamic",
-    ).eval()
-    unsupported_rotation = ConvRotInt8Linear.from_linear(
+    ))
+    unsupported_rotation = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
         source,
         rot_size=64,
         engine="auto",
         activation_scale_mode="dynamic",
-    ).eval()
+    ))
 
     static_allowed, static_reason = static_module._native_w8a8_gate(inputs)
     engine_allowed, engine_reason = explicit_engine._native_w8a8_gate(inputs)

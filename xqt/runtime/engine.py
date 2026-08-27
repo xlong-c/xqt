@@ -74,14 +74,25 @@ class HybridInferenceEngine:
         stage_name: str = "quant",
         source_model_stage: str = "baseline",
         apply_policy_on_init: bool = True,
+        materialize_execution_views: bool = True,
     ) -> "HybridInferenceEngine":
-        """Build an engine from a quant-stage artifact without re-quantizing."""
+        """Build an engine from a quant-stage artifact without re-quantizing.
+
+        Quantized models remain storage artifacts. The default engine handoff
+        copies them and materializes runtime execution views; callers that
+        need a strict reference-only model can disable that step explicitly.
+        """
 
         metadata = dict(quantized.metadata)
+        model = quantized.model
+        if materialize_execution_views:
+            from .modules.convrot import materialize_convrot_execution_views
+
+            model = materialize_convrot_execution_views(model, inplace=False)
         handoff = (
             quantized.infer_handoff()
             if hasattr(quantized, "infer_handoff")
-            else {"model": quantized.model, "compute_config": None}
+            else {"model": model, "compute_config": None}
         )
         compute_config = handoff.get("compute_config")
         raw_policies = metadata.get("execution_policies", [])
@@ -110,7 +121,6 @@ class HybridInferenceEngine:
                 },
                 module_count=len(list(quantized.quantized_modules)),
             )
-            model = quantized.model
             if parsed is not None:
                 from .composite_materialize import materialize_composite_compute
 
@@ -161,7 +171,7 @@ class HybridInferenceEngine:
                     module_count=len(list(quantized.quantized_modules)),
                 )
         return cls(
-            quantized.model,
+            model,
             default_precision=default_precision,
             runtime=runtime,
             policy=policy,

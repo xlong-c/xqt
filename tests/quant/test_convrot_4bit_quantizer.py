@@ -7,6 +7,7 @@ from xqt.quant import (
     quantize_with_convrot_4bit,
 )
 from xqt.runtime import apply_execution_policy
+from xqt.runtime import ConvRotW4A4ExecutionView
 from xqt.workflows import XQTOptimizationSession
 
 
@@ -17,6 +18,12 @@ class _TinyLinearModel(torch.nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.fc(inputs)
+
+
+def _runtime_convrot_w4a4(
+    storage: ConvRotMixedPrecisionLinear,
+) -> ConvRotW4A4ExecutionView:
+    return ConvRotW4A4ExecutionView.from_storage(storage).eval()
 
 
 def test_build_regular_hadamard_matrix_order_4_matches_convrot_base() -> None:
@@ -479,14 +486,14 @@ def test_convrot_rowwise_w4a4_cuda_runtime_cache_and_mutation(
         device="cuda",
         dtype=dtype,
     ).eval()
-    module = ConvRotMixedPrecisionLinear.from_linear(
+    module = _runtime_convrot_w4a4(ConvRotMixedPrecisionLinear.from_linear(
         source,
         rot_size=256,
         group_size=128,
         compute_precision="w4a4",
         activation_scale_mode="dynamic",
         w4a4_runtime_backend="rowwise",
-    ).eval()
+    ))
     storage = torch.randn(2, 3, 2048, device="cuda", dtype=dtype)
     inputs = storage[..., ::2]
 
@@ -548,14 +555,14 @@ def test_convrot_rowwise_w4a4_gate_rejects_static_activation_scale() -> None:
     if not _rowwise_convrot_w4a4_cuda_available():
         pytest.skip("rowwise sm_89 ConvRot W4A4 backend unavailable")
 
-    module = ConvRotMixedPrecisionLinear.from_linear(
+    module = _runtime_convrot_w4a4(ConvRotMixedPrecisionLinear.from_linear(
         torch.nn.Linear(1024, 1024, bias=False, device="cuda", dtype=torch.float16),
         rot_size=256,
         group_size=128,
         compute_precision="w4a4",
         activation_scale_mode="static",
         w4a4_runtime_backend="rowwise",
-    ).eval()
+    ))
     allowed, reason = module._rowwise_w4a4_gate(
         torch.randn(2, 1024, device="cuda", dtype=torch.float16)
     )

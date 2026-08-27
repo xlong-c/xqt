@@ -37,6 +37,7 @@ from xqt.quant.quantizers.convrot_4bit import (
     _apply_groupwise_rotation,
     _normalized_regular_hadamard,
 )
+from xqt.runtime import ConvRotW4A4ExecutionView
 
 DEFAULT_ARTIFACT_DIR = "artifacts/xqt/benchmarks/convrot_w4a4_sm89"
 DEFAULT_WARMUP = 30
@@ -133,13 +134,15 @@ def benchmark_convrot_w4a4_sm89(
                 device=device,
                 dtype=dtype,
             ).eval()
-            module = ConvRotMixedPrecisionLinear.from_linear(
-                source,
-                rot_size=256,
-                group_size=128,
-                compute_precision="w4a4",
-                activation_scale_mode="dynamic",
-                w4a4_runtime_backend="rowwise",
+            module = ConvRotW4A4ExecutionView.from_storage(
+                ConvRotMixedPrecisionLinear.from_linear(
+                    source,
+                    rot_size=256,
+                    group_size=128,
+                    compute_precision="w4a4",
+                    activation_scale_mode="dynamic",
+                    w4a4_runtime_backend="rowwise",
+                )
             ).eval()
             artifact_weight = module.dequantized_weight(
                 dtype=dtype,

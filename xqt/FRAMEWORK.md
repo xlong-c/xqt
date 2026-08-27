@@ -95,7 +95,7 @@ Engine 词表事实源 (DEBT-001): 实现侧唯一权威是 `xqt.contracts.engin
 XQT 是本仓库内唯一推理优化主体. Python API 是主入口, 包括 `XQTOptimizationSession`, `xqt.convert(...)` 和 `xqt.nn.*` facade. `HybridInferenceEngine` 与 `ModelRunner` 仅是 reference/交互式便利封装,不是 deploy runtime handle,serving scheduler 或生产引擎主入口.
 
 - `xqt.quant` 只负责量化算法与 artifact (packed weight, scale, rotation, execution policy / compute_config metadata, channel hybrid mask). quantizer 产出 contracts storage shell, 不把 runtime execution view 当作量化结果, 也不把 operator engine 名写成推理必选主键.
-- `xqt.runtime.HybridInferenceEngine` 只消费已量化模型与 execution policy / compute_config,提供 reference/交互式模块级与通道级混合精度检查;不跑 quantizer / calibration / sensitivity,也不代表生产 runtime.
+- `xqt.runtime.HybridInferenceEngine` 只消费已量化模型与 execution policy / compute_config,提供 reference/交互式模块级与通道级混合精度检查;`from_quantized_model()` 默认复制并物化 marker-based ConvRot execution view,可用 `materialize_execution_views=False` 保持 reference-only;不跑 quantizer / calibration / sensitivity,也不代表生产 runtime.
 - `xqt.contracts.engine_resolve` 按 `required_capabilities` (+ 可选 preferred_engines hint) 解析 operator engine; 不是 quant method 选择.
 - Operator engine 只管算子实现 / 融合 / MMA lowering. AWQ / GPTQ / SVD 是 quant **method**, 不是 engine methods.
 - `ArtifactManifest` 只用于 workflow / experiment 追踪, 不是 file-based inference 的加载契约. 推理侧文件入口二选一: (1) 模型包 `manifest.json` (`load_model_package`); (2) 扁平 `model.pt` + `quant.json` (`load_quant_pair` / `load_quant_pair_into_model`). 二者都只消费已量化存储 + 可选 `compute_config`, 不解析 quant recipe YAML.

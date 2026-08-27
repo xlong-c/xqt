@@ -141,7 +141,7 @@ print(describe_quant_backend_capability("pytorch", method="awq", strategy="weigh
 | `awq` | 离线静态 weight-only (activation-aware 校准服务权重) | `quantizers/awq.py`, `awq_gptq_weight_only.py` |
 | `gptq` | 离线静态 weight-only (Hessian-aware) | `quantizers/gptq.py`, `awq_gptq_weight_only.py` |
 | `svd` / `svdquant` | 离线静态权重残差 + 16-bit 低秩; 激活默认运行时动态 | `quantizers/svd.py` |
-| `convrot` | 离线规则 Hadamard 分组旋转 + 静态权重量化; 激活在线旋转 | `quantizers/convrot_4bit.py` (dynamic A4 为 per-token/row;支持 rowwise 或 Nunchaku native W4A4,否则 reference), `quantizers/convrot_int8.py` (W8A8 INT8 MMA, 当前 runtime activation scale 为 per-tensor) |
+| `convrot` | 离线规则 Hadamard 分组旋转 + 静态权重量化; 激活在线旋转 | `quantizers/convrot_4bit.py` (storage 默认 reference;经 `ConvRotW4A4ExecutionView.from_storage()` 才尝试 rowwise 或 Nunchaku native W4A4), `quantizers/convrot_int8.py` (storage 默认 reference;经 `ConvRotInt8ExecutionView.from_storage()` 才尝试 W8A8 INT8 MMA,当前 runtime activation scale 为 per-tensor) |
 | (torchao methods) | 由 torchao backend 承载 | `backends/torchao.py` |
 | (qdq static) | 离线静态权重 + 校准静态激活 (ONNX QDQ) | `backends/onnx_qdq.py` |
 
@@ -172,7 +172,7 @@ ConvRot 的 `rot_size` 是实际使用的规则 Hadamard 分组大小 `N0`, 必�
 - `logical_input_features` 和 `padded_input_features` 会写入 result/module metadata. forward 输出始终回到逻辑输出形状, padding 对调用方透明.
 - batch 维和 sequence/token 维只会折叠进旋转的 batch 侧, 没有长度整除限制. W4A4 dynamic 激活 scale 沿最后一维归约, 每个 token 独立生成一个 scale; static 模式才使用校准得到的 per-tensor scale.
 
-`ConvRotMixedPrecisionLinear(compute_precision="w4a4")` 的 artifact/strategy 分类和单次 runtime execution 必须分开看. 当前模块在支持条件下可执行两类 native W4A4:rowwise warp-FHT + CUTLASS `s4 x s4 -> s32` 路径,或 Nunchaku grouped W4A4 路径;两者都不可用时才回到 dequantized `F.linear` reference. `w4a4_runtime_backend=auto|rowwise|nunchaku|reference` 控制解析语义,真实状态以 `execution_metadata()` 的 `resolved_w4a4_runtime_backend`,`native_w4a4_used`,`runtime_weight_layout`,`native_w4a4_fallback_reason` 和 `norm_fused` 为准. SM89 rowwise 实现和性能证据见 [convrot-w4a4-sm89-optimization.md](convrot-w4a4-sm89-optimization.md).
+`ConvRotMixedPrecisionLinear(compute_precision="w4a4")` 的 artifact/strategy 分类和单次 runtime execution 必须分开看. `from_linear()` 和 quantizer 默认只创建 reference storage; 通过 `ConvRotW4A4ExecutionView.from_storage()` 显式物化后,支持条件下才会尝试两类 native W4A4:rowwise warp-FHT + CUTLASS `s4 x s4 -> s32` 路径,或 Nunchaku grouped W4A4 路径;两者都不可用时回到 dequantized `F.linear` reference. `w4a4_runtime_backend=auto|rowwise|nunchaku|reference` 控制解析语义,真实状态以 `execution_metadata()` 的 `artifact_view`,`resolved_w4a4_runtime_backend`,`native_w4a4_used`,`runtime_weight_layout`,`native_w4a4_fallback_reason` 和 `norm_fused` 为准. SM89 rowwise 实现和性能证据见 [convrot-w4a4-sm89-optimization.md](convrot-w4a4-sm89-optimization.md).
 
 配置 (默认先 weight-only / 离线静态权重):
 

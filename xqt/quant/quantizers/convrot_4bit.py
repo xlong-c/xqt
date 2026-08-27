@@ -301,7 +301,9 @@ class ConvRotMixedPrecisionLinear(nn.Module):
         channel_hybrid_enabled: bool = False,
     ) -> None:
         super().__init__()
-        self._xqt_runtime_execution_enabled = True
+        # Quantizer construction creates a serializable storage artifact.
+        # Native dispatch is enabled only by ConvRotW4A4ExecutionView.
+        self._xqt_runtime_execution_enabled = False
         self._xqt_convrot_storage_kind = "w4a4"
         self.input_features = int(input_features)
         self.output_features = int(output_features)
@@ -1219,6 +1221,7 @@ class ConvRotMixedPrecisionLinear(nn.Module):
                 else None
             ),
             "norm_fused": False,
+            "artifact_view": "contracts_reference",
         }
 
 

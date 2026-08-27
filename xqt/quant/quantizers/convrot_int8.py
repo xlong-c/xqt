@@ -105,7 +105,9 @@ class ConvRotInt8Linear(nn.Module):
         comfy_quant_marker: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
-        self._xqt_runtime_execution_enabled = True
+        # Quantizer construction creates a serializable storage artifact.
+        # Native dispatch is enabled only by ConvRotInt8ExecutionView.
+        self._xqt_runtime_execution_enabled = False
         self._xqt_convrot_storage_kind = "int8"
         self.input_features = int(input_features)
         self.output_features = int(output_features)

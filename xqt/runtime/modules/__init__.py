@@ -14,6 +14,7 @@ from .convrot import (
     ConvRotExecutionView,
     ConvRotInt8ExecutionView,
     ConvRotW4A4ExecutionView,
+    materialize_convrot_execution_views,
 )
 from .fp8_mma_linear import Fp8MmaLinear
 from .int8_mma_linear import Int8MmaLinear
@@ -47,6 +48,7 @@ __all__ = [
     "ConvRotExecutionView",
     "ConvRotInt8ExecutionView",
     "ConvRotW4A4ExecutionView",
+    "materialize_convrot_execution_views",
     "RMSNormCompositeLinear",
     "Fp8MmaLinear",
     "Int8MmaLinear",

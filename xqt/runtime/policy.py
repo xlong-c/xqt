@@ -55,8 +55,20 @@ def collect_module_precision_map(model: nn.Module) -> dict[str, str]:
     """Collect current compute precision for policy-aware modules."""
 
     precision_map: dict[str, str] = {}
+    execution_view_roots = {
+        name
+        for name, module in model.named_modules()
+        if bool(getattr(module, "_xqt_runtime_execution_view", False))
+    }
     for name, module in model.named_modules():
-        if isinstance(module, SupportsComputePrecision):
+        if any(
+            root == "" or name.startswith(f"{root}.")
+            for root in execution_view_roots
+        ):
+            continue
+        if isinstance(module, SupportsComputePrecision) or hasattr(
+            module, "compute_precision"
+        ):
             precision_map[name] = str(module.compute_precision)
     return precision_map
 
@@ -181,7 +193,17 @@ def apply_execution_policy(
     override_map = precision_overrides_to_map(overrides)
     resolved_default = normalize_compute_precision(default_precision)
 
+    execution_view_roots = {
+        name
+        for name, module in target_model.named_modules()
+        if bool(getattr(module, "_xqt_runtime_execution_view", False))
+    }
     for name, module in list(target_model.named_modules()):
+        if any(
+            root == "" or name.startswith(f"{root}.")
+            for root in execution_view_roots
+        ):
+            continue
         if not (
             isinstance(module, SupportsComputePrecision)
             or hasattr(module, "compute_precision")

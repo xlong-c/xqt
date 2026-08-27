@@ -26,6 +26,7 @@ from xqt.quant.quantizers.convrot_4bit import (
     _apply_groupwise_rotation,
     _normalized_regular_hadamard,
 )
+from xqt.runtime import ConvRotW4A4ExecutionView
 
 ROWS = 256
 FEATURES = 2048
@@ -81,13 +82,15 @@ def profile_convrot_w4a4_sm89() -> dict[str, Any]:
         device=device,
         dtype=DTYPE,
     ).eval()
-    module = ConvRotMixedPrecisionLinear.from_linear(
-        source,
-        rot_size=256,
-        group_size=128,
-        compute_precision="w4a4",
-        activation_scale_mode="dynamic",
-        w4a4_runtime_backend="rowwise",
+    module = ConvRotW4A4ExecutionView.from_storage(
+        ConvRotMixedPrecisionLinear.from_linear(
+            source,
+            rot_size=256,
+            group_size=128,
+            compute_precision="w4a4",
+            activation_scale_mode="dynamic",
+            w4a4_runtime_backend="rowwise",
+        )
     ).eval()
     inputs = torch.randn(ROWS, FEATURES, device=device, dtype=DTYPE)
     artifact_weight = module.dequantized_weight(

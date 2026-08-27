@@ -74,7 +74,17 @@ def collect_channel_hybrid_map(model: nn.Module) -> dict[str, dict[str, Any]]:
     """Collect active channel hybrid plans from a quantized model."""
 
     plans: dict[str, dict[str, Any]] = {}
+    execution_view_roots = {
+        name
+        for name, module in model.named_modules()
+        if bool(getattr(module, "_xqt_runtime_execution_view", False))
+    }
     for name, module in model.named_modules():
+        if any(
+            root == "" or name.startswith(f"{root}.")
+            for root in execution_view_roots
+        ):
+            continue
         if not isinstance(module, SupportsChannelHybrid):
             getter = getattr(module, "channel_hybrid_spec", None)
             if not callable(getter):
