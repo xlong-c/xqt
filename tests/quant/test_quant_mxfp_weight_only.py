@@ -7,9 +7,9 @@ import torch
 
 from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
-from xqt.quant import execute_quantization_plan
-from xqt.quant.plan import build_quantization_plan
-from xqt.quant.quantizers.mxfp_weight_only import MXFPWeightOnlyLinear
+from xqt.compression.quant import execute_quantization_plan
+from xqt.compression.quant.plan import build_quantization_plan
+from xqt.compression.quant.quantizers.mxfp_weight_only import MXFPWeightOnlyLinear
 
 
 class _TinyMLP(torch.nn.Module):

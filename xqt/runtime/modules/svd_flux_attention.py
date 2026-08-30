@@ -194,7 +194,7 @@ class SVDQuantFluxAttention(nn.Module):
         if not torch.cuda.is_available():
             return False
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_available,
             )
 
@@ -294,7 +294,7 @@ class SVDQuantFluxAttention(nn.Module):
         if (major, minor) != (8, 9):
             return False, f"native fused FLUX attention targets sm_89, got sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_available,
             )
 
@@ -333,7 +333,7 @@ class SVDQuantFluxAttention(nn.Module):
         inputs: torch.Tensor,
         rotary_emb: torch.Tensor,
     ) -> torch.Tensor:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             allocate_w4a4_workspace,
             bind_svdq_w4a4_qkv_rmsnorm_rope,
         )
@@ -396,7 +396,7 @@ class SVDQuantFluxAttention(nn.Module):
         output_v: torch.Tensor,
         row_offset: int,
     ) -> None:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             allocate_w4a4_workspace,
             bind_svdq_w4a4_qkv_rmsnorm_rope,
         )
@@ -498,7 +498,7 @@ class SVDQuantFluxAttention(nn.Module):
                 raise ValueError("joint attention requires packed context rotary tensor")
 
         if self.attention_processor == "nunchaku-fp16":
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 svdq_w4a4_attention_fp16,
             )
 

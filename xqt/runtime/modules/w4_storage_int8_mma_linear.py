@@ -8,12 +8,11 @@ import torch
 from torch import nn
 
 from xqt.contracts.packing_int4 import (
-    _normalize_group_size,
-    _quantize_grouped_fp4_weight,
     _unpack_int4,
 )
 from xqt.contracts.w4_storage import (
     W4StorageInt8MmaLinear as W4StorageInt8MmaStorageLinear,
+    _packed_w4_from_float_weight as _core_packed_w4_from_float_weight,
 )
 from xqt.core.errors import XQTBackendError
 from xqt.runtime.modules.int8_mma_linear import Int8MmaLinear
@@ -40,15 +39,7 @@ def _packed_w4_from_float_weight(
     *,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-    output_features, input_features = int(weight.shape[0]), int(weight.shape[1])
-    normalized_group_size = _normalize_group_size(group_size, input_features)
-    packed_weight, scale, padded_input_features = _quantize_grouped_fp4_weight(
-        weight,
-        group_size=normalized_group_size,
-        input_features=input_features,
-        output_features=output_features,
-    )
-    return packed_weight, scale, normalized_group_size, padded_input_features
+    return _core_packed_w4_from_float_weight(weight, group_size=group_size)
 
 def _float_weight_from_packed_w4(
     packed_weight: torch.Tensor,

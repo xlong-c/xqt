@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from xqt.contracts.quant_scheme import QuantScheme
-from xqt.core.errors import XQTConfigError
+from xqt.core.base import XQTConfigError
 
 RUNTIME_QUANT_CONTRACT_KEY = "runtime_quant_contract"
 RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION = 1

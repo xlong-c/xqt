@@ -2,7 +2,7 @@ project:
   name: detection_yolo_smoke
   artifact_dir: artifacts/xqt/detection/yolo_smoke
 model:
-  target: xqt.model.build_smoke_detection_module
+  target: xqt.kernels.nn.fixtures.build_smoke_detection_module
   params:
     num_classes: 3
     boxes_per_image: 2

@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from xqt.core.errors import XQTConfigError
+from xqt.core.base import XQTConfigError
 
 RUNTIME_FEATURES_KEY = "runtime_features"
 RUNTIME_FEATURES_SCHEMA_VERSION = 1
@@ -32,6 +32,8 @@ FEATURE_STATUSES = (
     "unsupported",
     "unverified",
     "metadata_only",
+    "reference_entity",
+    "adapter_only",
     "not_implemented",
 )
 FEATURE_OWNERS = ("xqt", "external_runtime")

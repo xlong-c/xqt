@@ -2,7 +2,7 @@ project:
   name: prune_structured_cnn
   artifact_dir: artifacts/xqt/prune/structured/cnn
 model:
-  target: xqt.prune.StructuredPruningToyCNN
+  target: xqt.kernels.nn.fixtures.toy_models.StructuredPruningToyCNN
   params:
     in_channels: 3
     hidden_channels: 8

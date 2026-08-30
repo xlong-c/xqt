@@ -29,7 +29,7 @@ from examples.xqt_models.unlimited_ocr import (
     load_unlimited_ocr,
     quantize_unlimited_ocr_convrot_int8,
 )
-from xqt.quant.quantizers.convrot_int8 import ConvRotInt8Linear
+from xqt.compression.quant.quantizers.convrot_int8 import ConvRotInt8Linear
 
 
 CONFIG: dict[str, Any] = {

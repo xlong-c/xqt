@@ -5,15 +5,15 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.materialize import materialize_operator_candidate_model
-from xqt.operator_opt.plan import build_operator_optimization_plan
-from xqt.operator_opt.kernels.tilelang.conv import (
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.materialize import materialize_operator_candidate_model
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
+from xqt.kernels.ops._impl.tilelang.conv import (
     conv3d_1x1x1_reference,
     conv3d_1x1x1_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.types import OperatorOptimizationTargetPlan
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
 from xqt.pipeline.passes import LoadModelPass
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
@@ -37,7 +37,7 @@ def _tilelang_conv3d_operator_config(device: str) -> dict:
             "artifact_dir": f"artifacts/xqt/tests/tilelang_conv3d_{device}",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_conv3d_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_conv3d_block",
             "params": {
                 "in_channels": 8,
                 "hidden_channels": 64,
@@ -124,7 +124,7 @@ def test_tilelang_conv3d_operator_stage_uses_reference_fallback_on_cpu() -> None
 
 
 def test_materialize_tilelang_conv3d_candidate_replaces_named_conv() -> None:
-    import xqt.model.toy_models as toy_models
+    import xqt.kernels.nn.fixtures.toy_models as toy_models
 
     module = toy_models.build_toy_conv3d_block()
     target = OperatorOptimizationTargetPlan(

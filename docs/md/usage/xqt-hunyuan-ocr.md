@@ -108,7 +108,7 @@ reshape 契约:
 
 | 项 | 默认 | 作用 |
 | --- | --- | --- |
-| **1. M=1 INT8 no-pad** | 可选: `decode_min_int8_rows=0` | `rows==1` 时优先 `int8_gemv_m1_*` (`__dp4a`, 见 `xqt/operator_opt/kernels/cute/int8mma_kernel.cu`); 不可用时回退 float 域 int8 products. 相对 float GEMV 约 2-3x, 仍慢于 cuBLAS dense, 默认关闭 |
+| **1. M=1 INT8 no-pad** | 可选: `decode_min_int8_rows=0` | `rows==1` 时优先 `int8_gemv_m1_*` (`__dp4a`, 见 `xqt/kernels/jit/csrc/quantization/int8mma_kernel.cu`); 不可用时回退 float 域 int8 products. 相对 float GEMV 约 2-3x, 仍慢于 cuBLAS dense, 默认关闭 |
 | **2. GQA tile=1** | `gqa_query_tile_rows=1` | 单 token 精确 GQA, 不 pad query 到 64; `64` 仍为 legacy TileLang MMA |
 | **3. Projection fusion** | QKV / gate+up INT8 pack | 仅 `decode_min_int8_rows=0` 且 M=1 时启用; dense 默认路径保持逐 projection (更快) |
 
@@ -124,7 +124,7 @@ reshape 契约:
 
 说明:
 
-- sm_89 TileLang `T.gemm` 不能 `block_m=1`; M=1 真 INT8 用 `int8_gemv_m1_*` (DP4A, 见 `xqt/operator_opt/kernels/cute/int8mma_kernel.cu`).
+- sm_89 TileLang `T.gemm` 不能 `block_m=1`; M=1 真 INT8 用 `int8_gemv_m1_*` (DP4A, 见 `xqt/kernels/jit/csrc/quantization/int8mma_kernel.cu`).
 - GQA `query_tile_rows` 仅支持 `{1, 64}`; 16/32 会 layout infer 失败.
 - fusion 仅 `Int8MmaLinear` + 相同 static activation scale; SVD residual 回退逐 projection.
 
@@ -200,12 +200,12 @@ result = optimize_hunyuan_ocr_dflash_svd_int4_blocks(
 | 主题 | 路径 |
 | --- | --- |
 | Hunyuan helper | `examples/xqt_models/hunyuan_ocr.py` |
-| SVD quant method | `xqt/quant/quantizers/svd.py` |
+| SVD quant method | `xqt/compression/quant/quantizers/svd.py` |
 | Runtime dual-branch modules | `xqt/runtime/modules/svd_w4a4_legacy.py` |
 | Residual INT8 module | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
-| torch.compile backend | `xqt/operator_opt/compile_backend.py` |
+| torch.compile backend | `xqt/kernels/wrappers/compile_backend.py` |
 | TileLang Hunyuan decode pipeline | `examples/xqt_models/hunyuan_ocr_tilelang.py` |
-| TileLang Hunyuan kernels | `xqt/operator_opt/kernels/tilelang/hunyuan_block.py` |
+| TileLang Hunyuan kernels | `xqt/kernels/ops/_impl/tilelang/hunyuan_block.py` |
 
 ## 验证
 

@@ -1,28 +1,13 @@
-"""XQT error types."""
+"""Deprecated compatibility imports for :mod:`xqt.core.base.errors`."""
 
-
-class XQTError(Exception):
-    """Base error for XQT."""
-
-
-class XQTConfigError(XQTError):
-    """Invalid XQT configuration."""
-
-
-class XQTPipelineError(XQTError):
-    """Pipeline pass execution failed."""
-
-
-class XQTRegistryError(XQTError):
-    """XQT registry lookup or registration failed."""
-
-
-class XQTArtifactError(XQTError):
-    """Artifact manifest or checksum operation failed."""
-
-
-class XQTBackendError(XQTError):
-    """Optional backend dependency or execution failed."""
+from .base.errors import (
+    XQTArtifactError,
+    XQTBackendError,
+    XQTConfigError,
+    XQTError,
+    XQTPipelineError,
+    XQTRegistryError,
+)
 
 
 __all__ = [

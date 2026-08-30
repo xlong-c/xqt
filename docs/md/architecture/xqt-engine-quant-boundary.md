@@ -30,10 +30,10 @@ Infer 只消费: 已量化模型 + 可选计算配置; 不回流量化, 不强�
 
 | 词 | 含义 | 合法落点 | 禁止落点 |
 | --- | --- | --- | --- |
-| **quant method** | 量化算法 / 如何得到 scale 与 packed weight | `quant.params.method`; quant report; `xqt/quant/quantizers/` | operator engine methods; Infer 必选输入 |
+| **quant method** | 量化算法 / 如何得到 scale 与 packed weight | `quant.params.method`; quant report; `xqt/compression/quant/quantizers/` | operator engine methods; Infer 必选输入 |
 | **storage** | 权重/激活存什么 | model buffers; 可选 `compute_config.modules[].storage` | 与某个 engine 绑死 |
 | **compute / MMA contract** | 算什么 (计算契约) | `compute_config.compute_contract`; `required_capabilities` | 写成 quant method 同义词 |
-| **operator engine** | 谁来 lowering / 跑 kernel | `operator` stage `engine=`; `xqt.convert` materialize preference; `operator_opt` | quant `backend` 名; AWQ/GPTQ/SVD 的 methods 列表 |
+| **operator engine** | 谁来 lowering / 跑 kernel | `operator` stage `engine=`; `xqt.convert` materialize preference; `xqt.kernels.wrappers` | quant `backend` 名; AWQ/GPTQ/SVD 的 methods 列表 |
 | **quant backend** | quant **适配路径** (外部库或 PyTorch 主路径) | `quant.params.backend` | 与 operator engine 同名混用 |
 | **export / deploy backend** | 外部 runtime (ORT/TRT/...) | export/deploy targets; 模型包 `preferred_backend` | 与 triton/tilelang 并列成 "XQT engine" |
 | **strategy** (现状) | 历史兼容枚举, 混有 storage/compute 痕迹 | recipe `strategy` (过渡) | 新能力的唯一主键 (应逐步拆到 method×storage×compute) |
@@ -58,7 +58,7 @@ Infer 只消费: 已量化模型 + 可选计算配置; 不回流量化, 不强�
 | `svdquant` | 是 quant **method**, 不是 quant backend | `backend=pytorch` + `method=svd` + `strategy=svd_fp4\|svd_int4\|svd_fp4_int8_mma\|svd_int4_int8_mma` |
 | `awq` / `gptq` 作 backend | 是 method | `backend=pytorch` + `method=awq\|gptq` |
 
-代码会拒绝上述错误 backend (见 `xqt/quant/capability.py`, `xqt/quant/execution/executor.py`).
+代码会拒绝上述错误 backend (见 `xqt/compression/quant/capability.py`, `xqt/compression/quant/execution/executor.py`).
 
 ---
 
@@ -120,10 +120,10 @@ stages:
 
 | method | 实现 | 默认 backend |
 | --- | --- | --- |
-| `awq` / `gptq` | `xqt/quant/quantizers/awq.py`, `gptq.py`, `awq_gptq_weight_only.py` | `pytorch` |
-| `svd` | `xqt/quant/quantizers/svd.py` | `pytorch` |
-| torchao 系列 | `xqt/quant/backends/torchao.py` | `torchao` |
-| static QDQ | `xqt/quant/backends/onnx_qdq.py` | `onnxruntime_qdq` |
+| `awq` / `gptq` | `xqt/compression/quant/quantizers/awq.py`, `gptq.py`, `awq_gptq_weight_only.py` | `pytorch` |
+| `svd` | `xqt/compression/quant/quantizers/svd.py` | `pytorch` |
+| torchao 系列 | `xqt/compression/quant/backends/torchao.py` | `torchao` |
+| static QDQ | `xqt/compression/quant/backends/onnx_qdq.py` | `onnxruntime_qdq` |
 
 ---
 
@@ -133,7 +133,7 @@ stages:
 
 - 算子 pattern 实现, 融合, materialize, MMA / dequant-gemm 等 **计算路径**.
 - capability 矩阵: `list_operator_engine_capabilities()`.
-- 按 `required_capabilities` (+ 可选 preferred hint) **resolve** engine (`xqt/contracts/engine_resolve.py`).
+- 按 `required_capabilities` (+ 可选 preferred hint) **resolve** engine (`xqt/kernels/engine_resolve.py`).
 
 ### 5.2 不负责
 
@@ -182,15 +182,15 @@ Infer 行为:  resolve(required_capabilities) -> execute
 
 | 主题 | 路径 |
 | --- | --- |
-| quant backend 矩阵 | `xqt/quant/capability.py` |
-| quant 执行分发 | `xqt/quant/execution/executor.py` |
-| quant methods 实现 | `xqt/quant/quantizers/` |
-| operator engine 矩阵 | `xqt/operator_opt/capability.py` |
-| engine resolve | `xqt/contracts/engine_resolve.py` |
+| quant backend 矩阵 | `xqt/compression/quant/capability.py` |
+| quant 执行分发 | `xqt/compression/quant/execution/executor.py` |
+| quant methods 实现 | `xqt/compression/quant/quantizers/` |
+| operator engine 矩阵 | `xqt/kernels/wrappers/capability.py` |
+| engine resolve | `xqt/kernels/engine_resolve.py` |
 | compute_config | `xqt/contracts/compute.py` |
 | Infer handoff | `xqt/contracts/quantized.py` `infer_handoff` |
 | Hybrid runtime | `xqt/runtime/engine.py` |
-| convert | `xqt/conversion.py` |
+| convert | `xqt/kernels/nn/convert.py` (`xqt.convert` 公开别名) |
 | strategy 枚举 (混轴现状) | `xqt/core/schema.py` `CANONICAL_QUANT_STRATEGIES` |
 
 ---

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from xqt.contracts.engine_resolve import (
+from xqt.kernels.engine_resolve import (
     EngineRegistration,
     engine_resolve_from_compute_config,
     engines_providing_all,
@@ -185,7 +185,7 @@ def test_resolve_compute_engine_defaults_match_int8_path() -> None:
 
 
 def test_primary_kernel_maps_onto_engine_registry() -> None:
-    from xqt.contracts.engine_resolve import map_primary_kernel_to_engine
+    from xqt.kernels.engine_resolve import map_primary_kernel_to_engine
 
     assert map_primary_kernel_to_engine("tilelang_fp4") == "tilelang"
     assert map_primary_kernel_to_engine("w8a8_int8_mma") == "tilelang"
@@ -217,7 +217,7 @@ def test_c10_cutile_cute_cutlass_not_pretend_executable_auto_head() -> None:
 def test_hadamard_groupwise_provided_by_tilelang_and_triton() -> None:
     """V3: C6 online kernel capability is declared on fusion DSL + portable line."""
 
-    from xqt.contracts.engine_resolve import engines_providing
+    from xqt.kernels.engine_resolve import engines_providing
 
     providers = engines_providing("hadamard_groupwise")
     assert "tilelang" in providers

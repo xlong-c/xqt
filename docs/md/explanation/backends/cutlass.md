@@ -24,7 +24,7 @@ XQT 当前的 CUTLASS adapter 不是完整 C++ extension build system. 它把 CU
 
 ## 当前支持 pattern
 
-源码位置: `xqt/operator_opt/backends/cutlass.py`
+源码位置: `xqt/kernels/ops/_impl/engines/cutlass.py`
 
 `CUTLASS_KERNEL_REGISTRY` 当前包含:
 
@@ -45,7 +45,7 @@ XQT 当前的 CUTLASS adapter 不是完整 C++ extension build system. 它把 CU
 ## 简单例子
 
 ```python
-from xqt.operator_opt.backends import (
+from xqt.kernels.wrappers import (
     CutlassCompileSettings,
     build_cutlass_artifact_metadata,
     list_cutlass_kernel_specs,
@@ -69,7 +69,7 @@ metadata = build_cutlass_artifact_metadata(
 ```python
 import torch
 
-from xqt.operator_opt.backends import run_cutlass_kernel
+from xqt.kernels.wrappers import run_cutlass_kernel
 
 
 a = torch.randn(128, 256)

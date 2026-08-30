@@ -14,7 +14,7 @@ from xqt.contracts import (
     RuntimeQuantContract,
     build_runtime_manifest,
 )
-from xqt.quant.types import QuantScheme
+from xqt.compression.quant.types import QuantScheme
 from xqt.contracts.quant_pair import write_quant_pair
 
 

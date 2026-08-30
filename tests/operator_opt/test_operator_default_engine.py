@@ -4,8 +4,8 @@ from xqt.core.schema import (
     OperatorOptimizationConfig,
     OperatorOptimizationTargetConfig,
 )
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from xqt.workflows.stage_specs import OperatorStageSpec
 
 

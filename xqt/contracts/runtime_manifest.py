@@ -20,7 +20,7 @@ from xqt.contracts.runtime_features import (
     RUNTIME_FEATURES_KEY,
     RuntimeFeatureMetadata,
 )
-from xqt.core.errors import XQTConfigError
+from xqt.core.base import XQTConfigError
 
 RUNTIME_MANIFEST_KEY = "runtime_manifest"
 RUNTIME_MANIFEST_SCHEMA_VERSION = 1

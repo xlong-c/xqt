@@ -9,8 +9,13 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
-from xqt.gemm import EpilogueSpec, GemmProblem, GemmSpec, PackedWeight, QuantSpec
-from xqt.gemm.backends.sm89.awq_w4a16_decode_sm89 import (
+from xqt.kernels.ops.gemm import (
+    EpilogueSpec,
+    GemmProblem,
+    GemmSpec,
+    PackedWeight,
+    PackedWeightMetadata,
+    QuantSpec,
     prepare_sm89_awq_w4a16_decode_parameters,
     prepack_sm89_awq_w4a16_decode,
     sm89_awq_w4a16_metadata,
@@ -113,8 +118,6 @@ class AWQW4A16Linear(nn.Module):
             raise RuntimeError(
                 "native-only AWQW4A16Linear released its canonical packed weight"
             )
-        from xqt.gemm import PackedWeightMetadata
-
         return PackedWeight(
             qweight=self.qweight,
             scales=self.weight_scale,
@@ -304,7 +307,7 @@ class AWQW4A16Linear(nn.Module):
             if isinstance(tensor, torch.Tensor) and tensor.device != target_device:
                 raise RuntimeError(f"canonical {name} must already be on the target device")
 
-        from xqt.operator_opt.kernels.cuda.awq_w4a16_sm89 import (
+        from xqt.kernels.ops.gemm import (
             bind_awq_w4a16_decode,
             native_awq_w4a16_available,
         )
@@ -483,7 +486,7 @@ class AWQW4A16Linear(nn.Module):
         bias = None
         if self.bias is not None:
             bias = self.bias.to(device=device, dtype=dtype).contiguous()
-        from xqt.operator_opt.kernels.cuda.awq_w4a16_sm89 import (
+        from xqt.kernels.ops.gemm import (
             bind_awq_w4a16_decode,
         )
 

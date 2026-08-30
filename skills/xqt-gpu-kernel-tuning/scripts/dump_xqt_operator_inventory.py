@@ -14,12 +14,12 @@ REPO_ROOT = next(
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from xqt.operator_opt.capability import list_operator_engine_capabilities
-from xqt.operator_opt.backends.cutile import list_cutile_kernel_specs
-from xqt.operator_opt.backends.cutlass import list_cutlass_kernel_specs
-from xqt.operator_opt.backends.cute_dsl import list_cute_dsl_kernel_specs
-from xqt.operator_opt.backends.tilelang import list_tilelang_kernel_specs
-from xqt.operator_opt.backends.triton import list_triton_kernel_specs
+from xqt.kernels.wrappers.capability import list_operator_engine_capabilities
+from xqt.kernels.ops._impl.engines.cutile import list_cutile_kernel_specs
+from xqt.kernels.ops._impl.engines.cutlass import list_cutlass_kernel_specs
+from xqt.kernels.ops._impl.engines.cute_dsl import list_cute_dsl_kernel_specs
+from xqt.kernels.ops._impl.engines.tilelang import list_tilelang_kernel_specs
+from xqt.kernels.ops._impl.engines.triton import list_triton_kernel_specs
 
 
 def _sorted_keys(payload: dict[str, Any]) -> list[str]:

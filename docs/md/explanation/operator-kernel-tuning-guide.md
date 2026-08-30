@@ -63,7 +63,7 @@
 3. **算力 prepack** (offline): 按 `sm_*` + MMA atom 写成 kernel 友好序 (连续 K, swizzle, ldmatrix 序).
 4. **Runtime kernel**: 只做 G2S + MMA + epilogue.
 
-XQT 注册表见 `xqt/operator_opt/kernels/prepack/`, 说明见 [mma-weight-prepack.md](mma-weight-prepack.md).
+XQT 注册表见 `xqt/kernels/ops/_impl/prepack/`, 说明见 [mma-weight-prepack.md](mma-weight-prepack.md).
 当前已实现 `int8:sm_89:b_nk`; int4 / fp4 / fp8 / 其它 arch 为 placeholder.
 
 ## 一眼判断瓶颈

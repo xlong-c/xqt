@@ -15,7 +15,7 @@ from examples.xqt_models.unlimited_ocr import (
     quantize_unlimited_ocr_convrot_int8,
     select_unlimited_ocr_convrot_modules,
 )
-from xqt.quant.quantizers.convrot_int8 import ConvRotInt8Linear
+from xqt.compression.quant.quantizers.convrot_int8 import ConvRotInt8Linear
 
 
 class _TinyUnlimitedOcr(nn.Module):

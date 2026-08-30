@@ -111,7 +111,7 @@ AWQ 是静态量化              # 更准确: 离线静态 weight-only; 激活�
 
 ## 3. Quant backend (当前)
 
-源码: `xqt/quant/capability.py` `list_quant_backend_capabilities()`.
+源码: `xqt/compression/quant/capability.py` `list_quant_backend_capabilities()`.
 
 | backend | status | 角色 |
 | --- | --- | --- |
@@ -126,7 +126,7 @@ AWQ 是静态量化              # 更准确: 离线静态 weight-only; 激活�
 刷新:
 
 ```python
-from xqt.quant.capability import list_quant_backend_capabilities, describe_quant_backend_capability
+from xqt.compression.quant.capability import list_quant_backend_capabilities, describe_quant_backend_capability
 
 print(sorted(list_quant_backend_capabilities()))
 print(describe_quant_backend_capability("pytorch", method="awq", strategy="weight_only_int4").to_dict())
@@ -160,7 +160,7 @@ params:
     activation_scale_mode: dynamic
 ```
 
-Comfy marker 编解码: `xqt.quant.comfy_quant` (`encode_int8_tensorwise_marker` / `decode_comfy_quant_marker`).
+Comfy marker 编解码: `xqt.compression.quant.comfy_quant` (`encode_int8_tensorwise_marker` / `decode_comfy_quant_marker`).
 调研笔记: `research/convrot-comfy/README.md`.
 
 ### ConvRot 的旋转块和形状契约
@@ -209,7 +209,7 @@ params:
 | | `svd_fp4` / `svd_int4` (残差存储形态) | |
 | | | `svd_fp4_int8_mma` / `svd_int4_int8_mma` (W4 residual + W8A8 MMA) |
 
-TRUE / PSEUDO nature: `xqt/quant/capability.py` `_STRATEGY_NATURE`.  
+TRUE / PSEUDO nature: `xqt/compression/quant/capability.py` `_STRATEGY_NATURE`.  
 TRUE = 已请求原生低精度 MMA contract; PSEUDO = 当前 XQT 路线是 dequant/reference floating-point compute; UNKNOWN = strategy/storage 单独不足以判定运行时 compute. 三者都不是单次 forward 的执行证明.
 
 名字里带 `dynamic` 的 strategy, 通常指 **激活或 runtime scale 动态**, 不表示权重是在线量化.
@@ -218,7 +218,7 @@ TRUE = 已请求原生低精度 MMA contract; PSEUDO = 当前 XQT 路线是 dequ
 
 ## 6. 执行分发
 
-源码: `xqt/quant/execution/executor.py`.
+源码: `xqt/compression/quant/execution/executor.py`.
 
 - 按 `backend` + `method` + `strategy` 路由到 quantizer / 外部 backend.
 - `backend=tilelang` / `backend=svdquant` **直接失败**.

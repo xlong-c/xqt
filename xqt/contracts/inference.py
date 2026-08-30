@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from xqt.core.errors import XQTConfigError
+from xqt.core.base import XQTConfigError
 
 INFERENCE_CONTRACT_SCHEMA_VERSION = "1.0"
 DEFAULT_INFERENCE_ADAPTER = "tensor"

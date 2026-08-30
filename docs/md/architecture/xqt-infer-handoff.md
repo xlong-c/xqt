@@ -173,7 +173,7 @@ quant capability 已按三轴事实源拆分为 method / storage / compute; 已�
 | 裁决 | 说明 |
 | --- | --- |
 | 默认 | `engine="auto"` |
-| 选择逻辑 | 抽到 `xqt.contracts.engine_resolve` (capability + hint) |
+| 选择逻辑 | 抽到 `xqt.kernels.engine_resolve` (capability + hint) |
 | kernel import | forward / resolve 路径 lazy import, quantizer 顶层不绑死 tilelang/cute |
 | quant 输出 | metadata 可记 `preferred_engines` / 实际 resolve 统计; 不写 `required_engine` |
 

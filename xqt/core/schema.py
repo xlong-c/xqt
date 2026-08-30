@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from xqt.contracts.inference import InferenceContractConfig
-from xqt.contracts.engine_resolve import convert_engine_names, operator_engine_names
+from xqt.kernels.engine_resolve import convert_engine_names, operator_engine_names
 from xqt.contracts.quant_strategy import (
     CANONICAL_QUANT_COMPUTES,
     CANONICAL_QUANT_METHODS,
@@ -180,6 +180,13 @@ class ComponentConfig:
 class ModelConfig(ComponentConfig):
     """Model construction and checkpoint settings."""
 
+    profile: Optional[str] = None
+    adapter_target: Optional[str] = None
+    family: Optional[str] = None
+    structure_contract: Optional[str] = None
+    inference_adapter: Optional[str] = None
+    requirements: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
     checkpoint: Optional[str] = None
     dtype: str = "float32"
     device: str = "cpu"

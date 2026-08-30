@@ -39,8 +39,9 @@ xqt.nn facade / torch module
 
 代码落点:
 
-- `xqt/operator_opt/kernels/`
-- `xqt/operator_opt/backends/*_KERNEL_REGISTRY`
+- `xqt/kernels/ops/` (公开 `ops.<group>` 薄封装 + GEMM 合约)
+- `xqt/kernels/ops/_impl/` (pattern implementation / engine adapter)
+- `xqt/kernels/jit/csrc/` (CUDA/C++ 源码)
 
 `kernel` 只负责:
 
@@ -72,12 +73,10 @@ xqt.nn facade / torch module
 
 代码落点:
 
-- `xqt/operator_opt/materialize.py`
-- `xqt/operator_opt/wrappers/`
-- `xqt/operator_opt/reference_wrappers.py`
-- `xqt/operator_opt/triton_wrappers.py`
-- `xqt/operator_opt/tilelang_wrappers.py`
-- `xqt/operator_opt/execute.py`
+- `xqt/kernels/wrappers/materialize.py`
+- `xqt/kernels/wrappers/` (TileLang / Triton / reference wrappers)
+- `xqt/kernels/wrappers/execute.py`
+- `xqt/kernels/wrappers/bench/`
 
 这一层是 **边界翻译层**, 也是 `kernel` 和 `xqt.nn` 的明确分割线.
 
@@ -103,7 +102,9 @@ xqt.nn facade / torch module
 
 代码落点:
 
-- `xqt/nn/`
+- `xqt/kernels/nn/` (`from xqt import nn` 是公开别名; 顶层 `xqt/nn/` 已删除)
+- `xqt/kernels/nn/convert.py` (公开别名仍是 `xqt.convert`)
+- `xqt/kernels/nn/fixtures/`
 
 `xqt.nn` 是 **语义 facade 层**.
 
@@ -131,9 +132,7 @@ xqt.nn facade / torch module
 
 允许:
 
-- `ModuleContract`
-- `PrecisionPolicy`
-- `FusionIntent`
+- `ModuleContract` / `PrecisionPolicy` / `FusionIntent` (`xqt.kernels.precision`)
 - `runtime intent` (`engine`, precision fields)
 - 标准 `nn.Module` 参数和子模块
 
@@ -172,19 +171,24 @@ xqt.nn facade / torch module
 ## 目录分工
 
 ```text
-xqt/nn/
+xqt/kernels/nn/
   semantic facade
+  convert API
+  smoke fixtures
   runtime intent
   eager / limited runtime path
 
-xqt/operator_opt/wrappers/
+xqt/kernels/wrappers/
   module-to-kernel adapters
   shape/layout translation
   execution metadata
   eager/reference fallback
+  operator benchmark helpers
 
-xqt/operator_opt/kernels/
-  pattern-level compute implementation
+xqt/kernels/ops/
+  public tensor op wrappers
+  GEMM contracts / dispatch / reference
+  pattern-level compute implementation in _impl/
   tensor-only API
   engine-specific reference/kernel pair
 ```
@@ -203,7 +207,7 @@ xqt/operator_opt/kernels/
 - `xqt.nn.FeedForward` / `RMSNorm` / `Attention` / `TransformerBlock`: facade, 可带 runtime intent, 部分路径已有专用 runtime 或 materialize 接线.
 - `materialize_module(...)`: facade / torch module 进入 operator candidate 的统一入口.
 - `_TileLang*Wrapper`, `_Triton*Wrapper`, `_ReferenceGuarded*Wrapper`: 边界翻译层.
-- `*_KERNEL_REGISTRY` 与 `xqt/operator_opt/kernels/*`: pattern 级 kernel 实现层.
+- `*_KERNEL_REGISTRY` 与 `xqt/kernels/ops/_impl/*`: pattern 级 kernel 实现层. `xqt/kernels/ops/_impl/*` 仍是旧路径兼容 shim; GEMM backend 只在 `xqt/kernels/ops/_impl/gemm_backends/`.
 
 ## 继续阅读
 

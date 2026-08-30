@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from xqt.export.hf_quant import export_compressed_tensors
-from xqt.quant.quantizers.awq_gptq_weight_only import (
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import (
     AWQGPTQWeightOnlyLinear,
     quantize_with_gptq_weight_only,
 )

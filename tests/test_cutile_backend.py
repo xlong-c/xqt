@@ -4,15 +4,15 @@ from unittest.mock import patch
 
 import torch
 
-from xqt.operator_opt.backends.cutile import (
+from xqt.kernels.ops._impl.engines.cutile import (
     build_cutile_artifact_metadata,
     list_cutile_kernel_specs,
     run_cutile_kernel,
 )
-from xqt.operator_opt.backends.tilelang import list_tilelang_kernel_specs
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.ops._impl.engines.tilelang import list_tilelang_kernel_specs
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from xqt.pipeline.preflight import preflight_optimization_config
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
@@ -25,7 +25,7 @@ def _cutile_operator_config() -> dict[str, object]:
             "artifact_dir": "artifacts/xqt/tests/cutile_operator",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_dequant_gemm_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_dequant_gemm_block",
             "params": {
                 "input_dim": 16,
                 "output_dim": 8,
@@ -117,7 +117,7 @@ def test_cutile_artifact_metadata_is_stable() -> None:
 
 
 def test_cutile_capability_uses_cuda_tile_runtime_probe() -> None:
-    with patch("xqt.operator_opt.backends.cutile.cutile_available", return_value=True):
+    with patch("xqt.kernels.ops._impl.engines.cutile.cutile_available", return_value=True):
         capability = describe_operator_engine_capability("cutile")
 
     assert capability.status == "planned"
@@ -129,7 +129,7 @@ def test_cutile_capability_uses_cuda_tile_runtime_probe() -> None:
 
 def test_preflight_records_cutile_config_and_missing_dependency() -> None:
     with (
-        patch("xqt.operator_opt.backends.cutile.cutile_available", return_value=False),
+        patch("xqt.kernels.ops._impl.engines.cutile.cutile_available", return_value=False),
         patch("xqt.pipeline.preflight_checks.operator._cutile_available", return_value=False),
     ):
         report = preflight_optimization_config(_cutile_operator_workflow_config())

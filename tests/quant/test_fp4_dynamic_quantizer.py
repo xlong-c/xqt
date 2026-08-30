@@ -3,9 +3,9 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.quant import FP4DynamicLinear, quantize_with_mxfp4_dynamic, quantize_with_nvfp4_dynamic
-from xqt.operator_opt.kernels.fp4_quant_common import unpack_nvfp4_weight_from_tilelang
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.compression.quant import FP4DynamicLinear, quantize_with_mxfp4_dynamic, quantize_with_nvfp4_dynamic
+from xqt.kernels.ops._impl.fp4_quant_common import unpack_nvfp4_weight_from_tilelang
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 from xqt.workflows import XQTOptimizationSession
 
 

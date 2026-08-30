@@ -1,7 +1,7 @@
-"""Runtime bridge modules for packed quantized weights (Infer / operator_opt).
+"""Runtime bridge modules for packed quantized weights (Infer / kernels.wrappers).
 
 These adapters expose packed storage to kernels. They are not quant algorithms
-and must not live under xqt.quant as a hard dependency of operator_opt.
+and must not live under xqt.compression.quant as a hard dependency of wrappers.
 """
 
 from .external_materialize import create_weight_plans

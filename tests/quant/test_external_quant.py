@@ -18,7 +18,7 @@ from xqt.contracts.external import (
     probe_external_quant_config,
     resolve_external_quantization,
 )
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.external_weight_only import load_external_quantized_model
 from xqt.runtime.bridges.hf_int4_layout import process_weights_after_loading
 

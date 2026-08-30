@@ -2,7 +2,7 @@ project:
   name: moe_smoke
   artifact_dir: artifacts/xqt/smoke/moe
 model:
-  target: xqt.model.build_smoke_moe
+  target: xqt.kernels.nn.fixtures.build_smoke_moe
   params:
     hidden_dim: 16
     intermediate_dim: 32

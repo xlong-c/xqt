@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import pytest
 
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     dense_gemm_reference,
     EpilogueSpec,
     GemmProblem,

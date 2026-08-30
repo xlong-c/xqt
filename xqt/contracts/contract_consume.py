@@ -12,7 +12,7 @@ from xqt.contracts.runtime_quant import (
     RuntimeQuantContract,
     extract_runtime_quant_contract,
 )
-from xqt.core.errors import XQTConfigError
+from xqt.core.base import XQTConfigError
 
 
 @dataclass(frozen=True, slots=True)

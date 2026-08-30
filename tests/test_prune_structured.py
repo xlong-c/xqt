@@ -3,7 +3,7 @@ from torch import nn
 
 from xqt.core.errors import XQTConfigError
 from xdl.model.vit import VisionTransformer
-from xqt.prune import (
+from xqt.compression.prune import (
     SUPPORTED_PRUNE_METHODS,
     apply_block_sparse_pruning,
     apply_global_l1_unstructured_pruning,

@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from xqt.export.onnx_exporter import export_onnx
-from xqt.quant.backends.onnx_qdq import assess_qdq_runtime_diff
+from xqt.compression.quant.backends.onnx_qdq import assess_qdq_runtime_diff
 
 
 def test_assess_qdq_runtime_diff_missing_file() -> None:

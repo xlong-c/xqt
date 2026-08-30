@@ -17,9 +17,9 @@ Use this skill to diagnose the layer between a fast kernel and a disappointing X
    - wrapper benchmark vs whole-module benchmark
    - eager fastpath vs CUDA Graph fastpath
 3. Inspect the hot XQT files first:
-   - `xqt/operator_opt/executor.py`
-   - `xqt/operator_opt/backends/tilelang.py`
-   - `xqt/operator_opt/kernels/tilelang/attention.py`
+   - `xqt/kernels/wrappers/executor.py`
+   - `xqt/kernels/ops/_impl/engines/tilelang.py`
+   - `xqt/kernels/ops/_impl/tilelang/attention.py`
    - `tools/benchmark_tilelang_half_ops.py`
    - `tests/xqt/test_operator_tilelang_*`
 4. Keep every conclusion grounded in a same-layer comparison. Do not compare kernel-only microbenchmarks against whole-module operator reports and call the difference a kernel regression.

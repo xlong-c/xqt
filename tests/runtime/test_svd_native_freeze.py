@@ -18,7 +18,7 @@ def _require_native_w4a4() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("native sm_89 W4A4 backend unavailable")
     try:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
             native_w4a4_available,
             native_w4a4_smalln_available,
         )

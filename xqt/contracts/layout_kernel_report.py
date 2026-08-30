@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Mapping, Sequence
 
-from xqt.core.errors import XQTConfigError
+from xqt.core.base import XQTConfigError
 
 LAYOUT_KERNEL_REPORT_KEYS: Final[tuple[str, ...]] = (
     "bits",

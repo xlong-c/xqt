@@ -8,7 +8,7 @@ from diffusers.models.transformers.transformer_flux import FluxAttention
 from torch import nn
 
 from tests.xqt.svd_test_helpers import make_legacy_svd_linear
-from xqt.gemm import PackedWeight, PackedWeightMetadata
+from xqt.kernels.ops.gemm import PackedWeight, PackedWeightMetadata
 from xqt.runtime import pack_diffusers_flux_rotary_emb
 from xqt.runtime.modules import (
     AWQW4A16Linear,
@@ -253,7 +253,7 @@ def test_single_block_rejects_training_and_autograd() -> None:
 def _require_native_w4a4() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("native sm_89 W4A4 backend unavailable")
-    from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+    from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
         native_w4a4_available,
     )
 

@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from xqt.core.errors import XQTBackendError
+from xqt.core.base import XQTBackendError
 
 from .int8_mma import Int8MmaLinear
 from .packing_int4 import (

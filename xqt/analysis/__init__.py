@@ -69,7 +69,7 @@ __all__ = [
     "write_markdown_report",
 ]
 
-# detection diff 依赖 xdl.metric.detection_utils, 降级为使用时才加载的可选依赖.
+# detection diff is xqt-local (xqt.analysis.detection.DecodedDetectionDiff), no xdl dependency.
 _LAZY = {"DecodedDetectionDiff", "compare_decoded_detections"}
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from xqt.quant import (
+from xqt.compression.quant import (
     FP4WeightOnlyLinear,
     MXFPWeightOnlyLinear,
     NVFP4LinearBridge,

@@ -521,7 +521,7 @@ def plot_model_tensor_selections_bar3d(
     )
     activation_outputs: Mapping[str, Any] = {}
     if activation_names:
-        from xqt.model.hooks import collect_module_outputs
+        from xqt.kernels.nn.fixtures.hooks import collect_module_outputs
 
         forward_args, forward_kwargs = _split_example_input(example_input)
         activation_outputs = collect_module_outputs(

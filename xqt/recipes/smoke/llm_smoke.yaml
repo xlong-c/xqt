@@ -2,7 +2,7 @@ project:
   name: llm_smoke
   artifact_dir: artifacts/xqt/smoke/llm
 model:
-  target: xqt.model.build_smoke_llm
+  target: xqt.kernels.nn.fixtures.build_smoke_llm
   params:
     vocab_size: 64
     hidden_dim: 16

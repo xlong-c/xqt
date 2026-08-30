@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     EpilogueSpec,
     GemmProblem,
     GemmSpec,

@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from xqt.benchmark.phase_latency import benchmark_prefill_decode
+from xqt.kernels.wrappers.bench.phase_latency import benchmark_prefill_decode
 from xqt.contracts.runtime_features import (
     RUNTIME_FEATURES_KEY,
     RuntimeFeatureMetadata,

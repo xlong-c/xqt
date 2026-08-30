@@ -17,15 +17,15 @@ from xqt.core.schema import (
     OperatorOptimizationTargetConfig,
 )
 from xqt.core.types import XQTContext
-from xqt.operator_opt import (
+from xqt.kernels.wrappers import (
     OperatorOptimizationExecutionPlan,
     OperatorOptimizationTargetPlan,
     register_block_kernel_builder,
 )
-from xqt.operator_opt.capability import OperatorOptimizationEngineCapability
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.materialize import materialize_operator_candidate_model
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.capability import OperatorOptimizationEngineCapability
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.materialize import materialize_operator_candidate_model
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 
 
 class _Block(nn.Module):
@@ -196,7 +196,7 @@ def test_single_kernel_acceptance_is_measured_at_parent_block(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
+    import xqt.kernels.wrappers.execute as execute_module
 
     model = _Model().eval()
     target = _plan(
@@ -312,8 +312,8 @@ def test_operator_target_below_min_speedup_is_not_applied(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
-    from xqt.operator_opt.reporting import summarize_operator_optimization_reports
+    import xqt.kernels.wrappers.execute as execute_module
+    from xqt.kernels.wrappers.reporting import summarize_operator_optimization_reports
 
     model = _Model().eval()
     target = _plan(
@@ -420,8 +420,8 @@ def test_operator_target_failed_numeric_validation_is_not_applied(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
-    from xqt.operator_opt.reporting import summarize_operator_optimization_reports
+    import xqt.kernels.wrappers.execute as execute_module
+    from xqt.kernels.wrappers.reporting import summarize_operator_optimization_reports
 
     model = _Model().eval()
     inputs = torch.randn(2, 4)
@@ -534,7 +534,7 @@ def test_torch_compile_graph_report_preserves_target_compile_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
+    import xqt.kernels.wrappers.execute as execute_module
 
     model = _Model().eval()
     target = _plan(
@@ -641,7 +641,7 @@ def test_cuda_only_planned_engine_reports_skip_without_cuda(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
+    import xqt.kernels.wrappers.execute as execute_module
 
     target = _plan(
         candidate_kind="single_kernel",
@@ -702,7 +702,7 @@ def test_non_pytorch_quant_runtime_guard_skips_torch_compile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
+    import xqt.kernels.wrappers.execute as execute_module
 
     target = _plan(
         candidate_kind="single_kernel",
@@ -778,8 +778,8 @@ def test_manual_block_kernel_fallback_runs_when_auto_block_materialization_fails
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import xqt.operator_opt.execute as execute_module
-    import xqt.operator_opt.materialize as materialize_module
+    import xqt.kernels.wrappers.execute as execute_module
+    import xqt.kernels.wrappers.materialize as materialize_module
 
     builder_name = "test_block_execution_auto_fallback_builder"
 

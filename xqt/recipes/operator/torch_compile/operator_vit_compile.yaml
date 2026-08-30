@@ -2,7 +2,7 @@ project:
   name: operator_torch_compile_vit
   artifact_dir: artifacts/xqt/operator/torch_compile/vit
 model:
-  target: xqt.model.toy_models.build_toy_transformer_classifier
+  target: xqt.kernels.nn.fixtures.toy_models.build_toy_transformer_classifier
   params:
     input_dim: 8
     hidden_dim: 8

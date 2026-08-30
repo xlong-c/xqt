@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.quant.quantizers.int8_mma import Int8MmaLinear, quantize_with_int8_mma
+from xqt.compression.quant.quantizers.int8_mma import Int8MmaLinear, quantize_with_int8_mma
 from xqt.runtime.modules import Int8MmaLinear as RuntimeInt8MmaLinear
 from xqt.workflows import XQTOptimizationSession
 
@@ -188,7 +188,7 @@ def test_int8_mma_auto_static_uses_fastpath_cuda() -> None:
     metadata = qlinear.execution_metadata()
 
     assert output.dtype == torch.float16
-    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+    from xqt.kernels.ops._impl.cute.int8mma_binding import int8mma_available
 
     expected_engine = (
         "cuda_sm89"
@@ -206,7 +206,7 @@ def test_int8_mma_auto_static_uses_fastpath_cuda() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_int8_mma_cuda_sm89_static_path_caches_fused_scale_bias() -> None:
-    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+    from xqt.kernels.ops._impl.cute.int8mma_binding import int8mma_available
 
     if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
         pytest.skip("cuda_sm89 CUTLASS extension unavailable")

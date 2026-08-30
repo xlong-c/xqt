@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.operator_opt.backends.tilelang import run_tilelang_kernel
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.operator_opt.kernels.tilelang._common import (
+from xqt.kernels.ops._impl.engines.tilelang import run_tilelang_kernel
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.kernels.ops._impl.tilelang._common import (
     tilelang_runtime_unavailability_reason,
     tilelang_runtime_usable,
 )
@@ -29,7 +29,7 @@ def _tilelang_operator_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/tilelang_capability_preflight",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_attention_classifier",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_attention_classifier",
             "params": {
                 "hidden_dim": 16,
                 "num_heads": 4,
@@ -52,7 +52,7 @@ def _tilelang_operator_config() -> dict:
 
 
 def test_tilelang_capability_reports_reference_fallback_when_package_missing() -> None:
-    with patch("xqt.operator_opt.capability._package_available", return_value=False):
+    with patch("xqt.kernels.wrappers.capability._package_available", return_value=False):
         capability = describe_operator_engine_capability("tilelang")
 
     assert capability.status == "available"
@@ -67,7 +67,7 @@ def test_tilelang_capability_reports_reference_fallback_when_package_missing() -
 
 def test_tilelang_runtime_rejects_known_incompatible_packed_tensor_abi() -> None:
     with patch(
-        "xqt.operator_opt.kernels.tilelang._common._tilelang_runtime_version",
+        "xqt.kernels.ops._impl.tilelang._common._tilelang_runtime_version",
         return_value="0.1.11",
     ):
         assert tilelang_runtime_usable() is False
@@ -79,14 +79,14 @@ def test_tilelang_runtime_rejects_known_incompatible_packed_tensor_abi() -> None
 def test_tilelang_capability_keeps_static_support_when_runtime_is_incompatible() -> None:
     with (
         patch(
-            "xqt.operator_opt.capability._package_available", return_value=True
+            "xqt.kernels.wrappers.capability._package_available", return_value=True
         ),
         patch(
-            "xqt.operator_opt.kernels.tilelang._common.tilelang_runtime_usable",
+            "xqt.kernels.ops._impl.tilelang._common.tilelang_runtime_usable",
             return_value=False,
         ),
         patch(
-            "xqt.operator_opt.kernels.tilelang._common.tilelang_runtime_unavailability_reason",
+            "xqt.kernels.ops._impl.tilelang._common.tilelang_runtime_unavailability_reason",
             return_value="TileLang test ABI incompatibility",
         ),
     ):
@@ -118,11 +118,11 @@ def test_tilelang_runtime_guard_rejects_cuda_kernel_invocation() -> None:
 
     with (
         patch(
-            "xqt.operator_opt.kernels.tilelang._common.tilelang_runtime_usable",
+            "xqt.kernels.ops._impl.tilelang._common.tilelang_runtime_usable",
             return_value=False,
         ),
         patch(
-            "xqt.operator_opt.kernels.tilelang._common.tilelang_runtime_unavailability_reason",
+            "xqt.kernels.ops._impl.tilelang._common.tilelang_runtime_unavailability_reason",
             return_value="TileLang test ABI incompatibility",
         ),
         pytest.raises(XQTBackendError, match="TileLang test ABI incompatibility"),

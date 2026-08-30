@@ -5,7 +5,7 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 from xqt.workflows import XQTOptimizationSession
 
 

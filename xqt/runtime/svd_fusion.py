@@ -9,7 +9,7 @@
 
 加速已推进以追平/超越 Nunchaku 整体加速。
 
-参考：xqt/operator_opt/kernels/tilelang/svd_fused.py
+参考：xqt/kernels/ops/_impl/tilelang/svd_fused.py
 """
 
 from __future__ import annotations
@@ -188,7 +188,7 @@ def fused_svd_forward_cuda(
             "fused_svd_forward_cuda expects x shaped [batch, input_features]"
         )
 
-    from xqt.operator_opt.kernels.tilelang.svd_fused import (
+    from xqt.kernels.ops.quantization import (
         svd_fused_dequant_gemm_low_rank_tilelang,
     )
 

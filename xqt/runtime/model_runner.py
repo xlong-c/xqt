@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from torch import nn
-
-from xqt.benchmark.phase_latency import PhaseLatencyReport, benchmark_prefill_decode
 from xqt.contracts.contract_consume import (
     ContractConsumeReport,
     consume_runtime_quant_contract,
@@ -31,7 +29,7 @@ class ModelRunnerReport:
     quantized_modules: tuple[str, ...]
     contract_errors: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
-    phase_latency: PhaseLatencyReport | None = None
+    phase_latency: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -151,8 +149,10 @@ class ModelRunner:
         if not self.quantized_modules:
             notes.append("quantized_modules_empty")
 
-        phase: PhaseLatencyReport | None = None
+        phase: Any | None = None
         if prefill_fn is not None and decode_fn is not None:
+            from xqt.kernels.wrappers.bench.phase_latency import benchmark_prefill_decode
+
             phase = benchmark_prefill_decode(
                 prefill_fn,
                 decode_fn,

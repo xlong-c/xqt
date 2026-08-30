@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 from xqt.core.schema import CANONICAL_QUANT_STRATEGIES, QuantConfig
-from xqt.quant.plan import build_quantization_plan
-from xqt.quant.strategy import coerce_quant_scheme, resolve_scheme
-from xqt.quant.types import QuantScheme
+from xqt.compression.quant.plan import build_quantization_plan
+from xqt.compression.quant.strategy import coerce_quant_scheme, resolve_scheme
+from xqt.compression.quant.types import QuantScheme
 
 
 def test_resolve_scheme_covers_every_canonical_strategy() -> None:

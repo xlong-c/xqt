@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import pytest
 
-from xqt.operator_opt.kernels.prepack import (
+from xqt.kernels.ops._impl.prepack import (
     INT8_SM89_B_NK,
     list_prepack_specs,
     prepack_weight,
@@ -39,7 +39,7 @@ def test_placeholder_raises() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required")
 def test_ptx_prepacked_matches_math() -> None:
-    from xqt.operator_opt.kernels.cute.int8mma_binding import (
+    from xqt.kernels.ops._impl.cute.int8mma_binding import (
         int8_linear_ptx_sm89,
         int8mma_available,
         prepack_qweight_t_for_ptx_sm89,
@@ -66,7 +66,7 @@ def test_ptx_prepacked_matches_math() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required")
 def test_cutlass_sm89_fused_scale_bias_matches_int_mm() -> None:
-    from xqt.operator_opt.kernels.cute.int8mma_binding import (
+    from xqt.kernels.ops._impl.cute.int8mma_binding import (
         int8_linear_cutlass_sm89,
         int8mma_available,
         prepack_qweight_t_for_ptx_sm89,

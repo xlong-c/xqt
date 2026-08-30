@@ -55,7 +55,7 @@ DEBT-001/002/003 的裁决和落地范围见 [../architecture/xqt-design-debt.md
 | 语义推理 contract | 模型族 adapter 的版本化 IO/schema 描述 | `xqt/contracts/inference.py`, `xqt/runtime/inference.py` |
 | runtime handle | deploy stage materialize 的可执行 session | `xqt/contracts/runtime.py`, export/deploy pass |
 | export backend | ONNX/TRT/OpenVINO/... 导出与适配 | `xqt/export/` |
-| engine | XQT 内部 kernel (见 [xqt-engines.md](xqt-engines.md)); **推理配置不应硬编码必选 engine** | `xqt/operator_opt/` |
+| engine | XQT 内部 kernel (见 [xqt-engines.md](xqt-engines.md)); **推理配置不应硬编码必选 engine** | `xqt/kernels/wrappers/` |
 
 ---
 
@@ -160,7 +160,7 @@ result = engine(...)  # HybridInferenceResult: output + precision_map + channel_
 
 ### 2.5 相关 quant 产物
 
-常见来源: `xqt/quant/quantizers/convrot_4bit.py` 等写入 execution policy metadata;  
+常见来源: `xqt/compression/quant/quantizers/convrot_4bit.py` 等写入 execution policy metadata;  
 `HybridInferenceEngine.from_quantized_model` 会读 `metadata["execution_policies"]`.
 
 ---

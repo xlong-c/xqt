@@ -29,7 +29,7 @@ XQT 当前的 CuTe DSL adapter 只覆盖少量 GEMM pattern, 主要用于:
 
 ## 当前支持 pattern
 
-源码位置: `xqt/operator_opt/backends/cute_dsl.py`
+源码位置: `xqt/kernels/ops/_impl/engines/cute_dsl.py`
 
 `CUTE_DSL_KERNEL_REGISTRY` 当前包含:
 
@@ -50,7 +50,7 @@ XQT 当前的 CuTe DSL adapter 只覆盖少量 GEMM pattern, 主要用于:
 ## 简单例子
 
 ```python
-from xqt.operator_opt.backends import (
+from xqt.kernels.wrappers import (
     CuteDSLCompileSettings,
     build_cute_dsl_artifact_metadata,
 )
@@ -72,7 +72,7 @@ fallback 执行:
 ```python
 import torch
 
-from xqt.operator_opt.backends import run_cute_dsl_kernel
+from xqt.kernels.wrappers import run_cute_dsl_kernel
 
 
 a = torch.randn(128, 256)

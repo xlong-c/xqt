@@ -38,7 +38,7 @@ def preflight_optimization_config(
 ) -> PreflightReport:
     """Run lightweight dependency and target checks for a stage workflow."""
 
-    from xqt.workflows.optimization import load_optimization_config
+    from xqt.core.workflow_loader import load_optimization_config
 
     loaded = load_optimization_config(config)
     report = PreflightReport()

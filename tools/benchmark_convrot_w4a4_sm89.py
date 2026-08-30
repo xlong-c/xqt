@@ -19,20 +19,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+from xqt.kernels.ops._impl.cute.convrot_w4a4_rowwise_sm89 import (
     allocate_convrot_w4a4_rowwise_workspace,
     bind_convrot_w4a4_rowwise_linear,
     convrot_w4a4_rowwise_linear,
     native_rowwise_convrot_w4a4_version,
 )
-from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
     allocate_w4a4_workspace,
     bind_convrot_w4a4_linear,
     native_w4a4_version,
     pack_w4a4_linear,
     w4a4_linear,
 )
-from xqt.quant.quantizers.convrot_4bit import (
+from xqt.compression.quant.quantizers.convrot_4bit import (
     ConvRotMixedPrecisionLinear,
     _apply_groupwise_rotation,
     _normalized_regular_hadamard,

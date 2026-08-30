@@ -2,7 +2,7 @@ project:
   name: yolo_detection_practice
   artifact_dir: artifacts/xqt/detection/yolo_practice
 model:
-  target: xqt.model.build_smoke_detection_module
+  target: xqt.kernels.nn.fixtures.build_smoke_detection_module
   params:
     num_classes: 80
     input_channels: 3

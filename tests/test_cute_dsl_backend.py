@@ -4,13 +4,13 @@ from unittest.mock import patch
 
 import torch
 
-from xqt.operator_opt.backends.cute_dsl import (
+from xqt.kernels.ops._impl.engines.cute_dsl import (
     build_cute_dsl_artifact_metadata,
     list_cute_dsl_kernel_specs,
 )
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from xqt.pipeline.preflight import preflight_optimization_config
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
@@ -23,7 +23,7 @@ def _cute_dsl_operator_config() -> dict[str, object]:
             "artifact_dir": "artifacts/xqt/tests/cute_dsl_operator",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_dequant_gemm_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_dequant_gemm_block",
             "params": {
                 "input_dim": 16,
                 "output_dim": 8,
@@ -95,7 +95,7 @@ def test_cute_dsl_artifact_metadata_is_stable() -> None:
 
 
 def test_cute_dsl_capability_reports_missing_runtime() -> None:
-    with patch("xqt.operator_opt.capability._package_available", return_value=False):
+    with patch("xqt.kernels.wrappers.capability._package_available", return_value=False):
         capability = describe_operator_engine_capability("cute_dsl")
 
     assert capability.status == "planned"
@@ -107,7 +107,7 @@ def test_cute_dsl_capability_reports_missing_runtime() -> None:
 
 def test_preflight_records_cute_dsl_config_and_missing_dependency() -> None:
     with (
-        patch("xqt.operator_opt.capability._package_available", return_value=False),
+        patch("xqt.kernels.wrappers.capability._package_available", return_value=False),
         patch("xqt.pipeline.preflight_checks.operator._package_available", return_value=False),
     ):
         report = preflight_optimization_config(_cute_dsl_operator_workflow_config())

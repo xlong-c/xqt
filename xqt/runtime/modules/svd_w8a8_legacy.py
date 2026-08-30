@@ -223,7 +223,7 @@ class SVDQuantInt8MmaLinear(CompositeAddModule):
 
         self._native_w8a8_fusion_enabled = False
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_svdq_w8a8_available,
                 native_svdq_w8a8_shape_supported,
             )
@@ -293,7 +293,7 @@ class SVDQuantInt8MmaLinear(CompositeAddModule):
         if (major, minor) != (8, 9):
             return False, f"native SVDQuant W8A8 currently targets sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_svdq_w8a8_available,
                 native_svdq_w8a8_shape_supported,
             )
@@ -314,7 +314,7 @@ class SVDQuantInt8MmaLinear(CompositeAddModule):
         return True, "native SVDQuant dynamic W8A8 plus LoRA fusion is available"
 
     def _native_w8a8_packed(self, inputs: torch.Tensor) -> Any:
-        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+        from xqt.kernels.ops.quantization import (
             pack_svdq_w8a8_linear,
         )
 
@@ -425,7 +425,7 @@ class SVDQuantInt8MmaLinear(CompositeAddModule):
         return output.reshape(*original_shape, self.output_features)
 
     def _native_w8a8_workspace(self, inputs: torch.Tensor, packed: Any) -> Any:
-        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+        from xqt.kernels.ops.quantization import (
             allocate_svdq_w8a8_workspace,
         )
 
@@ -449,7 +449,7 @@ class SVDQuantInt8MmaLinear(CompositeAddModule):
         return workspace
 
     def _native_w8a8_forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+        from xqt.kernels.ops.quantization import (
             bind_svdq_w8a8_linear,
         )
 

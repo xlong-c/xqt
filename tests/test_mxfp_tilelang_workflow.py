@@ -3,11 +3,11 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from xqt.operator_opt import (
+from xqt.kernels.wrappers import (
     OperatorOptimizationTargetPlan,
     materialize_operator_candidate_model,
 )
-from xqt.quant import MXFPWeightOnlyLinear
+from xqt.compression.quant import MXFPWeightOnlyLinear
 from xqt.workflows import XQTOptimizationSession
 
 

@@ -18,7 +18,7 @@ class QuantScheme:
 
     Replaces mixed-axis ``WxAy_format`` strategy strings as the execution-layer
     input. Resolved at plan time from ``quant.scheme`` or from the legacy
-    strategy/policy pair via ``xqt.quant.strategy.resolve_scheme``; the
+    strategy/policy pair via ``xqt.compression.quant.strategy.resolve_scheme``; the
     execution layer routes on this object, not on the strategy enum.
     """
 

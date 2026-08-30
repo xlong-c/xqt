@@ -8,16 +8,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from xqt.operator_opt import triton_wrappers
+from xqt.kernels.wrappers import triton_wrappers
 from xqt.core.errors import XQTBackendError
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.materialize import materialize_operator_candidate_model
-from xqt.operator_opt.plan import build_operator_optimization_plan
-from xqt.operator_opt.triton_wrappers import (
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.materialize import materialize_operator_candidate_model
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.triton_wrappers import (
     _TritonLinearWrapper,
     build_triton_candidate_model,
 )
-from xqt.operator_opt.types import OperatorOptimizationTargetPlan
+from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
@@ -606,7 +606,7 @@ def test_triton_linear_cuda_graph_capture_error_falls_back_to_eager_triton(
         raise RuntimeError("synthetic capture failure")
 
     monkeypatch.setattr(
-        "xqt.operator_opt.triton_wrappers.capture_cuda_graph_with_static_state",
+        "xqt.kernels.wrappers.triton_wrappers.capture_cuda_graph_with_static_state",
         fail_capture,
     )
 

@@ -23,7 +23,7 @@ from xqt.core.schema import (
 )
 from xqt.core.serialization import json_safe_value
 from xqt.core.types import XQTContext
-from xqt.pipeline.passes import LoadModelPass
+from xqt.pipeline.model_pass import LoadModelPass
 from xqt.pipeline.runner import create_context
 
 from .stage import (
@@ -264,6 +264,9 @@ def _record_stage_report(
 ) -> None:
     capability = _extract_optimization_capability(result.metrics)
     benchmark_config = state.context.benchmark_config
+    source_stage_name = (
+        stage.from_stage or state.best_stage or state.baseline_stage or "baseline"
+    )
     report = build_stage_report(
         stage_name=result.name,
         stage_kind=result.kind,
@@ -273,7 +276,7 @@ def _record_stage_report(
         artifacts=result.artifacts,
         capability=capability,
         lineage={
-            "from_stage": stage.from_stage,
+            "from_stage": source_stage_name,
             "compare_to": stage.compare_to,
             "baseline_stage": state.baseline_stage,
             "best_stage": state.best_stage,
@@ -434,6 +437,11 @@ def write_workflow_outputs(result: "OptimizedModelResult") -> None:
     path = artifact_dir / "workflow_result.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     result.context.artifacts["workflow_result"] = path
+    if result.context.manifest is not None:
+        manifest_path = artifact_dir / "manifest.json"
+        result.context.manifest.write_json(manifest_path)
+        result.context.artifacts["manifest"] = manifest_path
+        result.context.artifacts["workflow_manifest"] = manifest_path
 
 
 def acceptance_from_mapping(

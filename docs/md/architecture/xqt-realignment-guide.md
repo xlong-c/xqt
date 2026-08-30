@@ -35,13 +35,13 @@
 - `ExportTargetConfig.executorch`, `.ncnn` 与 `.mnn` 已收敛移动 / 嵌入式 export 配置. `XQTOptimizationSession.export()` / `.deploy()` 的单 target 入口也经对应参数走同一 StageSpec 解析; 同名 target `params` 旧键由 loader 明确拒绝. ncnn 的 `converter` 显式区分 `onnx2ncnn` 与 `pnnx`, ExportPass 和 preflight 已使用同一选择规则.
 - workflow 执行层开始从 `StageSpec` 读取参数; `operator`, `export/deploy`, `analyze`, `benchmark`, `quant`, `prune` 的主链都已不再写入对应的 `context.config.*` stage 配置槽位.
 - `run_quant_stage(context, spec)`, `run_prune_stage(context, spec)`, `run_operator_stage(context, spec)`, `run_export_stage(context, spec)`, `run_analyze_stage(context, spec)` 和 `run_benchmark_stage(context, spec)` 已落地, workflow 和 `XQTOptimizationSession` 的 stage 主链已通过这些 typed stage 入口调度.
-- `xqt.quant.quantizers.fake_qdq.build_fake_qdq_surrogate(...)` 已开始支持显式 `QuantConfig` / `QuantStageSpec`, 并会优先读取 `context.quant_config`, 不再只能从 `context.config.compression.quant` 偷读当前量化设置.
+- `xqt.compression.quant.quantizers.fake_qdq.build_fake_qdq_surrogate(...)` 已开始支持显式 `QuantConfig` / `QuantStageSpec`, 并会优先读取 `context.quant_config`, 不再只能从 `context.config.compression.quant` 偷读当前量化设置.
 - `xqt/recipes` 公开 YAML 仍保持 stage workflow 形态.
 - 旧 `XQTConfig`, `load_xqt_config()` 和 `XQTContext.config` 已从代码路径删除; `xqt.core.config` 只保留共享 `ConfigInput` 类型.
 - `xqt.core.reporting.OptimizationCapability` 已新增共享 `maturity` 字段. quant / prune / operator / export capability producer 与 readiness capability matrix 已统一输出 `executable`, `reference_guarded`, `metadata_only`, `planned` 四档成熟度.
 - operator target config / plan / report 已新增 `fallback_policy`, 当前支持 `strict` / `prefer_fallback`. `execute_operator_optimization_plan(...)`, operator stage summary 和 manifest metric 已显式记录 `fallback_reason` / `fallback_policy`, 不再把 engine fallback 藏在深层 metadata 中.
 - `materialize.py` 已收敛为跨 engine dispatch, component replacement 和 contract 校验. `execution_support.py` 负责运行辅助, `metadata.py` 负责 engine metadata/preflight, `tilelang_wrappers.py` 负责 TileLang candidate construction.
-- `xqt/prune/structured.py` 已删除. structured prune 的 public API, discovery wiring 和 toy model 分别位于 `api.py`, `discovery.py`, `toy_models.py`.
+- `xqt/compression/prune/structured.py` 已删除. structured prune 的 public API, discovery wiring 和 toy model 分别位于 `api.py`, `discovery.py`, `toy_models.py`.
 - deploy stage 已可 materialize ONNX Runtime `InferenceSession` 与 TensorRT runtime session. TensorRT producer 要求同 stage 的 non-dry-run engine, 并验证 engine deserialization 和 execution-context creation. 设定 `XQT_RUN_TENSORRT_HARDWARE_TESTS=1` 后, `tests/xqt/test_tensorrt_runtime_hardware.py` 会执行真实 ONNX export, TensorRT build, runtime handle, session execution, output diff 和小型 benchmark; 该最小 FP32 Linear -> ReLU -> Linear 路径已在 NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`) 上通过.
 - `StageReport.execution` 已固定记录 backend, engine, device, shape, warmup, iterations, fallback 和 artifact kinds.
 - `xqt/recipes/smoke/weight_only_tilelang_onnx_tensorrt_golden.yaml` 提供主推 stage 顺序的 target-hardware workflow. 它使用 `dynamo: false` 加 legacy dynamic axes 的 ONNX export 路径, 调用时仍必须显式提供 `example_inputs`; `pre_export_lowering: fp4_weight_only_to_dense_linear` 会只在 export copy 上 materialize dense dequantized 权重, 因而 TensorRT artifact 不是 packed-FP4 runtime. 设定 `XQT_RUN_GOLDEN_HARDWARE_TESTS=1` 且具备 CUDA + ONNX + TileLang 时, `tests/xqt/test_golden_path_recipe.py` 会以临时产物目录运行 dry-run workflow; 同时具备 TensorRT 时还会构建 non-dry-run engine, materialize runtime handle, 做 `1e-3` 数值对比并记录 `[8,64]`, `warmup=2`, `iterations=5` 的 runtime benchmark. 两项均在 NVIDIA GeForce RTX 4070 Ti SUPER (`sm_89`) 上通过. 测试继续断言 fallback 不被标记为 applied; 这不是 TileLang kernel 性能验收.
@@ -62,7 +62,7 @@
 - `ExportTargetConfig.torch_export` 与 `.torchscript` 是 PyTorch-native target 的 typed 参数面, 不再让已知配置回流到 target `params`.
 - `ExportTargetConfig.executorch`, `.ncnn` 与 `.mnn` 是移动 / 嵌入式 target 的 typed 参数面, 不再让已知配置回流到 target `params`.
 - `XQTContext` 已承载 `device`, `artifact_dir`, `project_name`, `task_type`, `compression_axes`, `model_target`, `model_params`, `quant_config`, `prune_config`, `analysis_config`, `benchmark_config`, `operator_config`, `output_diff_config`, `export_targets` 等 runtime 字段; `XQTContext.config` 已删除.
-- `run_workflow.py`, `export_pass`, `passes.py` 的报告落盘路径, `operator_opt/execute.py`, `quant/backends/onnx_qdq.py` 等路径已优先读取 `context.project_name` / `context.device` / `context.artifact_dir`; export targets 已通过 `context.export_targets` 传递.
+- `run_workflow.py`, `export_pass`, `passes.py` 的报告落盘路径, `xqt/kernels/wrappers/execute.py`, `xqt/compression/quant/backends/onnx_qdq.py` 等路径已优先读取 `context.project_name` / `context.device` / `context.artifact_dir`; export targets 已通过 `context.export_targets` 传递.
 - `run_xqt_recipe(...)`, `build_pipeline_from_config(...)`, pass order helper, `preflight_xqt_config()`, `create_manifest(XQTConfig)`, `xqt_config_to_dict()`, `load_xqt_config()` 和 `XQTConfig` 已删除. 旧顶层 recipe mapping 由 `load_optimization_config()` 直接拒绝并提示迁移.
 
 目标:
@@ -78,13 +78,13 @@ OptimizationConfig
 
 ### God module
 
-- `xqt/operator_opt/executor.py` 已删除. plan 构建位于 `plan.py`; cross-engine dispatch / contract validation 位于 `materialize.py`; execution support 位于 `execution_support.py`; engine metadata / preflight 位于 `metadata.py`; CuTile / CuTe DSL reference-guarded materialization 位于 `reference_wrappers.py`; Triton RMSNorm materialization / metadata 位于 `triton_wrappers.py`; TileLang candidate construction 和 wrapper family 位于 `tilelang_wrappers.py`; execution / benchmark / acceptance 位于 `execute.py`; CUDA Graph runtime 位于 `runtime.py`; summary 位于 `reporting.py`.
+- `xqt/kernels/wrappers/executor.py` 已删除. plan 构建位于 `xqt/kernels/wrappers/plan.py`; cross-engine dispatch / contract validation 位于 `materialize.py`; execution support 位于 `execution_support.py`; engine metadata / preflight 位于 `metadata.py`; CuTile / CuTe DSL reference-guarded materialization 位于 `reference_wrappers.py`; Triton RMSNorm materialization / metadata 位于 `triton_wrappers.py`; TileLang candidate construction 和 wrapper family 位于 `tilelang_wrappers.py`; execution / benchmark / acceptance 位于 `execute.py`; CUDA Graph runtime 位于 `runtime.py`; summary 位于 `reporting.py`.
 - structured prune 已不再保留 `structured.py` 汇总模块. dependency graph 位于 `graph.py`, public entry 位于 `api.py`, discovery adapter binding 位于 `discovery.py`, smoke model 位于 `toy_models.py`, concrete candidate collector 位于 `candidates_*.py`, planner 位于 `plan.py`, rewrite 位于 `rewrite.py`, report 位于 `report.py`, N:M / block-sparse 权重稀疏位于 `sparsity.py`.
 
 拆分必须先保持行为不变, 再改接口:
 
 ```text
-xqt/operator_opt/
+xqt/kernels/wrappers/
   plan.py
   materialize.py
   execution_support.py
@@ -94,8 +94,9 @@ xqt/operator_opt/
   triton_wrappers.py
   execute.py
   reporting.py
+  bench/
 
-xqt/prune/
+xqt/compression/prune/
   graph.py
   candidates.py
   candidates_attention.py
@@ -117,7 +118,7 @@ xqt/prune/
 
 ### Contract 层
 
-`xqt/contracts/` 已作为转换和 stage artifact 的事实源. `PrecisionPolicy`, `FeedForwardPrecisionPolicy`, `TensorStorageSpec`, `ModuleContract` 和 `FusionIntent` 已从 `conversion.py` 迁入. `QuantizedModel` 是模型侧量化算法的通用语义结果; `QuantizedModelPayload`, `PrunedModelPayload`, `RuntimeArtifactPayload`, `RuntimePlanPayload`, `RuntimeHandlePayload` 和 `ExportBundlePayload` 是带 workflow provenance 的 stage artifact, stage 仅保留重导出. `xqt.convert(...)` 通过该公开 schema 构造 contract, 再由 `xqt.operator_opt.materialize_module(module, contract, target)` 统一校验并 materialize operator candidate. `conversion.py` 暂时重导出原名称, 保持其 Provisional API 语义.
+`xqt/contracts/` 仍是 stage artifact 与量化存储的事实源. `PrecisionPolicy`, `FeedForwardPrecisionPolicy`, `TensorStorageSpec`, `ModuleContract` 和 `FusionIntent` 已下沉到 `xqt.kernels.precision` (convert / GEMM / facade 共用, `ops/_impl` 不经过 `kernels.nn`). `QuantizedModel` 是模型侧量化算法的通用语义结果; `QuantizedModelPayload`, `PrunedModelPayload`, `RuntimeArtifactPayload`, `RuntimePlanPayload`, `RuntimeHandlePayload` 和 `ExportBundlePayload` 是带 workflow provenance 的 stage artifact, stage 仅保留重导出. `xqt.convert(...)` 通过 lowering schema 构造 contract, 再由 `xqt.kernels.wrappers.materialize_module(module, contract, target)` 统一校验并 materialize operator candidate. `conversion.py` 暂时重导出原名称, 保持其 Provisional API 语义.
 
 contract 层仍未闭合. `OptimizationCapability.maturity` 已先作为共享 capability schema 落地, 后续 contract 目标至少包括:
 
@@ -135,7 +136,7 @@ contract 层仍未闭合. `OptimizationCapability.maturity` 已先作为共享 c
 - `xqt.nn.Linear`, `Conv2d`, `LayerNorm` 现为 `torch.nn` 子类 facade. 它们保持 PyTorch 前向和 module/state_dict 语义, 并显式承载 `engine` 与 precision runtime intent; 真正的 engine lowering 仍由 `xqt.convert(...)` 和 `materialize_module(...)` 负责.
 - `xqt.convert(...)` 已经有 Linear / Conv2d / LayerNorm / FeedForward 路径. TileLang lowerings 和 Triton FeedForward lowering 会通过 `materialize_module(...)` 复用 contract 校验与 candidate materialization; torch baseline 与尚无对应 operator executor 的 runtime facade 仍不强行套入 materializer.
 - `FeedForward` 的 Triton linear / gate fastpath 出错时会保留 reference 计算, 并在 `runtime_config().fallback` / `fallback_count` 写入 engine, stage 和原因, 不再静默吞掉异常.
-- `FeedForward.fusion_intent()` 已直接产出 `xqt.contracts.FusionIntent`; `conversion` 构建 FeedForward `ModuleContract` 时消费该 intent, 不再从 runtime report dict 反构 fusion patterns.
+- `FeedForward.fusion_intent()` 已直接产出 `xqt.kernels.precision.FusionIntent`; `conversion` 构建 FeedForward `ModuleContract` 时消费该 intent, 不再从 runtime report dict 反构 fusion patterns.
 - `xqt.nn.Attention` 与 `TransformerBlock` 已落地为 semantic facade. torch 路径用 SDPA / 组合前向; tilelang 路径可配置 runtime intent. `xqt.convert(...)` 已支持 `attention` / `transformer_block` operator kind, 并给所有 convert 路径挂载 `_xqt_module_contract`.
 - Stage payload contracts 提供 `from_stage_metrics(...)` 工厂; `stage_provider` 通过这些工厂构造 `QuantizedModelPayload` / `PrunedModelPayload` / `RuntimePlanPayload` / `ExportBundlePayload` / `RuntimeHandlePayload`, 不再在 provider 内手写平行字段映射.
 - operator report 在 candidate 带有 `_xqt_module_contract` 时会把 contract 写入 target metadata / `module_contract` 字段.

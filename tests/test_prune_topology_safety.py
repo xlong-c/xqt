@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
-from xqt.prune import (
+from xqt.compression.prune import (
     StructuredPruningAction,
     StructuredPruningPlan,
     apply_block_sparse_pruning,
@@ -25,7 +25,7 @@ from xqt.prune import (
     snapshot_module_dimensions,
     supported_prune_granularities,
 )
-from xqt.model.toy_models import StructuredPruningToyCNN
+from xqt.kernels.nn.fixtures.toy_models import StructuredPruningToyCNN
 from xqt.pipeline.passes import run_prune_stage
 from xqt.workflows.stage_specs import PruneStageSpec
 
@@ -54,7 +54,7 @@ def test_granularity_vocabulary_normalizes_aliases() -> None:
 
 
 def test_structured_plan_rejects_metadata_only_granularity() -> None:
-    from xqt.prune import plan_structured_pruning
+    from xqt.compression.prune import plan_structured_pruning
 
     with pytest.raises(ValueError, match="metadata_only"):
         plan_structured_pruning(
@@ -65,7 +65,7 @@ def test_structured_plan_rejects_metadata_only_granularity() -> None:
 
 
 def test_structured_plan_rejects_unknown_granularity() -> None:
-    from xqt.prune import plan_structured_pruning
+    from xqt.compression.prune import plan_structured_pruning
 
     with pytest.raises(ValueError, match="Unsupported prune granularity"):
         plan_structured_pruning(
@@ -212,7 +212,7 @@ def test_mask_based_reports_list_mask_only_modules() -> None:
     )
     assert nm_report.mask_only_modules == [layer.module_name for layer in nm_report.layers]
 
-    from xqt.prune import apply_nm_structured_sparsity
+    from xqt.compression.prune import apply_nm_structured_sparsity
 
     model = nn.Sequential(nn.Linear(8, 4, bias=False), nn.Linear(4, 4, bias=False))
     nm = apply_nm_structured_sparsity(model, pattern_n=2, pattern_m=4)

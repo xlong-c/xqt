@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from xqt.gemm import dequantize_int8_activation, quantize_int8_activation
+from xqt.kernels.ops.gemm import dequantize_int8_activation, quantize_int8_activation
 
 
 def test_static_per_tensor_quantization_does_not_require_dynamic_scale() -> None:

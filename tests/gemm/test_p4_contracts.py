@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     EpilogueSpec,
     GemmProblem,
     GemmSpec,

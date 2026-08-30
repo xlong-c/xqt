@@ -103,7 +103,7 @@ def _module_metadata(module_name: str) -> dict[str, Any]:
 
 def _cutile_available() -> bool:
     try:
-        from xqt.operator_opt.backends.cutile import cutile_available
+        from xqt.kernels.ops._impl.engines.cutile import cutile_available
     except Exception:
         return _package_available("cutile")
     return cutile_available()
@@ -111,7 +111,7 @@ def _cutile_available() -> bool:
 
 def _cutile_metadata() -> dict[str, Any]:
     try:
-        from xqt.operator_opt.kernels.cutile._common import cutile_module_metadata
+        from xqt.kernels.ops._impl.cutile._common import cutile_module_metadata
     except Exception:
         return _module_metadata("cutile")
     return cutile_module_metadata()

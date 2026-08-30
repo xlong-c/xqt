@@ -3,14 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from xqt import nn as xqt_nn
+import xqt.kernels.nn as xqt_nn
 from xqt.core.errors import XQTBackendError
-from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
-from xqt.operator_opt.kernels.tilelang.attention import (
+from xqt.kernels.ops._impl.engines.tilelang import get_tilelang_kernel_spec
+from xqt.kernels.ops._impl.tilelang.attention import (
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(
@@ -149,7 +149,7 @@ def test_xqt_attention_facade_preserves_bf16_for_tilelang(
             dropout_p=dropout_p,
         )
 
-    from xqt.operator_opt.kernels import attention as attention_kernels
+    from xqt.kernels.ops._impl import attention as attention_kernels
 
     monkeypatch.setattr(
         attention_kernels,

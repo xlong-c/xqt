@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from xqt.core.reporting import build_stage_report, reporting_schema_payload
 from xqt.export.capability import deployment_capability_matrix
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.prune.capability import describe_prune_runtime_capability
-from xqt.quant.capability import describe_quant_backend_capability
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.compression.prune.capability import describe_prune_runtime_capability
+from xqt.compression.quant.capability import describe_quant_backend_capability
 from xqt.readiness import assess_xqt_readiness
 from xqt.run_workflow import DEFAULT_CONFIG
 from xqt.workflows import optimize_model

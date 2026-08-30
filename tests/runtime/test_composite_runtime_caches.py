@@ -7,8 +7,8 @@ from tests.xqt.svd_test_helpers import (
     make_legacy_svd_int8,
     make_legacy_svd_linear,
 )
-from xqt.quant.quantizers.convrot_int8 import ConvRotInt8Linear
-from xqt.quant.quantizers.convrot_4bit import ConvRotMixedPrecisionLinear
+from xqt.compression.quant.quantizers.convrot_int8 import ConvRotInt8Linear
+from xqt.compression.quant.quantizers.convrot_4bit import ConvRotMixedPrecisionLinear
 from xqt.runtime.modules.svd_legacy import SVDQuantInt8MmaLinear, SVDQuantLinear
 from xqt.runtime.modules.svd_composite import (
     SVDQuantInt8MmaLinear as CompatSVDQuantInt8MmaLinear,

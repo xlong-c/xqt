@@ -17,8 +17,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from xqt import XQTOptimizationSession
-from xqt.benchmark import benchmark_callable
-from xqt.quant import NVFP4LinearBridge, bridge_module_to_nvfp4_linear
+from xqt.kernels.wrappers.bench import benchmark_callable
+from xqt.compression.quant import NVFP4LinearBridge, bridge_module_to_nvfp4_linear
 
 
 REPO_ID = "sahilchachra/Unlimited-OCR-NVFP4"

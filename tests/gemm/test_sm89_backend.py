@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     EpilogueSpec,
     GemmProblem,
     GemmSpec,
@@ -23,17 +23,17 @@ from xqt.gemm import (
     query_sm89_w4a16_resources,
     sm89_w4a16_fused_executor,
 )
-from xqt.gemm.backends.sm89 import (
+from xqt.kernels.ops._impl.gemm_backends.sm89 import (
     install_sm89_w8a8_executor,
     prepack_sm89_int8_weight,
     sm89_artifact_available,
 )
-from xqt.gemm.backends.sm89.w4a16_fused_sm89 import (
+from xqt.kernels.ops._impl.gemm_backends.sm89.w4a16_fused_sm89 import (
     install_sm89_w4a16_fused_executor,
     select_fused_split_k,
     split_k_partition,
 )
-from xqt.gemm.backends.sm89.w4a16_sm89 import install_sm89_w4a16_dequant_executor
+from xqt.kernels.ops._impl.gemm_backends.sm89.w4a16_sm89 import install_sm89_w4a16_dequant_executor
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

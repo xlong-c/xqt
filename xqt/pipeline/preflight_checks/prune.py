@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from xqt.core.schema import PruneConfig
-from xqt.prune import describe_prune_runtime_capability
+from xqt.compression.prune import describe_prune_runtime_capability
 
 from ._base import PreflightReport
 

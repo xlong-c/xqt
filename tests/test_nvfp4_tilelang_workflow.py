@@ -3,13 +3,13 @@ from __future__ import annotations
 import torch
 
 from xqt import XQTOptimizationSession
-from xqt.operator_opt import (
+from xqt.kernels.wrappers import (
     OperatorOptimizationTargetPlan,
     materialize_operator_candidate_model,
     materialize_operator_candidate_models,
 )
-from xqt.operator_opt._benchmark import _effective_min_speedup, _native_runtime_near_equal
-from xqt.quant import bridge_module_to_nvfp4_linear
+from xqt.kernels.wrappers._benchmark import _effective_min_speedup, _native_runtime_near_equal
+from xqt.compression.quant import bridge_module_to_nvfp4_linear
 
 
 class _FakeCompressedNVFP4Linear(torch.nn.Module):

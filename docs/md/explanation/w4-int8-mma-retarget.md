@@ -54,12 +54,12 @@ XQT 的 `w4_storage_int8_mma` 策略将同一份 packed W4 权重在运行时重
 ## 实现结构
 
 ```
-xqt/quant/quantizers/
+xqt/compression/quant/quantizers/
   fp4_weight_only.py         ← packed W4 存储 (FP4WeightOnlyLinear)
   int8_mma.py                ← W8A8 INT8 MMA (Int8MmaLinear)
   w4_storage_int8_mma.py     ← W4 存储 + INT8 MMA 转义 (W4StorageInt8MmaLinear)
 
-xqt/operator_opt/kernels/tilelang/
+xqt/kernels/ops/_impl/tilelang/
   int8_mma.py                ← TileLang INT8 MMA kernel (int8_mma_tilelang / int8_linear_tilelang)
 ```
 
@@ -93,7 +93,7 @@ release_int8_compute_view():
 ### Python API
 
 ```python
-from xqt.quant import quantize_with_w4_storage_int8_mma
+from xqt.compression.quant import quantize_with_w4_storage_int8_mma
 
 # 从 FP4WeightOnlyLinear 转换 (推荐)
 result = quantize_with_w4_storage_int8_mma(
@@ -322,16 +322,16 @@ W8A8 / `ptx_sm89` 热路径应对 int8 权重做 **offline prepack** (`int8:sm_8
 
 | 文件 | 说明 |
 |------|------|
-| `xqt/quant/quantizers/w4_storage_int8_mma.py` | W4StorageInt8MmaLinear + quantize API |
-| `xqt/quant/quantizers/int8_mma.py` | Int8MmaLinear (W8A8 INT8 MMA) |
-| `xqt/quant/quantizers/fp4_weight_only.py` | FP4WeightOnlyLinear (W4 存储) |
-| `xqt/operator_opt/kernels/tilelang/int8_mma.py` | TileLang INT8 MMA kernel |
-| `xqt/operator_opt/kernels/cute/int8mma_kernel.cu` | Ada sm_89 手写 INT8 MMA 源码 |
-| `xqt/operator_opt/kernels/cute/build/int8mma_sm89.so` | 编译产物 |
-| `xqt/operator_opt/kernels/cute/int8mma_binding.py` | ctypes 绑定 (`engine=ptx_sm89`) |
-| `xqt/operator_opt/kernels/prepack/` | 离线 MMA 预排板注册表 (int8 实现, 其它精度占位) |
+| `xqt/compression/quant/quantizers/w4_storage_int8_mma.py` | W4StorageInt8MmaLinear + quantize API |
+| `xqt/compression/quant/quantizers/int8_mma.py` | Int8MmaLinear (W8A8 INT8 MMA) |
+| `xqt/compression/quant/quantizers/fp4_weight_only.py` | FP4WeightOnlyLinear (W4 存储) |
+| `xqt/kernels/ops/_impl/tilelang/int8_mma.py` | TileLang INT8 MMA kernel |
+| `xqt/kernels/jit/csrc/quantization/int8mma_kernel.cu` | Ada sm_89 手写 INT8 MMA 源码 |
+| `xqt/kernels/ops/_impl/cute/build/int8mma_sm89.so` | 编译产物 |
+| `xqt/kernels/ops/_impl/cute/int8mma_binding.py` | ctypes 绑定 (`engine=ptx_sm89`) |
+| `xqt/kernels/ops/_impl/prepack/` | 离线 MMA 预排板注册表 (int8 实现, 其它精度占位) |
 | `docs/md/explanation/mma-weight-prepack.md` | 预排板设计说明 |
-| `xqt/quant/capability.py` | 策略 → nature 映射 (TRUE/PSEUDO) |
+| `xqt/compression/quant/capability.py` | 策略 → nature 映射 (TRUE/PSEUDO) |
 | `xqt/core/schema.py` | strategy 别名注册 |
 | `examples/mlp_w4_int8_mma_acceptance.py` | 10 层 MLP 验收脚本 |
 | `tests/xqt/quant/test_w4_storage_int8_mma.py` | 单元测试 |

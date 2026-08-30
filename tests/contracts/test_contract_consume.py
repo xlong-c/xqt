@@ -5,7 +5,7 @@ from __future__ import annotations
 from torch import nn
 
 from xqt.contracts import consume_runtime_quant_contract
-from xqt.quant.quantizers.int8_mma import quantize_with_int8_mma
+from xqt.compression.quant.quantizers.int8_mma import quantize_with_int8_mma
 
 
 def test_consume_contract_from_int8_result() -> None:

@@ -13,7 +13,7 @@ from examples.xqt_models.hunyuan_ocr_tilelang import (
     HunyuanOcrTileLangDecodeSpec,
     benchmark_hunyuan_ocr_tilelang_decode_graph,
 )
-from xqt.operator_opt.kernels.tilelang.hunyuan_block import (
+from xqt.kernels.ops._impl.tilelang.hunyuan_block import (
     gqa_decode_attention_reference,
     residual_add_reference,
     residual_rmsnorm_reference,

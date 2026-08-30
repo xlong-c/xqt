@@ -7,17 +7,17 @@ from pathlib import Path
 import pytest
 import torch
 
-import xqt.operator_opt.kernels.tilelang.gemm as tilelang_gemm_module
-from xqt.operator_opt.backends.tilelang import list_tilelang_kernel_specs
-from xqt.operator_opt.backends.tilelang_validation import (
+import xqt.kernels.ops._impl.tilelang.gemm as tilelang_gemm_module
+from xqt.kernels.ops._impl.engines.tilelang import list_tilelang_kernel_specs
+from xqt.kernels.ops._impl.tilelang.validation import (
     TileLangFP4ValidationResult,
     validate_tilelang_packed_fp4_fused_gemm,
 )
-from xqt.operator_opt.kernels.tilelang import (
+from xqt.kernels.ops._impl.tilelang import (
     build_tilelang_fp4_fused_dequant_gemm_kernel,
 )
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.kernels.tilelang.gemm import (
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang.gemm import (
     dequant_gemm_epilogue_reference,
     dequant_gemm_epilogue_tilelang,
     fp4_packed_dequant_gemm_epilogue_reference,
@@ -27,12 +27,12 @@ from xqt.operator_opt.kernels.tilelang.gemm import (
     nvfp4_packed_activation_gemm_epilogue_reference,
     nvfp4_packed_activation_gemm_epilogue_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang.fp4_quant import (
+from xqt.kernels.ops._impl.tilelang.fp4_quant import (
     scaled_mxfp4_quant_reference,
     scaled_nvfp4_quant_reference,
 )
-from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
-from xqt.quant import MXFPWeightOnlyLinear, bridge_module_to_nvfp4_linear
+from xqt.compression.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
+from xqt.compression.quant import MXFPWeightOnlyLinear, bridge_module_to_nvfp4_linear
 
 
 class _ExternalCompressedNVFP4Linear(torch.nn.Module):

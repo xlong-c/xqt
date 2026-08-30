@@ -221,7 +221,7 @@ def _validate_stage_spec(kind: str, spec: StageSpec) -> None:
 
 
 def _validate_quant_stage_spec(spec: QuantStageSpec) -> None:
-    from xqt.quant.capability import describe_quant_backend_capability
+    from xqt.compression.quant.capability import describe_quant_backend_capability
 
     spec.component_policies = [
         _quant_component_policy_config(component)
@@ -289,7 +289,7 @@ def _quant_component_policy_config(value: Any) -> QuantComponentPolicyConfig:
 
 
 def _validate_prune_stage_spec(spec: PruneStageSpec) -> None:
-    from xqt.prune import describe_prune_method
+    from xqt.compression.prune import describe_prune_method
 
     try:
         describe_prune_method(spec.method)

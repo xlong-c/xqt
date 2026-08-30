@@ -13,8 +13,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Mapping, Sequence
 
-from xqt.quant.strategy import resolve_scheme, strategy_scheme_templates
-from xqt.quant.types import QuantScheme
+from xqt.compression.quant.strategy import resolve_scheme, strategy_scheme_templates
+from xqt.compression.quant.types import QuantScheme
 
 from ._helpers import find_nested_numeric
 

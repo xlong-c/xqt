@@ -10,11 +10,11 @@ from xqt.core.schema import AnalysisConfig, OutputDiffConfig, PruneConfig, Quant
 from xqt.core.types import XQTContext
 import xqt.pipeline.passes as passes_module
 from xqt.pipeline.passes import run_prune_stage, run_quant_stage
-from xqt.quant import build_fake_qdq_surrogate, execute_quantization_plan
-from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
-from xqt.quant.sensitivity import analyze_layer_sensitivity
-from xqt.quant.plan import build_quantization_plan
-from xqt.quant.backends.torchao import TorchAOQuantizationResult
+from xqt.compression.quant import build_fake_qdq_surrogate, execute_quantization_plan
+from xqt.compression.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear
+from xqt.compression.quant.sensitivity import analyze_layer_sensitivity
+from xqt.compression.quant.plan import build_quantization_plan
+from xqt.compression.quant.backends.torchao import TorchAOQuantizationResult
 from xqt.workflows.stage_specs import PruneStageSpec, QuantStageSpec
 
 
@@ -510,7 +510,7 @@ def test_torchao_report_includes_calibration_summary_when_inputs_provided(
     )
 
     monkeypatch.setattr(
-        "xqt.quant.execution.executor.quantize_with_torchao",
+        "xqt.compression.quant.execution.executor.quantize_with_torchao",
         lambda model, **kwargs: TorchAOQuantizationResult(
             model=model,
             strategy="w8a8_int8",

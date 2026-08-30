@@ -105,7 +105,7 @@ def test_flux_materializer_promotes_generic_artifact_to_w4a4_executor() -> None:
         added_kv_proj_dim=None,
     ).eval()
     base = nn.Linear(128, 384)
-    from xqt.quant.quantizers.svd import quantize_with_svd
+    from xqt.compression.quant.quantizers.svd import quantize_with_svd
 
     result = quantize_with_svd(
         nn.Sequential(base),
@@ -215,7 +215,7 @@ def _require_native_w4a4() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("native sm_89 W4A4 backend unavailable")
     try:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
             native_w4a4_available,
         )
     except Exception:

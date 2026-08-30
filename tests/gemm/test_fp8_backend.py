@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     EpilogueSpec,
     GemmProblem,
     GemmSpec,
@@ -15,13 +15,13 @@ from xqt.gemm import (
     default_registry,
     reference_gemm,
 )
-from xqt.gemm.backends.sm89.fp8_sm89 import (
+from xqt.kernels.ops._impl.gemm_backends.sm89.fp8_sm89 import (
     _scale_scalar,
     fp8_sm89_executor,
     install_sm89_fp8_executors,
     sm89_fp8_artifact_available,
 )
-from xqt.gemm.common.fp8 import quantize_fp8
+from xqt.kernels.ops.gemm.fp8 import quantize_fp8
 
 
 _ARTIFACT = Path.home() / ".cache/xqt/gemm/sm89/fp8_cutlass_sm89.so"
@@ -397,7 +397,7 @@ def test_sm89_fp8_blockwise_splitk_matches_reference(split_k: int, block_k: int)
 
 
 def test_fp8_blockwise_split_k_partition_is_block_aligned() -> None:
-    from xqt.gemm import fp8_blockwise_split_k_partition
+    from xqt.kernels.ops.gemm import fp8_blockwise_split_k_partition
 
     k_per_split, split_count = fp8_blockwise_split_k_partition(1024, 64, 4)
     assert k_per_split % 64 == 0
@@ -443,7 +443,7 @@ def test_sm89_fp8_rejects_splitk_outside_blockwise() -> None:
 def test_sm89_fp8_blockwise_resource_query(block_k: int) -> None:
     if not _ARTIFACT.is_file():
         pytest.skip("SM89 FP8 CUTLASS artifact is not built")
-    from xqt.gemm import query_sm89_fp8_blockwise_resources
+    from xqt.kernels.ops.gemm import query_sm89_fp8_blockwise_resources
 
     report = query_sm89_fp8_blockwise_resources(
         _ARTIFACT, format_name="fp8_e4m3", output_dtype="fp16", block_k=block_k
@@ -456,7 +456,7 @@ def test_sm89_fp8_blockwise_resource_query(block_k: int) -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_sm89_fp8_install_promotes_blockwise_dispatch_when_manifest_ready() -> None:
-    from xqt.gemm import artifact_ready_for_execution, dispatch_gemm
+    from xqt.kernels.ops.gemm import artifact_ready_for_execution, dispatch_gemm
 
     if not _ARTIFACT.is_file() or not artifact_ready_for_execution(
         _ARTIFACT, kernel_name="sm89_fp8_cutlass", target_arch="sm_89"

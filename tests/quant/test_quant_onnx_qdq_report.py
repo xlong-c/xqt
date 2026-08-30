@@ -8,10 +8,10 @@ import torch
 
 from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
-from xqt.quant import execute_quantization_plan
-from xqt.quant.backends.onnx_qdq import ONNXQDQQuantizationResult
-from xqt.quant.plan import build_quantization_plan
-import xqt.quant.execution.executor as executor_module
+from xqt.compression.quant import execute_quantization_plan
+from xqt.compression.quant.backends.onnx_qdq import ONNXQDQQuantizationResult
+from xqt.compression.quant.plan import build_quantization_plan
+import xqt.compression.quant.execution.executor as executor_module
 
 
 def _runtime_context(

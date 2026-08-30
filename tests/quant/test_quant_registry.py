@@ -10,10 +10,10 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
-from xqt.quant import registry as quant_registry
-from xqt.quant.capability import describe_quant_backend_capability
-from xqt.quant.execution import execute_quantization_plan
-from xqt.quant.registry import (
+from xqt.compression.quant import registry as quant_registry
+from xqt.compression.quant.capability import describe_quant_backend_capability
+from xqt.compression.quant.execution import execute_quantization_plan
+from xqt.compression.quant.registry import (
     QuantRouteRegistration,
     RouteQuery,
     iter_quant_routes,
@@ -21,12 +21,12 @@ from xqt.quant.registry import (
     resolve_quant_route,
     route_matcher,
 )
-from xqt.quant.types import (
+from xqt.compression.quant.types import (
     QuantizationComponentPlan,
     QuantizationExecutionPlan,
     QuantizationReport,
 )
-from xqt.quant.quantizers.base import component_route_handler
+from xqt.compression.quant.quantizers.base import component_route_handler
 
 
 def _query(
@@ -82,7 +82,7 @@ def test_route_resolution_miss_returns_none() -> None:
 def test_executable_primary_kernel_maps_to_engine_or_torch() -> None:
     """U4: every executable route primary_kernel is engine-resolvable or mapped."""
 
-    from xqt.contracts.engine_resolve import (
+    from xqt.kernels.engine_resolve import (
         get_engine_registration,
         map_primary_kernel_to_engine,
     )
@@ -103,7 +103,7 @@ def test_executable_primary_kernel_maps_to_engine_or_torch() -> None:
 def test_scheme_kernel_matrix_lists_executable_routes() -> None:
     """V5: scheme_kernel_matrix is derived from the route table."""
 
-    from xqt.quant.registry import scheme_kernel_matrix
+    from xqt.compression.quant.registry import scheme_kernel_matrix
 
     rows = scheme_kernel_matrix()
     assert rows

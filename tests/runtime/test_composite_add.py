@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xqt.quant.quantizers.svd import quantize_with_svd
+from xqt.compression.quant.quantizers.svd import quantize_with_svd
 from xqt.runtime.composite_materialize import materialize_composite_compute
 from xqt.contracts import CompositeAddLinear, CompositeAddModule, ComputeConfig
 from xqt.runtime.modules import (

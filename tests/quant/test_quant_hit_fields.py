@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from torch import nn
 
-from xqt.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
-from xqt.quant.quantizers.int8_mma import quantize_with_int8_mma
-from xqt.quant.selection import summarize_quant_hit_fields
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
+from xqt.compression.quant.quantizers.int8_mma import quantize_with_int8_mma
+from xqt.compression.quant.selection import summarize_quant_hit_fields
 
 
 def test_int8_component_path_exposes_hit_fields() -> None:
@@ -19,8 +19,8 @@ def test_int8_component_path_exposes_hit_fields() -> None:
             return self.fc(x)
 
     from xqt.core.types import XQTContext
-    from xqt.quant.types import QuantizationComponentPlan
-    from xqt.quant.quantizers.int8_mma import execute_int8_mma_component
+    from xqt.compression.quant.types import QuantizationComponentPlan
+    from xqt.compression.quant.quantizers.int8_mma import execute_int8_mma_component
 
     model = Shell().eval()
     ctx = XQTContext(model=model, device="cpu")

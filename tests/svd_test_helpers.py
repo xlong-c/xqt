@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from xqt.contracts import CompositeAddLinear
-from xqt.quant.quantizers.svd import quantize_with_svd
+from xqt.compression.quant.quantizers.svd import quantize_with_svd
 from xqt.runtime.modules import SVDQuantInt8MmaLinear, SVDQuantLinear
 
 

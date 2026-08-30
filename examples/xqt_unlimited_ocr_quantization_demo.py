@@ -23,8 +23,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from xqt import XQTOptimizationSession
-from xqt.operator_opt.backends.gemm_precision import describe_gemm_precision_capability
-from xqt.quant.capability import describe_quant_backend_capability
+from xqt.kernels.ops._impl.gemm_precision import describe_gemm_precision_capability
+from xqt.compression.quant.capability import describe_quant_backend_capability
 
 
 MODEL_ID = "baidu/Unlimited-OCR"

@@ -5,20 +5,20 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.operator_opt.kernels.fp4_quant_common import (
+from xqt.kernels.ops._impl.fp4_quant_common import (
     dequantize_nvfp4_codes,
 )
-from xqt.operator_opt.kernels.tilelang.fp4_quant import (
+from xqt.kernels.ops._impl.tilelang.fp4_quant import (
     scaled_mxfp4_quant_reference,
     scaled_mxfp4_quant_tilelang,
     scaled_nvfp4_quant_reference,
     scaled_nvfp4_quant_tilelang,
 )
-from xqt.operator_opt.kernels.triton.fp4_quant import (
+from xqt.kernels.ops._impl.triton.fp4_quant import (
     scaled_mxfp4_quant_triton,
     scaled_nvfp4_quant_triton,
 )
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(

@@ -2,7 +2,7 @@ project:
   name: operator_cutlass_mlp
   artifact_dir: artifacts/xqt/operator/cutlass/mlp
 model:
-  target: xqt.model.toy_models.build_toy_llm_mlp_classifier
+  target: xqt.kernels.nn.fixtures.toy_models.build_toy_llm_mlp_classifier
   params:
     hidden_dim: 8
     intermediate_dim: 16

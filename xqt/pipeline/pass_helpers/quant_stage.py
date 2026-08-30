@@ -13,12 +13,12 @@ from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import AnalysisConfig, OutputDiffConfig, QuantConfig
 from xqt.core.types import XQTContext
 from xqt.export import export_onnx
-from xqt.quant import (
+from xqt.compression.quant import (
     build_quantization_plan,
     execute_quantization_plan,
     summarize_quantization_reports,
 )
-from xqt.quant.backends.onnx_qdq import quantize_onnx_qdq_static
+from xqt.compression.quant.backends.onnx_qdq import quantize_onnx_qdq_static
 from xqt.core.stage_specs import QuantStageSpec
 
 from .context import (
@@ -48,7 +48,7 @@ def _maybe_run_graph_transforms(
     if not isinstance(context.model, nn.Module):
         return [{"applied": False, "notes": ["model_not_nn_module"]}]
 
-    from xqt.quant.transforms import (
+    from xqt.compression.quant.transforms import (
         RotationAbsorbTransform,
         apply_graph_transforms,
     )

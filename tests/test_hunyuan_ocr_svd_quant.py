@@ -17,7 +17,7 @@ from examples.xqt_models.hunyuan_ocr import (
     optimize_hunyuan_ocr_dflash_svd_int4_blocks,
     optimize_hunyuan_ocr_svd_int4_blocks,
 )
-from xqt.operator_opt.types import OperatorOptimizationTargetPlan
+from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
 from xqt.runtime.modules import SVDQuantInt8MmaLinear
 
 

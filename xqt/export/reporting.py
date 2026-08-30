@@ -135,10 +135,12 @@ def export_artifact_lineage_report(
     target_summaries: Sequence[Mapping[str, object]],
     metrics: Mapping[str, Any],
     stage_kind: str,
+    source_stage: str | None = None,
 ) -> dict[str, Any]:
     """Describe export artifacts and their upstream optimization lineage."""
 
     upstream = _upstream_stage_lineage(metrics)
+    resolved_source = source_stage if source_stage is not None else stage_kind
     artifacts: list[dict[str, Any]] = []
     for index, artifact in enumerate(exported):
         target = target_summaries[index] if index < len(target_summaries) else {}
@@ -154,7 +156,7 @@ def export_artifact_lineage_report(
                 "index": index,
                 "format": artifact.get("format"),
                 "path": str(path) if path is not None else None,
-                "source_stage": stage_kind,
+                "source_stage": resolved_source,
                 "artifact_checksum": artifact.get("checksum"),
                 "artifact_size_bytes": _artifact_size(path),
                 "input_signature": {
@@ -175,7 +177,7 @@ def export_artifact_lineage_report(
         )
     return {
         "artifact_count": len(artifacts),
-        "source_stage": stage_kind,
+        "source_stage": resolved_source,
         "upstream_stage_count": len(upstream),
         "upstream_stages": [item["stage"] for item in upstream],
         "artifacts": artifacts,

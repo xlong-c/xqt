@@ -27,14 +27,14 @@ _LAZY_EXPORTS = {
         "xdl_checkpoint_to_xqt_context",
     ),
     "xdl_setup_to_xqt_context": (".xdl_adapter", "xdl_setup_to_xqt_context"),
-    "convert": (".conversion", "convert"),
-    "ConvertResult": (".conversion", "ConvertResult"),
+    "convert": (".kernels.nn.convert", "convert"),
+    "ConvertResult": (".kernels.nn.convert", "ConvertResult"),
     "FeedForwardPrecisionPolicy": (
-        ".conversion",
+        ".kernels.nn.convert",
         "FeedForwardPrecisionPolicy",
     ),
-    "MatmulPrecisionSpec": (".conversion", "MatmulPrecisionSpec"),
-    "PrecisionPolicy": (".conversion", "PrecisionPolicy"),
+    "MatmulPrecisionSpec": (".kernels.nn.convert", "MatmulPrecisionSpec"),
+    "PrecisionPolicy": (".kernels.nn.convert", "PrecisionPolicy"),
 }
 
 __all__ = [
@@ -60,7 +60,7 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name == "nn":
-        module = importlib.import_module(".nn", __name__)
+        module = importlib.import_module(".kernels.nn", __name__)
         globals()[name] = module
         return module
     target = _LAZY_EXPORTS.get(name)

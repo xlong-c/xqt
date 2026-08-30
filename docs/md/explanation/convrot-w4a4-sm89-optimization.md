@@ -74,10 +74,10 @@ XQT 完整 wrapper 延迟为 `13.297-26.766 us`. `xqt_wrapper / rowwise_bound_fl
 
 建议按以下顺序阅读:
 
-1. [convrot_4bit.py](../../../xqt/quant/quantizers/convrot_4bit.py): 数学 reference,artifact,backend policy,fallback 和 Python cache.
-2. [convrot_w4a4_rowwise_sm89.py](../../../xqt/operator_opt/kernels/cute/convrot_w4a4_rowwise_sm89.py): capability,JIT build,rowwise weight packing 和 Python binding.
-3. [convrot_w4a4_rowwise_sm89_binding.cpp](../../../xqt/operator_opt/kernels/cute/convrot_w4a4_rowwise_sm89_binding.cpp): 参数验证,dynamic runner,workspace cache 和 tensor version 失效.
-4. [convrot_w4a4_rowwise_sm89_kernel.cu](../../../xqt/operator_opt/kernels/cute/convrot_w4a4_rowwise_sm89_kernel.cu): warp-FHT,quant/pack,CUTLASS EVT epilogue 和 GEMM dispatch.
+1. [convrot_4bit.py](../../../xqt/compression/quant/quantizers/convrot_4bit.py): 数学 reference,artifact,backend policy,fallback 和 Python cache.
+2. [convrot_w4a4_rowwise_sm89.py](../../../xqt/kernels/ops/_impl/cute/convrot_w4a4_rowwise_sm89.py): capability,JIT build,rowwise weight packing 和 Python binding.
+3. [convrot_w4a4_rowwise_sm89_binding.cpp](../../../xqt/kernels/jit/csrc/quantization/convrot_w4a4_rowwise_sm89_binding.cpp): 参数验证,dynamic runner,workspace cache 和 tensor version 失效.
+4. [convrot_w4a4_rowwise_sm89_kernel.cu](../../../xqt/kernels/jit/csrc/quantization/convrot_w4a4_rowwise_sm89_kernel.cu): warp-FHT,quant/pack,CUTLASS EVT epilogue 和 GEMM dispatch.
 5. [test_convrot_4bit_quantizer.py](../../../tests/xqt/quant/test_convrot_4bit_quantizer.py): non-contiguous,高维,multi-stream,mutation 和数值 reference 验证.
 6. [benchmark_convrot_w4a4_sm89.py](../../../tools/benchmark_convrot_w4a4_sm89.py): 正式 CUDA-event benchmark 口径.
 7. [profile_convrot_w4a4_sm89.py](../../../tools/profile_convrot_w4a4_sm89.py): NVTX range 和 Nsight Systems workload.

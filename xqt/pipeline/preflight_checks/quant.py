@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from xqt.core.schema import QuantComponentPolicyConfig, QuantConfig
-from xqt.quant.capability import describe_quant_backend_capability
+from xqt.compression.quant.capability import describe_quant_backend_capability
 
 from ._base import PreflightReport, _check_dependency
 from .model import _check_cuda

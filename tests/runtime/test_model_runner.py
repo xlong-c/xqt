@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from xqt.quant.quantizers.int8_mma import quantize_with_int8_mma
+from xqt.compression.quant.quantizers.int8_mma import quantize_with_int8_mma
 from xqt.runtime.model_runner import ModelRunner
 
 

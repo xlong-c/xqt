@@ -27,7 +27,7 @@ CuTile 是面向 CUDA kernel 的 Python DSL / tile programming 路线. XQT 当�
 
 ## 当前支持 pattern
 
-源码位置: `xqt/operator_opt/backends/cutile.py`
+源码位置: `xqt/kernels/ops/_impl/engines/cutile.py`
 
 `CUTILE_KERNEL_REGISTRY` 当前包含:
 
@@ -55,7 +55,7 @@ CuTile 是面向 CUDA kernel 的 Python DSL / tile programming 路线. XQT 当�
 ## 简单例子
 
 ```python
-from xqt.operator_opt.backends import (
+from xqt.kernels.wrappers import (
     CuTileCompileSettings,
     build_cutile_artifact_metadata,
     list_cutile_kernel_specs,
@@ -80,7 +80,7 @@ metadata = build_cutile_artifact_metadata(
 ```python
 import torch
 
-from xqt.operator_opt.backends import run_cutile_kernel
+from xqt.kernels.wrappers import run_cutile_kernel
 
 
 x = torch.randn(4, 16)

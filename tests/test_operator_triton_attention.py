@@ -4,11 +4,11 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.operator_opt.backends.triton import (
+from xqt.kernels.ops._impl.engines.triton import (
     get_triton_kernel_spec,
     run_triton_kernel,
 )
-from xqt.operator_opt.kernels.triton.attention import (
+from xqt.kernels.ops._impl.triton.attention import (
     TritonAttentionSchedule,
     fused_attention_forward_reference,
     fused_attention_forward_triton,

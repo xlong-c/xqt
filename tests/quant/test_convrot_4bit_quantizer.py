@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from xqt.quant import (
+from xqt.compression.quant import (
     ConvRotMixedPrecisionLinear,
     build_regular_hadamard_matrix,
     quantize_with_convrot_4bit,
@@ -55,7 +55,7 @@ def test_build_regular_hadamard_matrix_rejects_non_power_of_four() -> None:
 
 
 def test_convrot_rotation_helper_rejects_non_power_of_four() -> None:
-    from xqt.quant.quantizers.convrot_4bit import _apply_groupwise_rotation
+    from xqt.compression.quant.quantizers.convrot_4bit import _apply_groupwise_rotation
 
     with pytest.raises(ValueError, match="power of four"):
         _apply_groupwise_rotation(torch.randn(2, 8), rot_size=8)
@@ -396,7 +396,7 @@ def _rowwise_convrot_w4a4_cuda_available() -> bool:
     if torch.cuda.get_device_capability() != (8, 9):
         return False
     try:
-        from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+        from xqt.kernels.ops._impl.cute.convrot_w4a4_rowwise_sm89 import (
             native_rowwise_convrot_w4a4_available,
         )
     except Exception:
@@ -411,13 +411,13 @@ def test_convrot_rowwise_w4a4_cuda_matches_packed_reference(
     if not _rowwise_convrot_w4a4_cuda_available():
         pytest.skip("rowwise sm_89 ConvRot W4A4 backend unavailable")
 
-    from xqt.operator_opt.kernels.cute.convrot_w4a4_rowwise_sm89 import (
+    from xqt.kernels.ops._impl.cute.convrot_w4a4_rowwise_sm89 import (
         allocate_convrot_w4a4_rowwise_workspace,
         convrot_w4a4_rowwise_linear,
         pack_convrot_w4a4_rowwise_weight,
     )
-    from xqt.quant.quantizers.convrot_4bit import _apply_groupwise_rotation
-    from xqt.quant.quantizers.fp4_weight_only import _unpack_int4
+    from xqt.compression.quant.quantizers.convrot_4bit import _apply_groupwise_rotation
+    from xqt.compression.quant.quantizers.fp4_weight_only import _unpack_int4
 
     torch.manual_seed(101)
     rows = 7

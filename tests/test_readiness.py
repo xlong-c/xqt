@@ -7,8 +7,8 @@ import pytest
 from xqt import XQTOptimizationSession, XQTReadinessReport, assess_xqt_readiness
 from xqt.core.artifact import ArtifactManifest
 from xqt.readiness import XQTReadinessScenario
-from xqt.operator_opt.backends.tilelang_validation import TileLangFP4ValidationResult
-from xqt.quant.capability import describe_quant_backend_capability
+from xqt.kernels.ops._impl.tilelang.validation import TileLangFP4ValidationResult
+from xqt.compression.quant.capability import describe_quant_backend_capability
 
 
 def _scenarios(report: XQTReadinessReport) -> dict[str, XQTReadinessScenario]:

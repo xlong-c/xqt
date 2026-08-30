@@ -192,7 +192,7 @@ def benchmark_tensorrt_engine(
     def run_once() -> object:
         return execute_tensorrt_session(session, inputs=inputs).output_tensors
 
-    from xqt.benchmark import benchmark_callable
+    from xqt.kernels.wrappers.bench import benchmark_callable
 
     latency = benchmark_callable(
         run_once,

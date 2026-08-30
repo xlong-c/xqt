@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
-from xqt.quant.sensitivity import LayerAnalysisRecord
+from xqt.compression.quant.sensitivity import LayerAnalysisRecord
 
 
 PrecisionAction = Literal["keep_high_precision", "skip_quantize", "quantize"]

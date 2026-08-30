@@ -2,7 +2,7 @@ project:
   name: multimodal_smoke
   artifact_dir: artifacts/xqt/smoke/multimodal
 model:
-  target: xqt.model.build_smoke_multimodal_classifier
+  target: xqt.kernels.nn.fixtures.build_smoke_multimodal_classifier
   params:
     image_channels: 3
     image_size: 16

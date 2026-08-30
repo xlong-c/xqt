@@ -6,7 +6,7 @@ from torch import nn
 
 from xqt.core.errors import XQTBackendError
 from xqt.export import apply_pre_export_lowering
-from xqt.quant import FP4WeightOnlyLinear
+from xqt.compression.quant import FP4WeightOnlyLinear
 
 
 class _FP4LinearModel(nn.Module):

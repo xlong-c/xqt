@@ -14,7 +14,7 @@ from xqt.contracts.layout_kernel_report import (
     empty_layout_kernel_report,
 )
 from xqt.core.errors import XQTConfigError
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.external_weight_only import load_external_quantized_model
 
 

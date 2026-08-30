@@ -7,14 +7,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
-from xqt.operator_opt.kernels.tilelang.linear_marlin import (
+from xqt.kernels.ops._impl.engines.tilelang import get_tilelang_kernel_spec
+from xqt.kernels.ops._impl.tilelang.linear_marlin import (
     linear_marlin_reference,
     linear_marlin_tilelang,
     quantize_int4_weight,
     quantize_int8_weight,
 )
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(

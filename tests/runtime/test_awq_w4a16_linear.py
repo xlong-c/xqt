@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.gemm import PackedWeight, PackedWeightMetadata
+from xqt.kernels.ops.gemm import PackedWeight, PackedWeightMetadata
 from xqt.runtime.modules import AWQW4A16Linear
 
 

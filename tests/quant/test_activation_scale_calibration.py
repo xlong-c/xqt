@@ -7,16 +7,16 @@ from torch import nn
 
 from xqt.core.errors import XQTBackendError
 from xqt.core.types import XQTContext
-from xqt.quant.calibration import (
+from xqt.compression.quant.calibration import (
     ActivationScaleArtifact,
     calibrate_activation_scales,
 )
-from xqt.quant.quantizers.int8_mma import (
+from xqt.compression.quant.quantizers.int8_mma import (
     Int8MmaLinear,
     execute_int8_mma_component,
     quantize_with_int8_mma,
 )
-from xqt.quant.types import QuantScheme, QuantizationComponentPlan
+from xqt.compression.quant.types import QuantScheme, QuantizationComponentPlan
 from xqt.contracts.quant_pair import write_quant_pair
 
 

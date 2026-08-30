@@ -12,9 +12,9 @@ if str(ROOT) not in sys.path:
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_wan import WanRMS_norm
 
-from xqt.benchmark.latency import benchmark_callable
-from xqt.operator_opt.triton_wrappers import _TritonRMSNormWrapper
-from xqt.operator_opt.kernels.triton.pointwise import fused_rmsnorm_triton
+from xqt.kernels.wrappers.bench.latency import benchmark_callable
+from xqt.kernels.wrappers.triton_wrappers import _TritonRMSNormWrapper
+from xqt.kernels.ops._impl.triton.pointwise import fused_rmsnorm_triton
 
 
 @dataclass

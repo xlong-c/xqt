@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from xqt.benchmark import benchmark_prefill_decode, merge_phase_into_metrics
+from xqt.kernels.wrappers.bench import benchmark_prefill_decode, merge_phase_into_metrics
 
 
 def test_benchmark_prefill_decode_offline_estimate() -> None:

@@ -1,4 +1,4 @@
-"""Tests for xqt.operator_opt.backends.gemm_selector.
+"""Tests for xqt.kernels.ops._impl.gemm_selector.
 
 Style mirrors test_prepack_int8_sm89.py: function-level tests, no fixture
 indirection, explicit torch.cuda skips.
@@ -9,9 +9,9 @@ from __future__ import annotations
 import torch
 import pytest
 
-from xqt.contracts import PrecisionPolicy
-from xqt.operator_opt.backends.gemm_precision import gemm_with_precision
-from xqt.operator_opt.backends.gemm_selector import (
+from xqt.kernels.precision import PrecisionPolicy
+from xqt.kernels.ops._impl.gemm_precision import gemm_with_precision
+from xqt.kernels.ops._impl.gemm_selector import (
     GemmShape,
     select_gemm_engine,
 )

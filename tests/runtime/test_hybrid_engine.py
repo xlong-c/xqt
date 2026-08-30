@@ -1,6 +1,6 @@
 import torch
 
-from xqt.quant import quantize_with_convrot_4bit
+from xqt.compression.quant import quantize_with_convrot_4bit
 from xqt.runtime import (
     ConvRotW4A4ExecutionView,
     HybridInferenceEngine,

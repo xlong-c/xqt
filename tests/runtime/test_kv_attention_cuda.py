@@ -9,12 +9,12 @@ from typing import Any
 import pytest
 import torch
 
-from xqt.operator_opt.kernels.tilelang._common import (
+from xqt.kernels.ops._impl.tilelang._common import (
     tilelang_runtime_unavailability_reason,
     tilelang_runtime_usable,
 )
-from xqt.operator_opt.kernels.tilelang import kv_int8_attention as kv_int8_kernel
-from xqt.operator_opt.kernels.tilelang.kv_int8_attention import (
+from xqt.kernels.ops._impl.tilelang import kv_int8_attention as kv_int8_kernel
+from xqt.kernels.ops._impl.tilelang.kv_int8_attention import (
     KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME,
     KV_INT8_PACKED_QKV_QUANTIZE_LAYOUT_KERNEL_NAME,
     KV_INT8_PROJECTION_IO_KERNEL_NAME,

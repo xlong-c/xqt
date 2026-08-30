@@ -8,7 +8,7 @@ from torch import nn
 
 from xqt.contracts import QuantizedModel, RuntimeQuantContract
 from xqt.core.errors import XQTConfigError
-from xqt.quant.types import QuantScheme
+from xqt.compression.quant.types import QuantScheme
 
 
 def _w4a16_scheme() -> QuantScheme:
@@ -117,8 +117,8 @@ def test_quantized_model_resolve_contract_none_when_absent() -> None:
 def test_quantize_awq_and_int8_mma_attach_runtime_contract() -> None:
     """U8: quant main paths attach RuntimeQuantContract by default."""
 
-    from xqt.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
-    from xqt.quant.quantizers.int8_mma import quantize_with_int8_mma
+    from xqt.compression.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
+    from xqt.compression.quant.quantizers.int8_mma import quantize_with_int8_mma
 
     model = nn.Sequential(nn.Linear(16, 8), nn.Linear(8, 4)).eval()
     awq = quantize_with_awq_weight_only(

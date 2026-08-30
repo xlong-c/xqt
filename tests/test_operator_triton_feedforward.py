@@ -5,9 +5,9 @@ import importlib.util
 import pytest
 import torch
 
-from xqt import nn as xqt_nn
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.plan import build_operator_optimization_plan
+import xqt.kernels.nn as xqt_nn
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
@@ -54,7 +54,7 @@ def _triton_feedforward_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/triton_feedforward_{device}",
         },
         "model": {
-            "target": "xqt.nn.FeedForward",
+            "target": "xqt.kernels.nn.FeedForward",
             "params": {},
             "device": device,
         },

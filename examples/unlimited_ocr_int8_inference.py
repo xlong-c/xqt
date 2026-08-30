@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from xqt.operator_opt.kernels.tilelang.int8_mma import (  # noqa: E402
+from xqt.kernels.ops._impl.tilelang.int8_mma import (  # noqa: E402
     build_tilelang_int8_linear_static_activation_kernel,
     build_tilelang_int8_mma_kernel,
     int8_linear_static_activation_tilelang,
@@ -33,7 +33,7 @@ from xqt.operator_opt.kernels.tilelang.int8_mma import (  # noqa: E402
     pad_rows_to_block,
     static_activation_quantize_tilelang,
 )
-from xqt.quant.quantizers.int8_mma import (  # noqa: E402
+from xqt.compression.quant.quantizers.int8_mma import (  # noqa: E402
     Int8MmaLinear,
     quantize_with_int8_mma,
 )
@@ -393,7 +393,7 @@ def _collect_linear_input_scales(
     policy: MappingLike,
     eps: float = 1e-6,
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    from xqt.quant.policy import QuantizationPolicy, should_quantize_module
+    from xqt.compression.quant.policy import QuantizationPolicy, should_quantize_module
 
     quant_policy = QuantizationPolicy(
         dtype=str(policy.get("dtype", "int8")),

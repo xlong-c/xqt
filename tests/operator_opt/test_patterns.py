@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from xqt.operator_opt.patterns import (
+from xqt.kernels.wrappers.patterns import (
     operator_pattern_coverage_report,
     scan_candidate_report,
     scan_export_candidates,

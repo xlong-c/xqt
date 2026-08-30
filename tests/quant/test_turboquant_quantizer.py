@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from xqt.quant import (
+from xqt.compression.quant import (
     TurboQuantCodec,
     TurboQuantWeightOnlyLinear,
     quantize_with_turboquant,

@@ -6,14 +6,14 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
-from xqt.quant.policy import classify_moe_module, is_moe_expert_module, is_moe_router_module
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
-from xqt.quant.quantizers.moe_weight_only import (
+from xqt.compression.quant.policy import classify_moe_module, is_moe_expert_module, is_moe_router_module
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.compression.quant.quantizers.moe_weight_only import (
     execute_moe_weight_only_component,
     list_moe_module_roles,
     quantize_moe_experts_weight_only,
 )
-from xqt.quant.types import QuantizationComponentPlan
+from xqt.compression.quant.types import QuantizationComponentPlan
 
 
 class _ToyMoEBlock(nn.Module):

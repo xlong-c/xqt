@@ -8,10 +8,10 @@ import pytest
 from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
 from xqt.contracts import CompositeAddLinear
-from xqt.quant.capability import describe_quant_backend_capability, list_quant_backend_capabilities
-from xqt.quant.execution import execute_quantization_plan
-from xqt.quant.plan import build_quantization_plan
-from xqt.quant.quantizers.svd import (
+from xqt.compression.quant.capability import describe_quant_backend_capability, list_quant_backend_capabilities
+from xqt.compression.quant.execution import execute_quantization_plan
+from xqt.compression.quant.plan import build_quantization_plan
+from xqt.compression.quant.quantizers.svd import (
     SVDQuantResult,
     quantize_with_svd,
 )

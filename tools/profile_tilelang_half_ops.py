@@ -13,15 +13,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from xqt.operator_opt.kernels.tilelang.attention import (
+from xqt.kernels.ops._impl.tilelang.attention import (
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang.linear import (
+from xqt.kernels.ops._impl.tilelang.linear import (
     half_linear_reference,
     half_linear_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang.norm import (
+from xqt.kernels.ops._impl.tilelang.norm import (
     layer_norm_reference,
     layer_norm_tilelang,
 )

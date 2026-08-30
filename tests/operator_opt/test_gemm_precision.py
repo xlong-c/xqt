@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import triton.language as tl
 
-from xqt.operator_opt.backends.gemm_precision import (
+from xqt.kernels.ops._impl.gemm_precision import (
     MatmulPrecisionSpec,
     conv1x1_as_gemm_with_precision,
     conv2d_as_gemm_with_precision,
@@ -24,14 +24,14 @@ from xqt.operator_opt.backends.gemm_precision import (
     list_available_precisions,
     router_gemm_with_precision,
 )
-from xqt.operator_opt.backends.triton import get_triton_kernel_spec
-from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
-from xqt.contracts import PrecisionPolicy
-from xqt.operator_opt.kernels.tilelang.gemm import (
+from xqt.kernels.ops._impl.engines.triton import get_triton_kernel_spec
+from xqt.kernels.ops._impl.engines.tilelang import get_tilelang_kernel_spec
+from xqt.kernels.precision import PrecisionPolicy
+from xqt.kernels.ops._impl.tilelang.gemm import (
     mxfp4_packed_dequant_gemm_epilogue_reference,
     nvfp4_packed_dequant_gemm_epilogue_reference,
 )
-from xqt.operator_opt.kernels.triton.gemm import (
+from xqt.kernels.ops._impl.triton.gemm import (
     TritonGemmSchedule,
     gemm_bf16_triton,
     gemm_fp16_triton,
@@ -41,7 +41,7 @@ from xqt.operator_opt.kernels.triton.gemm import (
     resolve_triton_bf16_gemm_schedule,
     resolve_triton_fp16_gemm_schedule,
 )
-from xqt.operator_opt.kernels.triton.mxfp_gemm import pack_mxfp, unpack_mxfp
+from xqt.kernels.ops._impl.triton.mxfp_gemm import pack_mxfp, unpack_mxfp
 
 
 @pytest.fixture
@@ -676,7 +676,7 @@ def test_gemm_with_precision_forwards_triton_schedule_kwargs(
         )
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_triton_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_triton_kernel",
         fake_run_triton_kernel,
     )
     a = torch.randn(4, 16, dtype=torch.bfloat16)
@@ -818,7 +818,7 @@ class TestUnifiedGEMMInterface:
             )
 
         monkeypatch.setattr(
-            "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+            "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
             fake_run_tilelang_kernel,
         )
         a = torch.randn(1, 64, dtype=torch.bfloat16)
@@ -1044,7 +1044,7 @@ def test_batched_gemm_shared_weight_uses_one_flattened_dispatch(
         return torch.empty((a.shape[0], b.shape[0]), dtype=torch.float32)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.gemm_with_precision",
+        "xqt.kernels.ops._impl.gemm_precision.gemm_with_precision",
         fake_gemm_with_precision,
     )
 
@@ -1252,7 +1252,7 @@ def test_gemm_variant_with_precision_routes_int8_tilelang_pattern(
         return torch.empty((a.shape[0], weight.shape[0]), dtype=kwargs["output_dtype"])
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 
@@ -1411,7 +1411,7 @@ def test_tilelang_int8_explicit_pattern_is_respected(
         )
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 
@@ -1505,11 +1505,11 @@ def test_gemm_fp16_triton_forwards_accum_and_output_dtype_to_kernel(
             return runner
 
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        "xqt.kernels.ops._impl.triton.gemm._require_cuda_tensors",
         lambda *args: None,
     )
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._gemm_kernel",
+        "xqt.kernels.ops._impl.triton.gemm._gemm_kernel",
         FakeKernelLaunch(),
     )
 
@@ -1553,11 +1553,11 @@ def test_gemm_fp16_triton_applies_resolved_sm89_schedule(
             return runner
 
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        "xqt.kernels.ops._impl.triton.gemm._require_cuda_tensors",
         lambda *args: None,
     )
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._gemm_kernel",
+        "xqt.kernels.ops._impl.triton.gemm._gemm_kernel",
         FakeKernelLaunch(),
     )
     a = torch.empty((1, 4096), dtype=torch.float16)
@@ -1594,11 +1594,11 @@ def test_gemm_bf16_triton_preserves_bf16_inputs_and_forwards_precision_kwargs(
         return torch.empty((a.shape[0], b.shape[0]), dtype=kwargs["output_dtype"])
 
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        "xqt.kernels.ops._impl.triton.gemm._require_cuda_tensors",
         lambda *args: None,
     )
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm.gemm_fp16_triton",
+        "xqt.kernels.ops._impl.triton.gemm.gemm_fp16_triton",
         fake_fp16_entry,
     )
 
@@ -1638,11 +1638,11 @@ def test_gemm_bf16_triton_applies_resolved_sm89_schedule(
         return torch.empty((int(a.shape[0]), int(b.shape[0])), dtype=torch.bfloat16)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        "xqt.kernels.ops._impl.triton.gemm._require_cuda_tensors",
         lambda *args: None,
     )
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm.gemm_fp16_triton",
+        "xqt.kernels.ops._impl.triton.gemm.gemm_fp16_triton",
         fake_fp16_entry,
     )
     a = torch.empty((1, 4096), dtype=torch.bfloat16)
@@ -1684,11 +1684,11 @@ def test_gemm_bf16_triton_does_not_query_cuda_capability_for_cpu_inputs(
         raise AssertionError(f"unexpected CUDA capability query for {device}")
 
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm._require_cuda_tensors",
+        "xqt.kernels.ops._impl.triton.gemm._require_cuda_tensors",
         lambda *args: None,
     )
     monkeypatch.setattr(
-        "xqt.operator_opt.kernels.triton.gemm.gemm_fp16_triton",
+        "xqt.kernels.ops._impl.triton.gemm.gemm_fp16_triton",
         fake_fp16_entry,
     )
     monkeypatch.setattr(torch.cuda, "get_device_capability", fail_capability_query)
@@ -1754,7 +1754,7 @@ def test_gemm_with_precision_tilelang_bf16_registry_selection(
         return torch.empty((a.shape[0], weight.shape[0]), dtype=torch.bfloat16)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 
@@ -1794,7 +1794,7 @@ def test_gemm_with_precision_tilelang_int8_static_activation_uses_fused_family(
         return torch.empty((a.shape[0], weight.shape[1]), dtype=torch.float16)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 
@@ -1835,7 +1835,7 @@ def test_gemm_with_precision_tilelang_int8_marlin_pattern_uses_linear_marlin(
         return torch.empty((a.shape[0], weight.shape[0]), dtype=torch.float16)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 
@@ -1877,7 +1877,7 @@ def test_gemm_with_precision_tilelang_int8_dequant_pattern_uses_dequant_family(
         return torch.empty((a.shape[0], qweight.shape[0]), dtype=torch.float16)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 
@@ -1918,7 +1918,7 @@ def test_gemm_with_precision_tilelang_int4_marlin_pattern_uses_linear_marlin(
         return torch.empty((a.shape[0], weight.shape[0]), dtype=torch.float16)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.backends.gemm_precision.run_tilelang_kernel",
+        "xqt.kernels.ops._impl.gemm_precision.run_tilelang_kernel",
         fake_run_tilelang_kernel,
     )
 

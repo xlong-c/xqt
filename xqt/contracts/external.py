@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from xqt.core.errors import XQTArtifactError
+from xqt.core.base import XQTArtifactError
 from xqt.contracts.external_methods import (
     iter_config_filenames,
     list_supported_external_formats,

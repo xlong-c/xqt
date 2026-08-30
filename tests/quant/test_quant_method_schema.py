@@ -5,8 +5,8 @@ from omegaconf import OmegaConf
 
 from xqt.core.errors import XQTConfigError
 from xqt.core.schema import QuantConfig, normalize_quant_strategy
-from xqt.quant.capability import describe_quant_backend_capability
-from xqt.quant.plan import build_quantization_plan
+from xqt.compression.quant.capability import describe_quant_backend_capability
+from xqt.compression.quant.plan import build_quantization_plan
 from xqt.workflows import load_optimization_config
 
 
@@ -17,7 +17,7 @@ def _base_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/quant_method_schema",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_hetero_quant_toy_model",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_hetero_quant_toy_model",
             "params": {
                 "in_features": 4,
                 "hidden_features": 4,
@@ -233,25 +233,25 @@ def test_tilelang_is_rejected_as_quant_backend() -> None:
 
 
 def test_awq_and_gptq_modules_are_explicit_reexports() -> None:
-    awq_module = importlib.import_module("xqt.quant.quantizers.awq")
-    gptq_module = importlib.import_module("xqt.quant.quantizers.gptq")
+    awq_module = importlib.import_module("xqt.compression.quant.quantizers.awq")
+    gptq_module = importlib.import_module("xqt.compression.quant.quantizers.gptq")
 
     assert awq_module.quantize_with_awq_weight_only.__module__ == (
-        "xqt.quant.quantizers.awq_gptq_weight_only"
+        "xqt.compression.quant.quantizers.awq_gptq_weight_only"
     )
-    assert awq_module.quantize_with_awq_fp4.__module__ == "xqt.quant.quantizers.fp4_weight_only"
+    assert awq_module.quantize_with_awq_fp4.__module__ == "xqt.compression.quant.quantizers.fp4_weight_only"
     assert gptq_module.quantize_with_gptq_weight_only.__module__ == (
-        "xqt.quant.quantizers.awq_gptq_weight_only"
+        "xqt.compression.quant.quantizers.awq_gptq_weight_only"
     )
-    assert gptq_module.quantize_with_gptq_fp4.__module__ == "xqt.quant.quantizers.fp4_weight_only"
+    assert gptq_module.quantize_with_gptq_fp4.__module__ == "xqt.compression.quant.quantizers.fp4_weight_only"
 
 
 def test_removed_placeholder_quantizer_modules_are_not_importable() -> None:
     with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("xqt.quant.quantizers.rtn")
+        importlib.import_module("xqt.compression.quant.quantizers.rtn")
 
     with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("xqt.quant.quantizers.smoothquant")
+        importlib.import_module("xqt.compression.quant.quantizers.smoothquant")
 
 
 def test_svdquant_is_rejected_as_quant_backend() -> None:

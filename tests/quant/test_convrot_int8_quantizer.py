@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from xqt.quant import (
+from xqt.compression.quant import (
     ConvRotInt8Linear,
     ConvRotNormInt8Linear,
     build_regular_hadamard_matrix,
@@ -304,7 +304,7 @@ def test_convrot_int8_defaults_to_static_with_calibration_inputs() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_convrot_int8_storage_artifact_uses_reference_forward_on_cuda() -> None:
-    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+    from xqt.kernels.ops._impl.cute.int8mma_binding import int8mma_available
 
     if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
         pytest.skip("cuda_sm89 CUTLASS extension unavailable")
@@ -330,7 +330,7 @@ def test_convrot_int8_storage_artifact_uses_reference_forward_on_cuda() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_convrot_int8_storage_artifact_bf16_reference_forward_on_cuda() -> None:
-    from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+    from xqt.kernels.ops._impl.cute.int8mma_binding import int8mma_available
 
     if torch.cuda.get_device_capability() != (8, 9) or not int8mma_available():
         pytest.skip("cuda_sm89 CUTLASS extension unavailable")
@@ -432,7 +432,7 @@ def _native_convrot_w8a8_test_available(dtype: torch.dtype) -> bool:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         return False
     try:
-        from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+        from xqt.kernels.ops._impl.cute.convrot_w8a8_sm89 import (
             native_convrot_w8a8_available,
         )
     except Exception:
@@ -447,7 +447,7 @@ def test_convrot_dynamic_native_sm89_route_cache_and_stream(
     if not _native_convrot_w8a8_test_available(dtype):
         pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
 
-    from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+    from xqt.kernels.ops._impl.cute.convrot_w8a8_sm89 import (
         allocate_convrot_w8a8_workspace,
         convrot_w8a8_linear,
     )
@@ -645,7 +645,7 @@ def test_convrot_native_dynamic_gate_keeps_explicit_fallbacks() -> None:
     assert rotation_allowed is False
     assert "unsupported" in rotation_reason
 
-    from xqt.operator_opt.kernels.cute.convrot_w8a8_sm89 import (
+    from xqt.kernels.ops._impl.cute.convrot_w8a8_sm89 import (
         native_convrot_w8a8_shape_supported,
     )
 

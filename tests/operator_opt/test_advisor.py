@@ -1,6 +1,6 @@
 import pytest
 
-from xqt.operator_opt import build_profiling_plan, recommend_precision_strategy
+from xqt.kernels.wrappers import build_profiling_plan, recommend_precision_strategy
 
 
 class TestPrecisionAdvisor:

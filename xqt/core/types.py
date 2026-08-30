@@ -1,7 +1,7 @@
 """Shared runtime types for XQT passes."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from .artifact import ArtifactManifest
 from .schema import (
@@ -13,6 +13,11 @@ from .schema import (
     PruneConfig,
     QuantConfig,
 )
+
+if TYPE_CHECKING:
+    from xqt.contracts import ModelStructureContract
+    from xqt.contracts import InferenceContract
+    from xqt.model import ModelProfile
 
 
 @dataclass
@@ -31,6 +36,7 @@ class XQTContext:
     task_type: str = ""
     compression_axes: list[str] | None = None
     model_target: str | None = None
+    model_checkpoint: str | None = None
     model_params: Dict[str, Any] | None = None
     quant_config: QuantConfig | None = None
     prune_config: PruneConfig | None = None
@@ -39,6 +45,9 @@ class XQTContext:
     operator_config: OperatorOptimizationConfig | None = None
     output_diff_config: OutputDiffConfig | None = None
     export_targets: list[ExportTargetConfig] | None = None
+    structure_contract: Optional["ModelStructureContract"] = None
+    model_profile: Optional["ModelProfile"] = None
+    inference_contract: Optional["InferenceContract"] = None
     manifest: Optional[ArtifactManifest] = None
 
     def __post_init__(self) -> None:

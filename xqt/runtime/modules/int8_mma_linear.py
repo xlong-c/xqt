@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from xqt.contracts.int8_mma import Int8MmaLinear as Int8MmaStorageLinear
-from xqt.contracts.engine_resolve import (
+from xqt.kernels.engine_resolve import (
     normalize_engine_name,
     resolve_int8_mma_engine,
 )
@@ -27,7 +27,7 @@ _OUTPUT_DTYPES = {torch.float16, torch.bfloat16, torch.float32}
 
 def _tilelang_int8_api():
     """Lazy import TileLang INT8 kernels (not at quantizer module import time)."""
-    from xqt.operator_opt.kernels.tilelang.int8_mma import (
+    from xqt.kernels.ops.gemm import (
         int8_linear_static_activation_m1_tilelang,
         int8_linear_static_activation_tilelang,
         int8_linear_tilelang,
@@ -48,7 +48,7 @@ def _tilelang_int8_api():
 
 def _triton_int8_api():
     """Lazy import Triton INT8 GEMM kernels."""
-    from xqt.operator_opt.kernels.triton.gemm import (
+    from xqt.kernels.ops.gemm import (
         gemm_int8_triton,
         quantize_int8_rowwise_triton,
     )
@@ -453,7 +453,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
         if (major, minor) != (8, 9):
             return False, f"ptx_sm89 requires sm_89, got sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+            from xqt.kernels.ops.gemm import int8mma_available
         except Exception as exc:
             return False, f"ptx_sm89 import failed: {exc}"
         if not int8mma_available():
@@ -475,7 +475,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
         if (major, minor) != (8, 9):
             return False, f"cuda_sm89 W8A8 requires sm_89, got sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.cute.int8mma_binding import int8mma_available
+            from xqt.kernels.ops.gemm import int8mma_available
         except Exception as exc:
             return False, f"cuda_sm89 import failed: {exc}"
         if not int8mma_available():
@@ -496,7 +496,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
                 )
             return self._qweight_prepacked_b
         try:
-            from xqt.operator_opt.kernels.cute.int8mma_binding import (
+            from xqt.kernels.ops.gemm import (
                 prepack_qweight_t_for_ptx_sm89,
             )
         except Exception:
@@ -546,7 +546,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
         qactivation: torch.Tensor,
         activation_scale: torch.Tensor,
     ) -> torch.Tensor:
-        from xqt.operator_opt.kernels.cute.int8mma_binding import int8_linear_cutlass_sm89
+        from xqt.kernels.ops.gemm import int8_linear_cutlass_sm89
 
         prepacked = self._ensure_ptx_prepacked_b()
         return int8_linear_cutlass_sm89(
@@ -566,7 +566,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
         activation_scale: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
-        from xqt.operator_opt.kernels.cute.int8mma_binding import int8_linear_ptx_sm89
+        from xqt.kernels.ops.gemm import int8_linear_ptx_sm89
 
         prepacked = self._ensure_ptx_prepacked_b()
         return int8_linear_ptx_sm89(
@@ -590,7 +590,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
         activation_scale: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
-        from xqt.operator_opt.kernels.cute.int8mma_binding import (
+        from xqt.kernels.ops.gemm import (
             int8_linear_fused_static_ptx_sm89,
         )
 
@@ -930,7 +930,7 @@ class Int8MmaLinear(Int8MmaStorageLinear):
             and self.qweight_t.is_cuda
         ):
             try:
-                from xqt.operator_opt.kernels.cute.int8mma_binding import (
+                from xqt.kernels.ops.gemm import (
                     int8_gemv_m1_fused_static_ptx_sm89,
                     int8mma_available,
                 )

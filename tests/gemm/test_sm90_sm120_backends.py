@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     EpilogueSpec,
     GemmProblem,
     GemmSpec,
@@ -21,7 +21,7 @@ from xqt.gemm import (
     quantize_fp8,
     select_kernel,
 )
-from xqt.gemm.backends._sm1xx_runtime import cutlass_blockscale_shape
+from xqt.kernels.ops._impl.gemm_backends._sm1xx_runtime import cutlass_blockscale_shape
 
 
 def test_sm90_and_sm120_build_configs_are_architecture_specific() -> None:
@@ -38,8 +38,8 @@ def test_sm90_and_sm120_build_configs_are_architecture_specific() -> None:
 
 def test_target_manifests_declare_stream_aware_runtime_abi() -> None:
     root = Path(__file__).resolve().parents[3]
-    sm90_source = (root / "xqt/gemm/backends/sm90/sm90_fp8_wgmma.py").read_text()
-    sm120_source = (root / "xqt/gemm/backends/sm120/sm120.py").read_text()
+    sm90_source = (root / "xqt/kernels/ops/_impl/gemm_backends/sm90/sm90_fp8_wgmma.py").read_text()
+    sm120_source = (root / "xqt/kernels/ops/_impl/gemm_backends/sm120/sm120.py").read_text()
 
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm90_source
     assert '"runtime_stream_abi": "torch_current_stream_void_p"' in sm120_source
@@ -193,8 +193,8 @@ def test_sm120_nvfp4_metadata_candidate_is_architecture_isolated() -> None:
 
 def test_arch_sources_keep_runtime_probe_abi_explicit() -> None:
     root = Path(__file__).resolve().parents[3]
-    sm90_source = (root / "xqt/gemm/backends/sm90/sm90_fp8_wgmma.cu").read_text()
-    sm120_source = (root / "xqt/gemm/backends/sm120/sm120_gemm.cu").read_text()
+    sm90_source = (root / "xqt/kernels/jit/csrc/gemm/sm90_fp8_wgmma.cu").read_text()
+    sm120_source = (root / "xqt/kernels/jit/csrc/gemm/sm120_gemm.cu").read_text()
 
     assert "Gemm::get_workspace_size(arguments)" in sm90_source
     assert "gemm.can_implement(arguments)" in sm90_source
@@ -231,7 +231,7 @@ def test_cutlass_blockscale_shapes_are_explicitly_layout_specific() -> None:
 
 
 def test_cutlass_blockscale_storage_is_column_major_over_block_grid() -> None:
-    from xqt.gemm.backends._sm1xx_runtime import flatten_cutlass_blockscale_grid
+    from xqt.kernels.ops._impl.gemm_backends._sm1xx_runtime import flatten_cutlass_blockscale_grid
 
     grid = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 
@@ -254,7 +254,7 @@ def test_cutlass_blockscale_storage_is_column_major_over_block_grid() -> None:
 
 
 def test_cutlass_nvfp4_scale_layout_matches_sm120_sfvec16_offsets() -> None:
-    from xqt.gemm.backends._sm1xx_runtime import (
+    from xqt.kernels.ops._impl.gemm_backends._sm1xx_runtime import (
         cutlass_nvfp4_scale_shape,
         cutlass_nvfp4_scale_storage_offset,
         cutlass_nvfp4_scale_storage_size,
@@ -289,7 +289,7 @@ def test_cutlass_nvfp4_scale_layout_matches_sm120_sfvec16_offsets() -> None:
 
 
 def test_sm1xx_runtime_rejects_canonical_per_row_scale_shape() -> None:
-    from xqt.gemm.backends._sm1xx_runtime import prepare_cutlass_blockscales
+    from xqt.kernels.ops._impl.gemm_backends._sm1xx_runtime import prepare_cutlass_blockscales
     from xqt.core.errors import XQTBackendError
 
     with pytest.raises(XQTBackendError, match="canonical XQT per-row scales"):

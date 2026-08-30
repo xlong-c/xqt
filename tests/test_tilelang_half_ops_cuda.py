@@ -6,22 +6,22 @@ import pytest
 import torch
 
 from xqt.core.errors import XQTBackendError
-from xqt.operator_opt.kernels.tilelang.conv import (
+from xqt.kernels.ops._impl.tilelang.conv import (
     conv2d_reference,
     conv2d_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang.linear import (
+from xqt.kernels.ops._impl.tilelang.linear import (
     dense_linear_epilogue_reference,
     dense_linear_epilogue_tilelang,
     half_linear_reference,
     half_linear_tilelang,
     resolve_tilelang_linear_schedule,
 )
-from xqt.operator_opt.kernels.tilelang.norm import (
+from xqt.kernels.ops._impl.tilelang.norm import (
     layer_norm_reference,
     layer_norm_tilelang,
 )
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 
 
 requires_cuda = pytest.mark.skipif(

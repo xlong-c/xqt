@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from tests.xqt.svd_test_helpers import make_legacy_svd_linear
-from xqt.quant.quantizers.svd import quantize_with_svd
+from xqt.compression.quant.quantizers.svd import quantize_with_svd
 from xqt.runtime import (
     fuse_composite_modules,
     materialize_svd_for_inference,
@@ -23,7 +23,7 @@ def _require_native_w4a4() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("native sm_89 W4A4 backend unavailable")
     try:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
             native_w4a4_available,
         )
     except Exception:
@@ -263,7 +263,7 @@ def test_materialize_diffusers_nonzero_dropout_keeps_original_graph() -> None:
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_native_fused_wrapper_matches_bound_runner(dtype: torch.dtype) -> None:
     _require_native_w4a4()
-    from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+    from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
         allocate_svdq_w4a4_gelu_mlp_workspace,
         bind_svdq_w4a4_gelu_mlp,
     )

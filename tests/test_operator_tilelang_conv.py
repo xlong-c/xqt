@@ -10,9 +10,9 @@ import torch
 
 from xqt.core.schema import BenchmarkConfig, OperatorOptimizationConfig
 from xqt.core.types import XQTContext
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from xqt.pipeline.passes import LoadModelPass
 
 
@@ -74,7 +74,7 @@ def _tilelang_conv_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/tilelang_conv_{device}",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_conv_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_conv_block",
             "params": {
                 "in_channels": in_channels,
                 "hidden_channels": hidden_channels,

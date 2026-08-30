@@ -67,10 +67,10 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 
 | 位置 | 现状 |
 | --- | --- |
-| `xqt/conversion.py` | docstring: `Module conversion facade for operator-oriented XQT engines`. 公开 `convert(..., engine=..., target=..., policy=..., fallback=...)`. `EngineKind` 仅 `torch / triton / tilelang / cutile / cute_dsl`. |
-| `xqt/conversion_impl/converter.py` | convert 时建 `OperatorContract`, 再按 module kind 做 semantic + engine materialize. |
-| `xqt/nn/*` | facade 构造也带 `engine` runtime intent. |
-| `xqt/operator_opt/*` | operator stage 另有 engine / capability / materialize. |
+| `xqt/kernels/nn/convert.py` | docstring: `Module conversion facade for operator-oriented XQT engines`. 公开 `convert(..., engine=..., target=..., policy=..., fallback=...)`. `EngineKind` 仅 `torch / triton / tilelang / cutile / cute_dsl`. |
+| `xqt/kernels/nn/conversion/converter.py` | convert 时建 `OperatorContract`, 再按 module kind 做 semantic + engine materialize. |
+| `xqt/kernels/nn/*` | facade 构造也带 `engine` runtime intent. |
+| `xqt/kernels/wrappers/*` | operator stage 另有 engine / capability / materialize. |
 | `xqt/runtime/*` | `HybridInferenceEngine` 走 execution policy, 不经 convert 选 engine. |
 | `xqt/core/schema.py` | `OPERATOR_OPT_ENGINES` 与 convert 的 `EngineKind` 集合不完全同构. |
 
@@ -93,7 +93,7 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
    - B. 允许 bind engine, 但明确是 eager materialize, 与 operator stage 对齐
    - C. 拆成 `to_facade` / `materialize(engine=...)` 或改名
 2. engine 的唯一权威选择点?
-   - operator stage / `operator_opt.execute`
+   - operator stage / `xqt.kernels.wrappers.execute`
    - runtime policy
    - nn facade
    - convert
@@ -108,7 +108,7 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 
 ### 全量落地 (2026-08-03)
 
-- 词表合一: 实现侧 `engine_registry_names()` (`xqt/contracts/engine_resolve.py`), 配置面 `OPERATOR_OPT_ENGINES` (`xqt/core/schema.py`), convert materialize 子集 `CONVERT_ENGINE_NAMES` (`torch` / `triton` / `tilelang` / `cutile` / `cute_dsl`); `xqt.convert` 对非子集 engine 显式报错.
+- 词表合一: 实现侧 `engine_registry_names()` (`xqt/kernels/engine_resolve.py`), 配置面 `OPERATOR_OPT_ENGINES` (`xqt/core/schema.py`), convert materialize 子集 `CONVERT_ENGINE_NAMES` (`torch` / `triton` / `tilelang` / `cutile` / `cute_dsl`); `xqt.convert` 对非子集 engine 显式报错.
 - 回归测试 `tests/xqt/quant/test_quant_axes.py::test_engine_vocabulary_fact_sources_are_aligned` 断言三份词表不漂移; `test_convert_engine_preference_uses_canonical_subset` 锁定 convert 子集.
 - 文档: `xqt/FRAMEWORK.md` Backend / Engine 术语注明词表事实源.
 
@@ -150,12 +150,12 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 
 | 位置 | 现状 |
 | --- | --- |
-| `xqt/quant/capability.py` `_BASE_CAPABILITIES` | quant **backend** 名含 `torchao`, `onnxruntime_qdq`, `pytorch`, **`tilelang`**, **`svdquant`**, `bitsandbytes`; 每项挂 `methods` 元组, 混入 `awq`/`gptq` 与 `*_mma` strategy 名. |
-| `xqt/quant/capability.py` `_STRATEGY_NATURE` | strategy → TRUE/PSEUDO (存储 vs 原生 MMA 意图); 这是更接近 "计算契约" 的轴, 但未成为公开主模型. |
+| `xqt/compression/quant/capability.py` `_BASE_CAPABILITIES` | quant **backend** 名含 `torchao`, `onnxruntime_qdq`, `pytorch`, **`tilelang`**, **`svdquant`**, `bitsandbytes`; 每项挂 `methods` 元组, 混入 `awq`/`gptq` 与 `*_mma` strategy 名. |
+| `xqt/compression/quant/capability.py` `_STRATEGY_NATURE` | strategy → TRUE/PSEUDO (存储 vs 原生 MMA 意图); 这是更接近 "计算契约" 的轴, 但未成为公开主模型. |
 | `xqt/core/schema.py` `CANONICAL_QUANT_STRATEGIES` | 同时包含 `weight_only_*`, `static_qdq_int8`, `svd_*`, `*_mma`, `convrot_w4a4` - **算法 / 存储 / 计算** 挤在同一 strategy 枚举. |
-| `xqt/quant/quantizers/` | 算法实现按文件拆: `awq.py`, `gptq.py`, `svd.py`, `int8_mma.py`, `w4_storage_int8_mma.py`, `fp4_weight_only.py` ... |
-| `xqt/operator_opt/capability.py` | **真正的 operator engine** 矩阵 (triton/tilelang/cutlass/...), **不** 列 awq/gptq. |
-| `xqt/operator_opt/backends/tilelang.py` | kernel patterns: attention/linear/dequant_gemm/... **不是** awq/gptq. |
+| `xqt/compression/quant/quantizers/` | 算法实现按文件拆: `awq.py`, `gptq.py`, `svd.py`, `int8_mma.py`, `w4_storage_int8_mma.py`, `fp4_weight_only.py` ... |
+| `xqt/kernels/wrappers/capability.py` | **真正的 operator engine** 矩阵 (triton/tilelang/cutlass/...), **不** 列 awq/gptq. |
+| `xqt/kernels/ops/_impl/engines/tilelang.py` | kernel patterns: attention/linear/dequant_gemm/... **不是** awq/gptq. |
 
 ### 三轴应拆开 (目标模型草案, 未拍板)
 
@@ -201,9 +201,9 @@ AWQ/GPTQ 只出现在轴 1; SVD 分解是轴 1 (+ 可选 low-rank 存储形态);
 
 ### 全量三轴公开 API 落地 (2026-08-03)
 
-- 三轴公开事实源 `xqt/quant/axes.py`: `quant_method_specs` (轴 1, 含注册表 method 并集), `quant_storage_specs` (轴 2, 从 strategy 模板派生, strategy 字符串显式为 scheme alias), `quant_compute_specs` (轴 3, compute contract + nature), `quant_axis_report` 汇总.
+- 三轴公开事实源 `xqt/compression/quant/axes.py`: `quant_method_specs` (轴 1, 含注册表 method 并集), `quant_storage_specs` (轴 2, 从 strategy 模板派生, strategy 字符串显式为 scheme alias), `quant_compute_specs` (轴 3, compute contract + nature), `quant_axis_report` 汇总.
 - `QuantBackendCapability` 拆分: `methods` 只列轴 1 算法; 新增 `storage_strategies` / `compute_contracts`; `to_dict` 与 `OptimizationCapability` metadata 携带三轴.
-- strategy 单一事实源: `xqt/quant/strategy.py::canonical_quant_strategies` 从 `_STRATEGY_SCHEME_TEMPLATES` 派生; 回归测试断言与 `core.schema.CANONICAL_QUANT_STRATEGIES` 一致.
+- strategy 单一事实源: `xqt/compression/quant/strategy.py::canonical_quant_strategies` 从 `_STRATEGY_SCHEME_TEMPLATES` 派生; 回归测试断言与 `core.schema.CANONICAL_QUANT_STRATEGIES` 一致.
 - recipe 字段名 `backend`+`strategy` 保留为兼容配置面; 执行层仍只消费 `QuantScheme` 与 compute contract.
 
 ### 相关
@@ -251,7 +251,7 @@ AWQ/GPTQ 只出现在轴 1; SVD 分解是轴 1 (+ 可选 low-rank 存储形态);
 | 点 | 证据 |
 | --- | --- |
 | runtime 包声明不跑 quant | `xqt/runtime/__init__.py`, `engine.py` docstring: 不跑 quantizer/calibration/sensitivity |
-| runtime → quant 无 import | 目录 import 扫描: `xqt/runtime/*` 不 import `xqt.quant` |
+| runtime → quant 无 import | 目录 import 扫描: `xqt/runtime/*` 不 import `xqt.compression.quant` |
 | compute 契约共享且较纯 | `xqt/contracts/compute.py`: `SUPPORTED_COMPUTE_PRECISIONS`, `SupportsComputePrecision`, 无 quantizer 逻辑 |
 | Hybrid 默认消费已量化 module | `HybridInferenceEngine(model, policy=...)` / `from_quantized_model` |
 | 文件推理与 quant recipe 分离 | `package.py` 只认模型包 manifest, 不解析 quant YAML |
@@ -260,9 +260,9 @@ AWQ/GPTQ 只出现在轴 1; SVD 分解是轴 1 (+ 可选 low-rank 存储形态);
 
 #### G1. Quantizer 直接依赖 operator kernel (量化阶段绑死 engine 实现)
 
-- `xqt/quant/quantizers/int8_mma.py` 顶层 import:
-  - `xqt.operator_opt.kernels.tilelang.int8_mma`
-  - 运行时再 import `xqt.operator_opt.kernels.cute.int8mma_binding`
+- `xqt/compression/quant/quantizers/int8_mma.py` 顶层 import:
+  - `xqt.kernels.ops._impl.tilelang.int8_mma`
+  - 运行时再 import `xqt.kernels.ops._impl.cute.int8mma_binding`
 - 同文件 `_VALID_ENGINES = {auto, tilelang, torch_int_mm, ptx_sm89, ...}`
 - **问题**: 量化结果 / 前向路径在 quantizer 内就选 engine, 推理侧无法 "只收模型 + 配置,再按 capability 选 engine".
 
@@ -286,7 +286,7 @@ AWQ/GPTQ 只出现在轴 1; SVD 分解是轴 1 (+ 可选 low-rank 存储形态);
 #### G5. convert / nn 在量化与推理之间又插一层 engine 绑定
 
 - `xqt.convert(..., engine=...)` (DEBT-001)
-- conversion_impl 直接调 `operator_opt` materialize
+- `xqt.kernels.nn.conversion` 直接调 `kernels.wrappers` materialize
 - **问题**: 第三条入口再次把 engine 绑进 "变换", 模糊 quant 输出与 infer 输入边界.
 
 #### G6. Export lowering 依赖具体 quant 模块类型
@@ -342,9 +342,9 @@ InferRuntime:
 | --- | --- |
 | Infer 交接面方案 | `docs/md/architecture/xqt-infer-handoff.md` |
 | `ComputeConfig` / contracts | `xqt/contracts/compute.py`, `QuantizedModel.infer_handoff()` |
-| capability resolve | `xqt/contracts/engine_resolve.py` |
+| capability resolve | `xqt/kernels/engine_resolve.py` |
 | ExecutionPolicy / RuntimePlan capabilities | `xqt/contracts/runtime.py` |
-| int8_mma 解耦 | `xqt/quant/quantizers/int8_mma.py` lazy kernel + default `auto` |
+| int8_mma 解耦 | `xqt/compression/quant/quantizers/int8_mma.py` lazy kernel + default `auto` |
 | 模型包 compute.json | `xqt/runtime/package.py` |
 | export duck type | `xqt/export/lowering.py` |
 
@@ -354,7 +354,7 @@ InferRuntime:
 - [../explanation/xqt-inference.md](../explanation/xqt-inference.md)
 - [../explanation/xqt-engines.md](../explanation/xqt-engines.md)
 - `xqt/runtime/engine.py`, `xqt/contracts/quantized.py`, `xqt/contracts/compute.py`
-- `xqt/quant/quantizers/int8_mma.py`
+- `xqt/compression/quant/quantizers/int8_mma.py`
 
 ---
 
@@ -376,8 +376,8 @@ InferRuntime:
 
 ### 源码锚点
 
-- `xqt/operator_opt/backends/gemm_selector.py` `select_gemm_engine`
-- `tests/xqt/operator_opt/test_gemm_selector.py`
+- `xqt/kernels/ops/_impl/gemm_selector.py` `select_gemm_engine`
+- `tests/xqt/kernels/wrappers/test_gemm_selector.py`
 
 ### 本阶段明确不做
 
@@ -386,7 +386,7 @@ InferRuntime:
 
 ### 相关
 
-- C10 engine 矩阵; operator_opt capability
+- C10 engine 矩阵; `xqt.kernels.wrappers` capability
 
 ---
 
@@ -407,7 +407,7 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | --- | --- |
 | dual-branch `ModuleComputeSpec.branches` + `combine` | `xqt/contracts/compute.py` |
 | contract `composite_add` | 同上 `SUPPORTED_COMPUTE_CONTRACTS` |
-| quant 只写 `CompositeAddLinear` 量化产物 + `compute_config` | `xqt/quant/quantizers/svd.py`, `xqt/contracts/composite.py` |
+| quant 只写 `CompositeAddLinear` 量化产物 + `compute_config` | `xqt/compression/quant/quantizers/svd.py`, `xqt/contracts/composite.py` |
 | runtime 按 `compute_config` 绑定 residual INT8 | `xqt/runtime/modules/composite_add.py`, `xqt/runtime/composite_materialize.py` |
 | Infer materialize 入口 | `xqt/runtime/composite_materialize.py`, `HybridInferenceEngine.from_quantized_model` |
 | quantizer 不再 eager materialize runtime | compute view 只由 Infer/runtime 显式绑定 |
@@ -420,7 +420,7 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | `W4StorageInt8MmaLinear` | `xqt/runtime/modules/w4_storage_int8_mma_linear.py` |
 | 旧 `SVDQuantLinear` / `SVDQuantInt8MmaLinear` 执行壳 | `xqt/runtime/modules/svd_w4a4_legacy.py`, `xqt/runtime/modules/svd_w8a8_legacy.py` |
 | pure packing helpers (唯一实体, runtime 兼容导出已删) | `xqt/contracts/packing_int4.py` |
-| quantizers 仅导出算法入口和量化结果类型, runtime 类从 `xqt.runtime` 访问 | `xqt/quant/quantizers/{int8_mma,w4_storage_int8_mma,svd}.py` |
+| quantizers 仅导出算法入口和量化结果类型, runtime 类从 `xqt.runtime` 访问 | `xqt/compression/quant/quantizers/{int8_mma,w4_storage_int8_mma,svd}.py` |
 | `runtime/*` 静态无 `quant.quantizers` import | 扫描通过 |
 
 ### 已落地 (方案 C 第三刀, 2026-08-16)
@@ -428,13 +428,13 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | 项 | 位置 |
 | --- | --- |
 | 通用 additive composite reference artifact | `xqt/contracts/composite.py` |
-| SVD reference quantization 输出 `CompositeAddLinear` | `xqt/quant/quantizers/svd.py` |
+| SVD reference quantization 输出 `CompositeAddLinear` | `xqt/compression/quant/quantizers/svd.py` |
 | 低秩因子 + packed residual 的 reference 重建测试 | `tests/xqt/quant/test_quant_svd_method.py` |
 | GELU materializer 接受通用 composite module | `xqt/runtime/composite_inference.py`, `xqt/runtime/modules/svd_gelu_mlp.py` |
 | 通用 W4A4 main/small-N executor + `compute_config` materialize 入口 | `xqt/runtime/modules/composite_add_w4a4.py`, `xqt/runtime/modules/composite_add.py` |
 | RMSNorm 作为独立输入变换 wrapper | `xqt/runtime/modules/composite_norm.py`, `tests/xqt/runtime/test_composite_norm.py` |
 | 旧 `SVDQuantLinear` 复用 generic artifact 存储与基础校验 | `xqt/runtime/modules/svd_w4a4_legacy.py` |
-| INT8-MMA quantizer 先输出 artifact, 再按 `compute_config` 物化 | `xqt/quant/quantizers/svd.py`, `xqt/runtime/modules/composite_add.py` |
+| INT8-MMA quantizer 先输出 artifact, 再按 `compute_config` 物化 | `xqt/compression/quant/quantizers/svd.py`, `xqt/runtime/modules/composite_add.py` |
 | FP8 split/collapse 也从 generic artifact 显式物化 | `xqt/runtime/modules/composite_add_fp8.py`, `xqt/runtime/modules/composite_add.py` |
 | GELU/FLUX native materializer 消费通用 W4A4 executor | `xqt/runtime/modules/svd_gelu_mlp.py`, `xqt/runtime/modules/svd_flux_attention.py` |
 
@@ -444,7 +444,7 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | --- | --- |
 | canonical additive artifact 下沉到 contracts | `xqt/contracts/composite.py` |
 | pure INT4 pack/unpack 协议下沉到 contracts | `xqt/contracts/packing_int4.py` |
-| SVD quantizer 去除 runtime import 与 eager compute materialization | `xqt/quant/quantizers/svd.py` |
+| SVD quantizer 去除 runtime import 与 eager compute materialization | `xqt/compression/quant/quantizers/svd.py` |
 | runtime materialization 改为显式 helper | `xqt/runtime/modules/composite_add.py`, `xqt/runtime/composite_materialize.py` |
 
 本阶段已迁移 reference, INT8-MMA 和 FP8 的 generic artifact/materialization
@@ -477,7 +477,7 @@ W4A4 executor, 但 QKV/RoPE 和 CUDA Graph 仍是特例, 默认 SVD reference
 1. ~~公开主键 method=svd + storage/compute; strategy 仅 WxAy~~ 执行层已用 `method=svd` + `composite_add` compute_config; `strategy` 为 WxAy 别名 (非 `svd_*` 主键). hunyuan helper 仍有 `scheme: svd_int4_int8_mma` 字符串, 可后续收敛.
 2. ~~additive vs k-group 词表~~ 已写入 `xqt/FRAMEWORK.md` composite 词表与 `xqt-infer-handoff.md` §3.4. fused FUSE_DOWN/UP 内核实现仍后续.
 3. hunyuan helper / recipes 文档: usage `xqt-hunyuan-ocr.md` 已 composite 口径; helper 函数名 `*_svd_int4_*` 可保留为样板名.
-4. ~~切断 `operator_opt` → `xqt.quant.bridges`~~ NVFP4 存储壳 + reference 已下沉为 `xqt/contracts/nvfp4.py`; `xqt.quant.bridges` 整目录已删除. `tilelang_validation` 内对 FP4 quantizer 的 import 保持 lazy (仅 validation fixture).
+4. ~~切断 wrappers / kernel impl → `xqt.compression.quant.bridges`~~ NVFP4 unpack 在 `xqt/kernels/ops/quantization/nvfp4.py`, bridge 在 `xqt/kernels/wrappers/nvfp4.py`; `xqt.compression.quant.bridges` 整目录已删除. `tilelang_validation` 内对 FP4 quantizer 的 import 保持 lazy (仅 validation fixture).
 
 ### 相关
 

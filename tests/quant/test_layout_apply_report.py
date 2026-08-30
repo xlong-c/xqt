@@ -6,15 +6,15 @@ import torch
 from torch import nn
 
 from xqt.contracts import build_runtime_manifest
-from xqt.quant.layout_apply_report import (
+from xqt.compression.quant.layout_apply_report import (
     layout_report_for_awq_gptq_model,
     layout_report_for_fp4_dynamic,
     layout_report_for_int8_mma,
     resolve_selected_kernel_name,
 )
-from xqt.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
-from xqt.quant.quantizers.fp4_dynamic import quantize_with_dynamic_fp4
-from xqt.quant.quantizers.int8_mma import quantize_with_int8_mma
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
+from xqt.compression.quant.quantizers.fp4_dynamic import quantize_with_dynamic_fp4
+from xqt.compression.quant.quantizers.int8_mma import quantize_with_int8_mma
 
 
 def test_resolve_selected_kernel_maps_primary_tokens() -> None:
@@ -101,8 +101,8 @@ def test_layout_report_for_int8_mma_helper() -> None:
 def test_refresh_layout_kernel_after_forward_uses_realized_engine() -> None:
     """V2: after int8 forward, selected_kernel reflects execution_metadata engine."""
 
-    from xqt.quant.layout_apply_report import refresh_layout_kernel_after_forward
-    from xqt.quant.quantizers.int8_mma import Int8MmaLinear, quantize_with_int8_mma
+    from xqt.compression.quant.layout_apply_report import refresh_layout_kernel_after_forward
+    from xqt.compression.quant.quantizers.int8_mma import Int8MmaLinear, quantize_with_int8_mma
 
     class _Tiny(nn.Module):
         def __init__(self) -> None:

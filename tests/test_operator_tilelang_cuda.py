@@ -3,17 +3,17 @@ from __future__ import annotations
 import pytest
 import torch
 
-from xqt import nn as xqt_nn
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.kernels.tilelang.attention import (
+import xqt.kernels.nn as xqt_nn
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.ops._impl.tilelang.attention import (
     fused_attention_forward_reference,
 )
-from xqt.operator_opt.tilelang_wrappers import (
+from xqt.kernels.wrappers.tilelang_wrappers import (
     _TileLangAttentionWrapper,
     _TileLangXqtAttentionWrapper,
 )
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
@@ -40,7 +40,7 @@ def _tilelang_cuda_operator_config(
             "artifact_dir": "artifacts/xqt/tests/tilelang_operator_cuda",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_attention_classifier",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_attention_classifier",
             "params": {
                 "hidden_dim": 64,
                 "num_heads": 4,

@@ -6,14 +6,14 @@ import pytest
 import torch
 from torch import nn
 
-import xqt.operator_opt.kernels.triton.gemm as triton_gemm_module
-import xqt.operator_opt.kernels.triton.mxfp_gemm as triton_mxfp_module
+import xqt.kernels.ops._impl.triton.gemm as triton_gemm_module
+import xqt.kernels.ops._impl.triton.mxfp_gemm as triton_mxfp_module
 from xqt import XQTOptimizationSession
-from xqt.operator_opt import (
+from xqt.kernels.wrappers import (
     OperatorOptimizationTargetPlan,
     materialize_operator_candidate_model,
 )
-from xqt.operator_opt.kernels.triton.gemm import (
+from xqt.kernels.ops._impl.triton.gemm import (
     dequantize_int4_weight_triton,
     dequantize_nvfp4_weight_triton,
     gemm_int4_dequant_reference,
@@ -23,11 +23,11 @@ from xqt.operator_opt.kernels.triton.gemm import (
     gemm_nvfp4_packed_dequant_reference,
     gemm_nvfp4_packed_dequant_triton,
 )
-from xqt.operator_opt.kernels.triton.fp4_quant import (
+from xqt.kernels.ops._impl.triton.fp4_quant import (
     scaled_mxfp4_quant_reference,
     scaled_nvfp4_quant_reference,
 )
-from xqt.operator_opt.kernels.triton.mxfp_gemm import (
+from xqt.kernels.ops._impl.triton.mxfp_gemm import (
     dequantize_mxfp_weight_triton,
     gemm_mxfp_packed_activation_reference,
     gemm_mxfp_packed_activation_triton,
@@ -35,7 +35,7 @@ from xqt.operator_opt.kernels.triton.mxfp_gemm import (
     gemm_mxfp_triton,
     unpack_mxfp,
 )
-from xqt.quant import FP4WeightOnlyLinear, MXFPWeightOnlyLinear, bridge_module_to_nvfp4_linear
+from xqt.compression.quant import FP4WeightOnlyLinear, MXFPWeightOnlyLinear, bridge_module_to_nvfp4_linear
 
 
 requires_cuda = pytest.mark.skipif(

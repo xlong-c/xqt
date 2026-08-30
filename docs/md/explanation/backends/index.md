@@ -45,7 +45,7 @@ XQT 的导出能力矩阵在 `xqt/export/capability.py` 中声明, 当前包含:
 | `ncnn` | P2 | `ncnn` | adapter |
 | `mnn` | P2 | `mnn` | adapter |
 
-XQT 的 operator engine adapter 在 `xqt/operator_opt/backends/` 中声明. 目录名仍叫 `backends` 是历史工程命名; 文档和新 API 使用 `engine` 描述这些 DSL / custom kernel 选择.
+XQT 的 operator engine adapter 在 `xqt/kernels/ops/_impl/engines/` 中声明. 目录名仍叫 `backends` 是历史工程命名; 文档和新 API 使用 `engine` 描述这些 DSL / custom kernel 选择.
 
 | engine | 主要 pattern | 当前定位 |
 | --- | --- | --- |

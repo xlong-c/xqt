@@ -12,7 +12,7 @@ from xqt.auto import (
     suggest_precision_actions,
     suggest_quant_backends,
 )
-from xqt.quant.sensitivity import LayerAnalysisRecord
+from xqt.compression.quant.sensitivity import LayerAnalysisRecord
 from xqt.workflows import StageAcceptanceConfig
 
 

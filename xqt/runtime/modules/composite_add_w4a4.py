@@ -105,7 +105,7 @@ class CompositeAddW4A4Linear(CompositeAddModule):
         self._last_fallback_reason = "native W4A4 fusion is disabled"
 
     def _native_backend_available(self) -> bool:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             native_w4a4_available,
             native_w4a4_smalln_available,
         )
@@ -146,7 +146,7 @@ class CompositeAddW4A4Linear(CompositeAddModule):
         ):
             return False, "bias must share the input device"
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_shape_supported,
             )
 
@@ -190,7 +190,7 @@ class CompositeAddW4A4Linear(CompositeAddModule):
         signature = self._state_signature(inputs)
         if self._native_packed is not None and self._native_packed[0] == signature:
             return self._native_packed[1]
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             pack_svdq_w4a4_linear,
             pack_svdq_w4a4_linear_smalln,
         )
@@ -231,7 +231,7 @@ class CompositeAddW4A4Linear(CompositeAddModule):
         cached = self._native_forward.get(key)
         if cached is not None:
             return cached
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             allocate_w4a4_workspace,
             bind_svdq_w4a4_linear,
             bind_svdq_w4a4_linear_smalln,

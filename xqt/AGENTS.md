@@ -16,18 +16,15 @@ XQT 负责模型压缩,图变换,导出适配,误差分析和 benchmark. XQT 不
 
 ### 包模块
 
-- `core/`: structured config, workflow/stage schema, artifact manifest 和 checksum.
-- `contracts/`: typed payload, quantized storage protocol, reference semantics 和 runtime handoff contract. `contracts` 可以提供 artifact 的 reference forward, 但不依赖 `quant/`, `runtime/` 或 `export/`; backend execution view 归 `runtime/`, packing 实体只保留一份.
-- `model/`: smoke-only model helper 和模型 forward hook 输出采集工具.
-- `pipeline/`: sequential pass manager,preflight 和 YAML runner.
+- `core/`: structured config, workflow/stage schema, artifact manifest 和 checksum. `core/base/` 是供 `contracts` 依赖的 leaf 层; `core` 高层可以依赖 `contracts`, `contracts` 不反向依赖 `core` 高层.
+- `contracts/`: typed payload, quantized storage protocol, reference semantics 和 runtime handoff contract. `contracts` 可以提供 artifact 的 reference forward, 但不依赖 `compression/quant/`, `runtime/`, `export/` 或 `kernels/`; backend execution view 归 `runtime/`, packing 实体只保留一份. engine resolve 在 `kernels/engine_resolve.py`; NVFP4 unpack 在 `kernels/ops/quantization/nvfp4.py`, bridge 在 `kernels/wrappers/nvfp4.py`; `PrecisionPolicy` / `ModuleContract` 在 `kernels/precision.py`.
+- `model/`: 具体模型适配实现与声明式 profile. 适配器可以负责模型架构组装,checkpoint 映射,特殊 forward 和输入输出包装; 通用 layer,operator,kernel,quant,prune 实现仍归对应模块. profile 只选择 adapter 并记录兼容性元数据.
+- `kernels/`: 计算栈唯一落点. `ops/` 是 tensor kernel + GEMM 合约, `wrappers/` 是 materialize / operator / bench, `nn/` 是 facade / convert / fixtures. `from xqt import nn` 与 `xqt.convert` 仍是公开别名, 实现在 `kernels/nn/`. `gemm/`, `conversion_impl/`, `operator_opt/`, `benchmark/` 与顶层 `nn/` 已删除; GEMM 只在 `kernels/ops/gemm/` 与 `kernels/ops/_impl/gemm_backends/`, convert 实现只在 `kernels/nn/conversion/`, operator 实现只在 `kernels/wrappers/` 与 `kernels/ops/_impl/`, bench 只在 `kernels/wrappers/bench/`, smoke fixture 只在 `kernels/nn/fixtures/`.
+- `pipeline/`: workflow 使用的内部执行层,负责 context 构建,preflight,stage pass 和 export handler;用户编排入口仍是 `workflows/`.
 - `workflows/`: stage-based model optimization workflow,支持 `benchmark`,`prune`,`quant`,`operator`,`export`,`deploy`,`analyze`.
 - `analysis/`: tensor output diff,layer analysis 和 report helper.
-- `benchmark/`: latency 和 memory benchmark helper.
-- `quant/`: 量化子系统. 根目录保留 policy/strategy/capability/plan/types 等 schema 和事实源; `execution/` 负责 plan dispatch 与 report 组装; `quantizers/` 放模型侧量化算法实现,如 FP4 weight-only,MXFP weight-only,ConvRot W4A4,SVD 以及后续 AWQ/GPTQ; quantizer 只产出 contracts storage shell 和 report, 不 import runtime execution view; `backends/` 放 torchao/onnxruntime_qdq 等外部 runtime 或导出适配; `calibration/` 放 activation calibration 和 calibration summary.
+- `compression/`: 模型侧压缩唯一落点. `quant/` 是量化子系统 (policy/strategy/capability/plan, execution, quantizers, backends, calibration); `prune/` 是 unstructured / structured / N:M / block sparse 剪枝. quantizer 只产出 contracts storage shell 和 report, 不 import runtime execution view.
 - `runtime/`: 混合推理引擎. 只消费已量化 artifact 与 execution policy, 做模块级 / 通道级混合精度调度 (`HybridInferenceEngine`, `apply_execution_policy`, `ChannelHybridSpec`); 不跑 quantizer / calibration / sensitivity.
-- `nn/`: 转换向 facade (`Linear` / `Attention` / `FeedForward` 等), 承载 engine 与 precision intent; 与 quant artifact 解耦.
-- `prune/`: unstructured,structured,N:M 和 block sparse pruning helper.
-- `operator_opt/`: `torch.compile`-first operator optimization pass,backend capability matrix and runtime fallback reporting.
 - `export/`: torch.export,TorchScript,ONNX,TensorRT,OpenVINO,ExecuTorch,ncnn,MNN 等导出 adapter.
 - `xdl_adapter.py`: 从 XDL TrainSetup-like 对象或 checkpoint 提取模型上下文,不接管训练,只接受 `OptimizationConfig` 或 workflow 输入,不接旧 recipe schema.
 

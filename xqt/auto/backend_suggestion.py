@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from xqt.quant.capability import (
+from xqt.compression.quant.capability import (
     QuantBackendCapability,
     describe_quant_backend_capability,
     supported_quant_backends,

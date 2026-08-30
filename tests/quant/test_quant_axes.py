@@ -16,18 +16,18 @@ from xqt.core.schema import (
     CONVERT_ENGINE_NAMES,
     OPERATOR_OPT_ENGINES,
 )
-from xqt.quant.axes import (
+from xqt.compression.quant.axes import (
     quant_axis_report,
     quant_compute_specs,
     quant_method_specs,
     quant_storage_specs,
 )
-from xqt.quant.capability import describe_quant_backend_capability
-from xqt.quant.strategy import (
+from xqt.compression.quant.capability import describe_quant_backend_capability
+from xqt.compression.quant.strategy import (
     canonical_quant_strategies,
     resolve_scheme,
 )
-from xqt.contracts.engine_resolve import engine_registry_names, operator_engine_names
+from xqt.kernels.engine_resolve import engine_registry_names, operator_engine_names
 from xqt.contracts.quant_strategy import (
     QUANT_STRATEGY_DEFINITIONS,
     QuantizationNature,

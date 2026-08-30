@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+from xqt.kernels.ops.quantization import (
     pack_svdq_w4a4_rotary_emb,
 )
 from xqt.contracts.composite import CompositeAddLinear, CompositeAddModule

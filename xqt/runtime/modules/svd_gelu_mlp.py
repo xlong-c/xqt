@@ -145,7 +145,7 @@ class SVDQuantGeluMLP(nn.Module):
         if not torch.cuda.is_available():
             return False
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_available,
             )
 
@@ -245,7 +245,7 @@ class SVDQuantGeluMLP(nn.Module):
         if (major, minor) != (8, 9):
             return False, f"native fused GELU MLP currently targets sm_89, got sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_available,
                 native_w4a4_shape_supported,
             )
@@ -267,7 +267,7 @@ class SVDQuantGeluMLP(nn.Module):
         return True, "native Nunchaku-semantics fused GELU MLP is available"
 
     def _native_forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             allocate_svdq_w4a4_gelu_mlp_workspace,
             bind_svdq_w4a4_gelu_mlp,
         )

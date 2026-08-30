@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from xqt.operator_opt.backends.tilelang import get_tilelang_kernel_spec
-from xqt.operator_opt.kernels.tilelang.int8_mma import (
+from xqt.kernels.ops._impl.engines.tilelang import get_tilelang_kernel_spec
+from xqt.kernels.ops._impl.tilelang.int8_mma import (
     build_tilelang_int8_mma_kernel,
     int8_linear_static_activation_tilelang,
     int8_linear_tilelang,

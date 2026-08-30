@@ -15,13 +15,13 @@ from xqt.core.artifact import ArtifactManifest, ArtifactRecord, MetricRecord
 from xqt.core.reporting import OptimizationCapability, reporting_schema_payload
 from xqt.export.capability import deployment_capability_matrix
 from xqt.export.tensorrt import validate_tensorrt_plugin_libraries
-from xqt.operator_opt.backends.tilelang_validation import (
+from xqt.kernels.ops._impl.tilelang.validation import (
     TileLangFP4ValidationResult,
     validate_tilelang_packed_fp4_fused_gemm,
 )
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.prune.capability import describe_prune_runtime_capability
-from xqt.quant.capability import describe_quant_backend_capability
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.compression.prune.capability import describe_prune_runtime_capability
+from xqt.compression.quant.capability import describe_quant_backend_capability
 
 
 @dataclass(frozen=True)
@@ -714,8 +714,8 @@ def _fp8_mma_readiness() -> XQTReadinessScenario:
 def _kv_cache_quant_readiness() -> XQTReadinessScenario:
     """Model-side KV scale path, independent of weight-quant stages (T6 / GUIDE)."""
 
-    from xqt.quant.registry import RouteQuery, resolve_quant_route
-    import xqt.quant.quantizers  # noqa: F401  # register routes
+    from xqt.compression.quant.registry import RouteQuery, resolve_quant_route
+    import xqt.compression.quant.quantizers  # noqa: F401  # register routes
 
     route = resolve_quant_route(
         RouteQuery(

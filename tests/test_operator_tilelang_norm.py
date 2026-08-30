@@ -11,10 +11,10 @@ from torch import nn
 
 from xqt.core.schema import BenchmarkConfig, OperatorOptimizationConfig
 from xqt.core.types import XQTContext
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.tilelang_wrappers import _TileLangNormWrapper
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.wrappers.tilelang_wrappers import _TileLangNormWrapper
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from xqt.pipeline.passes import LoadModelPass
 
 
@@ -73,7 +73,7 @@ def _tilelang_norm_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/tilelang_norm_{device}",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_norm_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_norm_block",
             "params": {
                 "hidden_dim": 64,
             },

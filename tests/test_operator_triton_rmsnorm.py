@@ -6,16 +6,16 @@ import pytest
 import torch
 from torch import nn
 
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.materialize import materialize_operator_candidate_model
-from xqt.operator_opt.plan import build_operator_optimization_plan
-from xqt.operator_opt.triton_wrappers import _TritonRMSNormWrapper
-from xqt.operator_opt.kernels.triton.pointwise import (
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.materialize import materialize_operator_candidate_model
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.triton_wrappers import _TritonRMSNormWrapper
+from xqt.kernels.ops._impl.triton.pointwise import (
     fused_channel_first_l2norm_reference,
     fused_rmsnorm_reference,
     fused_rmsnorm_triton,
 )
-from xqt.operator_opt.types import OperatorOptimizationTargetPlan
+from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 

@@ -11,12 +11,12 @@ from torch import nn
 
 from xqt.core.schema import BenchmarkConfig, OperatorOptimizationConfig
 from xqt.core.types import XQTContext
-from xqt.operator_opt import OperatorOptimizationTargetPlan
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.tilelang_wrappers import build_tilelang_candidate_model
-from xqt.operator_opt.plan import build_operator_optimization_plan
-from xqt.operator_opt.wrappers.linear import _TileLangLinearWrapper
+from xqt.kernels.wrappers import OperatorOptimizationTargetPlan
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.wrappers.tilelang_wrappers import build_tilelang_candidate_model
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.linear import _TileLangLinearWrapper
 from xqt.pipeline.passes import LoadModelPass
 
 
@@ -76,7 +76,7 @@ def _tilelang_linear_operator_config(
             "artifact_dir": f"artifacts/xqt/tests/tilelang_linear_{device}",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_linear_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_linear_block",
             "params": {
                 "input_dim": 64,
                 "hidden_dim": 64,
@@ -305,7 +305,7 @@ def test_tilelang_dequant_materialization_prefers_fp16_for_float32_only_buffers(
     )
 
     monkeypatch.setattr(
-        "xqt.operator_opt.wrappers.dequant_gemm._module_has_cuda_state",
+        "xqt.kernels.wrappers.dequant_gemm._module_has_cuda_state",
         lambda module: True,
     )
     candidate = build_tilelang_candidate_model(_FakeNVFP4Linear(), target)

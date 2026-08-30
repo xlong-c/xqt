@@ -291,7 +291,7 @@ def layer_statistics_rows(
     if not module_names:
         return []
 
-    from xqt.model.hooks import collect_module_outputs
+    from xqt.kernels.nn.fixtures.hooks import collect_module_outputs
 
     forward_args, forward_kwargs = _split_example_input(example_input)
     reference_outputs = collect_module_outputs(
@@ -473,7 +473,7 @@ def build_layer_analysis_payload(
 ) -> dict[str, object]:
     """Build reusable layer-analysis payload for reports and JSONL events."""
 
-    from xqt.quant.sensitivity import (
+    from xqt.compression.quant.sensitivity import (
         analyze_layer_errors,
         analyze_layer_sensitivity,
     )

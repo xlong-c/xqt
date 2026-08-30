@@ -2,7 +2,7 @@
 
 ## Scope
 
-`xqt.operator_opt` optimizes the runtime of an already compressed model. It does not run quantization, pruning, training, or task evaluation.
+`xqt.kernels.wrappers` optimizes the runtime of an already compressed model. It does not run quantization, pruning, training, or task evaluation.
 
 The acceptance objective is the steady-state latency of a model block on the target hardware. A fast kernel microbenchmark is diagnostic evidence only. It is never sufficient to apply a candidate to the model.
 
@@ -28,7 +28,7 @@ Hand-written block candidates use a named builder:
 ```python
 from torch import nn
 
-from xqt.operator_opt import (
+from xqt.kernels.wrappers import (
     OperatorOptimizationTargetPlan,
     register_block_kernel_builder,
 )

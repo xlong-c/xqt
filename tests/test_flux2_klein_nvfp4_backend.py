@@ -39,8 +39,8 @@ from examples.xqt_models.flux2_klein import (
     run_flux2_klein_nvfp4_inference,
     warmup_flux2_klein_nvfp4_transformer,
 )
-from xqt.quant import ConvRotInt8Linear, ConvRotMixedPrecisionLinear
-from xqt.quant import expand_group_scale, unpack_nvfp4e2m1
+from xqt.compression.quant import ConvRotInt8Linear, ConvRotMixedPrecisionLinear
+from xqt.compression.quant import expand_group_scale, unpack_nvfp4e2m1
 
 
 class _FakeFlux2NVFP4Linear(nn.Module):
@@ -607,7 +607,7 @@ def test_materialize_flux2_klein_nvfp4_engine_runs_three_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.cutile_available",
+        "xqt.kernels.wrappers.reference_wrappers.cutile_available",
         lambda: False,
     )
     x = torch.randn(3, 8, dtype=torch.float32)
@@ -649,7 +649,7 @@ def test_materialize_flux2_klein_nvfp4_engine_accepts_engine_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.cutile_available",
+        "xqt.kernels.wrappers.reference_wrappers.cutile_available",
         lambda: False,
     )
     model = _TinyFlux2Transformer().eval()
@@ -669,7 +669,7 @@ def test_cutile_uses_dense_cache_when_packed_runtime_is_reference_guarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.cutile_available",
+        "xqt.kernels.wrappers.reference_wrappers.cutile_available",
         lambda: True,
     )
     model = _TinyFlux2Transformer().eval()
@@ -696,7 +696,7 @@ def test_cutile_uses_packed_nvfp4_when_runtime_kernel_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.cutile_available",
+        "xqt.kernels.wrappers.reference_wrappers.cutile_available",
         lambda: True,
     )
 
@@ -708,7 +708,7 @@ def test_cutile_uses_packed_nvfp4_when_runtime_kernel_is_available(
         return types.SimpleNamespace(metadata=metadata)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.get_cutile_kernel_spec",
+        "xqt.kernels.wrappers.reference_wrappers.get_cutile_kernel_spec",
         fake_get_cutile_kernel_spec,
     )
     model = _TinyFlux2Transformer().eval()
@@ -748,11 +748,11 @@ def test_cutile_dense_path_flattens_rank3_inputs(
         return F.linear(x, weight, bias)
 
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.cutile_available",
+        "xqt.kernels.wrappers.reference_wrappers.cutile_available",
         lambda: True,
     )
     monkeypatch.setattr(
-        "xqt.operator_opt.reference_wrappers.run_cutile_kernel",
+        "xqt.kernels.wrappers.reference_wrappers.run_cutile_kernel",
         fake_run_cutile_kernel,
     )
     model = _TinyFlux2Transformer().eval()

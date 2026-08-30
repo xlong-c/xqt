@@ -2,7 +2,7 @@ project:
   name: transformer_vit_smoke
   artifact_dir: artifacts/xqt/smoke/transformer_vit
 model:
-  target: xqt.model.build_smoke_vit_classifier
+  target: xqt.kernels.nn.fixtures.build_smoke_vit_classifier
   params:
     image_size: 32
     patch_size: 8

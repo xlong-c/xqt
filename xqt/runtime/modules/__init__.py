@@ -16,6 +16,7 @@ from .convrot import (
     ConvRotW4A4ExecutionView,
     materialize_convrot_execution_views,
 )
+from .fp4_dynamic import FP4DynamicExecutionView, materialize_fp4_dynamic_execution_views
 from .fp8_mma_linear import Fp8MmaLinear
 from .int8_mma_linear import Int8MmaLinear
 from .kv_attention import KvCacheMetadata, KvScaleAttention

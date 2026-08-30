@@ -14,9 +14,13 @@
 - P5 待办: [TODO-P5.md](../research/xqt-gemm/TODO-P5.md) (persistent grouped scheduler, multi-stream prepack, CUDA Graph)
 
 ## 当前可用入口
-- xqt.gemm: GEMM 核心模块 (P3/P4 完成, P5 in progress)
-- xqt/operator_opt: 旧 operator 迁移 seed
-- xqt/runtime/modules: KV attention 等
+- `xqt.kernels.ops.gemm`: GEMM 合约, registry, dispatch (P3/P4 完成, P5 in progress)
+- `xqt.kernels.wrappers`: operator materialize / execute / capability
+- `xqt.kernels.wrappers.bench`: latency / memory / profiler
+- `xqt.kernels.nn`: semantic facade (`Linear` / `Attention` / `FeedForward` 等); `from xqt import nn` 是公开别名
+- `xqt.kernels.nn.fixtures`: smoke 模型与 toy fixture
+- `xqt.model`: 具体模型适配实现 (HunyuanOCR,Unlimited-OCR,Wan 2.1,Flux.2 Klein) 与 profile/adapter registry
+- `xqt/runtime/modules`: KV attention 等
 
 ## 核心边界
 

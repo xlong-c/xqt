@@ -1,7 +1,7 @@
 """Execution policy helpers for hybrid inference.
 
 Policy application only mutates runtime precision selectors on already
-quantized modules. Quantization algorithms live under ``xqt.quant``.
+quantized modules. Quantization algorithms live under ``xqt.compression.quant``.
 
 Types, constants, and normalizers are imported from ``xqt.contracts``.
 """

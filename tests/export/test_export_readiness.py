@@ -5,8 +5,8 @@ from __future__ import annotations
 from torch import nn
 
 from xqt.export import assess_export_readiness
-from xqt.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
-from xqt.quant.quantizers.int8_mma import quantize_with_int8_mma
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import quantize_with_awq_weight_only
+from xqt.compression.quant.quantizers.int8_mma import quantize_with_int8_mma
 
 
 def test_dense_model_can_export() -> None:

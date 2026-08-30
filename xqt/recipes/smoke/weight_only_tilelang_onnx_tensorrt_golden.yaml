@@ -2,7 +2,7 @@ project:
   name: weight_only_tilelang_onnx_tensorrt_golden
   artifact_dir: artifacts/xqt/smoke/weight_only_tilelang_onnx_tensorrt_golden
 model:
-  target: xqt.model.toy_models.build_toy_fp4_mlp
+  target: xqt.kernels.nn.fixtures.toy_models.build_toy_fp4_mlp
   params:
     hidden_dim: 64
   device: cuda:0

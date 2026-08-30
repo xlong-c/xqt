@@ -13,8 +13,7 @@ from xqt.contracts import (
     RuntimePlanPayload,
     StageReportPayload,
 )
-from xqt.quant.capability import describe_quant_backend_capability
-from xqt.prune.capability import prune_runtime_capability_from_report
+from xqt.contracts.module import get_module_contract
 
 from .stage_specs import stage_params
 from .stage import (
@@ -53,6 +52,8 @@ class StageProvider(Protocol):
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
         """Build a complete session-stage description."""
 
+        ...
+
 
 def build_stage_lineage(stage: Any) -> TransformLineage:
     """Build structured lineage for a workflow stage config."""
@@ -82,34 +83,36 @@ def _artifact_paths(context: StagePayloadBuildContext) -> dict[str, str]:
     return {key: str(value) for key, value in context.new_artifacts.items()}
 
 
-def _quant_capability(stage: Any, metrics: Mapping[str, Any]) -> dict[str, Any] | None:
-    params = stage_params(stage)
-    backend = str(metrics.get("backend") or params.get("backend") or "")
-    if not backend:
-        return None
-    policy = params.get("policy")
-    method = metrics.get("method") or params.get("method")
-    strategy = metrics.get("strategy") or params.get("strategy")
-    try:
-        return describe_quant_backend_capability(
-            backend,
-            method=str(method) if method is not None else None,
-            strategy=str(strategy) if strategy is not None else None,
-            policy=policy if isinstance(policy, Mapping) else None,
-        ).to_dict()
-    except ValueError:
-        return None
+def _capability_from_metrics_value(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        raw_capability = value.get("capability")
+        if isinstance(raw_capability, Mapping):
+            return dict(raw_capability)
+        raw_optimization = value.get("optimization_capability")
+        if isinstance(raw_optimization, Mapping):
+            return dict(raw_optimization)
+        for item in value.values():
+            capability = _capability_from_metrics_value(item)
+            if capability is not None:
+                return capability
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            capability = _capability_from_metrics_value(item)
+            if capability is not None:
+                return capability
+    return None
 
 
-def _prune_capability(
+def _quant_capability_from_metrics(
     metrics: Mapping[str, Any],
-    *,
-    device: str | None,
 ) -> dict[str, Any] | None:
-    try:
-        return prune_runtime_capability_from_report(metrics, device=device)
-    except ValueError:
-        return None
+    return _capability_from_metrics_value(metrics)
+
+
+def _prune_capability_from_metrics(
+    metrics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    return _capability_from_metrics_value(metrics)
 
 
 class DefaultStageProvider:
@@ -126,10 +129,7 @@ class DefaultStageProvider:
 
 def _model_module_contract(context: StagePayloadBuildContext) -> dict[str, Any] | None:
     model = getattr(context.state.context, "model", None)
-    raw = getattr(model, "_xqt_module_contract", None)
-    if isinstance(raw, Mapping):
-        return dict(raw)
-    return None
+    return get_module_contract(model)
 
 
 class ModelQuantizerProvider:
@@ -144,7 +144,7 @@ class ModelQuantizerProvider:
             metrics=metrics,
             params=stage_params(context.stage),
             artifacts=_artifact_paths(context),
-            capability=_quant_capability(context.stage, metrics),
+            capability=_quant_capability_from_metrics(metrics),
             module_contract=_model_module_contract(context),
         )
         payload_metadata = _base_payload_metadata(context)
@@ -169,10 +169,7 @@ class ModelPrunerProvider:
             metrics=metrics,
             params=stage_params(context.stage),
             artifacts=_artifact_paths(context),
-            capability=_prune_capability(
-                metrics,
-                device=getattr(context.state.context, "device", None),
-            ),
+            capability=_prune_capability_from_metrics(metrics),
             module_contract=_model_module_contract(context),
         )
         payload_metadata = _base_payload_metadata(context)

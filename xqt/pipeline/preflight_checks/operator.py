@@ -6,8 +6,8 @@ from typing import Any
 
 import torch
 
-from xqt.operator_opt.capability import describe_operator_engine_capability
-from xqt.operator_opt.cuda_extension import describe_custom_cuda_extension_capability
+from xqt.kernels.wrappers.capability import describe_operator_engine_capability
+from xqt.kernels.wrappers.cuda_extension import describe_custom_cuda_extension_capability
 
 from ._base import (
     PreflightReport,

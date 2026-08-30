@@ -6,16 +6,16 @@ from pathlib import Path
 import torch
 
 from xqt.contracts import ExecutionPolicyPayload, QuantizedModel, QuantizedModelPayload
-from xqt.quant.backends.torchao import TorchAOQuantizationResult
-from xqt.quant.quantizers.awq_gptq_weight_only import (
+from xqt.compression.quant.backends.torchao import TorchAOQuantizationResult
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import (
     AWQGPTQWeightOnlyQuantizationResult,
 )
-from xqt.quant.quantizers.base import QuantizerResult
-from xqt.quant.quantizers.fp4_weight_only import FP4QuantizationResult
-from xqt.quant.quantizers.int8_mma import Int8MmaQuantizationResult
-from xqt.quant.quantizers.mxfp_weight_only import MXFPQuantizationResult
-from xqt.quant.quantizers.svd import SVDQuantResult
-from xqt.quant.quantizers.w4_storage_int8_mma import (
+from xqt.compression.quant.quantizers.base import QuantizerResult
+from xqt.compression.quant.quantizers.fp4_weight_only import FP4QuantizationResult
+from xqt.compression.quant.quantizers.int8_mma import Int8MmaQuantizationResult
+from xqt.compression.quant.quantizers.mxfp_weight_only import MXFPQuantizationResult
+from xqt.compression.quant.quantizers.svd import SVDQuantResult
+from xqt.compression.quant.quantizers.w4_storage_int8_mma import (
     W4StorageInt8MmaQuantizationResult,
 )
 

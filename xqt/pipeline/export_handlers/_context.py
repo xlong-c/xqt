@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 import torch
 from torch import nn
 
+from xqt.core.errors import XQTArtifactError
 from xqt.core.schema import ExportTargetConfig, OutputDiffConfig
 from xqt.core.types import XQTContext
 from xqt.contracts.input_utils import default_input_names, first_tensor_output
@@ -47,10 +48,11 @@ def resolve_export_model(context: XQTContext) -> tuple[nn.Module, dict[str, obje
             "reason": "compiled_runtime_unwrapped",
         }
     if isinstance(context.reference_model, nn.Module):
-        return context.reference_model, {
-            "guarded": True,
-            "reason": "reference_model_fallback",
-        }
+        raise XQTArtifactError(
+            "export requires explicit source_stage after operator optimization; "
+            "reference_model_fallback is ambiguous - set stage.from_stage to an "
+            "optimized stage or disable the guard (got reference_model_fallback)"
+        )
     return model, {"guarded": False}
 
 

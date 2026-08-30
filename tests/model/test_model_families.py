@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from xqt.model import (
+from xqt.kernels.nn.fixtures import (
     build_smoke_diffusion_denoiser,
     build_smoke_detection_module,
     build_smoke_llm,
@@ -24,7 +24,7 @@ from xqt.model import (
     visual_token_compression_metadata,
 )
 import torch
-from xqt.model.toy_models import (
+from xqt.kernels.nn.fixtures.toy_models import (
     ToyAttentionClassifier,
     ToyConvBlock,
     ToyTransformerClassifier,

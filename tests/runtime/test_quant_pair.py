@@ -144,7 +144,7 @@ def test_quant_pair_roundtrip_preserves_runtime_quant_contract(tmp_path: Path) -
     """U1: contract writes into quant.json and resolves after load."""
 
     from xqt.contracts import RuntimeQuantContract
-    from xqt.quant.types import QuantScheme
+    from xqt.compression.quant.types import QuantScheme
 
     model = _TinyLinear().eval()
     contract = RuntimeQuantContract(
@@ -187,7 +187,7 @@ def test_quant_pair_roundtrip_preserves_runtime_quant_contract(tmp_path: Path) -
 
 def test_write_from_quantized_carries_contract(tmp_path: Path) -> None:
     from xqt.contracts import RuntimeQuantContract
-    from xqt.quant.types import QuantScheme
+    from xqt.compression.quant.types import QuantScheme
 
     model = _TinyLinear().eval()
     contract = RuntimeQuantContract(
@@ -227,7 +227,7 @@ def test_quant_pair_writes_runtime_manifest_with_contract(tmp_path: Path) -> Non
     """V1: quant.json metadata includes runtime_manifest when contract is set."""
 
     from xqt.contracts import RuntimeQuantContract, build_runtime_manifest
-    from xqt.quant.types import QuantScheme
+    from xqt.compression.quant.types import QuantScheme
 
     model = _TinyLinear().eval()
     contract = RuntimeQuantContract(

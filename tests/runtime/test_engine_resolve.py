@@ -5,7 +5,7 @@ import sys
 
 
 def test_resolve_int8_mma_auto_prefers_capability_order() -> None:
-    from xqt.contracts.engine_resolve import (
+    from xqt.kernels.engine_resolve import (
         default_auto_engine_order,
         resolve_int8_mma_engine,
     )
@@ -19,7 +19,7 @@ def test_resolve_int8_mma_auto_prefers_capability_order() -> None:
 
 
 def test_resolve_engine_preferred_is_hint_not_hard_requirement() -> None:
-    from xqt.contracts.engine_resolve import resolve_engine
+    from xqt.kernels.engine_resolve import resolve_engine
 
     # preferred engine that cannot provide int8_mma is skipped
     result = resolve_engine(
@@ -31,7 +31,7 @@ def test_resolve_engine_preferred_is_hint_not_hard_requirement() -> None:
 
 
 def test_resolve_engine_fp4_mma_prefers_supported_engine() -> None:
-    from xqt.contracts.engine_resolve import resolve_engine
+    from xqt.kernels.engine_resolve import resolve_engine
 
     result = resolve_engine(
         required_capabilities=["fp4_mma"],
@@ -46,13 +46,13 @@ def test_resolve_engine_fp4_mma_prefers_supported_engine() -> None:
 
 def test_int8_mma_quantizer_import_does_not_load_tilelang_kernels() -> None:
     banned = [
-        "xqt.operator_opt.kernels.tilelang.int8_mma",
-        "xqt.operator_opt.kernels.cute.int8mma_binding",
+        "xqt.kernels.ops._impl.tilelang.int8_mma",
+        "xqt.kernels.ops._impl.cute.int8mma_binding",
     ]
     for name in banned:
         sys.modules.pop(name, None)
     # Ensure fresh import of quantizer module path side effects
-    sys.modules.pop("xqt.quant.quantizers.int8_mma", None)
-    importlib.import_module("xqt.quant.quantizers.int8_mma")
+    sys.modules.pop("xqt.compression.quant.quantizers.int8_mma", None)
+    importlib.import_module("xqt.compression.quant.quantizers.int8_mma")
     for name in banned:
         assert name not in sys.modules, f"{name} was imported at quantizer import time"

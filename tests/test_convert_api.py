@@ -15,8 +15,8 @@ from xqt.conversion import (
     MatmulPrecisionSpec,
     PrecisionPolicy,
 )
-from xqt.contracts import FusionIntent, ModuleContract
-from xqt.quant import FP4WeightOnlyLinear
+from xqt.kernels.precision import FusionIntent, ModuleContract
+from xqt.compression.quant import FP4WeightOnlyLinear
 
 
 def test_xqt_convert_is_available_via_lazy_top_level_attribute() -> None:
@@ -77,7 +77,7 @@ def test_xqt_top_level_import_does_not_eagerly_load_framework_modules() -> None:
 
 def test_quantizer_aggregation_does_not_eagerly_load_export() -> None:
     script = (
-        "import sys; import xqt.quant.quantizers; "
+        "import sys; import xqt.compression.quant.quantizers; "
         "assert not any(m == 'xqt.export' or m.startswith('xqt.export.') for m in sys.modules)"
     )
     subprocess.run([sys.executable, "-c", script], check=True)
@@ -139,7 +139,7 @@ def test_convert_fp4_weight_only_linear_tilelang_returns_operator_candidate(
         return module_arg, None
 
     monkeypatch.setattr(
-        "xqt.operator_opt.materialize_module",
+        "xqt.kernels.wrappers.materialize_module",
         fake_materialize,
     )
 
@@ -250,7 +250,7 @@ def test_convert_conv2d_tilelang_delegates_to_materializer(
         return module_arg, None
 
     monkeypatch.setattr(
-        "xqt.operator_opt.materialize_module",
+        "xqt.kernels.wrappers.materialize_module",
         fake_materialize,
     )
 
@@ -818,7 +818,7 @@ def test_xqt_feedforward_records_triton_linear_fallback_reason(
         del args, kwargs
         raise RuntimeError("synthetic Triton failure")
 
-    monkeypatch.setattr("xqt.nn.feedforward.gemm_fp16_triton", _raise_triton)
+    monkeypatch.setattr("xqt.kernels.nn.feedforward.gemm_fp16_triton", _raise_triton)
     output = module(torch.randn(2, 8))
 
     runtime = module.runtime_config()

@@ -48,7 +48,7 @@ todo.nn.Attention == flash attention kernel
 | `fusion kernel` | 单个 kernel 内部直接完成多个子步骤 |
 | `FusionIntent` | 不绑定某个 engine 的融合意图 contract |
 
-当前 `FusionIntent` 已是共享 contract, 语义是 "requested operator fusion semantics independent of one kernel engine", 见 [xqt/contracts/module.py](/root/workspace/xdl/xqt/contracts/module.py:602).
+当前 `FusionIntent` 已是共享 lowering contract, 语义是 "requested operator fusion semantics independent of one kernel engine", 见 [xqt/kernels/precision.py](/root/workspace/xdl/xqt/kernels/precision.py).
 
 ## 一条边界线
 
@@ -151,33 +151,33 @@ todo.nn.Attention == flash attention kernel
 
 | family | engine/pattern | 代码入口 | 状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `gemm_fp16` | `triton/gemm_fp16` | [xqt/operator_opt/kernels/triton/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/triton/gemm.py:325) | 可执行 | dense 2D GEMM, 支持 bias/activation |
-| `gemm_bf16` | `triton/gemm_bf16` | [xqt/operator_opt/kernels/triton/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/triton/gemm.py:399) | 可执行 | BF16 dense GEMM |
-| `gemm_int8` | `triton/gemm_int8` | [xqt/operator_opt/kernels/triton/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/triton/gemm.py:443) | reference-guarded | 当前仍回落 reference |
-| `gemm_fp8` | `triton/gemm_fp8` | [xqt/operator_opt/kernels/triton/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/triton/gemm.py:474) | reference-guarded | 当前仍回落 reference |
-| `gemm_int4_dequant` | `triton/gemm_int4_dequant` | [xqt/operator_opt/kernels/triton/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/triton/gemm.py:508) | reference-guarded | INT4 weight-only dequant GEMM |
-| `gemm_mxfp*` | `triton/mxfp` | [xqt/operator_opt/kernels/triton/mxfp_gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/triton/mxfp_gemm.py:302) | 实验 | MXFP 路线 |
-| `dense_linear_epilogue` | `tilelang/dense_linear_epilogue` | [xqt/operator_opt/kernels/tilelang/linear.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/linear.py:16) | 可执行 | 本质是 dense GEMM + epilogue |
-| `half_linear` | `tilelang/linear` | [xqt/operator_opt/kernels/tilelang/linear.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/linear.py:92) | 可执行 | 半精度 linear, 本质 GEMM |
-| `dequant_gemm_epilogue` | `tilelang/dequant_gemm_epilogue` | [xqt/operator_opt/kernels/tilelang/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/gemm.py:73) | 可执行 | dequant + GEMM + epilogue |
-| `fp4_packed_dequant_gemm_epilogue` | `tilelang/fp4_packed_dequant_gemm_epilogue` | [xqt/operator_opt/kernels/tilelang/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/gemm.py:148) | 可执行 | packed FP4 |
-| `nvfp4_packed_dequant_gemm_epilogue` | `tilelang/nvfp4_packed_dequant_gemm_epilogue` | [xqt/operator_opt/kernels/tilelang/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/gemm.py:331) | 可执行 | packed NVFP4 |
-| `linear_marlin` | `tilelang/linear_marlin` | [xqt/operator_opt/kernels/tilelang/linear_marlin.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/linear_marlin.py:515) | 可执行 | Marlin 风格 packed GEMM |
-| `int8_mma` | `tilelang/int8_mma` | [xqt/operator_opt/kernels/tilelang/int8_mma.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/int8_mma.py:146) | 可执行 | true W8A8 |
-| `dense_linear_epilogue` | `cutile/dense_linear_epilogue` | [xqt/operator_opt/kernels/cutile/linear.py](/root/workspace/xdl/xqt/operator_opt/kernels/cutile/linear.py:13) | reference-guarded | CuTile 对齐 catalog |
-| `dequant_gemm_epilogue` | `cutile/dequant_gemm_epilogue` | [xqt/operator_opt/kernels/cutile/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/cutile/gemm.py:72) | reference-guarded | 参考/桥接 |
-| `fp4_packed_dequant_gemm_epilogue` | `cutile/fp4_packed_dequant_gemm_epilogue` | [xqt/operator_opt/kernels/cutile/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/cutile/gemm.py:177) | reference-guarded | packed FP4 |
-| `nvfp4_packed_dequant_gemm_epilogue` | `cutile/nvfp4_packed_dequant_gemm_epilogue` | [xqt/operator_opt/kernels/cutile/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/cutile/gemm.py:205) | reference-guarded | packed NVFP4 |
-| `gemm_epilogue` | `cutlass/gemm_epilogue` | [xqt/operator_opt/kernels/cutlass/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/cutlass/gemm.py:30) | metadata/reference | 主要 metadata/fallback |
-| `grouped_gemm` | `cutlass/grouped_gemm` | [xqt/operator_opt/backends/cutlass.py](/root/workspace/xdl/xqt/operator_opt/backends/cutlass.py:70) | metadata-only | pattern 已挂, 非主执行路 |
-| `gemm_epilogue` | `cute_dsl/gemm_epilogue` | [xqt/operator_opt/kernels/cute_dsl/gemm.py](/root/workspace/xdl/xqt/operator_opt/kernels/cute_dsl/gemm.py:30) | metadata/reference | CuTe DSL 方向 |
-| `grouped_gemm` | `cute_dsl/grouped_gemm` | [xqt/operator_opt/backends/cute_dsl.py](/root/workspace/xdl/xqt/operator_opt/backends/cute_dsl.py:70) | metadata-only | MoE 候选方向 |
+| `gemm_fp16` | `triton/gemm_fp16` | [xqt/kernels/ops/_impl/triton/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/triton/gemm.py:325) | 可执行 | dense 2D GEMM, 支持 bias/activation |
+| `gemm_bf16` | `triton/gemm_bf16` | [xqt/kernels/ops/_impl/triton/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/triton/gemm.py:399) | 可执行 | BF16 dense GEMM |
+| `gemm_int8` | `triton/gemm_int8` | [xqt/kernels/ops/_impl/triton/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/triton/gemm.py:443) | reference-guarded | 当前仍回落 reference |
+| `gemm_fp8` | `triton/gemm_fp8` | [xqt/kernels/ops/_impl/triton/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/triton/gemm.py:474) | reference-guarded | 当前仍回落 reference |
+| `gemm_int4_dequant` | `triton/gemm_int4_dequant` | [xqt/kernels/ops/_impl/triton/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/triton/gemm.py:508) | reference-guarded | INT4 weight-only dequant GEMM |
+| `gemm_mxfp*` | `triton/mxfp` | [xqt/kernels/ops/_impl/triton/mxfp_gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/triton/mxfp_gemm.py:302) | 实验 | MXFP 路线 |
+| `dense_linear_epilogue` | `tilelang/dense_linear_epilogue` | [xqt/kernels/ops/_impl/tilelang/linear.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/linear.py:16) | 可执行 | 本质是 dense GEMM + epilogue |
+| `half_linear` | `tilelang/linear` | [xqt/kernels/ops/_impl/tilelang/linear.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/linear.py:92) | 可执行 | 半精度 linear, 本质 GEMM |
+| `dequant_gemm_epilogue` | `tilelang/dequant_gemm_epilogue` | [xqt/kernels/ops/_impl/tilelang/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/gemm.py:73) | 可执行 | dequant + GEMM + epilogue |
+| `fp4_packed_dequant_gemm_epilogue` | `tilelang/fp4_packed_dequant_gemm_epilogue` | [xqt/kernels/ops/_impl/tilelang/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/gemm.py:148) | 可执行 | packed FP4 |
+| `nvfp4_packed_dequant_gemm_epilogue` | `tilelang/nvfp4_packed_dequant_gemm_epilogue` | [xqt/kernels/ops/_impl/tilelang/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/gemm.py:331) | 可执行 | packed NVFP4 |
+| `linear_marlin` | `tilelang/linear_marlin` | [xqt/kernels/ops/_impl/tilelang/linear_marlin.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/linear_marlin.py:515) | 可执行 | Marlin 风格 packed GEMM |
+| `int8_mma` | `tilelang/int8_mma` | [xqt/kernels/ops/_impl/tilelang/int8_mma.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/int8_mma.py:146) | 可执行 | true W8A8 |
+| `dense_linear_epilogue` | `cutile/dense_linear_epilogue` | [xqt/kernels/ops/_impl/cutile/linear.py](/root/workspace/xdl/xqt/kernels/ops/_impl/cutile/linear.py:13) | reference-guarded | CuTile 对齐 catalog |
+| `dequant_gemm_epilogue` | `cutile/dequant_gemm_epilogue` | [xqt/kernels/ops/_impl/cutile/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/cutile/gemm.py:72) | reference-guarded | 参考/桥接 |
+| `fp4_packed_dequant_gemm_epilogue` | `cutile/fp4_packed_dequant_gemm_epilogue` | [xqt/kernels/ops/_impl/cutile/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/cutile/gemm.py:177) | reference-guarded | packed FP4 |
+| `nvfp4_packed_dequant_gemm_epilogue` | `cutile/nvfp4_packed_dequant_gemm_epilogue` | [xqt/kernels/ops/_impl/cutile/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/cutile/gemm.py:205) | reference-guarded | packed NVFP4 |
+| `gemm_epilogue` | `cutlass/gemm_epilogue` | [xqt/kernels/ops/_impl/cutlass/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/cutlass/gemm.py:30) | metadata/reference | 主要 metadata/fallback |
+| `grouped_gemm` | `cutlass/grouped_gemm` | [xqt/kernels/ops/_impl/engines/cutlass.py](/root/workspace/xdl/xqt/kernels/ops/_impl/engines/cutlass.py:70) | metadata-only | pattern 已挂, 非主执行路 |
+| `gemm_epilogue` | `cute_dsl/gemm_epilogue` | [xqt/kernels/ops/_impl/cute_dsl/gemm.py](/root/workspace/xdl/xqt/kernels/ops/_impl/cute_dsl/gemm.py:30) | metadata/reference | CuTe DSL 方向 |
+| `grouped_gemm` | `cute_dsl/grouped_gemm` | [xqt/kernels/ops/_impl/engines/cute_dsl.py](/root/workspace/xdl/xqt/kernels/ops/_impl/engines/cute_dsl.py:70) | metadata-only | MoE 候选方向 |
 
 ### 1.2 GEMM 调度入口
 
 如果要从统一入口下手,当前 GEMM 主入口是:
 
-- [`gemm_with_precision(...)`](/root/workspace/xdl/xqt/operator_opt/backends/gemm_precision.py:64)
+- [`gemm_with_precision(...)`](/root/workspace/xdl/xqt/kernels/ops/_impl/gemm_precision.py:64)
 
 当前已经有的 GEMM composition 入口是:
 
@@ -193,7 +193,7 @@ todo.nn.Attention == flash attention kernel
 - `conv3x3_im2col_gemm_with_precision(...)`: 3x3 conv 走 unfold/im2col + GEMM + bias/activation.
 
 这些入口是为了先把常见形状收敛到已有 2D GEMM family, 不是在声明已经有 fused grouped GEMM 或 fused attention kernel.
-像 `flash_attention_*`, `router_softmax_topk`, `dispatch_pack_tokens`, `combine_scatter_tokens`, `dfl_projection_reduce` 这类名字仍然是独立的 fusion / routing / reduction backlog, 不通过 GEMM dispatcher 伪装执行。
+像 `flash_attention_*`, `router_softmax_topk`, `dispatch_pack_tokens`, `combine_scatter_tokens`, `dfl_projection_reduce` 这类名字仍然是独立的 fusion / routing / reduction backlog, 不通过 GEMM dispatcher 伪装执行.
 
 这个入口目前已经能区分:
 
@@ -282,8 +282,8 @@ YOLO 里的 GEMM 进一步细分:
 
 如果要查当前 conv->GEMM lowering 的现有实现锚点:
 
-- TileLang conv pattern 注册: [xqt/operator_opt/backends/tilelang.py](/root/workspace/xdl/xqt/operator_opt/backends/tilelang.py:148)
-- conv 参考 / 入口: [xqt/operator_opt/kernels/conv.py](/root/workspace/xdl/xqt/operator_opt/kernels/conv.py:1)
+- TileLang conv pattern 注册: [xqt/kernels/ops/_impl/engines/tilelang.py](/root/workspace/xdl/xqt/kernels/ops/_impl/engines/tilelang.py:148)
+- conv 参考 / 入口: [xqt/kernels/ops/_impl/conv.py](/root/workspace/xdl/xqt/kernels/ops/_impl/conv.py:1)
 
 YOLO 的最小实现建议:
 
@@ -345,8 +345,8 @@ DiT 里的 GEMM 进一步细分:
 如果要查当前这些路径最接近的实现锚点:
 
 - `fused_qkv_gemm` / `o_proj_gemm` 当前最接近 `gemm_fp16` / `gemm_bf16` 这类 dense GEMM 组合入口
-- `flash_attention_fwd` 参考 attention kernel: [xqt/operator_opt/kernels/attention.py](/root/workspace/xdl/xqt/operator_opt/kernels/attention.py:1)
-- `FeedForward` 融合意图与 runtime 组合: [xqt/nn/feedforward.py](/root/workspace/xdl/xqt/nn/feedforward.py:304)
+- `flash_attention_fwd` 参考 attention kernel: [xqt/kernels/ops/_impl/attention.py](/root/workspace/xdl/xqt/kernels/ops/_impl/attention.py:1)
+- `FeedForward` 融合意图与 runtime 组合: [xqt/kernels/nn/feedforward.py](/root/workspace/xdl/xqt/kernels/nn/feedforward.py:304)
 
 ### 3. 普通 MoE LLM
 
@@ -412,9 +412,9 @@ MoE LLM 里的 GEMM 进一步细分:
 
 如果要查当前最直接的实现锚点:
 
-- `true W8A8`: [xqt/operator_opt/kernels/tilelang/int8_mma.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/int8_mma.py:146)
-- `packed int4/int8 marlin`: [xqt/operator_opt/kernels/tilelang/linear_marlin.py](/root/workspace/xdl/xqt/operator_opt/kernels/tilelang/linear_marlin.py:515)
-- `grouped_gemm` 候选方向: [xqt/operator_opt/backends/cutlass.py](/root/workspace/xdl/xqt/operator_opt/backends/cutlass.py:62), [xqt/operator_opt/backends/cute_dsl.py](/root/workspace/xdl/xqt/operator_opt/backends/cute_dsl.py:62)
+- `true W8A8`: [xqt/kernels/ops/_impl/tilelang/int8_mma.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/int8_mma.py:146)
+- `packed int4/int8 marlin`: [xqt/kernels/ops/_impl/tilelang/linear_marlin.py](/root/workspace/xdl/xqt/kernels/ops/_impl/tilelang/linear_marlin.py:515)
+- `grouped_gemm` 候选方向: [xqt/kernels/ops/_impl/engines/cutlass.py](/root/workspace/xdl/xqt/kernels/ops/_impl/engines/cutlass.py:62), [xqt/kernels/ops/_impl/engines/cute_dsl.py](/root/workspace/xdl/xqt/kernels/ops/_impl/engines/cute_dsl.py:62)
 
 ## 跨三类模型的最小 kernel TODO 清单
 
@@ -703,7 +703,7 @@ MoE LLM 里的 GEMM 进一步细分:
 - `norm_requested`
 - `proj_out_epilogue_requested`
 
-见 [xqt/nn/feedforward.py](/root/workspace/xdl/xqt/nn/feedforward.py:304).
+见 [xqt/kernels/nn/feedforward.py](/root/workspace/xdl/xqt/kernels/nn/feedforward.py:304).
 
 这个 contract 级表达是对的, 因为它说的是:
 

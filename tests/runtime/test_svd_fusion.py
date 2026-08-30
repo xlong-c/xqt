@@ -15,7 +15,7 @@ from xqt.runtime.svd_fusion import (
     fused_svd_forward_cuda,
     svd_fusion_report,
 )
-from xqt.operator_opt.kernels.tilelang.svd_fused import resolve_svd_fused_schedule
+from xqt.kernels.ops._impl.tilelang.svd_fused import resolve_svd_fused_schedule
 
 
 def _make_svd_linear() -> SVDQuantLinear:
@@ -92,7 +92,7 @@ def _tilelang_cuda_available() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
-        from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+        from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
     except ImportError:
         return False
     return tilelang_runtime_usable()
@@ -215,7 +215,7 @@ def _native_svdq_w8a8_test_available() -> bool:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         return False
     try:
-        from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+        from xqt.kernels.ops._impl.cute.svdq_w8a8_sm89 import (
             native_svdq_w8a8_available,
         )
     except Exception:
@@ -227,7 +227,7 @@ def test_svdq_w4a4_native_metadata_reports_real_backend() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("native sm_89 W4A4 backend unavailable")
     try:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
             native_w4a4_available,
         )
     except Exception:
@@ -258,7 +258,7 @@ def test_svdq_w4a4_hot_cache_rebuilds_after_residual_scale_mutation() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("native sm_89 W4A4 backend unavailable")
     try:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
             native_w4a4_available,
         )
     except Exception:
@@ -310,7 +310,7 @@ def test_svdq_w8a8_native_route_cache_stream_and_fair_split() -> None:
     if not _native_svdq_w8a8_test_available():
         pytest.skip("native sm_89 SVDQuant W8A8 backend unavailable")
 
-    from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+    from xqt.kernels.ops._impl.cute.svdq_w8a8_sm89 import (
         allocate_svdq_w8a8_workspace,
         w8a8_linear,
     )
@@ -423,7 +423,7 @@ def test_svdq_w8a8_native_pads_mnk_and_rank() -> None:
 
 
 def test_svdq_w8a8_native_rejects_non_vector_aligned_features() -> None:
-    from xqt.operator_opt.kernels.cute.svdq_w8a8_sm89 import (
+    from xqt.kernels.ops._impl.cute.svdq_w8a8_sm89 import (
         native_svdq_w8a8_shape_supported,
     )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from xqt.core.errors import XQTArtifactError
+from xqt.core.base import XQTArtifactError
 from xqt.contracts.external_types import ExternalQuantInfo
 
 _SUPPORTED_METHODS: Final[frozenset[str]] = frozenset(

@@ -16,7 +16,7 @@ from xqt.contracts.runtime_quant import (
     RUNTIME_QUANT_CONTRACT_KEY,
     extract_runtime_quant_contract,
 )
-from xqt.core.errors import XQTArtifactError
+from xqt.core.base import XQTArtifactError
 
 QUANT_SIDECAR_SCHEMA_VERSION = "1.0"
 QUANT_SIDECAR_ARTIFACT_TYPE = "xqt_quant_sidecar"

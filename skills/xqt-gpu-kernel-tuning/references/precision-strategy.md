@@ -16,7 +16,7 @@ Do not choose precision from hardware alone.
 
 ### Triton GEMM dispatcher
 
-Current unified GEMM precision support in `xqt.operator_opt.backends.gemm_precision._gemm_triton`:
+Current unified GEMM precision support in `xqt.kernels.ops._impl.gemm_precision._gemm_triton`:
 
 - `fp16`
 - `bf16`

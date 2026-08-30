@@ -16,6 +16,7 @@ from xqt.contracts.composite import (
     initialize_composite_add_storage,
 )
 from xqt.contracts.packing_int4 import _unpack_int4
+from xqt.core.compilation import can_mutate_runtime_cache as _can_mutate_runtime_cache
 
 _SUPPORTED_RESIDUAL_QUANT_DTYPES = frozenset({"fp4", "int4"})
 _NATIVE_W4A4_LAYOUTS = frozenset({"main", "smalln"})
@@ -28,27 +29,13 @@ def _current_cuda_stream_id(device: torch.device) -> int:
     return int(torch.cuda.current_stream(device).cuda_stream)
 
 
-def _can_mutate_runtime_cache() -> bool:
-    """Return whether eager runtime caches may be mutated safely."""
-
-    compiler = getattr(torch, "compiler", None)
-    if compiler is not None:
-        is_compiling = getattr(compiler, "is_compiling", None)
-        if callable(is_compiling) and bool(is_compiling()):
-            return False
-    dynamo = getattr(torch, "_dynamo", None)
-    if dynamo is not None:
-        is_compiling = getattr(dynamo, "is_compiling", None)
-        if callable(is_compiling) and bool(is_compiling()):
-            return False
-    return not torch.jit.is_tracing()
 
 
 def _tilelang_runtime_usable() -> bool:
     """Probe the optional TileLang runtime without importing it at module load."""
 
     try:
-        from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
+        from xqt.kernels.ops.quantization import tilelang_runtime_usable
     except Exception:
         return False
     try:
@@ -227,7 +214,7 @@ class SVDQuantLinear(CompositeAddModule):
             return False
         native_usable = False
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_available,
             )
 
@@ -393,7 +380,7 @@ class SVDQuantLinear(CompositeAddModule):
             if isinstance(tensor, torch.Tensor) and tensor.device != target_device:
                 raise RuntimeError(f"canonical {name} must already be on the target device")
 
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             native_w4a4_available,
             native_w4a4_shape_supported,
             native_w4a4_smalln_available,
@@ -553,7 +540,7 @@ class SVDQuantLinear(CompositeAddModule):
         if (major, minor) != (8, 9):
             return False, f"native W4A4 currently targets sm_89, got sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_available,
                 native_w4a4_shape_supported,
             )
@@ -636,7 +623,7 @@ class SVDQuantLinear(CompositeAddModule):
             self._native_w4a4_hot_cache.pop(key, None)
             return None
         if graph_state is not None:
-            from xqt.operator_opt.runtime import replay_cuda_graph_tensor_callable
+            from xqt.kernels.wrappers.runtime import replay_cuda_graph_tensor_callable
 
             output = replay_cuda_graph_tensor_callable(graph_state, (flat,))
         else:
@@ -673,7 +660,7 @@ class SVDQuantLinear(CompositeAddModule):
                 )
             return packed
 
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             pack_svdq_w4a4_linear,
             pack_svdq_w4a4_linear_smalln,
         )
@@ -744,7 +731,7 @@ class SVDQuantLinear(CompositeAddModule):
         inputs: torch.Tensor,
         packed: Any,
     ) -> Any:
-        from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+        from xqt.kernels.ops.quantization import (
             allocate_w4a4_workspace,
         )
 
@@ -778,7 +765,7 @@ class SVDQuantLinear(CompositeAddModule):
         """Pick the BLOCK_N=64 GEMM for short-prefill shapes when available."""
 
         try:
-            from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+            from xqt.kernels.ops.quantization import (
                 native_w4a4_smalln_available,
                 smalln_w4a4_beneficial,
             )
@@ -828,7 +815,7 @@ class SVDQuantLinear(CompositeAddModule):
         major, minor = torch.cuda.get_device_capability(inputs.device)
         target_arch = f"sm_{major}{minor}"
         try:
-            from xqt.operator_opt.kernels.tilelang.svd_fused import (
+            from xqt.kernels.ops.quantization import (
                 resolve_svd_fused_schedule,
             )
 
@@ -1028,7 +1015,7 @@ class SVDQuantLinear(CompositeAddModule):
         native_allowed, native_gate_reason = self._native_w4a4_gate(x)
         if native_allowed:
             try:
-                from xqt.operator_opt.kernels.cute.svdq_w4a4_sm89 import (
+                from xqt.kernels.ops.quantization import (
                     bind_svdq_w4a4_linear,
                     bind_svdq_w4a4_linear_norm,
                     bind_svdq_w4a4_linear_smalln,
@@ -1068,7 +1055,7 @@ class SVDQuantLinear(CompositeAddModule):
                 fused = native_forward(flat)
                 graph_state = None
                 if self._cuda_graph_enabled:
-                    from xqt.operator_opt.runtime import (
+                    from xqt.kernels.wrappers.runtime import (
                         capture_cuda_graph_with_static_state,
                         replay_cuda_graph_tensor_callable,
                     )
@@ -1141,7 +1128,7 @@ class SVDQuantLinear(CompositeAddModule):
         if fused_allowed:
             try:
                 from xqt.runtime.svd_fusion import fused_svd_forward_cuda
-                from xqt.operator_opt.kernels.tilelang.svd_fused import (
+                from xqt.kernels.ops.quantization import (
                     resolve_svd_fused_schedule,
                 )
 

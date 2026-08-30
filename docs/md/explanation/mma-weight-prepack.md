@@ -53,7 +53,7 @@ W4 仍可不膨胀; prepack 作用在 **int8 热视图** 上, 可与 `release_in
 ## API
 
 ```python
-from xqt.operator_opt.kernels.prepack import (
+from xqt.kernels.ops._impl.prepack import (
     list_prepack_specs,
     prepack_weight,
     unpack_weight,
@@ -102,7 +102,7 @@ Static 激活路径 (推荐):
 | `int8:sm_80:b_mma` | placeholder | Ampere 专用 tag |
 | `int8:sm_90:b_mma` | placeholder | Hopper WGMMA 布局 |
 
-新增精度 / 架构: 在 `xqt/operator_opt/kernels/prepack/` 注册 `PrepackSpec`, 实现 `pack`/`unpack`, 再挂对应 kernel.
+新增精度 / 架构: 在 `xqt/kernels/ops/_impl/prepack/` 注册 `PrepackSpec`, 实现 `pack`/`unpack`, 再挂对应 kernel.
 
 ---
 
@@ -110,12 +110,12 @@ Static 激活路径 (推荐):
 
 | 文件 | 说明 |
 |------|------|
-| `xqt/operator_opt/kernels/prepack/base.py` | 注册表, `prepack_weight` / `unpack_weight` |
-| `xqt/operator_opt/kernels/prepack/int8_sm89.py` | INT8 sm_89 B_NK |
-| `xqt/operator_opt/kernels/cute/int8mma_kernel.cu` | PTX kernel + CUTLASS `int8mma_run_cutlass_64x128_prepacked_b` |
-| `xqt/operator_opt/kernels/cute/int8mma_binding.py` | ctypes + `prepack_qweight_t_for_ptx_sm89` + `int8_linear_cutlass_sm89` |
+| `xqt/kernels/ops/_impl/prepack/base.py` | 注册表, `prepack_weight` / `unpack_weight` |
+| `xqt/kernels/ops/_impl/prepack/int8_sm89.py` | INT8 sm_89 B_NK |
+| `xqt/kernels/jit/csrc/quantization/int8mma_kernel.cu` | PTX kernel + CUTLASS `int8mma_run_cutlass_64x128_prepacked_b` |
+| `xqt/kernels/ops/_impl/cute/int8mma_binding.py` | ctypes + `prepack_qweight_t_for_ptx_sm89` + `int8_linear_cutlass_sm89` |
 | `xqt/runtime/modules/int8_mma_linear.py` | `ptx_sm89` / `cuda_sm89` 的 prepack cache, version invalidation, auto routing |
-| `tests/xqt/operator_opt/test_prepack_int8_sm89.py` | 单测 |
+| `tests/xqt/kernels/wrappers/test_prepack_int8_sm89.py` | 单测 |
 
 ---
 

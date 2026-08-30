@@ -101,6 +101,29 @@ XQT engine:
 
 TileLang CUDA kernel entry 会先检查 runtime compatibility. 已知 packed-tensor ABI 不兼容时, entry 显式报错; operator wrapper 仅在 `fallback_policy` 允许时记录 eager fallback. 因此 package 可导入或静态 capability 为 `executable` 不等于本机完成 kernel correctness 或性能验收.
 
+## XQT Kernels 统一内核命名空间
+
+`xqt.kernels` 是 XQT 唯一的计算栈落点, 复刻 `sglang.kernels` (RFC #29630) 的四层模型, 并按三个子包收口: `ops` (tensor kernel + GEMM 合约), `wrappers` (materialize / operator / bench), `nn` (facade / convert / fixtures). 详细契约见 [xqt-kernels.md](xqt-kernels.md).
+
+分层:
+
+```text
+1. Public API        xqt.kernels.ops.<group>.<op>()
+2. Dispatch          select_kernel/get_kernel (固定) + BaseFusedOp.forward (择优, 按需)
+3. Registry+Metadata registry.py + spec.py (torch-free, 惰性)
+4. Backend x Device  KernelBackend(产地) x CapabilityRequirement(设备+SM窗口)
+```
+
+调用:
+
+- `xqt.kernels.ops.<group>.<op>()` - 单算子默认路径, 薄封装, 签名与 `FormatSignature` 一致.
+- `select_kernel(op, backend).load()` / `get_kernel(op, backend)` - 显式后端, 自研 vs `flashinfer` 等外部库 A/B.
+- `BaseFusedOp.forward(backend=)` - 仅 `activation / layernorm` 等可互换多后端 op 的自动择优与 `XQT_FORCE_KERNEL_BACKEND` 一键切回.
+
+实现仍可在 `xqt.kernels.jit` 或 `xqt.kernels.aot` 中开发, 但对外可调用路径必须经 `xqt.kernels.ops.*`. 新增内核或接入 `flashinfer` 仅需在 `xqt/kernels/ops/<group>/__init__.py` 加一行 `register_kernel(KernelSpec(..., backend=FLASHINFER, target="flashinfer:...", capabilities={CUDA}))`.
+
+三层边界关系: `xqt.kernels.nn / torch module -> xqt.kernels.wrappers (contract 校验, candidate 构造) -> xqt.kernels.ops.* -> engine kernel`. `from xqt import nn` 是 `xqt.kernels.nn` 的公开别名, 顶层 `xqt/nn/` 已删除, 与 kernel 不直接耦合.
+
 ## 配置方式
 
 `XQT` 只提供两种配置方式:
@@ -121,6 +144,7 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 | 概念 | 说明 |
 | --- | --- |
 | `OptimizationConfig` | 对外 stage workflow schema |
+| `ModelAdapter` / `ModelProfile` | `xqt.model` 的模型适配实现与声明记录,当前承载 HunyuanOCR,Unlimited-OCR,Wan 2.1,Flux.2 Klein. adapter 可负责架构组装,checkpoint mapping,特殊 forward 和 IO 包装; profile 通过 `model.profile` 选择 adapter. 通用 layer,operator,kernel 仍由各自模块提供 |
 | `StageSpec` | loader 后的 typed stage 参数 |
 | `XQTOptimizationSession` | 交互式 stage 编排入口 |
 | `ArtifactManifest` / `ArtifactRecord` | 产物追踪 |
@@ -151,7 +175,7 @@ YAML workflow 的公开 schema 只有一套: `project`, `model`, `task`, `compre
 - TorchExport 的已知配置收敛为 `targets[*].torch_export`: `strict`, `validate` 与 `runtime_diff`. TorchScript 的已知配置收敛为 `targets[*].torchscript`: `method`, `check_trace` 与 `runtime_diff`, 其中 `method` 只能是 `trace` 或 `script`. 同名 target `params` 旧键由 loader 明确拒绝; `XQTOptimizationSession.export()` 与 `.deploy()` 的单 target 入口分别经 `torch_export` 与 `torchscript` 参数走同一 StageSpec 解析路径.
 - ExecuTorch 的已知配置收敛为 `targets[*].executorch`: `dry_run`. ncnn 的已知配置收敛为 `targets[*].ncnn`: `source_path`, `converter`, `onnx2ncnn_path`, `pnnx_path`, `bin_path`, `extra_args`, `timeout` 与 `dry_run`; `converter` 只能是 `onnx2ncnn` 或 `pnnx`. pnnx 未显式配置 source 时优先使用同 workflow 的 TorchScript artifact, 再回退 ONNX, 使 preflight 与 ExportPass 选择同一 converter. MNN 的已知配置收敛为 `targets[*].mnn`: `source_path`, `converter_path`, `framework`, `extra_args`, `timeout` 与 `dry_run`. 同名 target `params` 旧键由 loader 明确拒绝; 三者的 Session 单 target 入口也经对应 typed 参数走同一 StageSpec 解析路径. dry-run preflight 不要求可选依赖或 converter executable 已安装.
 - materialized deploy runtime handle 的 known config 也已脱离无类型 `params`: ONNX Runtime providers 位于 `runtime_handle.onnxruntime`, TensorRT device 与 runtime plugin libraries 位于 `runtime_handle.tensorrt`. TensorRT runtime session 不再从 engine-build target 隐式继承 plugin libraries.
-- `PrecisionPolicy` 是 module conversion, `xqt.nn` facade runtime intent 与 GEMM 的共享精度 contract. `MatmulPrecisionSpec` 只在 `gemm_precision` 和 `conversion` 的兼容导入位置作为 `PrecisionPolicy` identity alias 保留; 不再有第二套字段 schema 或双向转换. facade 的 `auto` 仍表示输入 dtype 延迟决策, 但名称与角色字段的规范化同样来自 contract.
+- `PrecisionPolicy` 是 module conversion, `xqt.nn` facade runtime intent 与 GEMM 的共享精度 contract, 落点是 `xqt.kernels.precision` (不进 `kernels.nn`, 因为 `ops/_impl` 不能 import facade). `MatmulPrecisionSpec` 只在 `gemm_precision` 和 `conversion` 的兼容导入位置作为 `PrecisionPolicy` identity alias 保留; 不再有第二套字段 schema 或双向转换. facade 的 `auto` 仍表示输入 dtype 延迟决策, 但名称与角色字段的规范化同样来自该 contract.
 
 ### Session stage 协议
 

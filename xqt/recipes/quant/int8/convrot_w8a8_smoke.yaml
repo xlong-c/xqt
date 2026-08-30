@@ -2,7 +2,7 @@ project:
   name: convrot_w8a8_smoke
   artifact_dir: artifacts/xqt/quant/int8/convrot_w8a8_smoke
 model:
-  target: xqt.model.toy_models.build_toy_linear_block
+  target: xqt.kernels.nn.fixtures.toy_models.build_toy_linear_block
   params:
     input_dim: 16
     hidden_dim: 32

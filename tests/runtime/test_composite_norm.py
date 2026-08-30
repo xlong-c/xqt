@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from xqt.contracts import ComputeConfig
-from xqt.quant.quantizers.svd import quantize_with_svd
+from xqt.compression.quant.quantizers.svd import quantize_with_svd
 from xqt.runtime.composite_materialize import materialize_composite_compute
 from xqt.runtime.modules import (
     CompositeAddLinear,

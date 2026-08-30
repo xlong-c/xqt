@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from xqt.core.errors import XQTBackendError
+from xqt.core.base import XQTBackendError
 
 
 _ACTIVATION_SCALE_MODES = frozenset({"dynamic", "static"})

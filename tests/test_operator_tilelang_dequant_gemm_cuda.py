@@ -5,9 +5,9 @@ import importlib.util
 import pytest
 import torch
 
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.kernels.tilelang._common import tilelang_runtime_usable
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
@@ -30,7 +30,7 @@ def _tilelang_dequant_gemm_cuda_operator_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/tilelang_dequant_gemm_operator_cuda",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_dequant_gemm_block",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_dequant_gemm_block",
             "params": {
                 "input_dim": 32,
                 "output_dim": 64,

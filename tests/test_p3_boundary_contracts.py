@@ -10,11 +10,11 @@ import torch.nn.functional as F
 from torch import nn
 
 from xqt.core.errors import XQTBackendError
-from xqt.operator_opt.kernels.tilelang.attention import fused_attention_forward_tilelang
-from xqt.operator_opt.kernels.tilelang.linear import dense_linear_epilogue_tilelang
-from xqt.operator_opt.runtime import replay_cuda_graph_tensor_callable
-from xqt.operator_opt.triton_wrappers import _TritonLinearWrapper
-from xqt.operator_opt.wrappers.attention import _TileLangAttentionWrapper
+from xqt.kernels.ops._impl.tilelang.attention import fused_attention_forward_tilelang
+from xqt.kernels.ops._impl.tilelang.linear import dense_linear_epilogue_tilelang
+from xqt.kernels.wrappers.runtime import replay_cuda_graph_tensor_callable
+from xqt.kernels.wrappers.triton_wrappers import _TritonLinearWrapper
+from xqt.kernels.wrappers.attention import _TileLangAttentionWrapper
 from xqt.runtime.modules import KvScaleAttention
 
 

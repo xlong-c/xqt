@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch import nn
 
 from xqt.analysis import (
     build_layer_analysis_payload,
@@ -17,9 +16,8 @@ from xqt.analysis import (
     write_json_report,
     write_markdown_report,
 )
-from xqt.benchmark import benchmark_callable, benchmark_memory
+from xqt.kernels.wrappers.bench import benchmark_callable, benchmark_memory
 from xqt.core.artifact import ArtifactRecord, MetricRecord
-from xqt.core.imports import build_target
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import (
     AnalysisConfig,
@@ -28,24 +26,25 @@ from xqt.core.schema import (
     OutputDiffConfig,
 )
 from xqt.core.types import XQTContext
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.plan import build_operator_optimization_plan
-from xqt.operator_opt.reporting import (
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.reporting import (
     operator_acceptance_record,
     summarize_operator_optimization_reports,
 )
-from xqt.prune import (
+from xqt.compression.prune import (
     collect_module_importance,
     prune_runtime_capability_from_report,
     rank_prune_candidates,
 )
-from xqt.quant import (
+from xqt.compression.quant import (
     analyze_activation_drift,
     analyze_layer_errors,
     recommend_high_precision_modules,
 )
-
 from .export_pass import ExportPass, call_model as _call_model, run_export_stage
+from .model_pass import LoadModelPass
+from .report_pass import WriteReportsPass
 from .pass_helpers.context import (
     _analysis_runtime_config,
     _benchmark_runtime_config,
@@ -71,27 +70,6 @@ from xqt.core.stage_specs import (
     PruneStageSpec,
     QuantStageSpec,
 )
-
-
-class LoadModelPass:
-    """Build the configured PyTorch model."""
-
-    name = "load_model"
-
-    def run(self, context: XQTContext) -> XQTContext:
-        if context.model is not None:
-            return context
-        target = _context_model_target(context)
-        if not target:
-            raise ValueError("model.target is required when context.model is not set")
-        model = build_target(target, _context_model_params(context))
-        if not isinstance(model, nn.Module):
-            raise TypeError("model.target must build a torch.nn.Module")
-        model.eval()
-        context.model = model
-        if context.reference_model is None:
-            context.reference_model = copy.deepcopy(model)
-        return context
 
 
 class AnalyzePass:
@@ -479,27 +457,6 @@ def run_benchmark_stage(
     )
     context.benchmark_config = copy.deepcopy(benchmark_config)
     return BenchmarkPass().run(context, benchmark_config=benchmark_config)
-
-
-class WriteReportsPass:
-    """Write JSON and Markdown reports for collected metrics."""
-
-    name = "write_reports"
-
-    def run(self, context: XQTContext) -> XQTContext:
-        artifact_dir = Path(context.artifact_dir)
-        json_path = write_json_report(context.metrics, artifact_dir / "metrics.json")
-        markdown_path = write_markdown_report(
-            "XQT Metrics",
-            {
-                key: value if isinstance(value, dict) else {"value": value}
-                for key, value in context.metrics.items()
-            },
-            artifact_dir / "metrics.md",
-        )
-        context.artifacts["metrics_json"] = json_path
-        context.artifacts["metrics_markdown"] = markdown_path
-        return context
 
 
 __all__ = [

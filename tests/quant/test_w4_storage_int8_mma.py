@@ -4,8 +4,8 @@ from examples.mlp_w4_int8_mma_acceptance import (
     _select_best_path,
     weight_retarget_error,
 )
-from xqt.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear, quantize_with_fp4_weight_only
-from xqt.quant.quantizers.w4_storage_int8_mma import (
+from xqt.compression.quant.quantizers.fp4_weight_only import FP4WeightOnlyLinear, quantize_with_fp4_weight_only
+from xqt.compression.quant.quantizers.w4_storage_int8_mma import (
     W4StorageInt8MmaLinear,
     quantize_with_w4_storage_int8_mma,
 )

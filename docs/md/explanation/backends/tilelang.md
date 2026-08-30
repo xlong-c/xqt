@@ -30,7 +30,7 @@ XQT 当前 TileLang adapter 的重点不是在 import 时真正编译所有 kern
 
 ## 当前支持 pattern
 
-源码位置: `xqt/operator_opt/backends/tilelang.py`
+源码位置: `xqt/kernels/ops/_impl/engines/tilelang.py`
 
 `TILELANG_KERNEL_REGISTRY` 当前包含:
 
@@ -65,7 +65,7 @@ XQT 当前 TileLang adapter 的重点不是在 import 时真正编译所有 kern
 查看 registry:
 
 ```python
-from xqt.operator_opt.backends import list_tilelang_kernel_specs
+from xqt.kernels.wrappers import list_tilelang_kernel_specs
 
 
 specs = list_tilelang_kernel_specs()
@@ -75,7 +75,7 @@ print(sorted(specs))
 构造 metadata:
 
 ```python
-from xqt.operator_opt.backends import (
+from xqt.kernels.wrappers import (
     TileLangCompileSettings,
     build_tilelang_artifact_metadata,
 )
@@ -98,7 +98,7 @@ metadata = build_tilelang_artifact_metadata(
 ```python
 import torch
 
-from xqt.operator_opt.backends import run_tilelang_kernel
+from xqt.kernels.wrappers import run_tilelang_kernel
 
 
 x = torch.randn(4, 16)

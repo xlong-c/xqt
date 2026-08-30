@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from xqt.quant import quantize_with_convrot_4bit, quantize_with_convrot_int8
+from xqt.compression.quant import quantize_with_convrot_4bit, quantize_with_convrot_int8
 from xqt.runtime import (
     ConvRotInt8ExecutionView,
     ConvRotW4A4ExecutionView,

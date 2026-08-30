@@ -2,7 +2,7 @@ project:
   name: diffusion_smoke
   artifact_dir: artifacts/xqt/smoke/diffusion
 model:
-  target: xqt.model.build_smoke_diffusion_denoiser
+  target: xqt.kernels.nn.fixtures.build_smoke_diffusion_denoiser
   params:
     input_dim: 8
     hidden_dim: 16

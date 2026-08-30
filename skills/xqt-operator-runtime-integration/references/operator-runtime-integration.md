@@ -172,9 +172,9 @@ This usually isolates whether the gap comes from:
 
 Usually inspect these files in this order:
 
-1. `xqt/operator_opt/executor.py`
-2. `xqt/operator_opt/backends/tilelang.py`
-3. `xqt/operator_opt/kernels/tilelang/attention.py`
+1. `xqt/kernels/wrappers/executor.py`
+2. `xqt/kernels/ops/_impl/engines/tilelang.py`
+3. `xqt/kernels/ops/_impl/tilelang/attention.py`
 4. `tools/benchmark_tilelang_half_ops.py`
 5. `tests/xqt/test_operator_tilelang_*`
 

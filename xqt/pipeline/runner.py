@@ -19,6 +19,7 @@ from xqt.core.schema import (
 )
 from xqt.core.types import XQTContext
 from xqt.core.workflow_schema import OptimizationConfig
+from xqt.model import profile_from_model_config
 
 
 def _task_to_manifest_dict(task: TaskConfig) -> dict[str, Any]:
@@ -59,7 +60,7 @@ def _create_context_from_optimization_config(
     metrics: Optional[Mapping[str, Any]] = None,
     manifest: Optional[ArtifactManifest] = None,
 ) -> XQTContext:
-    from xqt.workflows.optimization import load_optimization_config
+    from xqt.core.workflow_loader import load_optimization_config
 
     loaded = load_optimization_config(config)
     project = dict(loaded.project)
@@ -68,6 +69,12 @@ def _create_context_from_optimization_config(
     device = loaded.device or loaded.model.device
     compression_axes = list(loaded.compression_axes)
     config_snapshot = asdict(loaded) if is_dataclass(loaded) else dict(loaded)
+    model_profile = profile_from_model_config(loaded.model)
+    effective_model_target = (
+        loaded.model.target
+        if loaded.model.target is not None
+        else None if model_profile is None else model_profile.loader_target
+    )
 
     return XQTContext(
         model=model,
@@ -81,8 +88,13 @@ def _create_context_from_optimization_config(
         project_name=project_name,
         task_type=loaded.task.type,
         compression_axes=compression_axes,
-        model_target=loaded.model.target,
-        model_params=copy.deepcopy(loaded.model.params),
+        model_target=effective_model_target,
+        model_checkpoint=loaded.model.checkpoint,
+        model_params={
+            **({} if model_profile is None else dict(model_profile.loader_params)),
+            **copy.deepcopy(loaded.model.params),
+        },
+        model_profile=model_profile,
         quant_config=QuantConfig(),
         prune_config=PruneConfig(),
         analysis_config=AnalysisConfig(),
@@ -98,6 +110,7 @@ def _create_context_from_optimization_config(
             compression_axes=compression_axes,
             task=_task_to_manifest_dict(loaded.task),
             config_snapshot=config_snapshot,
+            model_profile=None if model_profile is None else model_profile.to_dict(),
         ),
     )
 

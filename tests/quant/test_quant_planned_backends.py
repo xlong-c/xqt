@@ -7,9 +7,9 @@ import torch
 
 from xqt.core.schema import QuantConfig
 from xqt.core.types import XQTContext
-from xqt.quant.execution import execute_quantization_plan
-from xqt.quant.plan import build_quantization_plan
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.compression.quant.execution import execute_quantization_plan
+from xqt.compression.quant.plan import build_quantization_plan
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
 
 
 def _runtime_context(
@@ -157,7 +157,7 @@ def test_pytorch_gptq_int8_executes_hessian_aware_calibration() -> None:
 
 
 def test_online_weight_quant_is_planned_capability() -> None:
-    from xqt.quant.capability import describe_quant_backend_capability
+    from xqt.compression.quant.capability import describe_quant_backend_capability
 
     capability = describe_quant_backend_capability(
         "pytorch", method="online_weight_quant"

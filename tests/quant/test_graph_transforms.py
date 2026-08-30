@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from xqt.quant.transforms import (
+from xqt.compression.quant.transforms import (
     RotationAbsorbTransform,
     TransformPlan,
     apply_graph_transforms,
@@ -46,7 +46,7 @@ class _ToyResidualModel(nn.Module):
 
 
 def test_convrot_from_linear_preserves_input_already_rotated() -> None:
-    from xqt.quant.quantizers.convrot_4bit import ConvRotMixedPrecisionLinear
+    from xqt.compression.quant.quantizers.convrot_4bit import ConvRotMixedPrecisionLinear
 
     linear = nn.Linear(32, 32, bias=False)
     linear.input_already_rotated = True

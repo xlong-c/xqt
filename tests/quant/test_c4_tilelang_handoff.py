@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from xqt.contracts.layout_kernel_report import layout_report_from_module_shapes
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.hf_int4_layout import process_weights_after_loading
 from xqt.runtime.bridges.hf_int4_pack import awq_reverse_pack_order
 

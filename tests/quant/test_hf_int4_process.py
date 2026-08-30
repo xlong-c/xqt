@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from xqt.core.errors import XQTArtifactError
-from xqt.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
+from xqt.compression.quant.quantizers.awq_gptq_weight_only import AWQGPTQWeightOnlyLinear
 from xqt.runtime.bridges.hf_int4_layout import process_weights_after_loading
 from xqt.runtime.bridges.hf_int4_pack import awq_reverse_pack_order
 from xqt.runtime.bridges.weight_io import load_weight_state_dict

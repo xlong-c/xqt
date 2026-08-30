@@ -7,7 +7,24 @@ from typing import Sequence
 
 import torch
 
-from xdl.metric.detection_utils import DetectionPrediction, decode_detection_output
+from dataclasses import dataclass as _dataclass
+from typing import Any as _Any
+
+
+@_dataclass
+class DetectionPrediction:
+    """One image worth of decoded detections (xqt-local, no xdl dependency)."""
+
+    boxes: torch.Tensor
+    scores: torch.Tensor
+    labels: torch.Tensor
+
+    def to_dict(self) -> dict[str, _Any]:
+        return {
+            "boxes": self.boxes.detach().cpu().tolist(),
+            "scores": self.scores.detach().cpu().tolist(),
+            "labels": self.labels.detach().cpu().tolist(),
+        }
 
 
 @dataclass

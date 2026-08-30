@@ -2,7 +2,7 @@
 
 Holds the packed-weight module produced by algorithmic AWQ/GPTQ quantization:
 buffer storage, reference forward, and layout exposure for kernel wrappers.
-Calibration algorithms live in ``xqt.quant.quantizers.awq_gptq_weight_only``.
+Calibration algorithms live in ``xqt.compression.quant.quantizers.awq_gptq_weight_only``.
 """
 
 from __future__ import annotations
@@ -18,20 +18,7 @@ from xqt.contracts.packing_int4 import (
     _safe_positive,
     _unpack_int4,
 )
-
-
-def _can_mutate_runtime_cache() -> bool:
-    compiler = getattr(torch, "compiler", None)
-    if compiler is not None:
-        is_compiling = getattr(compiler, "is_compiling", None)
-        if callable(is_compiling) and bool(is_compiling()):
-            return False
-    dynamo = getattr(torch, "_dynamo", None)
-    if dynamo is not None:
-        is_compiling = getattr(dynamo, "is_compiling", None)
-        if callable(is_compiling) and bool(is_compiling()):
-            return False
-    return not torch.jit.is_tracing()
+from xqt.core.compilation import can_mutate_runtime_cache as _can_mutate_runtime_cache
 
 
 def _signed_quant_bounds(bits: int) -> tuple[int, int]:

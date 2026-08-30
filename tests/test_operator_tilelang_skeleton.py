@@ -7,8 +7,8 @@ from omegaconf import OmegaConf
 
 from xqt.core.schema import BenchmarkConfig, OperatorOptimizationConfig
 from xqt.core.types import XQTContext
-from xqt.operator_opt.execute import execute_operator_optimization_plan
-from xqt.operator_opt.plan import build_operator_optimization_plan
+from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
+from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 
 
 def _runtime_context(
@@ -49,7 +49,7 @@ def _base_tilelang_operator_config() -> dict:
             "artifact_dir": "artifacts/xqt/tests/tilelang_operator_skeleton",
         },
         "model": {
-            "target": "xqt.model.toy_models.build_toy_attention_classifier",
+            "target": "xqt.kernels.nn.fixtures.toy_models.build_toy_attention_classifier",
             "params": {
                 "hidden_dim": 16,
                 "num_heads": 4,

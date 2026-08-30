@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from xqt import nn as xqt_nn
+import xqt.kernels.nn as xqt_nn
 from xqt.conversion import convert
-from xqt.contracts import ModuleContract
+from xqt.kernels.precision import ModuleContract
 
 
 def test_attention_torch_forward_matches_shape() -> None:
@@ -89,7 +89,7 @@ def test_convert_attention_tilelang_cpu_matches_eager_reference() -> None:
 
 
 def test_convert_transformer_block_tilelang_materializes_internal_attention() -> None:
-    from xqt.operator_opt.tilelang_wrappers import _TileLangXqtAttentionWrapper
+    from xqt.kernels.wrappers.tilelang_wrappers import _TileLangXqtAttentionWrapper
 
     module = xqt_nn.TransformerBlock(32, heads=4, ffn_mult=2, engine="torch")
     result = convert(module, engine="tilelang", return_result=True)

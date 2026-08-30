@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from xqt.gemm import (
+from xqt.kernels.ops.gemm import (
     GemmArtifactManifest,
     GemmPreflightReport,
     Sm89BuildConfig,

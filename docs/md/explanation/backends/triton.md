@@ -24,7 +24,7 @@ Triton 是用 Python 编写自定义 GPU kernel 的 DSL 和 compiler. 它让开�
 
 ## 当前支持 pattern
 
-源码位置: `xqt/operator_opt/backends/triton.py`
+源码位置: `xqt/kernels/ops/_impl/engines/triton.py`
 
 `TRITON_KERNEL_REGISTRY` 当前包含:
 
@@ -51,7 +51,7 @@ Triton 是用 Python 编写自定义 GPU kernel 的 DSL 和 compiler. 它让开�
 查看 pattern:
 
 ```python
-from xqt.operator_opt.backends import list_triton_kernel_specs
+from xqt.kernels.wrappers import list_triton_kernel_specs
 
 
 print(list_triton_kernel_specs().keys())
@@ -62,7 +62,7 @@ print(list_triton_kernel_specs().keys())
 ```python
 import torch
 
-from xqt.operator_opt.backends import run_triton_kernel
+from xqt.kernels.wrappers import run_triton_kernel
 
 
 x = torch.randn(1024, device="cuda")
@@ -75,7 +75,7 @@ CPU fallback:
 ```python
 import torch
 
-from xqt.operator_opt.backends import run_triton_kernel
+from xqt.kernels.wrappers import run_triton_kernel
 
 
 x = torch.randn(1024)

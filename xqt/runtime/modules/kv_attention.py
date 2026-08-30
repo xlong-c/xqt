@@ -37,7 +37,7 @@ from xqt.contracts.runtime_quant import (
     RuntimeQuantContract,
 )
 from xqt.core.errors import XQTBackendError, XQTConfigError
-from xqt.operator_opt.runtime import target_arch_mismatch
+from xqt.kernels.jit.utils.arch import target_arch_mismatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,7 +462,7 @@ class KvScaleAttention(nn.Module):
             return "dropout_unsupported"
         if self.head_dim % 16 != 0:
             return "head_dim_not_multiple_of_16"
-        from xqt.operator_opt.kernels.tilelang._common import (
+        from xqt.kernels.ops.attention import (
             tilelang_runtime_unavailability_reason,
             tilelang_runtime_usable,
         )
@@ -474,7 +474,7 @@ class KvScaleAttention(nn.Module):
     def _run_packed_tilelang_attention(self, qkv: torch.Tensor) -> torch.Tensor:
         """Run packed-QKV quantize-layout and attention without report mutation."""
 
-        from xqt.operator_opt.kernels.tilelang.kv_int8_attention import (
+        from xqt.kernels.ops.attention import (
             fused_kv_int8_attention_packed_qkv_forward_tilelang,
             quantize_packed_qkv_int8_layout_tilelang,
         )
@@ -518,7 +518,7 @@ class KvScaleAttention(nn.Module):
             and self._fallback_reason is None
         ):
             return
-        from xqt.operator_opt.kernels.tilelang.kv_int8_attention import (
+        from xqt.kernels.ops.attention import (
             KV_INT8_PACKED_QKV_ATTENTION_KERNEL_NAME,
             KV_INT8_PACKED_QKV_QUANTIZE_LAYOUT_KERNEL_NAME,
         )
@@ -552,7 +552,7 @@ class KvScaleAttention(nn.Module):
         )
 
     def _graph_cache_key(self, x: torch.Tensor) -> tuple[Any, ...]:
-        from xqt.operator_opt.runtime import cuda_graph_tensor_signature
+        from xqt.kernels.wrappers.runtime import cuda_graph_tensor_signature
 
         device_index = x.device.index
         if device_index is None:
@@ -580,7 +580,7 @@ class KvScaleAttention(nn.Module):
         )
 
     def _capture_graph(self, x: torch.Tensor) -> dict[str, Any]:
-        from xqt.operator_opt.runtime import capture_cuda_graph_with_static_state
+        from xqt.kernels.wrappers.runtime import capture_cuda_graph_with_static_state
 
         state = capture_cuda_graph_with_static_state(
             (x,),
@@ -597,7 +597,7 @@ class KvScaleAttention(nn.Module):
         x: torch.Tensor,
         cache_key: tuple[Any, ...],
     ) -> None:
-        from xqt.operator_opt.runtime import replay_cuda_graph_tensor_callable
+        from xqt.kernels.wrappers.runtime import replay_cuda_graph_tensor_callable
 
         state.update(
             {

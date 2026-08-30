@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
-from xqt.quant.quantizers.kv_scale import (
+from xqt.compression.quant.quantizers.kv_scale import (
     KvScaleArtifact,
     attach_kv_scale_buffers,
     calibrate_kv_scales,
@@ -15,7 +15,7 @@ from xqt.quant.quantizers.kv_scale import (
     execute_kv_scale_component,
     kv_scales_to_compute_metadata,
 )
-from xqt.quant.types import QuantizationComponentPlan
+from xqt.compression.quant.types import QuantizationComponentPlan
 from xqt.contracts.quant_pair import write_quant_pair
 
 

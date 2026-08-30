@@ -12,7 +12,7 @@ from xqt.core.artifact import MetricRecord
 from xqt.core.inputs import extract_model_inputs, infer_model_input_count
 from xqt.core.schema import PruneConfig
 from xqt.core.types import XQTContext
-from xqt.prune import (
+from xqt.compression.prune import (
     PruningSchedule,
     apply_block_sparse_pruning,
     apply_global_l1_unstructured_pruning,
@@ -314,8 +314,13 @@ def _run_prune_with_resolved_config(
                 selection=dict(resolved_prune.selection),
                 example_input=example_input,
                 task_type=_context_task_type(context),
+                structure_contract=context.structure_contract,
             )
             context.metrics["prune"] = report.to_dict()
+            if context.structure_contract is not None:
+                context.metrics["prune"]["structure_contract_family"] = (
+                    context.structure_contract.family
+                )
             if context.manifest is not None:
                 context.manifest.add_metric(
                     MetricRecord(
@@ -341,8 +346,13 @@ def _run_prune_with_resolved_config(
             selection=resolved_prune.selection,
             example_input=example_input,
             task_type=_context_task_type(context),
+            structure_contract=context.structure_contract,
         )
         context.metrics["prune"] = report.to_dict()
+        if context.structure_contract is not None:
+            context.metrics["prune"]["structure_contract_family"] = (
+                context.structure_contract.family
+            )
         if context.manifest is not None:
             context.manifest.add_metric(
                     MetricRecord(

@@ -23,9 +23,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from xqt.benchmark import LatencyReport, measure_callable_ms
-from xqt.operator_opt import OperatorOptimizationTargetPlan, materialize_operator_candidate_models
-from xqt.quant import infer_nvfp4_tensor_layout
+from xqt.kernels.wrappers.bench import LatencyReport, measure_callable_ms
+from xqt.kernels.wrappers import OperatorOptimizationTargetPlan, materialize_operator_candidate_models
+from xqt.compression.quant import infer_nvfp4_tensor_layout
 
 
 REPO_ID = "sahilchachra/Unlimited-OCR-NVFP4"

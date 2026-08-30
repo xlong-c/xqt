@@ -775,7 +775,7 @@ def test_operator_pass_summary_preserves_fallback_policy_and_reason() -> None:
 
     class _FakeExecution:
         def __init__(self, model: torch.nn.Module) -> None:
-            from xqt.operator_opt.types import OperatorOptimizationReport
+            from xqt.kernels.wrappers.types import OperatorOptimizationReport
 
             self.model = model
             self.artifacts: dict[str, object] = {}
@@ -811,7 +811,7 @@ def test_operator_pass_summary_preserves_fallback_policy_and_reason() -> None:
         del plan, benchmark_config, device
         return _FakeExecution(context_value.require_model())
 
-    from xqt.operator_opt.plan import build_operator_optimization_plan
+    from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 
     plan = build_operator_optimization_plan(context.operator_config)
 
@@ -860,7 +860,7 @@ def test_operator_pass_manifest_records_acceptance_decision() -> None:
 
     class _FakeExecution:
         def __init__(self, model: torch.nn.Module) -> None:
-            from xqt.operator_opt.types import OperatorOptimizationReport
+            from xqt.kernels.wrappers.types import OperatorOptimizationReport
 
             self.model = model
             self.artifacts: dict[str, object] = {}
