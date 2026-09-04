@@ -195,6 +195,8 @@ class ConvRotInt8Linear(nn.Module):
                 torch.Tensor,
             ],
         ] = {}
+        self._cutlass_w8a8_prepacked_b: torch.Tensor | None = None
+        self._cutlass_w8a8_prepacked_b_signature: tuple[Any, ...] | None = None
         self._last_native_w8a8_used = False
         self._last_native_w8a8_backend: str | None = None
         self._last_native_w8a8_fallback_reason: str | None = None
@@ -219,6 +221,8 @@ class ConvRotInt8Linear(nn.Module):
         self._native_w8a8_workspace_cache.clear()
         self._native_w8a8_hot_cache.clear()
         self._cutlass_w8a8_workspace_cache.clear()
+        self._cutlass_w8a8_prepacked_b = None
+        self._cutlass_w8a8_prepacked_b_signature = None
         self._last_native_w8a8_used = False
         self._last_native_w8a8_backend = None
         self._last_native_w8a8_fallback_reason = None
@@ -586,8 +590,8 @@ class ConvRotInt8Linear(nn.Module):
             )
         if compute.activation_scale_mode != "dynamic":
             return False, "CUTLASS ConvRot requires dynamic activation scales"
-        if compute.engine != "cuda_sm89":
-            return False, "CUTLASS ConvRot requires the explicit cuda_sm89 engine"
+        if compute.engine not in {"auto", "cuda_sm89"}:
+            return False, "CUTLASS ConvRot requires the auto or explicit cuda_sm89 engine"
         if not inputs.is_cuda or inputs.dtype not in {torch.float16, torch.bfloat16}:
             return False, "CUTLASS ConvRot requires FP16 or BF16 CUDA activations"
         if compute.output_dtype != inputs.dtype:
@@ -728,6 +732,7 @@ class ConvRotInt8Linear(nn.Module):
     def _cutlass_w8a8_forward(self, inputs: torch.Tensor) -> torch.Tensor:
         from xqt.kernels.ops.quantization import (
             convrot_cutlass_w8a8_sm89,
+            prepack_qweight_t_for_ptx_sm89,
         )
 
         original_shape = tuple(int(dim) for dim in inputs.shape[:-1])
@@ -741,7 +746,16 @@ class ConvRotInt8Linear(nn.Module):
             bias,
             scale_bias,
         ) = self._cutlass_w8a8_workspace(flat)
-        prepacked = self.int8_compute._ensure_ptx_prepacked_b()
+        qweight = self.int8_compute.qweight_t
+        prepack_signature = (
+            str(qweight.device),
+            id(qweight),
+            int(getattr(qweight, "_version", 0)),
+        )
+        if self._cutlass_w8a8_prepacked_b_signature != prepack_signature:
+            self._cutlass_w8a8_prepacked_b = prepack_qweight_t_for_ptx_sm89(qweight)
+            self._cutlass_w8a8_prepacked_b_signature = prepack_signature
+        prepacked = self._cutlass_w8a8_prepacked_b
         output, _, _ = convrot_cutlass_w8a8_sm89(
             flat,
             self.int8_compute.qweight_t,
@@ -764,7 +778,7 @@ class ConvRotInt8Linear(nn.Module):
         self._last_native_w8a8_used = False
         self._last_native_w8a8_backend = None
         self._last_native_w8a8_fallback_reason = (
-            "CUTLASS ConvRot selected by explicit cuda_sm89 engine"
+            "CUTLASS ConvRot selected by shape-aware auto/cuda_sm89 route"
         )
         self.int8_compute.last_execution = {
             "engine": "cuda_sm89_cutlass_convrot",
@@ -784,6 +798,12 @@ class ConvRotInt8Linear(nn.Module):
             "target_arch": "sm_89",
             "prepacked_b": prepacked is not None,
             "cutlass_mainloop": "int8_tensorop_m16n8k32",
+            "cutlass_tile": (
+                "64x128x64"
+                if int(flat.shape[0]) == 256 and self.output_features >= 512
+                else "128x256x64"
+            ),
+            "cutlass_stages": 3,
             "cutlass_epilogue": (
                 "cutlass_visitor_rowwise_activation_weight_scale_bias_bf16"
                 if self.int8_compute.output_dtype == torch.bfloat16
@@ -869,27 +889,37 @@ class ConvRotInt8Linear(nn.Module):
         workspace: Any,
         backend: str,
     ) -> None:
+        small_m = "small_m" in backend
         self._last_native_w8a8_used = True
         self._last_native_w8a8_backend = backend
         self._last_native_w8a8_fallback_reason = None
         self._last_fused_static_fallback_reason = None
         self.int8_compute.last_execution = {
             "engine": "native_convrot_w8a8_sm89",
-            "reason": "rotation_dynamic_per_token_quant_then_nunchaku_w8a8_gemm",
+            "reason": (
+                "rotation_dynamic_per_token_quant_then_small_m_raw_int8_gemm"
+                if small_m
+                else "rotation_dynamic_per_token_quant_then_nunchaku_w8a8_gemm"
+            ),
             "true_int8_mma": True,
             "activation_dtype": "int8",
             "weight_dtype": "int8",
             "accumulation_dtype": "int32",
             "activation_scale_mode": "dynamic",
             "activation_granularity": "per_token",
-            "activation_quant_engine": "native_hadamard_dynamic_per_token",
+            "activation_quant_engine": (
+                "native_small_m_hadamard_dynamic_per_token"
+                if small_m
+                else "native_hadamard_dynamic_per_token"
+            ),
             "rotation_fused": not self.input_already_rotated,
             "input_rows": int(flat.shape[0]),
             "padded_rows": int(workspace.padded_rows),
             "input_features": self.input_features,
             "output_features": self.output_features,
             "target_arch": "sm_89",
-            "native_packed_weight": True,
+            "native_packed_weight": not small_m,
+            "small_m_specialized": small_m,
         }
 
     def _native_w8a8_hot_forward(self, inputs: torch.Tensor) -> torch.Tensor | None:
@@ -931,7 +961,11 @@ class ConvRotInt8Linear(nn.Module):
         )
 
         rows = int(inputs.shape[0])
-        padded_rows = ((rows + 255) // 256) * 256
+        padded_rows = (
+            ((rows + 15) // 16) * 16
+            if rows <= 128
+            else ((rows + 255) // 256) * 256
+        )
         stream_id = _current_cuda_stream_id(inputs.device)
         key = (
             str(inputs.device),
@@ -958,7 +992,11 @@ class ConvRotInt8Linear(nn.Module):
         if self.input_already_rotated:
             flat = self._pad_inputs(inputs).reshape(-1, self.padded_input_features)
             native_rot_size = 1
-            backend = "native_w8a8_dynamic_prerotated"
+            backend = (
+                "native_w8a8_small_m_prerotated"
+                if int(flat.shape[0]) <= 128
+                else "native_w8a8_dynamic_prerotated"
+            )
         else:
             flat = (
                 inputs
@@ -966,14 +1004,23 @@ class ConvRotInt8Linear(nn.Module):
                 else inputs.reshape(-1, self.input_features)
             )
             native_rot_size = self.rot_size
-            backend = "native_convrot_w8a8_dynamic"
+            backend = (
+                "native_convrot_w8a8_small_m"
+                if int(flat.shape[0]) <= 128
+                else "native_convrot_w8a8_dynamic"
+            )
         packed = self._native_w8a8_packed(flat)
         workspace = self._native_w8a8_workspace(flat, packed)
+        native_rotated_features = (
+            int(packed.raw_qweight_t.shape[0])
+            if int(flat.shape[0]) <= 128
+            else self.padded_input_features
+        )
         native_forward = bind_convrot_w8a8_linear(
             packed,
             workspace,
             rows=int(flat.shape[0]),
-            rotated_input_features=self.padded_input_features,
+            rotated_input_features=native_rotated_features,
             rot_size=native_rot_size,
         )
         output = native_forward(flat)
@@ -1084,7 +1131,14 @@ class ConvRotInt8Linear(nn.Module):
             self._last_native_w8a8_backend = None
             self._last_native_w8a8_fallback_reason = None
             return self._forward_float_fallback(inputs)
-        if self.int8_compute.engine == "cuda_sm89":
+        # M<=128 uses the dense-int8 entry to avoid the legacy 256-row ABI;
+        # the exact M=256 shape can use the lower-register CUTLASS schedule.
+        prefer_cutlass_m256 = (
+            self.int8_compute.engine == "auto"
+            and rows == 256
+            and self.output_features >= 512
+        )
+        if (self.int8_compute.engine == "cuda_sm89" and rows > 128) or prefer_cutlass_m256:
             cutlass_allowed, cutlass_reason = self._cutlass_w8a8_gate(inputs)
             if cutlass_allowed:
                 try:
@@ -1093,6 +1147,11 @@ class ConvRotInt8Linear(nn.Module):
                     cutlass_reason = f"CUTLASS ConvRot execution failed: {exc}"
             self._last_cutlass_w8a8_used = False
             self._last_cutlass_w8a8_fallback_reason = cutlass_reason
+        elif self.int8_compute.engine == "cuda_sm89" and rows <= 128:
+            self._last_cutlass_w8a8_used = False
+            self._last_cutlass_w8a8_fallback_reason = (
+                "small-M native dense-int8 path bypasses CUTLASS 256-row ABI"
+            )
         if self.int8_compute.engine not in {"auto", "cuda_sm89"}:
             self._last_cutlass_w8a8_used = False
             self._last_native_w8a8_used = False
@@ -1135,9 +1194,17 @@ class ConvRotInt8Linear(nn.Module):
 
     def execution_metadata(self) -> dict[str, Any]:
         base = self.int8_compute.execution_metadata()
+        last_engine = self.int8_compute.last_execution.get("engine")
+        if self._last_native_w8a8_used:
+            precision = dict(base.get("runtime_precision", {}))
+            precision["native_mma_executed"] = True
+            base["runtime_precision"] = precision
         return {
             **base,
             "implementation": (
+                "bf16_dense_small_m_fallback"
+                if last_engine == "float_fallback"
+                else
                 "cuda_sm89_cutlass_convrot"
                 if self._last_cutlass_w8a8_used
                 else self._last_native_w8a8_backend

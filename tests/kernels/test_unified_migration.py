@@ -43,16 +43,6 @@ def test_benchmark_package_is_removed() -> None:
     assert "ModuleNotFoundError" in result.stderr
 
 
-def test_model_package_is_removed() -> None:
-    code = "import importlib; importlib.import_module('xqt.model')"
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "ModuleNotFoundError" in result.stderr
 
 
 def test_nn_package_is_removed() -> None:

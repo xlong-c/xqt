@@ -2,7 +2,7 @@
 
 Reference:
   SVDQuant: Absorbing Outliers by Low-Rank Components for 4-Bit Diffusion Models
-  (Li et al., NVIDIA/MIT, 2024) — https://arxiv.org/abs/2411.05007
+  (Li et al., NVIDIA/MIT, 2024) - https://arxiv.org/abs/2411.05007
 
 The core idea:
   1. Decompose weight W via SVD: W = U @ diag(S) @ Vh
@@ -32,8 +32,8 @@ class SVDDecomposition:
     W_res = W - L1 @ L2  (residual to be quantized)
 
     Shapes (assuming W is out_features × in_features):
-      - L1: (out_features, r)  — down-projection, applied after activation
-      - L2: (r, in_features)   — up-projection, applied after MMA
+      - L1: (out_features, r)  - down-projection, applied after activation
+      - L2: (r, in_features)   - up-projection, applied after MMA
     """
 
     U: torch.Tensor
@@ -46,8 +46,8 @@ class SVDDecomposition:
     def low_rank_components(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (L1, L2) such that W_lr = L1 @ L2.
 
-        L1 shape: (out_features, r)  — used as x @ L1^T (or L1 @ x^T)
-        L2 shape: (r, in_features)   — used as y @ L2^T (or L2 @ y^T)
+        L1 shape: (out_features, r)  - used as x @ L1^T (or L1 @ x^T)
+        L2 shape: (r, in_features)   - used as y @ L2^T (or L2 @ y^T)
 
         In the SVDQuant convention:
           down_proj:  x @ L1^T    (batch × in) @ (in × r) → (batch × r)

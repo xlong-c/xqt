@@ -15,6 +15,11 @@ extern "C" int xqt_convrot_w8a8_quantize_rotated_act(
 extern "C" int xqt_convrot_w8a8_gemm(
     const void*, const void*, void*, const void*, const void*, const void*, int,
     int, int, int, int, cudaStream_t);
+extern "C" int xqt_convrot_w8a8_small_quantize(
+    const void*, void*, void*, int, int, int, int, int, cudaStream_t);
+extern "C" int xqt_convrot_w8a8_small_gemm(
+    const void*, const void*, const void*, const void*, const void*, void*, int,
+    int, int, cudaStream_t);
 extern "C" const char* xqt_convrot_w8a8_version();
 
 namespace {
@@ -253,12 +258,120 @@ torch::Tensor linear(
     return output;
 }
 
+torch::Tensor small_m_linear(
+    torch::Tensor input,
+    torch::Tensor activation,
+    torch::Tensor activation_scales,
+    torch::Tensor qweight_t,
+    torch::Tensor weight_scales,
+    torch::Tensor bias,
+    int64_t rotated_k,
+    int64_t rot_size) {
+    for (const auto& item : {
+             std::pair<const torch::Tensor*, const char*>{&input, "input"},
+             {&activation, "activation"},
+             {&activation_scales, "activation_scales"},
+             {&qweight_t, "qweight_t"},
+             {&weight_scales, "weight_scales"},
+             {&bias, "bias"},
+         }) {
+        require_cuda_contiguous(*item.first, item.second);
+        require_same_device(input, *item.first, item.second);
+    }
+    require_compute_type(input, "input");
+    require_compute_type(activation_scales, "activation_scales");
+    TORCH_CHECK(input.dim() == 2, "input must be [M, logical_K]");
+    TORCH_CHECK(
+        activation.dim() == 2 && activation.scalar_type() == torch::kInt8,
+        "activation must be 2D int8");
+    TORCH_CHECK(
+        qweight_t.dim() == 2 && qweight_t.scalar_type() == torch::kInt8,
+        "qweight_t must be 2D int8 [K, N]");
+    TORCH_CHECK(
+        weight_scales.scalar_type() == torch::kFloat32,
+        "weight_scales must be float32");
+    TORCH_CHECK(bias.scalar_type() == torch::kFloat32, "bias must be float32");
+    const int actual_m = static_cast<int>(input.size(0));
+    const int logical_k = static_cast<int>(input.size(1));
+    const int padded_m = static_cast<int>(activation.size(0));
+    const int padded_k = static_cast<int>(activation.size(1));
+    const int n = static_cast<int>(qweight_t.size(1));
+    const int rotation_extent = static_cast<int>(rotated_k);
+    const int rotation_size = static_cast<int>(rot_size);
+    TORCH_CHECK(
+        actual_m > 0 && actual_m <= 128,
+        "small-M path requires 0 < M <= 128");
+    TORCH_CHECK(
+        padded_m >= actual_m && padded_m % 16 == 0,
+        "invalid small-M padding");
+    TORCH_CHECK(
+        qweight_t.size(0) == padded_k,
+        "qweight_t and activation K mismatch");
+    TORCH_CHECK(n > 0 && n % 4 == 0, "output N must be a multiple of 4");
+    TORCH_CHECK(weight_scales.numel() == n, "weight scale size mismatch");
+    TORCH_CHECK(bias.numel() == n, "bias size mismatch");
+    TORCH_CHECK(
+        activation_scales.numel() >= actual_m,
+        "activation scale storage mismatch");
+    TORCH_CHECK(
+        rotation_size == 1 ||
+            (rotation_size >= 2 && rotation_size <= 256 &&
+             rotation_size % 4 == 0 &&
+             ((rotation_size / 4) & (rotation_size / 4 - 1)) == 0),
+        "rot_size must be one or a power of four up to 256");
+    TORCH_CHECK(
+        rotation_extent >= logical_k && rotation_extent <= padded_k,
+        "rotated_k must cover logical K and fit padded K");
+    TORCH_CHECK(
+        rotation_size == 1 || rotation_extent % rotation_size == 0,
+        "rotated_k must be divisible by rot_size");
+    auto output = torch::empty({actual_m, n}, input.options());
+    c10::cuda::CUDAGuard guard(input.device());
+    check_status(
+        xqt_convrot_w8a8_small_quantize(
+            input.data_ptr(),
+            activation.data_ptr(),
+            activation_scales.data_ptr(),
+            actual_m,
+            logical_k,
+            rotation_extent,
+            padded_k,
+            rotation_size,
+            current_stream(input)),
+        "small-M ConvRot activation rotation and dynamic quantization");
+    check_status(
+        xqt_convrot_w8a8_small_gemm(
+            activation.data_ptr(),
+            activation_scales.data_ptr(),
+            qweight_t.data_ptr(),
+            weight_scales.data_ptr(),
+            bias.data_ptr(),
+            output.data_ptr(),
+            actual_m,
+            n,
+            padded_k,
+            current_stream(input)),
+        "small-M ConvRot dense int8 GEMM");
+    return output;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     module.def("quantize_weight", &quantize_weight);
     module.def("quantize_rotated_act", &quantize_rotated_act);
     module.def("gemm", &gemm);
+    module.def(
+        "small_m_linear",
+        &small_m_linear,
+        pybind11::arg("input"),
+        pybind11::arg("activation"),
+        pybind11::arg("activation_scales"),
+        pybind11::arg("qweight_t"),
+        pybind11::arg("weight_scales"),
+        pybind11::arg("bias"),
+        pybind11::arg("rotated_k"),
+        pybind11::arg("rot_size"));
     module.def(
         "linear",
         &linear,

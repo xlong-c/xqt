@@ -16,7 +16,7 @@ from xqt.core.errors import XQTBackendError
 from xqt.kernels.jit.utils.compile import CompileSpec, csrc_path, load_extension
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parents[3]
+_REPO_ROOT = _HERE.parents[4]
 _NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _VECTOR_ALIGNMENT = 4

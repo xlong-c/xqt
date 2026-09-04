@@ -4233,3 +4233,264 @@ runtime 负责后端执行视图. 本轮覆盖 `Int8MmaLinear` 与
 - [layer boundary tests](../../../tests/xqt/test_layer_import_boundaries.py)
 - [INT8 quantizer tests](../../../tests/xqt/quant/test_int8_mma_quantizer.py)
 - [W4 quantizer tests](../../../tests/xqt/quant/test_w4_storage_int8_mma.py)
+
+## R-043: OvisOCR2 ConvRot W8A8 SM89 runtime path
+
+### Target and implementation
+
+`xqt.model.ovisocr2` supports the OvisOCR2/Ovis2.5 model family, with
+`AIDC-AI/Ovis2.5-9B` as the default checkpoint. The adapter selects only
+non-output `nn.Linear` modules below `llm`, and keeps `visual_tokenizer`,
+`vte`, and every `lm_head` in BF16. Storage quantization and execution remain
+separate: `quantize_ovisocr2_convrot_int8(...)` creates a serializable ConvRot
+W8A8 artifact, while `materialize_ovisocr2_convrot_int8_runtime(...)` explicitly
+enables the runtime view.
+
+The performance default is dynamic per-token activation scaling with rotation
+size 256. On SM89, the native route fuses regular-Hadamard rotation, dynamic
+INT8 activation packing, and Nunchaku W8A8 GEMM. The route caches packed
+weights and row-shaped workspaces, and preserves existing fallback metadata for
+unsupported device, dtype, shape, or engine requests.
+
+### Fair baseline, correctness, and result
+
+The reproducible proxy benchmark is
+`research/xqt-gemm/bench_sm89_ovisocr2_convrot_w8a8.py`. It uses a BF16 Ovis
+namespace proxy (`llm.projection` plus protected `llm.lm_head`), CUDA events,
+20 warmup calls, 11 alternating samples, and 100 calls per sample. It does not
+download a checkpoint or claim OCR quality. The BF16 dense projection and
+ConvRot candidate use identical generated weights and inputs.
+
+Target: NVIDIA GeForce RTX 4070 Ti SUPER, SM89, driver 591.86, CUDA 13.0,
+PyTorch 2.12.1+cu130, BF16, rotation size 256.
+
+| Ovis proxy shape | BF16 p50 | ConvRot W8A8 p50 | ConvRot/BF16 | relative RMSE |
+| --- | ---: | ---: | ---: | ---: |
+| `M=1,4096 -> 4096` | `0.06434 ms` | `0.13274 ms` | `2.063x` | `0.01201` |
+| `M=32,4096 -> 4096` | `0.03109 ms` | `0.14151 ms` | `4.552x` | `0.01263` |
+| `M=256,4096 -> 12288` | `0.31092 ms` | `0.21912 ms` | `0.705x` | `0.01262` |
+
+All three cases report `engine=native_convrot_w8a8_sm89`,
+`native_w8a8_used=true`, `rotation_quant_fused=true`, and `true_int8_mma=true`.
+The 256-row MLP projection is `1.42x` faster than its BF16 baseline. The decode
+and short-prefill shapes are slower because the native workspace pads rows to
+256, so they must retain a deployment-specific `min_int8_rows` threshold or
+fall back to the existing higher-precision route. No full-checkpoint OCR
+quality, end-to-end `chat` latency, or serving throughput claim follows from
+this proxy result.
+
+### Verification locations
+
+- [OvisOCR2 adapter](../../../xqt/model/ovisocr2.py)
+- [SM89 native ConvRot runtime](../../../xqt/kernels/ops/_impl/cute/convrot_w8a8_sm89.py)
+- [OvisOCR2 adapter tests](../../../tests/xqt/test_ovisocr2_convrot.py)
+- [benchmark entry](../../../research/xqt-gemm/bench_sm89_ovisocr2_convrot_w8a8.py)
+- [benchmark artifact](../../../research/xqt-gemm/artifacts/2026-08-31-sm89-ovisocr2-convrot-w8a8/result.json)
+
+## R-044: OvisOCR2 small-M dispatch guard
+
+### Problem and change
+
+The SM89 native ConvRot ABI uses 256-row workspace tiles. For decode and short
+prefill (`M=1/32`), padding dominates the useful GEMM work and made INT8 slower
+than the BF16 projection. OvisOCR2 keeps its `min_int8_rows=256` adapter default:
+rows below 256 use the cached dense BF16 fallback, while `M>=256` remains eligible
+for the native INT8 route. The dedicated benchmark overrides this threshold to
+exercise the new small-M kernel. This is an explicit precision/runtime dispatch
+decision, not an INT8 speed claim for the small-M cases.
+
+The benchmark adds `M=64/128` boundary cases so the threshold is observable. In
+the latest run, `M=1/32/64/128` measured `1.02x/1.07x/1.07x/0.96x` of BF16,
+while `M=256` measured `0.70x` (about `1.43x` faster). This guard remains the
+default OvisOCR2 policy; the dedicated small-M INT8 kernel and its separate
+benchmark are recorded in R-048.
+
+### Verification
+
+- [OvisOCR2 adapter test](../../../tests/xqt/test_ovisocr2_convrot.py)
+- [small-M benchmark](../../../research/xqt-gemm/bench_sm89_ovisocr2_convrot_w8a8.py)
+
+## R-048: SM89 small-M dense INT8 ConvRot kernel
+
+### 实现
+
+为绕开 Nunchaku 256-row packed ABI, SM89 ConvRot 在 `M<=128` 时改用专用
+入口: 每行在 CUDA 内核中执行 regular-Hadamard (4 阶张量积) 和动态 per-token
+量化, 再用原始 KxN INT8 权重, 逐输出通道 scale 和 bias 做 dense INT8 WMMA
+(`m16n16k16`) 累加. 行 workspace 只按 16 对齐, `M=1/32/64/128` 分别使用
+16/32/64/128 行, 不再填充到 256 行. `M>128` 继续走原有 Nunchaku packed
+路径, 显式 `cuda_sm89` 也会先绕过 CUTLASS 的 256-row 分支.
+
+### 验证
+
+SM89 RTX 4070 Ti SUPER, BF16, CUDA events, 20 warmup, 11 repeats, 每次 100
+调用的 proxy benchmark (无 checkpoint 和 OCR 质量结论) 结果为:
+
+| M | BF16 p50 | small-M INT8 p50 | INT8/BF16 | relative RMSE |
+|---:|---:|---:|---:|---:|
+| 1 | 0.0574 ms | 0.2052 ms | 3.58x | 0.0118 |
+| 32 | 0.0284 ms | 0.2071 ms | 7.29x | 0.0125 |
+| 64 | 0.0317 ms | 0.3140 ms | 9.90x | 0.0124 |
+| 128 | 0.0571 ms | 0.6880 ms | 12.05x | 0.0125 |
+
+本轮首先验证了真实 INT8 操作和 256-row ABI 脱钩; 该 SIMT/WMMA 原型在
+这些小矩阵上仍受 launch 和权重读取开销影响, 暂未宣称端到端延迟收益. 通过
+与旧 packed 路径的同输入对照, FP16 最大绝对差约 `0.002`; 新增 M=1/32/128
+workspace 和 metadata 回归测试, `small_m_specialized=true` 明确标识该分支.
+
+### 验证位置
+
+- [SM89 small-M CUDA kernel](../../../xqt/kernels/jit/csrc/quantization/convrot_w8a8_sm89_kernel.cu)
+- [small-M binding](../../../xqt/kernels/jit/csrc/quantization/convrot_w8a8_sm89_binding.cpp)
+- [ConvRot runtime dispatch](../../../xqt/compression/quant/quantizers/convrot_int8.py)
+- [small-M regression tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
+
+## R-049: SM89 M=256 ConvRot CUTLASS visitor route
+
+### Nsight 证据与改动
+
+M=256 的 steady-state profile 使用
+`research/xqt-gemm/profile_sm89_ovisocr2_convrot_w8a8.py`,CUDA events 预热后再
+采集 30 次调用. Nsight Systems 将每次调用拆为两个主要 kernel: Nunchaku packed
+GEMM 中位数约 `112.8 us`,旋转/量化约 `79.8 us`. Nsight Compute basic 对原
+Nunchaku GEMM 显示 255 registers/thread,16.7% theoretical occupancy 和 1.45
+waves/SM;96 个 CTA 在 66 个 SM 上产生约半个尾波.
+
+本轮先复用已存在的 CUTLASS visitor `128x256x64` tile,然后根据 Nsight
+Compute 的寄存器瓶颈做单变量 tile A/B. `128x256` 使用 226 registers/thread,
+16.7% theoretical occupancy,运行时 GEMM 中位数约 `111.9 us`;改用
+`64x128x64` 后降为 96 registers/thread,33.3% theoretical occupancy 和
+2.91 waves/SM,steady-state GEMM 中位数约 `107.5 us`,旋转/量化约
+`14.6 us`. 完整 CUDA-event benchmark 的 `M=256,K=4096,N=12288` 从 BF16
+`0.3168 ms` 降到 `0.1361 ms` (`0.4296x`,约 2.33x). M<=128 的 dense INT8
+入口和显式 engine 行为不变. 进一步把 `stages=3` 改为 `stages=2` 的单变量
+实验约 `0.136 ms`,慢于 stages=3,因此不采纳. 当前瓶颈仍是 visitor GEMM 的
+计算/内存混合利用,不能仅凭 occupancy 报告宣称还有固定比例收益.
+
+后续针对 occupancy 的三个候选也做了同形状 A/B. `64x128x32` 无法通过
+CUTLASS visitor 的 warp-level K 静态约束; `32x128x64` 和 `64x64x64` 虽然
+减少单 CTA 资源,但 steady-state 分别为 `0.1999 ms` 和 `0.2057 ms`,明显慢于
+`64x128x64` 的 `0.1299 ms`,因此不接入默认路由. 详细数据见
+`research/xqt-gemm/artifacts/2026-09-01-sm89-ovisocr2-convrot-m256/tile_ab_results.json`.
+
+### 验证
+
+- RTX 4070 Ti SUPER,SM89,CUDA 13.0,PyTorch 2.12.1+cu130,BF16,
+  `M=256,K=4096,N=12288`.
+- `pytest -q tests/xqt/quant/test_convrot_int8_quantizer.py`
+  (包含 M=256 auto 路由回归)通过.
+- Nsight Systems trace:
+  `research/xqt-gemm/artifacts/2026-09-01-sm89-ovisocr2-convrot-m256/nsys/m256_cutlass_64x128_range.nsys-rep`
+  (CUTLASS GEMM `107.5 us`,quantize `14.6 us`,30 instances).
+- Nsight Compute basic:
+  `research/xqt-gemm/artifacts/2026-09-01-sm89-ovisocr2-convrot-m256/ncu/cutlass_64x128_basic.ncu-rep`
+  (96 registers/thread,33.3% occupancy,384 CTA,2.91 waves/SM).
+
+## R-045: FLUX Nunchaku attention workspace reuse
+
+### 目标
+
+减少 `SVDQuantFluxAttention` 的 Nunchaku FP16 热路径在每次 forward 中分配
+Q/K/V 临时 tensor 的 host allocator 开销. 本轮不改变 QKV + Q/K RMSNorm +
+RoPE kernel, 不改变 attention 数学或输出布局.
+
+### 基线与方法
+
+历史 FLUX joint attention parity benchmark 使用 RTX 4070 Ti SUPER (`sm_89`),
+CUDA events, 20 warmup, 12 paired repeats, 200 calls per repeat. 该 benchmark
+测的是 module 级 wrapper,不是完整 Transformer. 本轮开发环境没有 native sm89
+W4A4 backend,因此没有把缓存前后的 latency 差异写成已验证结果.
+
+### 实现
+
+- `SVDQuantFluxAttention` 增加按 device,dtype,heads,head_dim,padded rows 和
+  CUDA stream 隔离的 Q/K/V buffer cache,容量上限为 8 个 shape.
+- Nunchaku FP16 路径复用缓存 buffer,避免每次 forward 的三次 `torch.empty`.
+- `_apply` 和 runtime cache clear 同时释放 attention buffer cache.
+- `execution_metadata()` 增加 `attention_workspace_reused`,用于确认第二次调用
+  是否命中缓存. 每次 forward 先清零该状态,避免 gate 失败时残留旧值.
+
+### 正确性与适用边界
+
+新增测试在两次相同输入调用之间检查输出一致性,并要求第二次调用报告
+`attention_workspace_reused=true`. 缓存按 CUDA stream 隔离,避免并发 stream 写同一
+组 Q/K/V. shape 或 stream 变化会分配新组,超过容量上限时清空旧组.
+
+### 未采纳方案
+
+默认 SDPA 路径暂未实现 projection kernel 直接写入用户 QKV buffer: 当前 native
+binding 没有该 ABI,额外 `copy_` 不能减少 device-to-device copy. R-047 已将 cat
+输出改为可复用 staging buffer,只消除临时 allocation; QKV 与 attention 的单 kernel
+融合留待 profiler 证明 attention 边界是主要瓶颈后再做.
+
+### 验证落点
+
+- [FLUX runtime](../../../xqt/runtime/modules/svd_flux_attention.py)
+- [Nunchaku path test](../../../tests/xqt/runtime/test_svd_flux_attention.py)
+- [历史 FLUX parity artifact](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-flux-attention-parity-v1/result.json)
+
+## R-046: TileLang self-attention packed QKV projection
+
+### 目标与实现
+
+`_TileLangAttentionWrapper` 在 self-attention (`query is key is value`) 情况下,
+原先对同一个输入分别执行 Q,K,V 三次 `F.linear`. 现在直接使用已有的 packed
+`in_proj_weight` 和 `in_proj_bias` 执行一次 `F.linear`,再按 embedding 维度切分为
+Q/K/V. Cross-attention 或 Q/K/V 输入不同的调用继续走原来的三次投影路径.
+
+运行时 metadata 增加 `qkv_projection`,值为 `packed_self_attention`, `separate_qkv`,
+或 `reference_fallback`,用于确认实际分支,而不是仅凭配置推断.
+
+### 性能证据
+
+在 RTX 4070 Ti SUPER (`sm_89`), FP16, `K=4096`, `B=1` 的 CUDA event 微基准中,
+对每个候选执行 30 次 warmup 和 12 次交替采样,每次采样 200 次投影:
+
+| sequence | packed / separate | 观察 |
+| ---: | ---: | --- |
+| `1` | `0.955x` | packed 更快 |
+| `64` | `1.040x` | 近似持平, packed 略慢 |
+| `128` | `1.023x` | 近似持平 |
+| `256` | `0.987x` | packed 略快 |
+| `512` | `0.996x` | 近似持平 |
+| `1024` | `0.994x` | 近似持平 |
+
+这里的 ratio 是 `packed_latency / separate_latency`; 该结果只覆盖 QKV 投影阶段,
+不代表完整 attention 或 Transformer block 的端到端 speedup. 稳定收益来自减少两次
+矩阵乘 launch 和一次中间输出分配; 序列较长时 GEMM 本体占主导,因此不宣称固定比例
+的整体加速.
+
+### 验证
+
+- CPU 回归测试确认 self-attention 数值等价且 `F.linear` 调用次数为 1.
+- 现有 CUDA attention wrapper 测试继续覆盖 cross-attention 数值和 causal 语义.
+- [TileLang attention wrapper](../../../xqt/kernels/wrappers/attention.py)
+- [packed projection test](../../../tests/xqt/test_operator_tilelang_cuda.py)
+
+## R-047: FLUX SDPA joint-QKV staging buffer reuse
+
+### 目标与实现
+
+`SVDQuantFluxAttention` 的 `flashattn2`/SDPA joint attention 路径仍然需要
+先分别生成 context 和 hidden 的 QKV,因为当前 W4A4 binding 没有接受用户输出
+buffer 的 ABI. 本轮保留这两个 projection 的计算,但将 `torch.cat` 替换为按
+context/hidden 行数,device,dtype 和 CUDA stream 缓存的 staging buffer,再把两段
+QKV copy 到 context-then-hidden 的固定布局.
+
+这消除了每次 joint forward 的 cat 输出 allocation 和释放,不改变 QKV 数值,顺序
+或 SDPA 数学. stream 进入 cache key,避免并发 stream 复用同一个写入 buffer; module
+`_apply()`,`disable_fusion()` 和 cache clear 会释放该缓存. `execution_metadata()`
+增加 `joint_qkv_workspace_reused`,用于确认第二次相同 shape 调用命中缓存.
+
+### 边界与验证
+
+该改动不是 QKV projection 到目标 buffer 的原地融合:两次 projection 结果仍会先
+物化,因此收益只来自 staging allocation reuse,不能宣称减少 device-to-device copy.
+真实 CUDA latency 需要在 SM89 上用 paired CUDA event 重新测量;当前本机 native
+W4A4 backend 不可用. CPU 回归测试覆盖 shape 命中和 `disable_fusion()` 清理,
+CUDA parity 测试继续覆盖 joint output shape 与 native metadata.
+
+### 验证落点
+
+- [FLUX runtime](../../../xqt/runtime/modules/svd_flux_attention.py)
+- [staging buffer test](../../../tests/xqt/runtime/test_svd_flux_attention.py)

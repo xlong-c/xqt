@@ -19,6 +19,7 @@ class DemoAdapter(ModelAdapter):
         del params
         assert checkpoint == "custom.pt"
         return nn.Linear(2, 2)
+
 from xqt.pipeline.runner import create_context
 
 
@@ -54,6 +55,7 @@ def test_builtin_profiles_cover_shipped_model_loaders() -> None:
     assert {
         "hf.hunyuan-ocr",
         "hf.unlimited-ocr",
+        "hf.ovisocr2",
         "diffusers.wan21-vae",
         "diffusers.flux2-klein",
     }.issubset(names)

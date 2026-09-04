@@ -20,7 +20,7 @@ from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import (
 )
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parents[3]
+_REPO_ROOT = _HERE.parents[4]
 _NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
 _VECTOR_ALIGNMENT = 4
 _CUDA_SOURCE = csrc_path("quantization", "svdq_w8a8_sm89_kernel.cu")

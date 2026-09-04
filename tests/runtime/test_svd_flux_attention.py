@@ -164,6 +164,37 @@ def test_rotary_helper_rejects_wrong_dtype_and_length() -> None:
         )
 
 
+def test_joint_qkv_buffer_reuses_shape_and_clears_on_disable() -> None:
+    attention, to_qkv, add_qkv_proj = _make_joint_attention()
+    module = SVDQuantFluxAttention(
+        attention,
+        to_qkv,
+        add_qkv_proj=add_qkv_proj,
+    )
+    device = torch.device("cpu")
+    first = module._joint_qkv_buffer(
+        3,
+        2,
+        device=device,
+        dtype=torch.float32,
+    )
+    second = module._joint_qkv_buffer(
+        3,
+        2,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    assert second is first
+    assert module.execution_metadata()["joint_qkv_workspace_reused"] is True
+    assert module._joint_qkv_buffer_cache
+
+    module.disable_fusion()
+
+    assert module._joint_qkv_buffer_cache == {}
+    assert module.execution_metadata()["joint_qkv_workspace_reused"] is False
+
+
 def test_native_path_rejects_training_before_cuda_dispatch() -> None:
     attention, to_qkv, add_qkv_proj = _make_joint_attention()
     module = SVDQuantFluxAttention(
@@ -298,14 +329,32 @@ def test_cuda_joint_nunchaku_fp16_forward_reports_shapes() -> None:
             context,
             image_rotary_emb=rotary,
         )
+        hidden_output_second, context_output_second = module(
+            hidden,
+            context,
+            image_rotary_emb=rotary,
+        )
 
     assert hidden_output.shape == hidden.shape
     assert context_output.shape == context.shape
+    torch.testing.assert_close(
+        hidden_output_second,
+        hidden_output,
+        rtol=2e-3,
+        atol=2e-3,
+    )
+    torch.testing.assert_close(
+        context_output_second,
+        context_output,
+        rtol=2e-3,
+        atol=2e-3,
+    )
     metadata = module.execution_metadata()
     assert metadata["native_qkv_used"] is True
     assert metadata["implementation"] == "native_svdq_flux_attention_nunchaku_fp16"
     assert metadata["attention_processor"] == "nunchaku-fp16"
     assert metadata["fallback_reason"] is None
+    assert metadata["attention_workspace_reused"] is True
 
 
 def test_cuda_single_nunchaku_fp16_forward_reports_shapes() -> None:

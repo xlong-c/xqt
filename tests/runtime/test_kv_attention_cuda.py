@@ -739,6 +739,8 @@ def test_fused_dispatch_passes_scale_buffers_without_scalar_readback(
         )
         return k_int8, v_int8
 
+    import xqt.kernels.ops.attention as ops_attention
+
     monkeypatch.setattr(entity, "_fused_unavailability_reason", fused_available)
     monkeypatch.setattr(
         kv_int8_kernel,
@@ -749,6 +751,18 @@ def test_fused_dispatch_passes_scale_buffers_without_scalar_readback(
         kv_int8_kernel,
         "quantize_packed_qkv_int8_layout_tilelang",
         fake_quantize_layout,
+    )
+    monkeypatch.setattr(
+        ops_attention,
+        "fused_kv_int8_attention_packed_qkv_forward_tilelang",
+        fake_fused,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ops_attention,
+        "quantize_packed_qkv_int8_layout_tilelang",
+        fake_quantize_layout,
+        raising=False,
     )
 
     output = entity._try_fused_attention(qkv)

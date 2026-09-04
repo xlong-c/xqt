@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -70,6 +72,43 @@ def _tilelang_cuda_operator_config(
             "sync_cuda": True,
         },
     }
+
+
+def test_tilelang_attention_self_attention_uses_packed_qkv_projection() -> None:
+    attention = torch.nn.MultiheadAttention(
+        16,
+        4,
+        batch_first=True,
+        dropout=0.0,
+    ).eval()
+    wrapper = _TileLangAttentionWrapper(
+        attention,
+        fallback="eager",
+        settings={"target_arch": "cpu", "attention_fastpath": "tilelang"},
+    )
+    x = torch.randn(2, 7, 16)
+    embed_dim = int(attention.embed_dim)
+    expected = tuple(
+        torch.nn.functional.linear(
+            x,
+            attention.in_proj_weight[start : start + embed_dim],
+            None
+            if attention.in_proj_bias is None
+            else attention.in_proj_bias[start : start + embed_dim],
+        )
+        for start in (0, embed_dim, 2 * embed_dim)
+    )
+
+    with patch(
+        "xqt.kernels.wrappers.attention.F.linear",
+        wraps=torch.nn.functional.linear,
+    ) as linear:
+        actual = wrapper._project_qkv(x, x, x)
+
+    assert linear.call_count == 1
+    assert wrapper.last_qkv_projection == "packed_self_attention"
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor)
 
 
 @requires_cuda
@@ -266,6 +305,8 @@ def test_tilelang_attention_wrapper_replays_cuda_graph_on_second_call(
     assert second_output.dtype == dtype
     assert first_metadata["cuda_graph"]["state"] == "captured"
     assert second_metadata["cuda_graph"]["state"] == "replayed"
+    assert first_metadata["qkv_projection"] == "packed_self_attention"
+    assert second_metadata["qkv_projection"] == "packed_self_attention"
     assert first_metadata["kernel_constraints"]["dtype"] == str(dtype).removeprefix(
         "torch."
     )
@@ -351,6 +392,8 @@ def test_tilelang_attention_wrapper_native_path_preserves_lower_right_causal_cro
         atol=tolerance,
         rtol=tolerance,
     )
+    assert tilelang_wrapper.last_qkv_projection == "separate_qkv"
+    assert native_wrapper.last_qkv_projection == "separate_qkv"
 
 
 @requires_cuda

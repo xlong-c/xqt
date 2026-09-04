@@ -1526,14 +1526,16 @@ int run_cutlass_visitor_convrot_w8a8(
   if (quantize_error != cudaSuccess) {
     return static_cast<int>(quantize_error);
   }
-  if (n >= 512) {
+  // M=256 benefits from the lower-register tile; preserve the legacy tile for
+  // other explicit CUTLASS shapes until they have independent measurements.
+  if (actual_m == 256 && n >= 512) {
     return run_cutlass_visitor_w8a8<
         ElementOutput,
+        64,
         128,
-        256,
         64,
-        64,
-        64,
+        32,
+        32,
         64,
         3>(
         quantized_activation,
@@ -1551,11 +1553,11 @@ int run_cutlass_visitor_convrot_w8a8(
   }
   return run_cutlass_visitor_w8a8<
       ElementOutput,
-      64,
       128,
+      256,
       64,
-      32,
-      32,
+      64,
+      64,
       64,
       3>(
       quantized_activation,

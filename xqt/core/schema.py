@@ -14,7 +14,15 @@ from xqt.contracts.quant_strategy import (
 )
 
 COMPRESSION_AXES = ("width", "depth", "precision", "sparsity", "steps", "low_rank")
-TASK_TYPES = ("classification", "detection")
+TASK_TYPES = (
+    "classification",
+    "detection",
+    "llm",
+    "diffusion",
+    "moe",
+    "multimodal",
+    "custom",
+)
 PRUNE_GRANULARITIES = (
     "channel",
     "filter",

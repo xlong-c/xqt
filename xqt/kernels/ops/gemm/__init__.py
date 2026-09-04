@@ -10,7 +10,11 @@ from xqt.kernels.ops._legacy_api import load_legacy
 _CUDA = frozenset({CapabilityRequirement.CUDA})
 
 
-def _gemm_reference(a, b, bias=None):  # type: ignore[no-untyped-def]
+def _gemm_reference(
+    a: Any,
+    b: Any,
+    bias: Any | None = None,
+) -> Any:
     import torch
 
     out = torch.matmul(a, b)
@@ -134,13 +138,13 @@ def __dir__() -> list[str]:
     return sorted(names)
 
 
-def gemm_bmm_fp8_triton(*args, **kwargs):  # type: ignore[no-untyped-def]
+def gemm_bmm_fp8_triton(*args: Any, **kwargs: Any) -> Any:
     from xqt.kernels.selector import get_kernel
 
     return get_kernel("gemm.bmm_fp8", KernelBackend.TRITON)(*args, **kwargs)
 
 
-def gemm_fp16_triton(*args, **kwargs):  # type: ignore[no-untyped-def]
+def gemm_fp16_triton(*args: Any, **kwargs: Any) -> Any:
     from xqt.kernels.selector import get_kernel
 
     return get_kernel("gemm.gemm_fp16", KernelBackend.TRITON)(*args, **kwargs)
@@ -152,13 +156,13 @@ def gemm_bf16_triton(*args: Any, **kwargs: Any) -> Any:
     return get_kernel("gemm.gemm_bf16", KernelBackend.TRITON)(*args, **kwargs)
 
 
-def gemm_fp16_tilelang(*args, **kwargs):  # type: ignore[no-untyped-def]
+def gemm_fp16_tilelang(*args: Any, **kwargs: Any) -> Any:
     from xqt.kernels.selector import get_kernel
 
     return get_kernel("gemm.gemm_fp16", KernelBackend.TILELANG)(*args, **kwargs)
 
 
-def gemm_fp16_torch(*args, **kwargs):  # type: ignore[no-untyped-def]
+def gemm_fp16_torch(*args: Any, **kwargs: Any) -> Any:
     from xqt.kernels.selector import get_kernel
 
     return get_kernel("gemm.gemm_fp16", KernelBackend.TORCH)(*args, **kwargs)

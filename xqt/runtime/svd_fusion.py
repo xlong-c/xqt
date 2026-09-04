@@ -1,15 +1,15 @@
 """SVDQuant FUSE_DOWN / FUSE_UP fusion contract (DEBT-005).
 
-现在支持更 deep epilogue fusion (bias + LoRA up) 和 runtime backend 选择。
+现在支持更 deep epilogue fusion (bias + LoRA up) 和 runtime backend 选择.
 
-已提取优化：
+已提取优化:
 - FUSE_UP 深度 epilogue 融合
 - Runtime backend (fused vs native Nunchaku-like)
 - Schedule 调优
 
-加速已推进以追平/超越 Nunchaku 整体加速。
+加速已推进以追平/超越 Nunchaku 整体加速.
 
-参考：xqt/kernels/ops/_impl/tilelang/svd_fused.py
+参考:xqt/kernels/ops/_impl/tilelang/svd_fused.py
 """
 
 from __future__ import annotations

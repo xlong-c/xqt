@@ -499,13 +499,44 @@ def test_convrot_dynamic_native_sm89_route_cache_and_stream(
     torch.testing.assert_close(first, split, rtol=3e-2, atol=3e-2)
     assert packed_first[1] is packed_second[1]
     assert len(module._native_w8a8_workspace_cache) == 2
-    assert metadata["implementation"] == "native_convrot_w8a8_dynamic"
+    assert metadata["implementation"] == "native_convrot_w8a8_small_m"
     assert metadata["native_w8a8_used"] is True
     assert metadata["rotation_quant_fused"] is True
     assert metadata["activation_quant_fused"] is True
     assert metadata["activation_granularity"] == "per_token"
     assert metadata["norm_fused"] is False
     assert metadata["native_w8a8_fallback_reason"] is None
+    assert metadata["small_m_specialized"] is True
+    assert metadata["native_packed_weight"] is False
+
+
+@pytest.mark.parametrize("rows", [1, 32, 128])
+def test_convrot_dynamic_native_sm89_small_m_workspace_alignment(rows: int) -> None:
+    if not _native_convrot_w8a8_test_available(torch.float16):
+        pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
+
+    source = torch.nn.Linear(
+        256,
+        256,
+        bias=True,
+        device="cuda",
+        dtype=torch.float16,
+    ).eval()
+    module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=256,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ))
+    output = module(torch.randn(rows, 256, device="cuda", dtype=torch.float16))
+    torch.cuda.synchronize()
+    workspace = next(iter(module._native_w8a8_workspace_cache.values()))
+    metadata = module.execution_metadata()
+
+    assert output.shape == (rows, 256)
+    assert workspace.padded_rows == ((rows + 15) // 16) * 16
+    assert metadata["implementation"] == "native_convrot_w8a8_small_m"
+    assert metadata["small_m_specialized"] is True
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -563,10 +594,46 @@ def test_convrot_dynamic_native_sm89_prerotated_route() -> None:
     metadata = module.execution_metadata()
 
     assert output.shape == (13, 80)
-    assert metadata["implementation"] == "native_w8a8_dynamic_prerotated"
+    assert metadata["implementation"] == "native_w8a8_small_m_prerotated"
     assert metadata["native_w8a8_used"] is True
     assert metadata["rotation_quant_fused"] is False
     assert metadata["activation_quant_fused"] is True
+
+
+def test_convrot_dynamic_auto_m256_prefers_cutlass_when_available() -> None:
+    if not _native_convrot_w8a8_test_available(torch.bfloat16):
+        pytest.skip("native sm_89 ConvRot W8A8 backend unavailable")
+    try:
+        from xqt.kernels.ops._impl.cute.int8mma_binding import int8mma_available
+
+        if not int8mma_available():
+            pytest.skip("CUTLASS INT8 MMA backend unavailable")
+    except Exception:
+        pytest.skip("CUTLASS INT8 MMA backend unavailable")
+
+    source = torch.nn.Linear(
+        256,
+        512,
+        bias=True,
+        device="cuda",
+        dtype=torch.bfloat16,
+    ).eval()
+    module = _runtime_convrot_int8(ConvRotInt8Linear.from_linear(
+        source,
+        rot_size=256,
+        engine="auto",
+        activation_scale_mode="dynamic",
+    ))
+    output = module(torch.randn(256, 256, device="cuda", dtype=torch.bfloat16))
+    torch.cuda.synchronize()
+    metadata = module.execution_metadata()
+
+    assert output.shape == (256, 512)
+    assert metadata["implementation"] == "cuda_sm89_cutlass_convrot"
+    assert metadata["cutlass_w8a8_used"] is True
+    assert metadata["native_w8a8_used"] is False
+    assert metadata["cutlass_tile"] == "64x128x64"
+    assert metadata["cutlass_stages"] == 3
 
 
 def test_convrot_dynamic_native_sm89_pads_mnk() -> None:
@@ -599,7 +666,7 @@ def test_convrot_dynamic_native_sm89_pads_mnk() -> None:
     assert packed.padded_input_features == 512
     assert packed.padded_output_features == 256
     assert tuple(packed.qweight.shape) == (256, 512)
-    assert workspace.padded_rows == 256
+    assert workspace.padded_rows == 32
 
 
 def test_convrot_native_dynamic_gate_keeps_explicit_fallbacks() -> None:

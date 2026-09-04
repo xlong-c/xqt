@@ -41,6 +41,9 @@ class _TwoMoEModel(nn.Module):
         self.moe_a = _MoEBlock()
         self.moe_b = _MoEBlock()
 
+    def forward(self, x: Tensor) -> Tensor:
+        return self.moe_a(x) + self.moe_b(x)
+
 
 def _moe_contract() -> ModelStructureContract:
     return ModelStructureContract(
@@ -274,6 +277,7 @@ def test_run_prune_stage_without_contract_keeps_baseline_rewrite() -> None:
             method="structured",
             target_sparsity=0.5,
             granularity="expert",
+            scope="per_layer",
         ),
     )
     assert "structure_contract_family" not in context.metrics["prune"]

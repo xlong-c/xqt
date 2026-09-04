@@ -15,6 +15,8 @@ from .composite_add_w4a4 import CompositeAddW4A4Linear
 from .svd_w4a4_legacy import SVDQuantLinear
 
 _HEAD_DIM = 128
+_ATTENTION_BUFFER_CACHE_LIMIT = 8
+_JOINT_QKV_BUFFER_CACHE_LIMIT = 8
 
 
 def _is_w4a4_projection(module: CompositeAddModule) -> bool:
@@ -159,8 +161,15 @@ class SVDQuantFluxAttention(nn.Module):
                 Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
             ],
         ] = {}
+        self._attention_buffer_cache: dict[
+            tuple[Any, ...],
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        ] = {}
+        self._joint_qkv_buffer_cache: dict[tuple[Any, ...], torch.Tensor] = {}
         self._last_native_qkv_used = False
         self._last_fallback_reason: str | None = None
+        self._last_attention_workspace_reused = False
+        self._last_joint_qkv_workspace_reused = False
 
         if self._native_fusion_enabled:
             for projection in self._output_projections():
@@ -179,6 +188,10 @@ class SVDQuantFluxAttention(nn.Module):
 
     def _clear_runtime_cache(self) -> None:
         self._native_hot_cache.clear()
+        self._attention_buffer_cache.clear()
+        self._joint_qkv_buffer_cache.clear()
+        self._last_attention_workspace_reused = False
+        self._last_joint_qkv_workspace_reused = False
 
     def _apply(self, fn: Any) -> "SVDQuantFluxAttention":
         super()._apply(fn)
@@ -206,8 +219,12 @@ class SVDQuantFluxAttention(nn.Module):
         """Disable the native path; calls then fail instead of changing semantics."""
 
         self._native_fusion_enabled = False
+        self._attention_buffer_cache.clear()
+        self._joint_qkv_buffer_cache.clear()
         self._last_native_qkv_used = False
         self._last_fallback_reason = "native fused FLUX attention is disabled"
+        self._last_attention_workspace_reused = False
+        self._last_joint_qkv_workspace_reused = False
 
     @staticmethod
     def _tensor_signature(tensor: torch.Tensor) -> tuple[Any, ...]:
@@ -257,6 +274,87 @@ class SVDQuantFluxAttention(nn.Module):
             int(inputs.shape[0]),
             stream_id,
         )
+
+    def _attention_buffers(
+        self,
+        total_padded: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return reusable Q/K/V buffers for the packed FP16 attention path."""
+
+        raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+        if callable(raw_stream):
+            stream_id = int(raw_stream(device.index))
+        else:
+            stream_id = int(torch.cuda.current_stream(device).cuda_stream)
+        cache_key = (
+            device.index,
+            dtype,
+            self.heads,
+            self.head_dim,
+            int(total_padded),
+            stream_id,
+        )
+        cached = self._attention_buffer_cache.get(cache_key)
+        if cached is not None:
+            self._last_attention_workspace_reused = True
+            return cached
+
+        shape = (1, self.heads, int(total_padded), self.head_dim)
+        query = torch.empty(shape, device=device, dtype=dtype)
+        key = torch.empty_like(query)
+        value = torch.empty_like(query)
+        if len(self._attention_buffer_cache) >= _ATTENTION_BUFFER_CACHE_LIMIT:
+            self._attention_buffer_cache.clear()
+        cached = (query, key, value)
+        self._attention_buffer_cache[cache_key] = cached
+        self._last_attention_workspace_reused = False
+        return cached
+
+    def _joint_qkv_buffer(
+        self,
+        context_rows: int,
+        hidden_rows: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return a reusable context-then-hidden QKV staging buffer."""
+
+        if device.type == "cuda":
+            raw_stream = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+            if callable(raw_stream):
+                stream_id = int(raw_stream(device.index))
+            else:
+                stream_id = int(torch.cuda.current_stream(device).cuda_stream)
+        else:
+            stream_id = 0
+        cache_key = (
+            device.index,
+            dtype,
+            int(context_rows),
+            int(hidden_rows),
+            self.inner_dim,
+            stream_id,
+        )
+        cached = self._joint_qkv_buffer_cache.get(cache_key)
+        if cached is not None:
+            self._last_joint_qkv_workspace_reused = True
+            return cached
+
+        total_rows = int(context_rows) + int(hidden_rows)
+        cached = torch.empty(
+            (1, total_rows, 3 * self.inner_dim),
+            device=device,
+            dtype=dtype,
+        )
+        if len(self._joint_qkv_buffer_cache) >= _JOINT_QKV_BUFFER_CACHE_LIMIT:
+            self._joint_qkv_buffer_cache.clear()
+        self._joint_qkv_buffer_cache[cache_key] = cached
+        self._last_joint_qkv_workspace_reused = False
+        return cached
 
     def _native_gate(
         self,
@@ -472,6 +570,8 @@ class SVDQuantFluxAttention(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run fused QKV, PyTorch SDPA, and the existing FLUX output projections."""
 
+        self._last_attention_workspace_reused = False
+        self._last_joint_qkv_workspace_reused = False
         if kwargs:
             raise NotImplementedError("joint_attention_kwargs are not supported")
         if attention_mask is not None:
@@ -511,10 +611,11 @@ class SVDQuantFluxAttention(nn.Module):
             )
             context_padded = self._padded_rows(context_rows) if context_rows else 0
             total_padded = context_padded + hidden_padded
-            packed_shape = (1, self.heads, total_padded, self.head_dim)
-            query = torch.empty(packed_shape, device=hidden_states.device, dtype=torch.float16)
-            key = torch.empty_like(query)
-            value = torch.empty_like(query)
+            query, key, value = self._attention_buffers(
+                total_padded,
+                device=hidden_states.device,
+                dtype=torch.float16,
+            )
             if encoder_hidden_states is not None:
                 if (
                     context_rotary is None
@@ -562,6 +663,7 @@ class SVDQuantFluxAttention(nn.Module):
                     :, context_padded : context_padded + hidden_rows
                 ]
         else:
+            self._last_attention_workspace_reused = False
             qkv = self._run_qkv_branch(
                 "hidden",
                 self.to_qkv,
@@ -581,7 +683,17 @@ class SVDQuantFluxAttention(nn.Module):
                     encoder_hidden_states,
                     context_rotary,
                 )
-                qkv = torch.cat((qkv_context, qkv), dim=1)
+                context_rows = int(encoder_hidden_states.shape[1])
+                hidden_rows = int(hidden_states.shape[1])
+                qkv_buffer = self._joint_qkv_buffer(
+                    context_rows,
+                    hidden_rows,
+                    device=hidden_states.device,
+                    dtype=qkv.dtype,
+                )
+                qkv_buffer[:, :context_rows].copy_(qkv_context)
+                qkv_buffer[:, context_rows : context_rows + hidden_rows].copy_(qkv)
+                qkv = qkv_buffer
 
             query, key, value = qkv.chunk(3, dim=-1)
             query = query.view(1, -1, self.heads, self.head_dim).transpose(1, 2)
@@ -651,6 +763,12 @@ class SVDQuantFluxAttention(nn.Module):
             "heads": self.heads,
             "joint_attention": self.added_kv_proj_dim is not None,
             "batch_limit": 1,
+            "attention_workspace_reused": bool(
+                self._last_attention_workspace_reused
+            ),
+            "joint_qkv_workspace_reused": bool(
+                self._last_joint_qkv_workspace_reused
+            ),
         }
 
 

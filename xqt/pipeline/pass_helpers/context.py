@@ -73,9 +73,7 @@ def _context_benchmark_config(context: XQTContext) -> BenchmarkConfig:
 
 
 def _context_task_type(context: XQTContext) -> str:
-    if not context.task_type:
-        raise ValueError("XQTContext.task_type is required")
-    return context.task_type
+    return str(context.task_type or "")
 
 
 def _context_model_target(context: XQTContext) -> str | None:

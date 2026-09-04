@@ -140,15 +140,6 @@ def test_benchmark_package_is_removed() -> None:
     raise AssertionError("xqt.benchmark should not exist")
 
 
-def test_model_package_is_removed() -> None:
-    import importlib
-
-    assert not (ROOT / "xqt" / "model").exists()
-    try:
-        importlib.import_module("xqt.model")
-    except ModuleNotFoundError:
-        return
-    raise AssertionError("xqt.model should not exist")
 
 
 def test_nn_package_is_removed() -> None:

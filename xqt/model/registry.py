@@ -32,6 +32,14 @@ def _register_builtin_profiles() -> None:
             metadata={"source": "huggingface", "repo_id": "baidu/Unlimited-OCR"},
         ),
         ModelProfile(
+            profile_id="hf.ovisocr2",
+            family="multimodal",
+            loader_target="xqt.model.ovisocr2.load_ovisocr2",
+            loader_params={"repo_id": "AIDC-AI/Ovis2.5-9B"},
+            inference_adapter="tensor",
+            metadata={"source": "huggingface", "repo_id": "AIDC-AI/Ovis2.5-9B"},
+        ),
+        ModelProfile(
             profile_id="diffusers.wan21-vae",
             family="diffusion",
             loader_target="xqt.model.wan21.load.load_wan21_vae",

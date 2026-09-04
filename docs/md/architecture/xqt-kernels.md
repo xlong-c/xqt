@@ -324,11 +324,11 @@ xqt/kernels/jit/
 
 迁移完成后, 新增实现必须落在 canonical 路径. `xqt.kernels.wrappers` 仍可被旧调用方导入, 但不得在其中新增 kernel implementation 或第二份源码.
 
-## 六,`aot/` 子结构
+## 六,`aot/` 构建树与 JIT/AOT 方案选型
 
 `aot` 是 CMake/pyproject 构建树, 不是 Python 包 (顶层无 `__init__.py`).
 
-```
+```text
 xqt/kernels/aot/
   CMakeLists.txt / pyproject.toml / Makefile / build.sh
   csrc/<group>/*.cu/.cc + common_extension.cc  # REGISTER_EXTENSION(NAME)
@@ -338,6 +338,37 @@ xqt/kernels/aot/
 ```
 
 当前可空, 后续 wheel 产物落此. `ops/<group>` 的 `AOT` backend `target` 指向 `xqt_kernel:<group>.<op>` 或 `xqt.kernels.aot.python.xqt_kernel:<op>`.
+
+### 6.1 JIT vs AOT 技术权衡对比
+
+| 评估维度 | JIT (Just-In-Time) 运行时即时编译 | AOT (Ahead-Of-Time) 提前离线编译 |
+| :--- | :--- | :--- |
+| **首次启动延迟** | **慢 (冷启动开销)**. 首个 token 或初次加载时触发编译器调用, 存在数秒至数分钟的 warmup 抖动. | **极快 (零编译等待)**. 运行时直接 `dlopen` 加载预编译 `.so`, 秒级拉起. |
+| **运行环境依赖** | **重**. 宿主机必须具备完整编译工具链 (`nvcc`, `gcc/g++`, CUDA Toolkit 开发包, Cutlass 头文件等). | **轻**. 部署环境仅需标准显卡驱动和精简 CUDA Runtime, 无需任何主机编译工具. |
+| **形状特化与调优** | **极强**. 可在运行时获取精确的 $M, N, K$, Batch, SeqLen 进行分支消除, 常量折叠与 autotune 调优. | **受限**. 依赖预设模板 (Templates), 穷举参数组合会导致编译耗时与二进制体积组合爆炸. |
+| **算子融合能力** | **天然适配**. 便于将 Norm + Quant + GEMM 等跨算子拼接为单个 kernel (如 TorchInductor / Triton). | **较难穷举**. 通常仅能预先手写实现有限的固定融合模式 (如 FlashAttention, FusedRMSNorm). |
+| **分发与维护成本** | **维护轻量**. 仅需分发 Python 源码或 `.cu` 模版, 避免跨环境编译复杂 wheel. | **维护繁重**. 需针对不同 CUDA, Python, GPU 架构 (如 SM80/SM89/SM90) 编译构建巨大 wheel, 易发 ABI 冲突. |
+| **迭代调试效率** | **高**. 修改 Python / Triton / CUDA 模板后保存即可直接重跑验证. | **低**. 每次微调代码均需触发重新打包与静态构建. |
+
+### 6.2 工业界实践: 双轨混合分层策略 (Hybrid)
+
+现代高性能推理引擎 (如 vLLM, SGLang, XQT) 均不采用二选一的单一方案, 而是遵循分层混合双轨制:
+
+1. **高频底座通用算子归 AOT**:
+   - 基础 Dense GEMM, FlashAttention, KV Cache 管理 (`reshape_and_cache`), 通用量化解包等使用最频繁, 逻辑固定的算子, 提前编译为原生扩展库 (如 `sgl-kernel`, `vllm._C`, `flashinfer`), 保证生产上线时冷启动耗时为 0.
+2. **前沿定制, 探索性算子与动态融合归 JIT**:
+   - 模型定制化融合 (如 SVD 融合, ConvRot 旋转矩阵融合, SM89 专用低比特算子实验), Triton / TileLang 自动调优算子, 优先走 JIT 路径. 借助统一编译缓存 (`~/.cache/xqt/kernels/`), 首次构建后长期复用.
+
+### 6.3 XQT 演进规划与落地路径
+
+结合 XQT 专注于模型压缩, 图变换, 低比特量化与算子实验的定位, 实施两阶段收敛:
+
+1. **研发与压缩实验期 (当前阶段: JIT 优先)**:
+   - 算子源文件集中收拢于 `xqt/kernels/jit/csrc/<group>/` (如 `gemm/`, `quantization/`), 统一经 `csrc_path()` 与 `CompileSpec` 驱动 JIT 编译并持久化缓存到 `~/.cache/xqt/kernels/`.
+   - 该方式保障新型量化算法 (AWQ, GPTQ, ConvRot, SVDQ, NVFP4) 和算子融合能够随改随跑, 零打包门槛.
+2. **生产固化与交付期 (下一阶段: AOT 收敛)**:
+   - 当特定核心算子 (如 INT8 Ada GEMM, SVD 融合算子, 基础 RMSNorm) 逻辑完全冻结且参数稳定后, 将其沉淀收拢至 `xqt/kernels/aot/`.
+   - 通过 CMake / pyproject 将其打包构建为独立 wheel 二进制扩展, 消除生产 Serving 容器中的 `nvcc` 工具链依赖与冷启动毛刺.
 
 ## 七,与现有三层边界的关系
 

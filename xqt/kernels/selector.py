@@ -53,3 +53,10 @@ def get_kernel(op: str, backend: Optional[KernelBackend] = None) -> Callable[...
 def clear_cache() -> None:
     _resolve.cache_clear()
     _platform.cache_clear()
+    try:
+        from xqt.kernels.ops._legacy_api import clear_legacy_cache
+
+        clear_legacy_cache()
+    except ImportError:
+        pass
+

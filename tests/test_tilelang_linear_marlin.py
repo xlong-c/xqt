@@ -175,7 +175,7 @@ def test_linear_marlin_tilelang_quantized_matches_reference(
 @requires_cuda
 @requires_tilelang
 def test_linear_marlin_int4_gpu_correctness_and_latency_smoke() -> None:
-    """U10: GPU INT4 dequant path — correctness + structural latency (not a speed claim)."""
+    """U10: GPU INT4 dequant path - correctness + structural latency (not a speed claim)."""
 
     import time
 

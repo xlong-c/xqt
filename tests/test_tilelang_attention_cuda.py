@@ -149,10 +149,12 @@ def test_xqt_attention_facade_preserves_bf16_for_tilelang(
             dropout_p=dropout_p,
         )
 
-    from xqt.kernels.ops._impl import attention as attention_kernels
+    from xqt.kernels.ops._impl.tilelang import attention as tilelang_attention
+    from xqt.kernels.selector import clear_cache
 
+    clear_cache()
     monkeypatch.setattr(
-        attention_kernels,
+        tilelang_attention,
         "fused_attention_forward_tilelang",
         fake_tilelang_attention,
     )

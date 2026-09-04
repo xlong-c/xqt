@@ -12,7 +12,12 @@ from xqt.kernels.ops._legacy_api import load_legacy
 _CUDA = frozenset({CapabilityRequirement.CUDA})
 
 
-def _fused_attention_torch(q, k, v, is_causal=False):  # type: ignore[no-untyped-def]
+def _fused_attention_torch(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    is_causal: bool = False,
+) -> torch.Tensor:
     import torch.nn.functional as F
 
     return F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)

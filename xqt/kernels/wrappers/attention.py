@@ -46,6 +46,7 @@ class _TileLangAttentionWrapper(nn.Module):
         self.last_graph_state = "disabled"
         self.last_graph_reason: str | None = None
         self.last_kernel_dtype: str | None = None
+        self.last_qkv_projection = "not_run"
         self._graph_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def _prefer_native_attention_fastpath(self, q: torch.Tensor) -> bool:
@@ -96,6 +97,20 @@ class _TileLangAttentionWrapper(nn.Module):
         if self.attention.in_proj_weight is None:
             raise XQTBackendError("TileLang attention wrapper requires packed in_proj_weight")
         embed_dim = int(self.attention.embed_dim)
+        if query is key and key is value:
+            packed_qkv = F.linear(
+                query,
+                self.attention.in_proj_weight,
+                self.attention.in_proj_bias,
+            )
+            q_proj, k_proj, v_proj = torch.split(
+                packed_qkv,
+                embed_dim,
+                dim=-1,
+            )
+            self.last_qkv_projection = "packed_self_attention"
+            return q_proj, k_proj, v_proj
+        self.last_qkv_projection = "separate_qkv"
         q_proj = F.linear(
             query,
             self.attention.in_proj_weight[:embed_dim],
@@ -272,6 +287,7 @@ class _TileLangAttentionWrapper(nn.Module):
         self.last_graph_state = "disabled"
         self.last_graph_reason = reason
         self.last_kernel_dtype = str(query.dtype).removeprefix("torch.")
+        self.last_qkv_projection = "reference_fallback"
         reference_key = query if key is None else key
         reference_value = reference_key if value is None else value
         output, weights = self.attention(
@@ -353,6 +369,7 @@ class _TileLangAttentionWrapper(nn.Module):
         is_causal: bool = False,
         **_: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        self.last_qkv_projection = "not_run"
         if attn_mask is not None or key_padding_mask is not None:
             return self._run_reference_attention_forward(
                 query,
@@ -366,6 +383,11 @@ class _TileLangAttentionWrapper(nn.Module):
                 reason="attention_mask_requires_reference",
             )
         q_input, k_input, v_input = self._canonicalize_attention_inputs(query, key, value)
+        self.last_qkv_projection = (
+            "packed_self_attention"
+            if q_input is k_input and k_input is v_input
+            else "separate_qkv"
+        )
         mismatch = _target_arch_mismatch_reason(self.settings, q_input)
         if mismatch is not None:
             return self._run_reference_attention_forward(
@@ -479,6 +501,7 @@ class _TileLangAttentionWrapper(nn.Module):
             "execution_reason": self.last_execution_reason,
             "kernel_kind": kernel_kind,
             "operator_family": self.last_operator_family,
+            "qkv_projection": self.last_qkv_projection,
             "selected_fastpath": self.last_fastpath,
             "kernel_constraints": {
                 "dtype": self.last_kernel_dtype or "unknown",

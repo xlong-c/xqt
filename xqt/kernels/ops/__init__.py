@@ -11,18 +11,6 @@ _GROUPS = (
     "quantization",
     "kvcache",
     "moe",
-    "mamba",
-    "diffusion",
-    "sampling",
-    "communication",
-    "memory",
-    "speculative",
-    "norm",
-    "elementwise",
-    "embeddings",
-    "grammar",
-    "lplb",
-    "kv_canary",
 )
 
 for _group in _GROUPS:

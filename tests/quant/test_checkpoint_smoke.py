@@ -1,4 +1,4 @@
-"""T10/U9: offline checkpoint smoke — quantize → export → load → diff → latency.
+"""T10/U9: offline checkpoint smoke - quantize → export → load → diff → latency.
 
 Default path uses an in-process CI fixture (no network / no public HF download).
 Optional real HF-style directories are gated by ``XQT_HF_QUANT_FIXTURE`` or
@@ -104,7 +104,7 @@ def test_checkpoint_smoke_export_load_diff_latency(tmp_path: Path) -> None:
     max_abs = (y_ref - y_load).abs().max().item()
     assert max_abs < 1e-4, f"forward diff too large: {max_abs}"
 
-    # Latency smoke (CPU, structural only — not a perf claim)
+    # Latency smoke (CPU, structural only - not a perf claim)
     reps = 20
     with torch.no_grad():
         for _ in range(3):

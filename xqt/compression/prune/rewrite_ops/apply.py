@@ -10,7 +10,7 @@ from torch import nn
 from xqt.analysis.compare import compare_tensors
 
 
-def _assess_export_readiness(model: nn.Module):  # type: ignore[no-untyped-def]
+def _assess_export_readiness(model: nn.Module) -> Any:
     from xqt.export.export_readiness import assess_export_readiness
 
     return assess_export_readiness(model)

@@ -2,7 +2,7 @@
 
 XQT 当前没有独立的 ``gptq.py`` 实现文件. 可执行的 GPTQ 模型侧量化逻辑
 统一落在 ``awq_gptq_weight_only.py`` 中, 这里仅保留显式聚合入口, 避免再
-出现空 placeholder 模块。
+出现空 placeholder 模块.
 """
 
 from .awq_gptq_weight_only import (

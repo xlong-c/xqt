@@ -81,3 +81,9 @@ def group_dir(group: str) -> tuple[str, ...]:
                 continue
         names.update(name for name in dir(module) if not name.startswith("__"))
     return tuple(sorted(names))
+
+
+def clear_legacy_cache() -> None:
+    """Clear cached legacy module attribute resolutions."""
+    load_legacy.cache_clear()
+

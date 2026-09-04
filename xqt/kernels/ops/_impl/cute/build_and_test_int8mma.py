@@ -36,7 +36,7 @@ def build() -> Path:
         "-gencode",
         "arch=compute_89,code=compute_89",
         "-I",
-        str(ROOT.parents[3] / "third_party" / "cutlass" / "include"),
+        str(ROOT.parents[4] / "third_party" / "cutlass" / "include"),
         str(SRC),
         "-o",
         str(SO),

@@ -17,7 +17,7 @@ from xqt.kernels.jit.utils.compile import CompileSpec, csrc_path, load_extension
 from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import pack_scale
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parents[3]
+_REPO_ROOT = _HERE.parents[4]
 _NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _NATIVE_ROT_SIZE = 256
@@ -88,7 +88,7 @@ def _load_extension(dtype_key: str) -> Any:
     try:
         return load_extension(
             CompileSpec(
-                name=f"xqt_convrot_w8a8_sm89_{dtype_key}_v1",
+                name=f"xqt_convrot_w8a8_sm89_{dtype_key}_v2",
                 sources=(_BINDING_SOURCE, _CUDA_SOURCE),
                 include_dirs=(_NUNCHAKU_INCLUDE,),
                 cxx_flags=("-O3", "-std=c++20", *dtype_flags),
@@ -151,6 +151,9 @@ class PackedConvRotW8A8Linear:
     padded_input_features: int
     padded_output_features: int
     dtype: torch.dtype
+    raw_qweight_t: torch.Tensor
+    raw_weight_scales: torch.Tensor
+    raw_bias: torch.Tensor
 
 
 @dataclass
@@ -224,6 +227,16 @@ def pack_convrot_w8a8_linear(
         padded_input_features=padded_input,
         padded_output_features=padded_output,
         dtype=dtype,
+        raw_qweight_t=qweight_t,
+        raw_weight_scales=weight_scale.to(
+            device=qweight_t.device,
+            dtype=torch.float32,
+        ).contiguous(),
+        raw_bias=(
+            torch.zeros(output_features, device=qweight_t.device, dtype=torch.float32)
+            if bias is None
+            else bias.to(device=qweight_t.device, dtype=torch.float32).contiguous()
+        ),
     )
 
 
@@ -231,10 +244,15 @@ def allocate_convrot_w8a8_workspace(
     rows: int,
     packed: PackedConvRotW8A8Linear,
 ) -> ConvRotW8A8Workspace:
-    padded_rows = _round_up(int(rows), 256)
+    padded_rows = _round_up(int(rows), 16) if int(rows) <= 128 else _round_up(int(rows), 256)
+    activation_features = (
+        int(packed.raw_qweight_t.shape[0])
+        if int(rows) <= 128
+        else packed.padded_input_features
+    )
     return ConvRotW8A8Workspace(
         quantized_activation=torch.empty(
-            (padded_rows, packed.padded_input_features),
+            (padded_rows, activation_features),
             dtype=torch.int8,
             device=packed.qweight.device,
         ),
@@ -281,11 +299,32 @@ def convrot_w8a8_linear(
         int(inputs.shape[0]),
         packed,
     )
-    if active_workspace.padded_rows != _round_up(int(inputs.shape[0]), 256):
+    expected_rows = (
+        _round_up(int(inputs.shape[0]), 16)
+        if int(inputs.shape[0]) <= 128
+        else _round_up(int(inputs.shape[0]), 256)
+    )
+    if active_workspace.padded_rows != expected_rows:
         raise ValueError("workspace row extent does not match inputs")
-    if int(active_workspace.quantized_activation.shape[1]) != packed.padded_input_features:
+    expected_features = (
+        int(packed.raw_qweight_t.shape[0])
+        if int(inputs.shape[0]) <= 128
+        else packed.padded_input_features
+    )
+    if int(active_workspace.quantized_activation.shape[1]) != expected_features:
         raise ValueError("workspace feature extent does not match packed weights")
     extension = _load_extension(_dtype_key(inputs.dtype))
+    if int(inputs.shape[0]) <= 128:
+        return extension.small_m_linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.raw_qweight_t,
+            packed.raw_weight_scales,
+            packed.raw_bias,
+            rotated_k,
+            int(rot_size),
+        )
     return extension.linear(
         inputs.contiguous(),
         active_workspace.quantized_activation,
@@ -309,9 +348,15 @@ def bind_convrot_w8a8_linear(
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Bind validated packed state for the steady-state ConvRot hot path."""
 
-    if workspace.padded_rows != _round_up(int(rows), 256):
+    expected_rows = _round_up(int(rows), 16) if int(rows) <= 128 else _round_up(int(rows), 256)
+    if workspace.padded_rows != expected_rows:
         raise ValueError("workspace row extent does not match rows")
-    if int(workspace.quantized_activation.shape[1]) != packed.padded_input_features:
+    expected_features = (
+        int(packed.raw_qweight_t.shape[0])
+        if int(rows) <= 128
+        else packed.padded_input_features
+    )
+    if int(workspace.quantized_activation.shape[1]) != expected_features:
         raise ValueError("workspace feature extent does not match packed weights")
     extension = _load_extension(_dtype_key(packed.dtype))
     quantized_activation = workspace.quantized_activation
@@ -322,8 +367,22 @@ def bind_convrot_w8a8_linear(
     rotated_k = int(rotated_input_features)
     rotation_size = int(rot_size)
     output_features = packed.output_features
+    raw_qweight_t = packed.raw_qweight_t
+    raw_weight_scales = packed.raw_weight_scales
+    raw_bias = packed.raw_bias
 
     def run(inputs: torch.Tensor) -> torch.Tensor:
+        if int(inputs.shape[0]) <= 128:
+            return extension.small_m_linear(
+                inputs.contiguous(),
+                quantized_activation,
+                activation_scales,
+                raw_qweight_t,
+                raw_weight_scales,
+                raw_bias,
+                rotated_k,
+                rotation_size,
+            )
         return extension.linear(
             inputs.contiguous(),
             quantized_activation,
