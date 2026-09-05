@@ -91,6 +91,7 @@ _CONTRACT_MODULES = (
     "tuning_cache",
     "quantize",
     "registry",
+    "moe_grouped",
 )
 
 __all__ = [

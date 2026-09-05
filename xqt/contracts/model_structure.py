@@ -236,6 +236,18 @@ class ModelStructureContract:
                 return component
         return None
 
+    def role_for_path(self, path: str) -> str | None:
+        """Return the declared role for a module path, if any."""
+        for component in self.components:
+            if path in component.paths:
+                return component.role
+        return None
+
+    def paths_for_role(self, role: str) -> tuple[str, ...]:
+        """Return all declared module paths for a role."""
+        comp = self.component_by_role(role)
+        return comp.paths if comp is not None else ()
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,

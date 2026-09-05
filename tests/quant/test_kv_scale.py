@@ -148,3 +148,66 @@ def test_cosine_gate() -> None:
     assert result["cosine"] >= 0.99
     bad = evaluate_kv_scale_cosine(reference, -reference, threshold=0.99)
     assert bad["passed"] is False
+
+
+def test_discover_kv_projection_modules_with_structure_contract() -> None:
+    from xqt.contracts.model_structure import (
+        ComponentSpec,
+        MergedProjectionSpec,
+        ModelStructureContract,
+    )
+
+    class _CustomBlock(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            # Non-standard naming that wouldn't match heuristic patterns
+            self.packed_attn = nn.Linear(16, 48, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.packed_attn(x)
+
+    class _CustomModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = _CustomBlock()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.block(x)
+
+    model = _CustomModel().eval()
+
+    # Without contract, discovery cannot find it because "packed_attn" is non-standard
+    heuristic_layers = discover_kv_projection_modules(model)
+    assert len(heuristic_layers) == 0
+
+    contract = ModelStructureContract(
+        family="transformer",
+        components=(
+            ComponentSpec(role="attention", paths=("block.packed_attn",)),
+        ),
+        merged_projections=(
+            MergedProjectionSpec(
+                module_path="block.packed_attn",
+                parts=("q", "k", "v"),
+                split_out_features=(16, 16, 16),
+            ),
+        ),
+    )
+
+    contract_layers = discover_kv_projection_modules(
+        model, structure_contract=contract
+    )
+    assert "block" in contract_layers
+    assert contract_layers["block"]["fused_qkv"] == "block.packed_attn"
+    assert contract_layers["block"]["k"] == "block.packed_attn"
+    assert contract_layers["block"]["v"] == "block.packed_attn"
+
+    # Calibration also works end-to-end with contract
+    artifacts = calibrate_kv_scales(
+        model,
+        [torch.randn(2, 4, 16)],
+        structure_contract=contract,
+    )
+    assert "block" in artifacts
+    assert artifacts["block"].k_scale > 0
+    assert artifacts["block"].v_scale > 0

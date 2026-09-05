@@ -6,7 +6,13 @@ import importlib
 from typing import Any
 
 from xqt.kernels.registry import KernelRegistry, register_kernel, registry
-from xqt.kernels.selector import clear_cache, get_kernel, select_kernel
+from xqt.kernels.selector import (
+    clear_cache,
+    get_fastest_kernel,
+    get_kernel,
+    select_fastest_kernel,
+    select_kernel,
+)
 from xqt.kernels.spec import (
     CapabilityRequirement,
     DeviceType,
@@ -29,10 +35,13 @@ __all__ = [
     "capabilities_satisfied",
     "clear_cache",
     "get_kernel",
+    "get_fastest_kernel",
     "register_fused_op",
     "register_kernel",
     "registry",
     "select_kernel",
+    "select_fastest_kernel",
+    "AutoTunedOperator",
     "get_fused_op_backend",
     "set_fused_op_backend",
     "enable_kernel_trace",
@@ -44,6 +53,7 @@ __all__ = [
 # Torch-dependent symbols are lazily re-exported so that importing this package
 # (and spec/registry/selector) keeps working on a CPU-only box.
 _LAZY_EXPORTS = {
+    "AutoTunedOperator": ("xqt.kernels.dispatcher", "AutoTunedOperator"),
     "BaseFusedOp": ("xqt.kernels.fused_op", "BaseFusedOp"),
     "register_fused_op": ("xqt.kernels.fused_op", "register_fused_op"),
     "get_fused_op_backend": ("xqt.kernels.fused_op", "get_fused_op_backend"),

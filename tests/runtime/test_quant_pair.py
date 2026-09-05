@@ -311,3 +311,72 @@ def test_hybrid_engine_from_loaded_quant_pair_without_requant(tmp_path: Path) ->
     assert output.shape == (2, 4)
     assert engine.policy is not None
     assert engine.policy.policy_kind == "compute_config"
+
+
+def test_write_and_load_quant_pair_safetensors_roundtrip(tmp_path: Path) -> None:
+    model = _TinyLinear().eval()
+    with torch.no_grad():
+        model.fc.weight.fill_(0.125)
+        model.fc.bias.fill_(0.375)
+
+    compute_config = {
+        "schema_version": "1.0",
+        "default_precision": "w8a8",
+        "modules": [
+            {
+                "name": "fc",
+                "compute_contract": "int8_mma",
+                "precision": "w8a8",
+                "required_capabilities": ["int8_mma"],
+            }
+        ],
+    }
+    pair_dir = write_quant_pair(
+        model,
+        tmp_path / "safetensors_pair",
+        compute_config=compute_config,
+        lineage={"backend": "pytorch", "method": "int8_mma", "strategy": "weight_act"},
+        weights_format="safetensors",
+    )
+
+    assert (pair_dir / "model.safetensors").is_file()
+    assert (pair_dir / "quant.json").is_file()
+
+    sidecar = json.loads((pair_dir / "quant.json").read_text(encoding="utf-8"))
+    assert sidecar["artifact_type"] == "xqt_quant_sidecar"
+    assert sidecar["weights"]["format"] == "safetensors"
+    assert sidecar["weights"]["path"] == "model.safetensors"
+
+    loaded = load_quant_pair(pair_dir)
+    assert loaded.weights_path == (pair_dir / "model.safetensors").resolve()
+
+    # Also test loading by passing the safetensors file directly
+    loaded_by_file = load_quant_pair(pair_dir / "model.safetensors")
+    assert loaded_by_file.weights_path == loaded.weights_path
+
+    shell = _TinyLinear().eval()
+    quantized = load_quant_pair_into_model(shell, pair_dir)
+    assert torch.allclose(shell.fc.weight, model.fc.weight)
+    assert torch.allclose(shell.fc.bias, model.fc.bias)
+    assert quantized.method == "int8_mma"
+
+
+def test_write_quant_pair_from_quantized_safetensors(tmp_path: Path) -> None:
+    model = _TinyLinear().eval()
+    quantized = QuantizedModel(
+        model=model,
+        backend="pytorch",
+        method="fp4_weight_only",
+        strategy="weight_only",
+    )
+    pair_dir = tmp_path / "from_quantized_safetensors"
+    write_quant_pair_from_quantized(
+        quantized,
+        pair_dir,
+        weights_format="safetensors",
+    )
+
+    assert (pair_dir / "model.safetensors").is_file()
+    loaded = load_quant_pair(pair_dir)
+    assert loaded.manifest.weights["format"] == "safetensors"
+

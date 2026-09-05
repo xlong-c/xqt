@@ -28,10 +28,13 @@ from xqt.contracts.runtime_quant import (
 from xqt.core.base import XQTArtifactError, file_sha256, json_safe_value, utc_timestamp
 
 from .quant_pair_schema import (
+    DEFAULT_SAFETENSORS_NAME,
     DEFAULT_SIDECAR_NAME,
     DEFAULT_WEIGHTS_NAME,
     QUANT_SIDECAR_ARTIFACT_TYPE,
     QUANT_SIDECAR_SCHEMA_VERSION,
+    SUPPORTED_WEIGHTS_FORMATS,
+    WEIGHTS_FORMAT_SAFETENSORS,
     WEIGHTS_FORMAT_TORCH_STATE_DICT,
     LoadedQuantPair,
     QuantPairManifest,
@@ -82,10 +85,12 @@ def _resolve_sidecar_path(path: str | Path) -> Path:
         sidecar = candidate / DEFAULT_SIDECAR_NAME
     elif candidate.name == DEFAULT_SIDECAR_NAME or candidate.suffix == ".json":
         sidecar = candidate
+    elif candidate.is_file() and candidate.suffix in (".safetensors", ".pt", ".bin"):
+        sidecar = candidate.parent / DEFAULT_SIDECAR_NAME
     else:
         raise XQTArtifactError(
-            "load_quant_pair expects a directory containing quant.json "
-            "or a quant.json path"
+            "load_quant_pair expects a directory containing quant.json, "
+            "a quant.json path, or a paired weights file"
         )
     if not sidecar.is_file():
         raise XQTArtifactError(f"quant.json file not found: {sidecar}")
@@ -159,20 +164,58 @@ def write_quant_pair(
     lineage: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
     runtime_quant_contract: RuntimeQuantContract | Mapping[str, Any] | None = None,
-    weights_name: str = DEFAULT_WEIGHTS_NAME,
+    weights_name: str | None = None,
     sidecar_name: str = DEFAULT_SIDECAR_NAME,
+    weights_format: str | None = None,
 ) -> Path:
-    """Write model.pt + quant.json. Model must already hold quantized storage.
+    """Write model weights (safetensors or .pt) + quant.json. Model must already hold quantized storage.
 
     When ``runtime_quant_contract`` is set (or present inside ``metadata``), it is
     stored under ``runtime_quant_contract`` as the internal fact source. HF
     ``quantization_config`` is never invented here.
     """
 
+    if weights_format is not None and weights_format not in SUPPORTED_WEIGHTS_FORMATS:
+        raise XQTArtifactError(
+            f"unsupported weights_format={weights_format!r}; "
+            f"supported formats are {SUPPORTED_WEIGHTS_FORMATS}"
+        )
+
+    if weights_format == WEIGHTS_FORMAT_SAFETENSORS:
+        resolved_weights_name = weights_name or DEFAULT_SAFETENSORS_NAME
+        resolved_format = WEIGHTS_FORMAT_SAFETENSORS
+    elif weights_format == WEIGHTS_FORMAT_TORCH_STATE_DICT:
+        resolved_weights_name = weights_name or DEFAULT_WEIGHTS_NAME
+        resolved_format = WEIGHTS_FORMAT_TORCH_STATE_DICT
+    else:
+        if weights_name is None:
+            resolved_weights_name = DEFAULT_WEIGHTS_NAME
+            resolved_format = WEIGHTS_FORMAT_TORCH_STATE_DICT
+        elif weights_name.endswith(".safetensors"):
+            resolved_weights_name = weights_name
+            resolved_format = WEIGHTS_FORMAT_SAFETENSORS
+        else:
+            resolved_weights_name = weights_name
+            resolved_format = WEIGHTS_FORMAT_TORCH_STATE_DICT
+
     pair_dir = Path(output_dir)
     pair_dir.mkdir(parents=True, exist_ok=True)
-    weights_path = pair_dir / weights_name
-    torch.save(model.state_dict(), weights_path)
+    weights_path = pair_dir / resolved_weights_name
+
+    if resolved_format == WEIGHTS_FORMAT_SAFETENSORS:
+        try:
+            from safetensors.torch import save_file
+        except ImportError as exc:
+            raise XQTArtifactError(
+                "saving .safetensors requires the safetensors package"
+            ) from exc
+        state = {
+            str(k): (v.detach().contiguous() if isinstance(v, torch.Tensor) else v)
+            for k, v in model.state_dict().items()
+        }
+        save_file(state, str(weights_path))
+    else:
+        torch.save(model.state_dict(), weights_path)
 
     contract = runtime_quant_contract
     if contract is None and metadata is not None:
@@ -180,8 +223,8 @@ def write_quant_pair(
     meta = _merge_pair_metadata(metadata, runtime_contract=contract)
     QuantPairManifest(
         weights={
-            "path": weights_name,
-            "format": WEIGHTS_FORMAT_TORCH_STATE_DICT,
+            "path": resolved_weights_name,
+            "format": resolved_format,
             "checksum": file_sha256(weights_path),
         },
         compute_config=_resolve_compute_config_dict(compute_config),
@@ -195,9 +238,10 @@ def write_quant_pair_from_quantized(
     quantized: QuantizedModel,
     output_dir: str | Path,
     *,
-    weights_name: str = DEFAULT_WEIGHTS_NAME,
+    weights_name: str | None = None,
     sidecar_name: str = DEFAULT_SIDECAR_NAME,
     metadata: Mapping[str, Any] | None = None,
+    weights_format: str | None = None,
 ) -> Path:
     """Write a quant pair from QuantizedModel via infer_handoff() + contract."""
 
@@ -230,6 +274,7 @@ def write_quant_pair_from_quantized(
         runtime_quant_contract=contract,
         weights_name=weights_name,
         sidecar_name=sidecar_name,
+        weights_format=weights_format,
     )
 
 
@@ -259,10 +304,10 @@ def load_quant_pair(path: str | Path) -> LoadedQuantPair:
                 f"expected {expected}, got {actual}"
             )
     weights_format = str(manifest.weights.get("format", ""))
-    if weights_format != WEIGHTS_FORMAT_TORCH_STATE_DICT:
+    if weights_format not in SUPPORTED_WEIGHTS_FORMATS:
         raise XQTArtifactError(
-            "load_quant_pair currently supports format="
-            f"{WEIGHTS_FORMAT_TORCH_STATE_DICT!r}, got {weights_format!r}"
+            f"load_quant_pair currently supports formats {SUPPORTED_WEIGHTS_FORMATS!r}, "
+            f"got {weights_format!r}"
         )
     return LoadedQuantPair(
         pair_dir=pair_dir.resolve(),
@@ -283,14 +328,36 @@ def load_quant_pair_into_model(
     """Load state_dict into a quantized module shell; never re-quantizes."""
 
     loaded = load_quant_pair(path)
-    try:
-        state = torch.load(
-            loaded.weights_path,
-            map_location=map_location,
-            weights_only=True,
+    weights_format = str(loaded.manifest.weights.get("format", ""))
+
+    if weights_format == WEIGHTS_FORMAT_SAFETENSORS:
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise XQTArtifactError(
+                "loading .safetensors requires the safetensors package"
+            ) from exc
+        raw_state = load_file(str(loaded.weights_path))
+        target_device = (
+            torch.device(map_location)
+            if isinstance(map_location, str)
+            else map_location
         )
-    except TypeError:
-        state = torch.load(loaded.weights_path, map_location=map_location)
+        state = {k: v.to(target_device) for k, v in raw_state.items()}
+    elif weights_format == WEIGHTS_FORMAT_TORCH_STATE_DICT:
+        try:
+            state = torch.load(
+                loaded.weights_path,
+                map_location=map_location,
+                weights_only=True,
+            )
+        except TypeError:
+            state = torch.load(loaded.weights_path, map_location=map_location)
+    else:
+        raise XQTArtifactError(
+            f"unsupported weights format in quant pair: {weights_format!r}"
+        )
+
     if not isinstance(state, Mapping):
         raise XQTArtifactError(
             f"quant pair weights must be a state_dict mapping: {loaded.weights_path}"
@@ -300,12 +367,15 @@ def load_quant_pair_into_model(
 
 
 __all__ = [
+    "DEFAULT_SAFETENSORS_NAME",
     "DEFAULT_SIDECAR_NAME",
     "DEFAULT_WEIGHTS_NAME",
     "LoadedQuantPair",
     "QUANT_SIDECAR_ARTIFACT_TYPE",
     "QUANT_SIDECAR_SCHEMA_VERSION",
     "QuantPairManifest",
+    "SUPPORTED_WEIGHTS_FORMATS",
+    "WEIGHTS_FORMAT_SAFETENSORS",
     "WEIGHTS_FORMAT_TORCH_STATE_DICT",
     "load_quant_pair",
     "load_quant_pair_into_model",

@@ -13,9 +13,13 @@ from torch import nn
 
 from xqt.contracts.packing_int4 import (
     _normalize_group_size,
+    _pack_int2,
+    _pack_int3,
     _pack_int4,
     _pad_weight_for_groups,
     _safe_positive,
+    _unpack_int2,
+    _unpack_int3,
     _unpack_int4,
 )
 from xqt.core.compilation import can_mutate_runtime_cache as _can_mutate_runtime_cache
@@ -26,6 +30,10 @@ def _signed_quant_bounds(bits: int) -> tuple[int, int]:
         return -128, 127
     if bits == 4:
         return -8, 7
+    if bits == 3:
+        return -4, 3
+    if bits == 2:
+        return -2, 1
     raise ValueError(f"Unsupported signed weight-only bit width: {bits}")
 
 
@@ -56,6 +64,10 @@ def _quantize_grouped_weight(
     quantized = quantized.to(torch.int8).reshape(output_features, padded_input_features)
     if bits == 4:
         return _pack_int4(quantized), scale, padded_input_features
+    if bits == 3:
+        return _pack_int3(quantized), scale, padded_input_features
+    if bits == 2:
+        return _pack_int2(quantized), scale, padded_input_features
     return quantized.contiguous(), scale, padded_input_features
 
 
@@ -67,6 +79,10 @@ def _decode_quantized_weight(
 ) -> torch.Tensor:
     if bits == 4:
         return _unpack_int4(quantized_weight, padded_input_features)
+    if bits == 3:
+        return _unpack_int3(quantized_weight, logical_k=padded_input_features)
+    if bits == 2:
+        return _unpack_int2(quantized_weight, logical_k=padded_input_features)
     return quantized_weight.to(torch.float32)
 
 
@@ -97,7 +113,7 @@ class AWQGPTQWeightOnlyLinear(nn.Module):
         self._dense_bias_cache: dict[tuple[str, str], torch.Tensor | None] = {}
         if self.bits != 4:
             self.tilelang_packed_dequant_gemm_args = None
-        storage_dtype = torch.uint8 if self.bits == 4 else torch.int8
+        storage_dtype = torch.uint8 if self.bits in (2, 3, 4) else torch.int8
         self.register_buffer("quantized_weight", quantized_weight.to(storage_dtype))
         self.register_buffer("weight_scale", scale.to(torch.float32))
         if bias is None:

@@ -171,3 +171,62 @@ def test_xqt_attention_facade_preserves_bf16_for_tilelang(
         (torch.bfloat16, torch.bfloat16, torch.bfloat16)
     ]
     assert attention.runtime_fallback is None
+
+
+def test_resolve_tilelang_attention_schedule() -> None:
+    from xqt.kernels.ops._impl.tilelang.attention import resolve_tilelang_attention_schedule
+    from xqt.kernels.ops._impl.tilelang.tuning_cache import (
+        TimingCacheKey,
+        get_tilelang_timing_cache,
+    )
+
+    # 1. Test decode adaptive heuristic (seq_q <= 4)
+    q_decode = torch.randn(1, 8, 1, 64, dtype=torch.float16)
+    k_decode = torch.randn(1, 8, 128, 64, dtype=torch.float16)
+    sched_dec = resolve_tilelang_attention_schedule(q_decode, k_decode, causal=False)
+    assert sched_dec.block_m == 16
+    assert sched_dec.preset == "decode_adaptive"
+
+    # 2. Test prefill default (seq_q > 4)
+    q_prefill = torch.randn(1, 8, 64, 64, dtype=torch.float16)
+    k_prefill = torch.randn(1, 8, 64, 64, dtype=torch.float16)
+    sched_pref = resolve_tilelang_attention_schedule(q_prefill, k_prefill, causal=True)
+    assert sched_pref.block_m == 64
+    assert sched_pref.preset == "prefill_default"
+
+    # 3. Test explicit overrides take precedence
+    sched_override = resolve_tilelang_attention_schedule(
+        q_decode, k_decode, block_m=32, block_n=128
+    )
+    assert sched_override.block_m == 32
+    assert sched_override.block_n == 128
+
+    # 4. Test TimingCache lookup hit
+    cache = get_tilelang_timing_cache()
+    custom_key = TimingCacheKey(
+        op_type="attention",
+        arch="cuda",
+        dtype="float16",
+        shape=(1, 8, 32, 32, 64),
+        extra="causal=False",
+    )
+    cache.record(
+        custom_key,
+        {"block_m": 32, "block_n": 32, "threads": 256, "num_stages": 3},
+        preset_name="test_tuned_attn",
+        persist=False,
+    )
+    q_custom = torch.randn(1, 8, 32, 64, dtype=torch.float16)
+    k_custom = torch.randn(1, 8, 32, 64, dtype=torch.float16)
+    sched_cached = resolve_tilelang_attention_schedule(
+        q_custom, k_custom, causal=False, target_arch="cuda"
+    )
+    assert sched_cached.preset == "test_tuned_attn"
+    assert sched_cached.block_m == 32
+    assert sched_cached.threads == 256
+
+    # 5. Test candidate attention schedule generation
+    candidates = cache.get_candidate_attention_schedules(seq_q=1, seq_kv=128, head_dim=64)
+    assert len(candidates) > 0
+    assert any(c["block_m"] == 16 for c in candidates)
+

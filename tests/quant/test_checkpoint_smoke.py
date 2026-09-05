@@ -77,7 +77,7 @@ def test_checkpoint_smoke_export_load_diff_latency(tmp_path: Path) -> None:
     )
     assert export_report.module_count >= 1
     assert (export_dir / "config.json").is_file()
-    assert (export_dir / "model.pt").is_file()
+    assert (export_dir / "model.safetensors").is_file()
 
     # Dense base for materialize
     base = _TinyMLP().eval()

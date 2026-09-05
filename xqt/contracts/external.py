@@ -148,6 +148,9 @@ def _infer_from_quant_config(
         or quant_config.get("quantization_method")
         or quant_config.get("format")
     )
+    extra_data: dict[str, Any] = {}
+    if "kv_cache_scheme" in quant_config:
+        extra_data["kv_cache_scheme"] = quant_config["kv_cache_scheme"]
     return ExternalQuantInfo(
         format=method,
         source_file=source_file,
@@ -158,6 +161,7 @@ def _infer_from_quant_config(
         desc_act=desc_act,
         zero_point=zero_point,
         quant_method_raw=str(raw_method) if raw_method is not None else None,
+        extra=extra_data,
         source_files=(source_file,),
     )
 

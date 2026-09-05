@@ -13,6 +13,10 @@ from xqt.kernels.ops._impl.tilelang._common import (
     require_tilelang,
 )
 from xqt.kernels.ops._impl.tilelang.gemm_builder import build_tilelang_gemm_kernel
+from xqt.kernels.ops._impl.tilelang.tuning_cache import (
+    TimingCacheKey,
+    get_tilelang_timing_cache,
+)
 from xqt.kernels.jit.utils.arch import target_arch_mismatch
 
 
@@ -45,11 +49,12 @@ def resolve_tilelang_linear_schedule(
     *,
     out_features: int | None = None,
     activation: str | None = None,
+    has_bias: bool = False,
     block_m: int | None = None,
     block_n: int | None = None,
     block_k: int | None = None,
-    threads: int = 128,
-    num_stages: int = 2,
+    threads: int | None = None,
+    num_stages: int | None = None,
     target_arch: str | None = None,
 ) -> TileLangLinearSchedule:
     """Resolve evidence-backed defaults while preserving explicit overrides."""
@@ -63,7 +68,37 @@ def resolve_tilelang_linear_schedule(
     default_block_m = 64
     default_block_n = 64
     default_block_k = 64
-    if (
+    default_threads = 128
+    default_num_stages = 2
+
+    # Query timing cache first
+    dtype_str = (
+        "bfloat16"
+        if x.dtype == torch.bfloat16
+        else ("float16" if x.dtype == torch.float16 else str(x.dtype).replace("torch.", ""))
+    )
+    m_val = int(x.shape[0]) if x.ndim >= 1 else 1
+    k_val = int(x.shape[1]) if x.ndim >= 2 else (int(x.shape[0]) if x.ndim == 1 else 1)
+    n_val = int(out_features) if out_features is not None else 0
+    key = TimingCacheKey(
+        op_type="linear",
+        arch=resolved_target_arch or "cuda",
+        dtype=dtype_str,
+        shape=(m_val, n_val, k_val),
+        extra=f"bias={bool(has_bias)},act={activation or 'none'}",
+    )
+    cache = get_tilelang_timing_cache()
+    cached_entry = cache.lookup(key)
+
+    if cached_entry is not None:
+        preset = cached_entry.preset_name
+        sched = cached_entry.schedule
+        default_block_m = int(sched.get("block_m", 64))
+        default_block_n = int(sched.get("block_n", 64))
+        default_block_k = int(sched.get("block_k", 64))
+        default_threads = int(sched.get("threads", 128))
+        default_num_stages = int(sched.get("num_stages", 2))
+    elif (
         x.ndim == 2
         and int(x.shape[0]) <= 4
         and int(x.shape[1]) == 4096
@@ -91,8 +126,8 @@ def resolve_tilelang_linear_schedule(
         block_m=default_block_m if block_m is None else int(block_m),
         block_n=default_block_n if block_n is None else int(block_n),
         block_k=default_block_k if block_k is None else int(block_k),
-        threads=int(threads),
-        num_stages=int(num_stages),
+        threads=default_threads if threads is None else int(threads),
+        num_stages=default_num_stages if num_stages is None else int(num_stages),
         target_arch=resolved_target_arch,
         preset=preset,
     )
@@ -153,6 +188,7 @@ def dense_linear_epilogue_tilelang(
         x,
         out_features=int(weight.shape[0]),
         activation=activation,
+        has_bias=bias is not None,
         block_m=block_m,
         block_n=block_n,
         block_k=block_k,

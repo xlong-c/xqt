@@ -6,6 +6,26 @@ from .attention import (
     fused_attention_forward_reference,
     fused_attention_forward_tilelang,
 )
+from .autotuner import (
+    AutoTuneCandidateResult,
+    AutoTuneConfig,
+    AutoTuneResult,
+    TileLangAutoTuner,
+    tune_linear_schedule,
+)
+from .tuning_cache import (
+    DEFAULT_TIMING_CACHE_ENV,
+    TileLangTimingCache,
+    TimingCacheEntry,
+    TimingCacheKey,
+    get_tilelang_timing_cache,
+)
+from .sm90_wgmma import (
+    SM90WgmmaSchedule,
+    check_sm90_execution_readiness,
+    resolve_sm90_wgmma_schedule,
+    sm90_wgmma_linear_reference,
+)
 from .conv import (
     TILELANG_CONV_KERNEL_METADATA,
     build_tilelang_conv1x1_nchw_kernel,
@@ -173,6 +193,16 @@ __all__ = [
     "resolve_svd_fused_schedule",
     "conv2d_reference",
     "conv2d_tilelang",
+    "AutoTuneCandidateResult",
+    "AutoTuneConfig",
+    "AutoTuneResult",
+    "DEFAULT_TIMING_CACHE_ENV",
+    "TileLangAutoTuner",
+    "TileLangTimingCache",
+    "TimingCacheEntry",
+    "TimingCacheKey",
+    "get_tilelang_timing_cache",
+    "tune_linear_schedule",
     "conv3d_1x1x1_reference",
     "conv3d_1x1x1_tilelang",
     "dense_linear_epilogue_reference",
@@ -223,6 +253,10 @@ __all__ = [
     "scaled_mxfp4_quant_tilelang",
     "scaled_nvfp4_quant_reference",
     "scaled_nvfp4_quant_tilelang",
+    "SM90WgmmaSchedule",
+    "check_sm90_execution_readiness",
+    "resolve_sm90_wgmma_schedule",
+    "sm90_wgmma_linear_reference",
     "static_activation_quantize_tilelang",
     "svd_fused_dequant_gemm_low_rank_tilelang",
     "swiglu_reference",

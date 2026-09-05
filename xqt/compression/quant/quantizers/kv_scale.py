@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 from xqt.core.types import XQTContext
+from xqt.contracts.model_structure import ModelStructureContract
 from xqt.compression.quant.calibration.scale_artifact import run_calibration_batches
 from xqt.compression.quant.execution.reporting import build_component_quantization_report
 from xqt.compression.quant.types import QuantizationComponentPlan, QuantizationNature, QuantizationReport
@@ -90,23 +91,41 @@ def discover_kv_projection_modules(
     model: nn.Module,
     *,
     module_names: Sequence[str] | None = None,
+    structure_contract: ModelStructureContract | None = None,
 ) -> dict[str, dict[str, str]]:
     """Map layer prefix -> {k: module_path, v: module_path}.
 
     Supports separate ``k_proj``/``v_proj`` and fused ``qkv`` Linear modules.
+    When ``structure_contract`` is provided, declared merged projections and roles
+    take precedence over name heuristics.
     """
 
     named = dict(model.named_modules())
+    layers: dict[str, dict[str, str]] = {}
+
+    if structure_contract is not None:
+        for merged in structure_contract.merged_projections:
+            parts_lower = {p.lower() for p in merged.parts}
+            has_k = any("k" in p for p in parts_lower)
+            has_v = any("v" in p for p in parts_lower)
+            if has_k and has_v and merged.module_path in named:
+                if module_names is None or merged.module_path in module_names:
+                    parent = _parent_path(merged.module_path)
+                    layers.setdefault(parent, {})["k"] = merged.module_path
+                    layers.setdefault(parent, {})["v"] = merged.module_path
+                    layers.setdefault(parent, {})["fused_qkv"] = merged.module_path
+
     candidates = [
         name
         for name, module in named.items()
         if name and isinstance(module, nn.Linear)
         and (module_names is None or name in module_names)
     ]
-    layers: dict[str, dict[str, str]] = {}
     for name in candidates:
         leaf = _leaf_name(name)
         parent = _parent_path(name)
+        if parent in layers and "fused_qkv" in layers[parent]:
+            continue
         if leaf in {"qkv", "wqkv", "query_key_value"}:
             layers.setdefault(parent, {})["k"] = name
             layers.setdefault(parent, {})["v"] = name
@@ -136,6 +155,7 @@ def calibrate_kv_scales(
     eps: float = 1e-6,
     observer: str = "minmax",
     forward_kwargs: Mapping[str, Any] | None = None,
+    structure_contract: ModelStructureContract | None = None,
 ) -> dict[str, KvScaleArtifact]:
     """Calibrate per-tensor K/V scales from projection *outputs*.
 
@@ -150,7 +170,11 @@ def calibrate_kv_scales(
     if int(qmax) <= 0:
         raise ValueError("qmax must be positive")
 
-    layers = discover_kv_projection_modules(model, module_names=module_names)
+    layers = discover_kv_projection_modules(
+        model,
+        module_names=module_names,
+        structure_contract=structure_contract,
+    )
     if not layers:
         return {}
 

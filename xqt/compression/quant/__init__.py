@@ -19,10 +19,15 @@ from xqt.contracts.external import (
 )
 from .transforms import (
     GraphQuantTransform,
+    OrthogonalRotationTransform,
+    RewriteTransactionReport,
     RotationAbsorbTransform,
+    SpeculativeRewriteConfig,
     TransformPlan,
     TransformReport,
     apply_graph_transforms,
+    build_random_orthogonal_matrix,
+    speculative_graph_rewrite,
 )
 from .capability import (
     QuantBackendCapability,
@@ -89,6 +94,10 @@ from .quantizers.awq_gptq_weight_only import (
     quantize_with_awq_weight_only,
     quantize_with_gptq_weight_only,
 )
+from .quantizers.adaptive_rounding import (
+    optimize_linear_rounding,
+    quantize_with_adaptive_rounding,
+)
 from .quantizers.int8_mma import (
     Int8MmaLinear,
     Int8MmaQuantizationResult,
@@ -110,6 +119,14 @@ from .quantizers.convrot_int8 import (
     ConvRotNormInt8Linear,
     ConvRotInt8QuantizationResult,
     quantize_with_convrot_int8,
+)
+from .sequential import (
+    LayerSequentialConfig,
+    LayerSequentialReport,
+    SequentialBlockSpec,
+    SequentialPartition,
+    discover_sequential_partition,
+    quantize_layer_sequential,
 )
 from .comfy_quant import (
     DEFAULT_CONVROT_GROUP_SIZE,
@@ -169,6 +186,10 @@ from .quantizers.moe_weight_only import (
     execute_moe_weight_only_component,
     list_moe_module_roles,
     quantize_moe_experts_weight_only,
+)
+from .quality import (
+    ModelCompressionQualityReport,
+    evaluate_model_compression_quality,
 )
 
 __all__ = [
@@ -242,6 +263,7 @@ __all__ = [
     "apply_graph_transforms",
     "build_quantization_plan",
     "build_composite_quantization_artifact",
+    "build_random_orthogonal_matrix",
     "build_regular_hadamard_matrix",
     "build_fake_qdq_surrogate",
     "build_int8_tensorwise_marker",
@@ -255,10 +277,15 @@ __all__ = [
     "list_supported_external_formats",
     "normalize_external_format",
     "override_external_format",
+    "OrthogonalRotationTransform",
+    "RewriteTransactionReport",
+    "SpeculativeRewriteConfig",
+    "speculative_graph_rewrite",
     "probe_external_quant_config",
     "resolve_external_quantization",
     "decode_comfy_quant_marker",
     "describe_quant_backend_capability",
+    "discover_sequential_partition",
     "encode_comfy_quant_marker",
     "encode_int8_tensorwise_marker",
     "evaluate_kv_scale_cosine",
@@ -270,13 +297,18 @@ __all__ = [
     "is_moe_expert_module",
     "is_moe_router_module",
     "kv_scales_to_compute_metadata",
+    "LayerSequentialConfig",
+    "LayerSequentialReport",
     "list_moe_module_roles",
     "list_quant_backend_capabilities",
     "list_quantizable_modules",
     "marker_convrot_groupsize",
     "marker_reports_convrot",
     "normalize_int8_tensorwise_marker",
+    "optimize_linear_rounding",
+    "quantize_layer_sequential",
     "quantize_moe_experts_weight_only",
+    "quantize_with_adaptive_rounding",
     "quantize_with_awq_fp4",
     "quantize_with_awq_weight_only",
     "quantize_with_convrot_4bit",
@@ -298,4 +330,6 @@ __all__ = [
     "summarize_quantization_reports",
     "suggest_high_precision_modules",
     "unpack_nvfp4e2m1",
+    "ModelCompressionQualityReport",
+    "evaluate_model_compression_quality",
 ]

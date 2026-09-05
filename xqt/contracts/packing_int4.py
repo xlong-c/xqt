@@ -91,11 +91,91 @@ def _quantize_grouped_fp4_weight(
     return packed_weight, scale, padded_input_features
 
 
+def _pack_int2(values: torch.Tensor) -> torch.Tensor:
+    """Pack signed INT2 values in [-2, 1] into uint8."""
+    values_i = values.to(torch.int16)
+    if values_i.shape[-1] % 4 != 0:
+        values_i = F.pad(values_i, (0, 4 - values_i.shape[-1] % 4), value=0)
+    codes = (values_i + 2).to(torch.uint8)
+    return (
+        codes[..., 0::4]
+        | (codes[..., 1::4] << 2)
+        | (codes[..., 2::4] << 4)
+        | (codes[..., 3::4] << 6)
+    ).contiguous()
+
+
+def _unpack_int2(packed: torch.Tensor, logical_k: int) -> torch.Tensor:
+    """Decode canonical INT2 storage back to signed float32 values in [-2, 1]."""
+    codes = torch.stack(
+        (
+            packed & 0x03,
+            (packed >> 2) & 0x03,
+            (packed >> 4) & 0x03,
+            (packed >> 6) & 0x03,
+        ),
+        dim=-1,
+    ).reshape(*packed.shape[:-1], -1)[..., : int(logical_k)]
+    return (codes.to(torch.int16) - 2).to(torch.float32)
+
+
+def _pack_int3(values: torch.Tensor) -> torch.Tensor:
+    """Pack signed INT3 values in [-4, 3] with 8 codes per 3 bytes."""
+    values_i = values.to(torch.int16)
+    if values_i.shape[-1] % 8 != 0:
+        values_i = F.pad(values_i, (0, 8 - values_i.shape[-1] % 8), value=0)
+    codes = (values_i + 4).to(torch.uint8)
+    groups = codes.reshape(*codes.shape[:-1], -1, 8)
+    byte0 = (
+        groups[..., 0]
+        | (groups[..., 1] << 3)
+        | ((groups[..., 2] & 0x03) << 6)
+    )
+    byte1 = (
+        ((groups[..., 2] >> 2) & 0x01)
+        | (groups[..., 3] << 1)
+        | (groups[..., 4] << 4)
+        | ((groups[..., 5] & 0x01) << 7)
+    )
+    byte2 = (
+        ((groups[..., 5] >> 1) & 0x03)
+        | (groups[..., 6] << 2)
+        | (groups[..., 7] << 5)
+    )
+    packed = torch.stack((byte0, byte1, byte2), dim=-1).reshape(*codes.shape[:-1], -1)
+    return packed.contiguous()
+
+
+def _unpack_int3(packed: torch.Tensor, logical_k: int) -> torch.Tensor:
+    """Decode canonical INT3 storage back to signed float32 values in [-4, 3]."""
+    groups_per_row = (int(logical_k) + 7) // 8
+    groups = packed.reshape(*packed.shape[:-1], groups_per_row, 3)
+    byte0, byte1, byte2 = groups[..., 0], groups[..., 1], groups[..., 2]
+    codes = torch.stack(
+        (
+            byte0 & 0x07,
+            (byte0 >> 3) & 0x07,
+            ((byte0 >> 6) & 0x03) | ((byte1 & 0x01) << 2),
+            (byte1 >> 1) & 0x07,
+            (byte1 >> 4) & 0x07,
+            ((byte1 >> 7) & 0x01) | ((byte2 & 0x03) << 1),
+            (byte2 >> 2) & 0x07,
+            (byte2 >> 5) & 0x07,
+        ),
+        dim=-1,
+    ).reshape(*packed.shape[:-1], -1)[..., : int(logical_k)]
+    return (codes.to(torch.int16) - 4).to(torch.float32)
+
+
 __all__ = [
     "_encode_signed_nibble",
     "_decode_signed_nibble",
     "_pack_int4",
     "_unpack_int4",
+    "_pack_int3",
+    "_unpack_int3",
+    "_pack_int2",
+    "_unpack_int2",
     "_safe_positive",
     "_normalize_group_size",
     "_pad_weight_for_groups",

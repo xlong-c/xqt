@@ -171,6 +171,108 @@ def _sdpa_reference(
     )
 
 
+@dataclass(frozen=True)
+class TileLangAttentionSchedule:
+    """Concrete execution schedule for TileLang attention."""
+
+    block_m: int
+    block_n: int
+    threads: int
+    num_stages: int
+    target_arch: str | None = None
+    preset: str = "default"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "block_m": int(self.block_m),
+            "block_n": int(self.block_n),
+            "threads": int(self.threads),
+            "num_stages": int(self.num_stages),
+            "target_arch": self.target_arch,
+            "preset": self.preset,
+        }
+
+
+def resolve_tilelang_attention_schedule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    *,
+    causal: bool = False,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    threads: int | None = None,
+    num_stages: int | None = None,
+    target_arch: str | None = None,
+) -> TileLangAttentionSchedule:
+    """Resolve evidence-backed attention schedule using TimingCache or adaptive rules."""
+    from xqt.kernels.ops._impl.tilelang.tuning_cache import (
+        TimingCacheKey,
+        get_tilelang_timing_cache,
+    )
+
+    resolved_target_arch = target_arch
+    if resolved_target_arch is None and q.is_cuda:
+        major, minor = torch.cuda.get_device_capability(q.device)
+        resolved_target_arch = f"sm_{major}{minor}"
+
+    preset = "default"
+    default_block_m = 64
+    default_block_n = 64
+    default_threads = 128
+    default_num_stages = 2
+
+    # Query timing cache first
+    dtype_str = (
+        "bfloat16"
+        if q.dtype == torch.bfloat16
+        else ("float16" if q.dtype == torch.float16 else str(q.dtype).replace("torch.", ""))
+    )
+    b_val = int(q.shape[0]) if q.ndim >= 1 else 1
+    h_val = int(q.shape[1]) if q.ndim >= 2 else 1
+    sq_val = int(q.shape[2]) if q.ndim >= 3 else 1
+    sk_val = int(k.shape[2]) if k.ndim >= 3 else 1
+    hd_val = int(q.shape[3]) if q.ndim >= 4 else 1
+
+    key = TimingCacheKey(
+        op_type="attention",
+        arch=resolved_target_arch or "cuda",
+        dtype=dtype_str,
+        shape=(b_val, h_val, sq_val, sk_val, hd_val),
+        extra=f"causal={bool(causal)}",
+    )
+    cache = get_tilelang_timing_cache()
+    cached_entry = cache.lookup(key)
+
+    if cached_entry is not None:
+        preset = cached_entry.preset_name
+        sched = cached_entry.schedule
+        default_block_m = int(sched.get("block_m", 64))
+        default_block_n = int(sched.get("block_n", 64))
+        default_threads = int(sched.get("threads", 128))
+        default_num_stages = int(sched.get("num_stages", 2))
+    elif sq_val <= 4:
+        preset = "decode_adaptive"
+        default_block_m = 16
+        default_block_n = 64
+        default_threads = 128
+        default_num_stages = 2
+    else:
+        preset = "prefill_default"
+        default_block_m = 64
+        default_block_n = 64
+        default_threads = 128
+        default_num_stages = 2
+
+    return TileLangAttentionSchedule(
+        block_m=default_block_m if block_m is None else int(block_m),
+        block_n=default_block_n if block_n is None else int(block_n),
+        threads=default_threads if threads is None else int(threads),
+        num_stages=default_num_stages if num_stages is None else int(num_stages),
+        target_arch=resolved_target_arch,
+        preset=preset,
+    )
+
+
 def fused_attention_forward_reference(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -191,10 +293,10 @@ def fused_attention_forward_tilelang(
     *,
     causal: bool = False,
     dropout_p: float = 0.0,
-    block_m: int = 64,
-    block_n: int = 64,
-    threads: int = 128,
-    num_stages: int = 2,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    threads: int | None = None,
+    num_stages: int | None = None,
     target_arch: str | None = None,
 ) -> torch.Tensor:
     """CUDA-only TileLang attention entry point."""
@@ -207,6 +309,16 @@ def fused_attention_forward_tilelang(
             f"TileLang attention target architecture is not executable: {mismatch}"
         )
     _validate_attention_inputs(q, k, v, dropout_p=dropout_p)
+    schedule = resolve_tilelang_attention_schedule(
+        q,
+        k,
+        causal=causal,
+        block_m=block_m,
+        block_n=block_n,
+        threads=threads,
+        num_stages=num_stages,
+        target_arch=target_arch,
+    )
     input_dtype = (
         "float16" if q.dtype == torch.float16 else "bfloat16"
     )
@@ -217,10 +329,10 @@ def fused_attention_forward_tilelang(
         seq_kv=int(k.shape[2]),
         head_dim=int(q.shape[3]),
         causal=causal,
-        block_m=int(block_m),
-        block_n=int(block_n),
-        num_stages=int(num_stages),
-        threads=int(threads),
+        block_m=int(schedule.block_m),
+        block_n=int(schedule.block_n),
+        num_stages=int(schedule.num_stages),
+        threads=int(schedule.threads),
         input_dtype=input_dtype,
     )
     return kernel(q, k, v)
@@ -246,7 +358,9 @@ TILELANG_ATTENTION_KERNEL_METADATA: dict[str, dict[str, Any]] = {
 __all__ = [
     "TILELANG_ATTENTION_KERNEL_METADATA",
     "TileLangAttentionDesign",
+    "TileLangAttentionSchedule",
     "build_tilelang_attention_design",
     "fused_attention_forward_reference",
     "fused_attention_forward_tilelang",
+    "resolve_tilelang_attention_schedule",
 ]

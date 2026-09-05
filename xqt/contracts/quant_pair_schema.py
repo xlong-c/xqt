@@ -21,8 +21,14 @@ from xqt.core.base import XQTArtifactError
 QUANT_SIDECAR_SCHEMA_VERSION = "1.0"
 QUANT_SIDECAR_ARTIFACT_TYPE = "xqt_quant_sidecar"
 DEFAULT_WEIGHTS_NAME = "model.pt"
+DEFAULT_SAFETENSORS_NAME = "model.safetensors"
 DEFAULT_SIDECAR_NAME = "quant.json"
 WEIGHTS_FORMAT_TORCH_STATE_DICT = "torch_state_dict"
+WEIGHTS_FORMAT_SAFETENSORS = "safetensors"
+SUPPORTED_WEIGHTS_FORMATS = (
+    WEIGHTS_FORMAT_TORCH_STATE_DICT,
+    WEIGHTS_FORMAT_SAFETENSORS,
+)
 
 
 def optional_str(value: Any) -> str | None:
@@ -165,12 +171,15 @@ class LoadedQuantPair:
 
 
 __all__ = [
+    "DEFAULT_SAFETENSORS_NAME",
     "DEFAULT_SIDECAR_NAME",
     "DEFAULT_WEIGHTS_NAME",
     "LoadedQuantPair",
     "QUANT_SIDECAR_ARTIFACT_TYPE",
     "QUANT_SIDECAR_SCHEMA_VERSION",
     "QuantPairManifest",
+    "SUPPORTED_WEIGHTS_FORMATS",
+    "WEIGHTS_FORMAT_SAFETENSORS",
     "WEIGHTS_FORMAT_TORCH_STATE_DICT",
     "optional_str",
 ]

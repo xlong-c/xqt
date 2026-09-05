@@ -68,6 +68,11 @@ from .torch_exporter import (
     export_torchscript,
 )
 from .hf_quant import HFQuantExportReport, export_compressed_tensors
+from .package import (
+    ModelPackageReport,
+    export_model_package,
+    load_model_package_manifest,
+)
 from .export_readiness import ExportReadinessReport, assess_export_readiness
 from .reporting import (
     export_artifact_lineage_report,
@@ -122,9 +127,11 @@ __all__ = [
     "deployment_capability_matrix",
     "evaluate_tensorrt_performance_thresholds",
     "HFQuantExportReport",
+    "ModelPackageReport",
     "export_compressed_tensors",
     "export_executorch_program",
     "export_mnn_from_onnx",
+    "export_model_package",
     "export_ncnn_from_onnx",
     "export_ncnn_with_pnnx",
     "export_qnn_from_onnx",
@@ -137,6 +144,7 @@ __all__ = [
     "openvino_runtime_layer_report",
     "tensorrt_runtime_layer_report",
     "inspect_tensorrt_engine",
+    "load_model_package_manifest",
     "mobile_export_diagnosis",
     "onnx_graph_diagnostics_report",
     "optimize_onnx",
