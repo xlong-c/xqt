@@ -55,7 +55,7 @@ class StageProvider(Protocol):
         ...
 
 
-def build_stage_lineage(stage: Any) -> TransformLineage:
+def build_stage_lineage(stage: Any, *, source_stage_name: str) -> TransformLineage:
     """Build structured lineage for a workflow stage config."""
 
     params = stage_params(stage)
@@ -65,7 +65,7 @@ def build_stage_lineage(stage: Any) -> TransformLineage:
         transform_family=transform_family_for_kind(stage.kind),
         transform_name=stage.kind,
         params=params,
-        from_stage=stage.from_stage,
+        from_stage=source_stage_name,
         compare_to=stage.compare_to,
     )
 
@@ -121,7 +121,10 @@ class DefaultStageProvider:
     def build(self, context: StagePayloadBuildContext) -> StageProviderOutput:
         return StageProviderOutput(
             session_stage_kind=stage_kind_for_transform(context.stage.kind),
-            lineage=build_stage_lineage(context.stage),
+            lineage=build_stage_lineage(
+                context.stage,
+                source_stage_name=context.source_stage_name,
+            ),
             payload_value=context.state.context.model,
             payload_metadata=_base_payload_metadata(context),
         )
@@ -151,7 +154,10 @@ class ModelQuantizerProvider:
         payload_metadata["quantized_model"] = payload_value.to_dict()
         return StageProviderOutput(
             session_stage_kind="quantized",
-            lineage=build_stage_lineage(context.stage),
+            lineage=build_stage_lineage(
+                context.stage,
+                source_stage_name=context.source_stage_name,
+            ),
             payload_value=payload_value,
             payload_metadata=payload_metadata,
         )
@@ -176,7 +182,10 @@ class ModelPrunerProvider:
         payload_metadata["pruned_model"] = payload_value.to_dict()
         return StageProviderOutput(
             session_stage_kind="optimized",
-            lineage=build_stage_lineage(context.stage),
+            lineage=build_stage_lineage(
+                context.stage,
+                source_stage_name=context.source_stage_name,
+            ),
             payload_value=payload_value,
             payload_metadata=payload_metadata,
         )
@@ -197,7 +206,10 @@ class OperatorOptimizerProvider:
         payload_metadata["runtime_plan"] = payload_value.to_dict()
         return StageProviderOutput(
             session_stage_kind="optimized",
-            lineage=build_stage_lineage(context.stage),
+            lineage=build_stage_lineage(
+                context.stage,
+                source_stage_name=context.source_stage_name,
+            ),
             payload_value=payload_value,
             payload_metadata=payload_metadata,
         )
@@ -218,7 +230,10 @@ class ExportProvider:
             payload_metadata["runtime_handle"] = payload_value.to_dict()
             return StageProviderOutput(
                 session_stage_kind="exported",
-                lineage=build_stage_lineage(context.stage),
+                lineage=build_stage_lineage(
+                    context.stage,
+                    source_stage_name=context.source_stage_name,
+                ),
                 payload_value=payload_value,
                 payload_metadata=payload_metadata,
             )
@@ -233,7 +248,10 @@ class ExportProvider:
         payload_metadata["export_bundle"] = payload_value.to_dict()
         return StageProviderOutput(
             session_stage_kind="exported",
-            lineage=build_stage_lineage(context.stage),
+            lineage=build_stage_lineage(
+                context.stage,
+                source_stage_name=context.source_stage_name,
+            ),
             payload_value=payload_value,
             payload_metadata=payload_metadata,
         )
@@ -254,7 +272,10 @@ class ObservationProvider:
         payload_metadata["stage_report"] = payload_value.to_dict()
         return StageProviderOutput(
             session_stage_kind="observed",
-            lineage=build_stage_lineage(context.stage),
+            lineage=build_stage_lineage(
+                context.stage,
+                source_stage_name=context.source_stage_name,
+            ),
             payload_value=payload_value,
             payload_metadata=payload_metadata,
         )

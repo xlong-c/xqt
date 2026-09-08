@@ -95,6 +95,7 @@ class OptimizedModelResult:
     session_stages: list[SessionStage] = field(default_factory=list)
     best_stage: Optional[str] = None
     baseline_stage: Optional[str] = None
+    current_stage: Optional[str] = None
     models: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -396,6 +397,12 @@ class XQTOptimizationSession:
     def best_stage(self) -> Optional[str]:
         return self._state.best_stage
 
+    @property
+    def current_stage(self) -> Optional[str]:
+        """Name of the accepted model state used by the next transform stage."""
+
+        return self._state.current_stage
+
     def compare_stages(self, source_stage: str, target_stage: str) -> StageComparison:
         """Compare two managed session stages without mutating session state."""
 
@@ -514,6 +521,7 @@ class XQTOptimizationSession:
         ):
             raise ValueError(f"unknown model snapshot: {stage_name}")
         self._state.context.model = restore_stage_model(self._state, stage_name)
+        self._state.current_stage = stage_name
 
     def use(self, stage_name: str) -> None:
         self.revert_to(stage_name)
@@ -521,10 +529,11 @@ class XQTOptimizationSession:
     def run_stage(self, stage: OptimizationStageConfig) -> OptimizationStageResult:
         self._validate_stage(stage)
         ensure_stage_spec(stage, rebuild=True)
-        self._state.config.stages.append(stage)
         result = _run_optimization_stage(self._state, stage)
         if result is None:
             raise ValueError(f"stage is disabled: {stage.name}")
+        if result.accepted:
+            self._state.config.stages.append(stage)
         self._outputs_written = False
         return result
 

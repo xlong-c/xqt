@@ -25,11 +25,16 @@ class XQTBackendError(XQTError):
     """Optional backend dependency or execution failed."""
 
 
+class XQTQuantError(XQTError):
+    """Quantization request or materialization contract failed."""
+
+
 __all__ = [
     "XQTArtifactError",
     "XQTBackendError",
     "XQTConfigError",
     "XQTError",
     "XQTPipelineError",
+    "XQTQuantError",
     "XQTRegistryError",
 ]

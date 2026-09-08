@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from torch import nn
 
+from xqt.core.base import XQTConfigError
 from xqt.contracts import ModelStructureContract
 from xqt.contracts.model_structure import (
     is_module_path_within,
@@ -16,6 +17,7 @@ from xqt.contracts.model_structure import (
 from .candidates import (
     _CandidateDiscoveryResult,
     _StructuredPruningAdapter,
+    _StructuredCandidate,
     collect_candidates,
 )
 from .candidates_attention import collect_head_candidates
@@ -331,6 +333,12 @@ def collect_structured_candidates(
         supported_granularities=SUPPORTED_GRANULARITIES,
     )
     if structure_contract is not None:
+        from xqt.contracts.model_structure import is_structure_contract_valid_for_model
+
+        if not is_structure_contract_valid_for_model(structure_contract, model):
+            raise XQTConfigError(
+                "Structure contract is invalid or expired for the given model"
+            )
         _apply_structure_contract(result, structure_contract)
     return result
 

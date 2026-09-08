@@ -14,11 +14,17 @@ from xqt.model import (
 )
 
 
+class DemoModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(2, 2)
+
+
 class DemoAdapter(ModelAdapter):
     def load(self, checkpoint: str | None, **params: object) -> nn.Module:
         del params
         assert checkpoint == "custom.pt"
-        return nn.Linear(2, 2)
+        return DemoModel()
 
 from xqt.pipeline.runner import create_context
 
@@ -124,4 +130,5 @@ def test_profile_adapter_can_construct_model_without_loader_target() -> None:
     from xqt.pipeline.passes import LoadModelPass
 
     LoadModelPass().run(context)
-    assert isinstance(context.model, nn.Linear)
+    assert isinstance(context.model, nn.Module)
+    assert context.model.__class__.__name__ == "DemoModel"

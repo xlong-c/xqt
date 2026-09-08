@@ -302,3 +302,52 @@ def test_run_scheme_search_acceptance_callback() -> None:
 
     assert all(attempt.status == "skipped" for attempt in report.attempts)
     assert report.recommended == ()
+
+
+def test_evaluate_stage_acceptance_multi_operator_worst_aggregation() -> None:
+    """XQT-009: Multiple speedup values default to min aggregation; worst speedup determines pass/fail."""
+    accept = StageAcceptanceConfig(min_speedup=1.5)
+    # One fast operator (2.0x) and one degraded operator (0.8x)
+    metrics = {
+        "operators": {
+            "op_fast": {"speedup": 2.0},
+            "op_slow": {"speedup": 0.8},
+        }
+    }
+    evaluation = evaluate_stage_acceptance(accept, metrics)
+    assert evaluation.accepted is False
+    assert evaluation.checks["min_speedup"]["observed"] == pytest.approx(0.8)
+
+
+def test_evaluate_stage_acceptance_explicit_metric_path() -> None:
+    """XQT-009: Exact metric paths can be targeted via metric_paths configuration."""
+    accept = StageAcceptanceConfig(
+        min_speedup=1.5,
+        metric_paths={"speedup": "model.latency.speedup"},
+    )
+    metrics = {
+        "operators": {"op1": {"speedup": 0.5}},  # Ignored
+        "model": {"latency": {"speedup": 1.8}},
+    }
+    evaluation = evaluate_stage_acceptance(accept, metrics)
+    assert evaluation.accepted is True
+    assert evaluation.checks["min_speedup"]["observed"] == pytest.approx(1.8)
+
+
+def test_evaluate_stage_acceptance_rejects_nan_bool_and_negative() -> None:
+    """XQT-009: Boolean flags, NaN, Inf, and non-positive speedup are rejected."""
+    accept = StageAcceptanceConfig(min_speedup=1.2)
+
+    # Boolean True must NOT be parsed as 1.0
+    eval_bool = evaluate_stage_acceptance(accept, {"speedup": True})
+    assert eval_bool.accepted is False
+    assert "missing" in eval_bool.checks["min_speedup"]["reason"]
+
+    # NaN is rejected
+    eval_nan = evaluate_stage_acceptance(accept, {"speedup": float("nan")})
+    assert eval_nan.accepted is False
+
+    # Negative speedup is rejected
+    eval_neg = evaluate_stage_acceptance(accept, {"speedup": -1.5})
+    assert eval_neg.accepted is False
+    assert "finite and > 0" in eval_neg.checks["min_speedup"]["reason"]

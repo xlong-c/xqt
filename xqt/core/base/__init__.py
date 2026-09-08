@@ -15,6 +15,7 @@ from .errors import (
     XQTConfigError,
     XQTError,
     XQTPipelineError,
+    XQTQuantError,
     XQTRegistryError,
 )
 from .serialization import json_safe_value
@@ -28,6 +29,7 @@ __all__ = [
     "XQTConfigError",
     "XQTError",
     "XQTPipelineError",
+    "XQTQuantError",
     "XQTRegistryError",
     "collect_dependency_versions",
     "file_sha256",

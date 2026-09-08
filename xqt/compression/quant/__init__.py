@@ -155,13 +155,24 @@ from xqt.kernels.ops.quantization.nvfp4 import (
     expand_group_scale,
     unpack_nvfp4e2m1,
 )
-from xqt.kernels.wrappers.nvfp4 import (
-    NVFP4LinearBridge,
-    NVFP4TensorLayout,
-    bridge_module_to_nvfp4_linear,
-    bridge_module_to_nvfp4_linear_shared,
-    infer_nvfp4_tensor_layout,
-)
+_NVFP4_WRAPPERS_EXPORTS = {
+    "NVFP4LinearBridge",
+    "NVFP4TensorLayout",
+    "bridge_module_to_nvfp4_linear",
+    "bridge_module_to_nvfp4_linear_shared",
+    "infer_nvfp4_tensor_layout",
+}
+
+
+def __getattr__(name: str):
+    if name in _NVFP4_WRAPPERS_EXPORTS:
+        import importlib
+
+        mod = importlib.import_module("xqt.kernels.wrappers.nvfp4")
+        val = getattr(mod, name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 from .quantizers.svd import (
     SVDQuantResult,
     quantize_with_svd,

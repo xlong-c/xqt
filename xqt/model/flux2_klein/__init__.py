@@ -47,12 +47,18 @@ from .load import (
     run_flux2_klein_nvfp4_inference,
     flux2_klein_bf16_convrot_int8_default_policy,
 )
+from .adapter import (
+    Flux2KleinBF16Adapter,
+    Flux2KleinNVFP4Adapter,
+)
 
 __all__ = [
     "FLUX2_KLEIN_4B_NVFP4_FILENAME",
     "FLUX2_KLEIN_4B_NVFP4_REPO_ID",
     "FLUX2_KLEIN_4B_REPO_ID",
     "FLUX2_KLEIN_NVFP4_ENGINES",
+    "Flux2KleinBF16Adapter",
+    "Flux2KleinNVFP4Adapter",
     "Flux2KleinNVFP4CompiledTransformerResult",
     "Flux2KleinNVFP4CudaGraphTransformerResult",
     "Flux2KleinNVFP4EngineResult",

@@ -8,7 +8,6 @@ from typing import Any, Mapping, Optional, Sequence
 import torch
 from torch import nn
 
-from xqt.kernels.nn.fixtures.hooks import collect_module_outputs
 from xqt.analysis.compare import TensorDiff, compare_tensors, summarize_tensor
 
 from .policy import QuantizationPolicy, list_quantizable_modules
@@ -186,6 +185,8 @@ def _collect_shared_tensor_outputs(
     )
     if not names:
         return [], {}, {}
+
+    from xqt.kernels.nn.fixtures.hooks import collect_module_outputs
 
     reference_outputs = collect_module_outputs(
         reference_model,
@@ -435,6 +436,8 @@ def analyze_layer_errors(
         return []
 
     names = [record.name for record in drift_records]
+    from xqt.kernels.nn.fixtures.hooks import collect_module_outputs
+
     reference_outputs = collect_module_outputs(
         reference_model,
         *forward_args,

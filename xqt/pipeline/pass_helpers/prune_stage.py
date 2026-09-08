@@ -350,9 +350,18 @@ def _run_prune_with_resolved_config(
         )
         context.metrics["prune"] = report.to_dict()
         if context.structure_contract is not None:
+            from xqt.contracts.model_structure import update_structure_contract_for_model
+
+            context.structure_contract = update_structure_contract_for_model(
+                context.structure_contract, model
+            )
             context.metrics["prune"]["structure_contract_family"] = (
                 context.structure_contract.family
             )
+            if context.structure_contract.topology_fingerprint:
+                context.metrics["prune"]["structure_contract_fingerprint"] = (
+                    context.structure_contract.topology_fingerprint
+                )
         if context.manifest is not None:
             context.manifest.add_metric(
                     MetricRecord(

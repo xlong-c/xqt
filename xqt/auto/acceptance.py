@@ -8,6 +8,7 @@ silently passing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Mapping
 
 from ._helpers import find_nested_numeric
@@ -29,27 +30,51 @@ class AcceptanceEvaluation:
                 key: dict(value) for key, value in self.checks.items()
             },
         }
-def _memory_mb(metrics: Mapping[str, Any]) -> float | None:
+def _metric(
+    metrics: Mapping[str, Any],
+    accept: Any,
+    key: str,
+    *,
+    default_aggregation: str,
+) -> tuple[float | None, str | None, str]:
+    paths = getattr(accept, "metric_paths", {})
+    aggregations = getattr(accept, "aggregations", {})
+    path = paths.get(key) if isinstance(paths, Mapping) else None
+    aggregation = (
+        aggregations.get(key, default_aggregation)
+        if isinstance(aggregations, Mapping)
+        else default_aggregation
+    )
+    value = find_nested_numeric(
+        metrics,
+        key,
+        path=str(path) if path is not None else None,
+        aggregation=str(aggregation),
+    )
+    return value, None if path is None else str(path), str(aggregation)
+
+
+def _memory_mb(metrics: Mapping[str, Any], accept: Any) -> float | None:
     for key in ("peak_memory_mb", "memory_mb"):
-        value = find_nested_numeric(metrics, key)
+        value, _, _ = _metric(metrics, accept, key, default_aggregation="max")
         if value is not None:
             return value
     for key in ("peak_memory_bytes", "peak_bytes", "cuda_peak_allocated_bytes"):
-        value = find_nested_numeric(metrics, key)
+        value, _, _ = _metric(metrics, accept, key, default_aggregation="max")
         if value is not None:
             return value / (1024.0 * 1024.0)
     return None
 
 
-def _accuracy_drop(metrics: Mapping[str, Any]) -> float | None:
-    direct = find_nested_numeric(metrics, "accuracy_drop")
+def _accuracy_drop(metrics: Mapping[str, Any], accept: Any) -> float | None:
+    direct, _, _ = _metric(metrics, accept, "accuracy_drop", default_aggregation="max")
     if direct is not None:
         return direct
-    baseline = find_nested_numeric(metrics, "accuracy_baseline")
-    candidate = find_nested_numeric(metrics, "accuracy_candidate")
+    baseline, _, _ = _metric(metrics, accept, "accuracy_baseline", default_aggregation="min")
+    candidate, _, _ = _metric(metrics, accept, "accuracy_candidate", default_aggregation="min")
     if baseline is not None and candidate is not None:
         return baseline - candidate
-    accuracy = find_nested_numeric(metrics, "accuracy")
+    accuracy, _, _ = _metric(metrics, accept, "accuracy", default_aggregation="min")
     if baseline is not None and accuracy is not None:
         return baseline - accuracy
     return None
@@ -58,12 +83,28 @@ def _accuracy_drop(metrics: Mapping[str, Any]) -> float | None:
 def _benchmark_speedup(
     reference_benchmark: Mapping[str, Any] | None,
     metrics: Mapping[str, Any],
+    accept: Any,
 ) -> float | None:
     if reference_benchmark is None:
         return None
-    reference_latency = find_nested_numeric(reference_benchmark, "p50_ms")
-    current_latency = find_nested_numeric(metrics, "p50_ms")
-    if reference_latency is None or current_latency is None or current_latency <= 0:
+    reference_latency, _, _ = _metric(
+        reference_benchmark,
+        accept,
+        "p50_ms",
+        default_aggregation="max",
+    )
+    current_latency, _, _ = _metric(
+        metrics,
+        accept,
+        "p50_ms",
+        default_aggregation="max",
+    )
+    if (
+        reference_latency is None
+        or current_latency is None
+        or reference_latency < 0
+        or current_latency <= 0
+    ):
         return None
     return reference_latency / current_latency
 
@@ -87,6 +128,8 @@ def evaluate_stage_acceptance(
         observed: Any,
         threshold: Any,
         reason: str,
+        path: str | None = None,
+        aggregation: str | None = None,
     ) -> None:
         nonlocal accepted
         checks[key] = {
@@ -94,6 +137,8 @@ def evaluate_stage_acceptance(
             "observed": observed,
             "threshold": threshold,
             "reason": reason,
+            "path": path,
+            "aggregation": aggregation,
         }
         if not passed:
             accepted = False
@@ -101,9 +146,20 @@ def evaluate_stage_acceptance(
 
     min_speedup = getattr(accept, "min_speedup", None)
     if min_speedup is not None:
-        speedup = _benchmark_speedup(reference_benchmark, metrics)
+        speedup = _benchmark_speedup(reference_benchmark, metrics, accept)
+        _, speedup_path, speedup_aggregation = _metric(
+            metrics,
+            accept,
+            "speedup",
+            default_aggregation="min",
+        )
         if speedup is None:
-            speedup = find_nested_numeric(metrics, "speedup")
+            speedup, speedup_path, speedup_aggregation = _metric(
+                metrics,
+                accept,
+                "speedup",
+                default_aggregation="min",
+            )
         if speedup is None:
             record(
                 "min_speedup",
@@ -111,6 +167,18 @@ def evaluate_stage_acceptance(
                 observed=None,
                 threshold=min_speedup,
                 reason="speedup evidence is missing",
+                path=speedup_path,
+                aggregation=speedup_aggregation,
+            )
+        elif speedup <= 0 or not math.isfinite(speedup):
+            record(
+                "min_speedup",
+                passed=False,
+                observed=speedup,
+                threshold=min_speedup,
+                reason="speedup must be finite and > 0",
+                path=speedup_path,
+                aggregation=speedup_aggregation,
             )
         elif speedup < min_speedup:
             record(
@@ -119,6 +187,8 @@ def evaluate_stage_acceptance(
                 observed=speedup,
                 threshold=min_speedup,
                 reason=f"speedup {speedup:.6g} is below {min_speedup:g}",
+                path=speedup_path,
+                aggregation=speedup_aggregation,
             )
         else:
             record(
@@ -127,11 +197,15 @@ def evaluate_stage_acceptance(
                 observed=speedup,
                 threshold=min_speedup,
                 reason="speedup threshold met",
+                path=speedup_path,
+                aggregation=speedup_aggregation,
             )
 
     max_mean_abs = getattr(accept, "max_mean_abs", None)
     if max_mean_abs is not None:
-        mean_abs = find_nested_numeric(metrics, "mean_abs")
+        mean_abs, path, aggregation = _metric(
+            metrics, accept, "mean_abs", default_aggregation="max"
+        )
         if mean_abs is None:
             record(
                 "max_mean_abs",
@@ -139,14 +213,18 @@ def evaluate_stage_acceptance(
                 observed=None,
                 threshold=max_mean_abs,
                 reason="mean_abs evidence is missing",
+                path=path,
+                aggregation=aggregation,
             )
-        elif mean_abs > max_mean_abs:
+        elif mean_abs < 0 or mean_abs > max_mean_abs:
             record(
                 "max_mean_abs",
                 passed=False,
                 observed=mean_abs,
                 threshold=max_mean_abs,
-                reason=f"mean_abs {mean_abs:.6g} exceeds {max_mean_abs:g}",
+                reason=f"mean_abs {mean_abs:.6g} is outside [0, {max_mean_abs:g}]",
+                path=path,
+                aggregation=aggregation,
             )
         else:
             record(
@@ -155,11 +233,15 @@ def evaluate_stage_acceptance(
                 observed=mean_abs,
                 threshold=max_mean_abs,
                 reason="mean_abs threshold met",
+                path=path,
+                aggregation=aggregation,
             )
 
     max_max_abs = getattr(accept, "max_max_abs", None)
     if max_max_abs is not None:
-        max_abs = find_nested_numeric(metrics, "max_abs")
+        max_abs, path, aggregation = _metric(
+            metrics, accept, "max_abs", default_aggregation="max"
+        )
         if max_abs is None:
             record(
                 "max_max_abs",
@@ -167,14 +249,18 @@ def evaluate_stage_acceptance(
                 observed=None,
                 threshold=max_max_abs,
                 reason="max_abs evidence is missing",
+                path=path,
+                aggregation=aggregation,
             )
-        elif max_abs > max_max_abs:
+        elif max_abs < 0 or max_abs > max_max_abs:
             record(
                 "max_max_abs",
                 passed=False,
                 observed=max_abs,
                 threshold=max_max_abs,
-                reason=f"max_abs {max_abs:.6g} exceeds {max_max_abs:g}",
+                reason=f"max_abs {max_abs:.6g} is outside [0, {max_max_abs:g}]",
+                path=path,
+                aggregation=aggregation,
             )
         else:
             record(
@@ -183,11 +269,15 @@ def evaluate_stage_acceptance(
                 observed=max_abs,
                 threshold=max_max_abs,
                 reason="max_abs threshold met",
+                path=path,
+                aggregation=aggregation,
             )
 
     max_relative_error = getattr(accept, "max_relative_error", None)
     if max_relative_error is not None:
-        relative_error = find_nested_numeric(metrics, "relative_error")
+        relative_error, path, aggregation = _metric(
+            metrics, accept, "relative_error", default_aggregation="max"
+        )
         if relative_error is None:
             record(
                 "max_relative_error",
@@ -195,14 +285,21 @@ def evaluate_stage_acceptance(
                 observed=None,
                 threshold=max_relative_error,
                 reason="relative_error evidence is missing",
+                path=path,
+                aggregation=aggregation,
             )
-        elif relative_error > max_relative_error:
+        elif relative_error < 0 or relative_error > max_relative_error:
             record(
                 "max_relative_error",
                 passed=False,
                 observed=relative_error,
                 threshold=max_relative_error,
-                reason=f"relative_error {relative_error:.6g} exceeds {max_relative_error:g}",
+                reason=(
+                    f"relative_error {relative_error:.6g} is outside "
+                    f"[0, {max_relative_error:g}]"
+                ),
+                path=path,
+                aggregation=aggregation,
             )
         else:
             record(
@@ -211,11 +308,13 @@ def evaluate_stage_acceptance(
                 observed=relative_error,
                 threshold=max_relative_error,
                 reason="relative_error threshold met",
+                path=path,
+                aggregation=aggregation,
             )
 
     max_memory_mb = getattr(accept, "max_memory_mb", None)
     if max_memory_mb is not None:
-        memory_mb = _memory_mb(metrics)
+        memory_mb = _memory_mb(metrics, accept)
         if memory_mb is None:
             record(
                 "max_memory_mb",
@@ -224,13 +323,16 @@ def evaluate_stage_acceptance(
                 threshold=max_memory_mb,
                 reason="peak memory evidence is missing",
             )
-        elif memory_mb > max_memory_mb:
+        elif memory_mb < 0 or memory_mb > max_memory_mb:
             record(
                 "max_memory_mb",
                 passed=False,
                 observed=memory_mb,
                 threshold=max_memory_mb,
-                reason=f"peak memory {memory_mb:.6g} MB exceeds {max_memory_mb:g} MB",
+                reason=(
+                    f"peak memory {memory_mb:.6g} MB is outside "
+                    f"[0, {max_memory_mb:g}] MB"
+                ),
             )
         else:
             record(
@@ -243,7 +345,7 @@ def evaluate_stage_acceptance(
 
     max_accuracy_drop = getattr(accept, "max_accuracy_drop", None)
     if max_accuracy_drop is not None:
-        accuracy_drop = _accuracy_drop(metrics)
+        accuracy_drop = _accuracy_drop(metrics, accept)
         if accuracy_drop is None:
             record(
                 "max_accuracy_drop",

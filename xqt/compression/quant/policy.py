@@ -9,7 +9,7 @@ from typing import Iterable, Sequence
 import torch
 from torch import nn
 
-
+from xqt.core.base import XQTConfigError
 from xqt.contracts.model_structure import (
     ModelStructureContract,
     is_module_path_within,
@@ -118,6 +118,13 @@ def list_quantizable_modules(
     """Inspect a model and return quantization candidates."""
 
     policy = policy or QuantizationPolicy()
+    if structure_contract is not None:
+        from xqt.contracts.model_structure import is_structure_contract_valid_for_model
+
+        if not is_structure_contract_valid_for_model(structure_contract, model):
+            raise XQTConfigError(
+                "Structure contract is invalid or expired for the given model"
+            )
     protected = (
         structure_contract_keep_high_precision_paths(structure_contract)
         if structure_contract is not None

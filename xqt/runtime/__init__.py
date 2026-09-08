@@ -46,6 +46,18 @@ from .policy import (
 
 from .engine import HybridInferenceEngine, HybridInferenceResult
 from .model_runner import ModelRunner, ModelRunnerReport
+from .cuda_graph import (
+    CUDAGraphBlockRunner,
+    CUDAGraphCache,
+    CUDAGraphCacheKey,
+    CUDAGraphEntry,
+    compute_model_param_fingerprint,
+)
+from .deploy_loader import (
+    DeployedModelInstance,
+    DeploymentExecutionReport,
+    StandaloneDeployLoader,
+)
 from .composite_branch import (
     CompositeBranchModule,
     MaterializerFunc,
@@ -232,4 +244,12 @@ __all__ = [
     "build_runtime_manifest",
     "generate_serving_config",
     "write_serving_config",
+    "CUDAGraphBlockRunner",
+    "CUDAGraphCache",
+    "CUDAGraphCacheKey",
+    "CUDAGraphEntry",
+    "compute_model_param_fingerprint",
+    "DeployedModelInstance",
+    "DeploymentExecutionReport",
+    "StandaloneDeployLoader",
 ]

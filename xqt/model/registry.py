@@ -52,8 +52,23 @@ def _register_builtin_profiles() -> None:
             family="diffusion",
             loader_target="xqt.model.flux2_klein.load.load_flux2_klein_bf16_transformer",
             loader_params={"repo_id": "black-forest-labs/FLUX.2-klein-4b"},
+            adapter_target="xqt.model.flux2_klein.adapter.Flux2KleinBF16Adapter",
             inference_adapter="tensor",
             metadata={"source": "huggingface", "repo_id": "black-forest-labs/FLUX.2-klein-4b"},
+        ),
+        ModelProfile(
+            profile_id="diffusers.flux2-klein-nvfp4",
+            family="diffusion",
+            loader_target="xqt.model.flux2_klein.load.load_flux2_klein_nvfp4_transformer",
+            loader_params={"repo_id": "black-forest-labs/FLUX.2-klein-4b-nvfp4"},
+            adapter_target="xqt.model.flux2_klein.adapter.Flux2KleinNVFP4Adapter",
+            inference_adapter="tensor",
+            metadata={
+                "source": "huggingface",
+                "repo_id": "black-forest-labs/FLUX.2-klein-4b-nvfp4",
+                "format": "nvfp4",
+                "family": "diffusion",
+            },
         ),
     )
     _PROFILES.update({profile.profile_id: profile for profile in builtins})

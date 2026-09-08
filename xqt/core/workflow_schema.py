@@ -18,6 +18,8 @@ class StageAcceptanceConfig:
     max_relative_error: Optional[float] = None
     max_memory_mb: Optional[float] = None
     max_accuracy_drop: Optional[float] = None
+    metric_paths: dict[str, str] = field(default_factory=dict)
+    aggregations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

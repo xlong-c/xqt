@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Callable
 
 import torch
@@ -42,32 +43,46 @@ def _maybe_run_graph_transforms(
         raw = getattr(resolved_quant, "policy", None)
         if isinstance(raw, dict):
             policy = dict(raw)
-    transform_names = policy.get("graph_transforms")
-    if not transform_names:
+    transform_raw = policy.get("graph_transforms")
+    if not transform_raw:
         return []
     if not isinstance(context.model, nn.Module):
         return [{"applied": False, "notes": ["model_not_nn_module"]}]
 
     from xqt.compression.quant.transforms import (
-        RotationAbsorbTransform,
         apply_graph_transforms,
+        build_graph_transform,
+        parse_graph_transform_config,
     )
 
-    transforms = []
-    names = (
-        list(transform_names)
-        if isinstance(transform_names, (list, tuple))
-        else [str(transform_names)]
-    )
-    for name in names:
-        key = str(name).strip().lower()
-        if key in {"rotation_absorb", "rotation", "quarot"}:
-            rot_size = int(policy.get("transform_rot_size", policy.get("rot_size", 32)))
-            transforms.append(RotationAbsorbTransform(rot_size=rot_size))
-    if not transforms:
-        return [{"applied": False, "notes": [f"unknown_transforms:{names}"]}]
-    reports = apply_graph_transforms(context.model, transforms)
-    return [report.to_dict() for report in reports]
+    transform_cfg = parse_graph_transform_config(transform_raw)
+    if not transform_cfg.transforms:
+        return []
+
+    transforms = [
+        build_graph_transform(single.name, single.params)
+        for single in transform_cfg.transforms
+    ]
+
+    # 接入事务保护，若变换过程中出错则完整回滚原模型
+    snapshot = copy.deepcopy(context.model)
+    try:
+        reports = apply_graph_transforms(
+            context.model, transforms, dry_run=transform_cfg.dry_run
+        )
+        if context.structure_contract is not None and not transform_cfg.dry_run:
+            from xqt.contracts.model_structure import (
+                compute_topology_fingerprint,
+                update_structure_contract_for_model,
+            )
+
+            context.structure_contract = update_structure_contract_for_model(
+                context.structure_contract, context.model
+            )
+        return [report.to_dict() for report in reports]
+    except Exception as exc:
+        context.model = snapshot
+        raise exc
 
 
 def _build_quant_layer_analysis_summary(

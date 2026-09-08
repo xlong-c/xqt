@@ -6,6 +6,7 @@ from .base.errors import (
     XQTConfigError,
     XQTError,
     XQTPipelineError,
+    XQTQuantError,
     XQTRegistryError,
 )
 
@@ -16,5 +17,6 @@ __all__ = [
     "XQTConfigError",
     "XQTError",
     "XQTPipelineError",
+    "XQTQuantError",
     "XQTRegistryError",
 ]

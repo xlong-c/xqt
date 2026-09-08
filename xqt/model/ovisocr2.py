@@ -26,11 +26,12 @@ from xqt.compression.quant.quantizers.convrot_int8 import (
 from xqt.runtime.modules.convrot import materialize_convrot_execution_views
 
 
-OVISOCR2_REPO_ID = "AIDC-AI/Ovis2.5-9B"
+OVISOCR2_REPO_ID = "ATH-MaaS/OvisOCR2"
 OVISOCR2_CONVROT_INT8_STRATEGY = "w8a8_int8"
 
 _DEFAULT_EXCLUDE_NAME_PATTERNS = (
     r"^visual_tokenizer(?:\.|$)",
+    r"^visual(?:\.|$)",
     r"^vte(?:\.|$)",
     r".*lm_head$",
 )
@@ -166,7 +167,19 @@ def select_ovisocr2_convrot_modules(
     for name, module in model.named_modules():
         if not name or not isinstance(module, nn.Linear):
             continue
-        if not name.startswith("llm.") or name.endswith("lm_head"):
+        if not (
+            name.startswith(
+                (
+                    "llm.",
+                    "language_model.",
+                    "model.language_model.",
+                    "model.layers.",
+                    "model.model.layers.",
+                )
+            )
+            or "self_attn." in name
+            or "mlp." in name
+        ) or name.endswith("lm_head"):
             continue
         if selection_mode == "include_only" and not (
             name in include_names
@@ -386,6 +399,106 @@ def materialize_ovisocr2_convrot_int8_runtime(
     return materialize_convrot_execution_views(model, inplace=inplace)
 
 
+def make_shared_convrot_w8a8_group(
+    projections: list[nn.Module],
+    *,
+    sample_inputs: torch.Tensor | None = None,
+    rot_size: int = 256,
+    norm_weight: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> Any:
+    """Create a SharedConvRotW8A8Group from a list of ConvRot W8A8 Linear layers."""
+
+    from xqt.kernels.ops._impl.cute.convrot_w8a8_sm89 import (
+        PackedConvRotW8A8Linear,
+        SharedConvRotW8A8Group,
+    )
+
+    packeds: list[PackedConvRotW8A8Linear] = []
+    for proj in projections:
+        target = getattr(proj, "storage", proj)
+        if hasattr(target, "_native_w8a8_packed"):
+            if sample_inputs is not None:
+                dummy = sample_inputs
+            else:
+                buf = next(target.buffers(), None)
+                if buf is not None:
+                    device = buf.device
+                elif hasattr(target, "int8_compute"):
+                    device = target.int8_compute.qweight_t.device
+                else:
+                    device = torch.device("cuda")
+                dummy = torch.empty(
+                    (1, target.input_features),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            packeds.append(target._native_w8a8_packed(dummy))
+        elif isinstance(target, PackedConvRotW8A8Linear):
+            packeds.append(target)
+        else:
+            raise TypeError(
+                f"Module {proj} does not expose ConvRot W8A8 packed state"
+            )
+    return SharedConvRotW8A8Group(
+        packeds,
+        rot_size=rot_size,
+        norm_weight=norm_weight,
+        eps=eps,
+    )
+
+
+def make_fused_convrot_w8a8_group(
+    projections: list[nn.Module],
+    *,
+    sample_inputs: torch.Tensor | None = None,
+    rot_size: int = 256,
+    norm_weight: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    min_int8_rows: int = 256,
+) -> Any:
+    """Create a FusedConvRotW8A8LinearGroup fusing projections into a single horizontal GEMM."""
+
+    from xqt.kernels.ops._impl.cute.convrot_w8a8_sm89 import (
+        FusedConvRotW8A8LinearGroup,
+        PackedConvRotW8A8Linear,
+    )
+
+    packeds: list[PackedConvRotW8A8Linear] = []
+    for proj in projections:
+        target = getattr(proj, "storage", proj)
+        if hasattr(target, "_native_w8a8_packed"):
+            if sample_inputs is not None:
+                dummy = sample_inputs
+            else:
+                buf = next(target.buffers(), None)
+                if buf is not None:
+                    device = buf.device
+                elif hasattr(target, "int8_compute"):
+                    device = target.int8_compute.qweight_t.device
+                else:
+                    device = torch.device("cuda")
+                dummy = torch.empty(
+                    (1, target.input_features),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            packeds.append(target._native_w8a8_packed(dummy))
+        elif isinstance(target, PackedConvRotW8A8Linear):
+            packeds.append(target)
+        else:
+            raise TypeError(
+                f"Module {proj} does not expose ConvRot W8A8 packed state"
+            )
+    return FusedConvRotW8A8LinearGroup(
+        packeds,
+        rot_size=rot_size,
+        norm_weight=norm_weight,
+        eps=eps,
+        min_int8_rows=min_int8_rows,
+    )
+
+
 __all__ = [
     "OVISOCR2_CONVROT_INT8_STRATEGY",
     "OVISOCR2_REPO_ID",
@@ -393,6 +506,8 @@ __all__ = [
     "OvisOcr2ConvRotInt8Result",
     "calibrate_ovisocr2_convrot_activation_scales",
     "load_ovisocr2",
+    "make_fused_convrot_w8a8_group",
+    "make_shared_convrot_w8a8_group",
     "materialize_ovisocr2_convrot_int8_runtime",
     "ovisocr2_convrot_default_policy",
     "quantize_ovisocr2_convrot_int8",

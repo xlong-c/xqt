@@ -76,12 +76,45 @@ class _OptimizationRunState:
     stages_by_name: dict[str, SessionStage] = field(default_factory=dict)
     stage_order: list[str] = field(default_factory=list)
     baseline_stage: Optional[str] = None
+    current_stage: Optional[str] = None
     best_stage: Optional[str] = None
     stage_counter: Any = field(default_factory=lambda: count(1))
 
 
 def _snapshot_model(model: Any) -> Any:
     return copy.deepcopy(model) if isinstance(model, nn.Module) else model
+
+
+def _copy_attempt_value(value: Any) -> Any:
+    """Copy mutable context metadata without requiring model duplication."""
+
+    try:
+        return copy.deepcopy(value)
+    except (TypeError, RuntimeError):
+        return value
+
+
+def _snapshot_context_fields(context: XQTContext) -> dict[str, Any]:
+    """Snapshot non-model context state before a candidate attempt."""
+
+    return {
+        name: _copy_attempt_value(value)
+        for name, value in vars(context).items()
+        if name != "model"
+    }
+
+
+def _restore_context_fields(
+    context: XQTContext,
+    fields: Mapping[str, Any],
+) -> None:
+    """Restore all non-model fields, discarding attempt-local additions."""
+
+    for name in tuple(vars(context)):
+        if name != "model" and name not in fields:
+            delattr(context, name)
+    for name, value in fields.items():
+        setattr(context, name, _copy_attempt_value(value))
 
 
 def _stage_id(state: _OptimizationRunState) -> str:
@@ -105,6 +138,10 @@ def _register_stage(
     summary: str = "",
     payload_metadata: dict[str, Any] | None = None,
 ) -> SessionStage:
+    if name in state.stages_by_name:
+        raise ValueError(f"stage name is already registered: {name}")
+    if any(parent not in state.stages_by_name for parent in parent_names):
+        raise ValueError(f"stage parents must already exist: {parent_names}")
     payload_kind = payload_kind_for_stage(
         stage_kind,
         transform_kind=created_by.kind,
@@ -202,6 +239,7 @@ def create_optimization_state(
         payload_metadata={"source": "session_init"},
     )
     state.baseline_stage = baseline_name
+    state.current_stage = baseline_name
     state.best_stage = baseline_name
     state.model_snapshots["initial"] = _snapshot_model(context.model)
     return state
@@ -261,12 +299,11 @@ def _record_stage_report(
     state: _OptimizationRunState,
     stage: "OptimizationStageConfig",
     result: "OptimizationStageResult",
+    *,
+    source_stage_name: str,
 ) -> None:
     capability = _extract_optimization_capability(result.metrics)
     benchmark_config = state.context.benchmark_config
-    source_stage_name = (
-        stage.from_stage or state.best_stage or state.baseline_stage or "baseline"
-    )
     report = build_stage_report(
         stage_name=result.name,
         stage_kind=result.kind,
@@ -279,6 +316,7 @@ def _record_stage_report(
             "from_stage": source_stage_name,
             "compare_to": stage.compare_to,
             "baseline_stage": state.baseline_stage,
+            "current_stage": state.current_stage,
             "best_stage": state.best_stage,
         },
         metadata={
@@ -312,36 +350,42 @@ def run_optimization_stage(
 
     if not stage.enabled:
         return None
-    if stage.from_stage is not None:
-        if (
-            stage.from_stage not in state.model_snapshots
-            and stage.from_stage not in state.stages_by_name
-        ):
-            raise ValueError(f"unknown from_stage: {stage.from_stage}")
-        state.context.model = restore_stage_model(state, stage.from_stage)
-
+    source_stage_name = (
+        stage.from_stage or state.current_stage or state.baseline_stage or "baseline"
+    )
+    if source_stage_name not in state.stages_by_name:
+        raise ValueError(f"unknown source stage: {source_stage_name}")
+    state.context.model = restore_stage_model(state, source_stage_name)
+    before_context = _snapshot_context_fields(state.context)
     before_artifacts = dict(state.context.artifacts)
-    if stage.kind == "benchmark":
-        runners.benchmark(state.config, stage, state.context)
-        metrics = dict(state.context.metrics.get("benchmark", {}))
-        state.benchmark_results[stage.name] = metrics
-    elif stage.kind == "prune":
-        runners.prune(state.config, stage, state.context)
-        metrics = dict(state.context.metrics.get("prune", {}))
-    elif stage.kind == "quant":
-        runners.quant(state.config, stage, state.context)
-        metrics = dict(state.context.metrics.get("quant", {}))
-    elif stage.kind == "operator":
-        runners.operator(state.config, stage, state.context)
-        metrics = dict(state.context.metrics.get("operator_optimization", {}))
-    elif stage.kind in {"export", "deploy"}:
-        runners.export(state.config, stage, state.context)
-        metrics = dict(state.context.metrics.get("export", {}))
-    elif stage.kind == "analyze":
-        runners.analyze(state.config, stage, state.context)
-        metrics = dict(state.context.metrics.get("analysis", {}))
-    else:
-        raise ValueError(f"unsupported stage kind {stage.kind}")
+    before_benchmarks = _copy_attempt_value(state.benchmark_results)
+
+    try:
+        if stage.kind == "benchmark":
+            runners.benchmark(state.config, stage, state.context)
+            metrics = dict(state.context.metrics.get("benchmark", {}))
+        elif stage.kind == "prune":
+            runners.prune(state.config, stage, state.context)
+            metrics = dict(state.context.metrics.get("prune", {}))
+        elif stage.kind == "quant":
+            runners.quant(state.config, stage, state.context)
+            metrics = dict(state.context.metrics.get("quant", {}))
+        elif stage.kind == "operator":
+            runners.operator(state.config, stage, state.context)
+            metrics = dict(state.context.metrics.get("operator_optimization", {}))
+        elif stage.kind in {"export", "deploy"}:
+            runners.export(state.config, stage, state.context)
+            metrics = dict(state.context.metrics.get("export", {}))
+        elif stage.kind == "analyze":
+            runners.analyze(state.config, stage, state.context)
+            metrics = dict(state.context.metrics.get("analysis", {}))
+        else:
+            raise ValueError(f"unsupported stage kind {stage.kind}")
+    except Exception:
+        _restore_context_fields(state.context, before_context)
+        state.context.model = restore_stage_model(state, source_stage_name)
+        state.benchmark_results = before_benchmarks
+        raise
 
     reference_benchmark = (
         state.benchmark_results.get(stage.compare_to)
@@ -353,15 +397,11 @@ def run_optimization_stage(
         metrics,
         reference_benchmark=reference_benchmark,
     )
-    source_stage_name = (
-        stage.from_stage or state.best_stage or state.baseline_stage or "baseline"
-    )
-    if accepted and stage.save_model and transform_mutates_model(stage.kind):
-        state.best_stage = stage.name
-    elif not accepted and stage.revert_on_reject and stage.from_stage is not None:
-        state.context.model = restore_stage_model(state, stage.from_stage)
-
     new_artifacts = _new_artifacts(before_artifacts, state.context.artifacts)
+    if not accepted:
+        _restore_context_fields(state.context, before_context)
+        state.context.model = restore_stage_model(state, source_stage_name)
+        state.benchmark_results = before_benchmarks
     from .optimization import OptimizationStageResult
 
     result = OptimizationStageResult(
@@ -396,12 +436,23 @@ def run_optimization_stage(
             metrics=metrics,
             artifacts=new_artifacts,
             save_requested=stage.save_model,
-            save_model_snapshot=stage.save_model and transform_mutates_model(stage.kind),
+            save_model_snapshot=transform_mutates_model(stage.kind),
             compare_baseline=stage.compare_to or state.baseline_stage,
             summary=f"{stage.kind} stage '{stage.name}'",
             payload_metadata=provider_output.payload_metadata,
         )
-    _record_stage_report(state, stage, result)
+        if stage.kind == "benchmark":
+            state.benchmark_results[stage.name] = metrics
+        if transform_mutates_model(stage.kind):
+            state.current_stage = stage.name
+            # The default explicit ranking rule is latest accepted model stage.
+            state.best_stage = stage.name
+    _record_stage_report(
+        state,
+        stage,
+        result,
+        source_stage_name=source_stage_name,
+    )
     return result
 
 
@@ -417,6 +468,7 @@ def result_from_state(state: _OptimizationRunState) -> "OptimizedModelResult":
         session_stages=[state.stages_by_name[name] for name in state.stage_order],
         best_stage=state.best_stage,
         baseline_stage=state.baseline_stage,
+        current_stage=state.current_stage,
         models=dict(state.model_snapshots),
     )
 
@@ -433,6 +485,7 @@ def write_workflow_outputs(result: "OptimizedModelResult") -> None:
         "artifacts": json_safe_value(result.artifacts),
         "best_stage": result.best_stage,
         "baseline_stage": result.baseline_stage,
+        "current_stage": result.current_stage,
     }
     path = artifact_dir / "workflow_result.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
