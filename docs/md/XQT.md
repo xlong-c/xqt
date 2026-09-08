@@ -10,6 +10,8 @@ XQT 只关注模型本身. 它接收 PyTorch 模型,checkpoint 或导出产物,�
 
 当前 `XQTOptimizationSession` 内部已经维护正式 `SessionStage` 图, `StagePayload` typed payload, transform-side provider 和 `StageComparison` helper. 详细协议以 [architecture/xqt.md](architecture/xqt.md) 和 [../../xqt/FRAMEWORK.md](../../xqt/FRAMEWORK.md) 为准.
 
+后续修改规划见 [XQT 改进路线图](architecture/xqt-improvement-roadmap.md) 和 [改进目标与验收](architecture/xqt-improvement-goals.md). 规划将状态正确性, 契约接线和真实模型交付串成逐项验收路径, 不代表这些目标已实现.
+
 ## 1. 项目定位
 
 本章节保留为兼容锚点. `XQT` 的系统定位和模型侧边界已经迁到:

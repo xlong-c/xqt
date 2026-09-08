@@ -9,6 +9,7 @@
 | --- | --- |
 | 本文 `xqt-design-debt.md` | 只记账: open 问题, 锚点, 裁决问题 |
 | [xqt-realignment-guide.md](xqt-realignment-guide.md) | 长期矫正准则与现状落地状态 |
+| [xqt-improvement-roadmap.md](xqt-improvement-roadmap.md) / [xqt-improvement-goals.md](xqt-improvement-goals.md) | 2026-09-05 改进大纲与详细验收; 新任务状态只在 goals 维护, 不重新打开已结案历史债 |
 | [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md) | engine / quant 词表与禁止项 (规则源) |
 | [xqt-infer-handoff.md](xqt-infer-handoff.md) | quant→infer 交接面 |
 | [xqt.md](xqt.md) / [FRAMEWORK.md](../../../xqt/FRAMEWORK.md) | 已实现事实 |
@@ -39,9 +40,9 @@
 | --- | --- | --- | --- |
 | [DEBT-001](#debt-001-xqtconvert-engine-把推理-engine-绑在-convert-参数上) | `xqt.convert(..., engine=...)` 绑定推理 engine | done | high |
 | [DEBT-002](#debt-002-quant-capability-把算法方法与-mma-计算契约-engine-缠在一起) | quant capability 把 AWQ/GPTQ/SVD 与 MMA/engine 缠在一起 | done | high |
-| [DEBT-003](#debt-003-量化与推理未严格解耦-推理应只消费模型--计算配置) | 量化与推理未严格解耦; 推理应只消费模型 + 计算配置 | done | high |
+| [DEBT-003](#debt-003) | 量化与推理未严格解耦; 推理应只消费模型 + 计算配置 | done | high |
 | [DEBT-004](#debt-004-gemm-selector-fp4nvfp4-goal-感知尚未落地) | gemm selector `goal` 对 fp4/nvfp4 尚无差异化 | done | medium |
-| [DEBT-005](#debt-005-svdquant-应走-composite-add-混合精度而非特例-runtime) | SVDQuant 应走 composite_add 混合精度而非特例 runtime | planned (partial) | high |
+| [DEBT-005](#debt-005) | SVDQuant 应走 composite_add 混合精度而非特例 runtime | planned (partial) | high |
 
 ---
 
@@ -217,6 +218,8 @@ AWQ/GPTQ 只出现在轴 1; SVD 分解是轴 1 (+ 可选 low-rank 存储形态);
 
 ---
 
+<a id="debt-003"></a>
+
 ## DEBT-003: 量化与推理未严格解耦; 推理应只消费模型 + 计算配置
 
 **状态**: done  
@@ -389,6 +392,8 @@ InferRuntime:
 - C10 engine 矩阵; `xqt.kernels.wrappers` capability
 
 ---
+
+<a id="debt-005"></a>
 
 ## DEBT-005: SVDQuant 应走 composite_add 混合精度而非特例 runtime
 

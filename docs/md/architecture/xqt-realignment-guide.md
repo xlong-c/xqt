@@ -2,6 +2,8 @@
 
 本文记录 XQT 现状诊断中 1-8 节的落地状态, 并给后续重构提供长期执行准则. 它是指导文件, 不是完成报告; 未完成项不得在其他文档中写成既有事实.
 
+2026-09-05 后续改进的大纲见 [XQT 改进路线图](xqt-improvement-roadmap.md), 任务状态与详细验收只维护在 [改进目标与验收](xqt-improvement-goals.md). 本文保留历史矫正背景, 涉及历史设计债的最新状态以 [设计债台账](xqt-design-debt.md) 为准; 实施前仍需核对源码.
+
 ## 结论
 
 最初诊断报告的 1-8 节没有全部实现. 当前已经落地的是配置单轨化 Phase A/B/C: workflow loader 会把 `stages[*].params` 解析成 typed `StageSpec`; `operator`, `export/deploy`, `analyze`, `benchmark`, `quant`, `prune` 都已通过显式参数消费 typed spec 或其投影; 旧 `XQTConfig`, `load_xqt_config()` 和 `XQTContext.config` 已从代码路径删除. 其余多数仍处于规划或局部实现状态.
@@ -181,7 +183,7 @@ weight-only low-bit
 
 ## 文档写作规则
 
-- 架构目标写入 `docs/md/architecture/xqt-realignment-guide.md` 或 `xqt-design-debt.md`.
+- 长期矫正原则保留在本文, 新问题记入 `xqt-design-debt.md`; 本批改进的大纲与验收分别维护在 `xqt-improvement-roadmap.md` 和 `xqt-improvement-goals.md`, 不复制任务状态.
 - 已实现事实写入 `docs/md/architecture/xqt.md`, `docs/md/explanation/xqt-concepts.md`, `docs/md/usage/xqt-workflows.md`, `xqt/FRAMEWORK.md`.
 - 规划和现状必须分开. 未完成项必须使用 "目标", "计划", "尚未" 等措辞.
 - 修改能力成熟度时, 同步更新 readiness, capability, tests 和文档.
@@ -189,12 +191,6 @@ weight-only low-bit
 
 ## 下一步顺序
 
-1. 在目标 CUDA GPU 的 runtime-compatible TileLang 环境继续扩展 correctness / benchmark 覆盖. 本机已用 TileLang `0.1.12` 在 `sm_89` 通过 linear / conv / norm / dequant / attention CUDA tests 与 golden workflow; Triton RMSNorm / FeedForward 同样通过. 仍需更大 shape 与性能基线后再调整宣传面. `0.1.11` 继续保留为已知不兼容版本.
-2. 在目标 TensorRT 环境和真实部署形状上扩展 complete golden workflow 的 runtime benchmark. 非 dry-run engine, runtime handle, 数值对比和 `[8,64]` 最小 benchmark 已在 `sm_89` 上通过, 但依赖 explicit dense dequantized export lowering, 不代表 packed-FP4 TensorRT runtime. Stage report 对 live TensorRT handle 的序列化回归已修复.
-3. Contract 层: payload 已支持可选 `module_contract` (quant/prune/export/operator), `stage_provider` 会从 model `_xqt_module_contract` 自动提取. 内部 Plan/Report 执行类型仍可继续加深 contract 驱动, 但不扩张平行 schema.
-4. 持续校正 backend / engine capability 的 maturity 和宣传面; TransformerBlock 完整 block-level 单 kernel fusion 与正式性能基线 (非正确性 shape 扫) 仍待加深.
-5. 设计债统一记在 [xqt-design-debt.md](xqt-design-debt.md), 后面批量制定修改方案. 当前 open:
-   - DEBT-001: `convert` 绑推理 engine
-   - DEBT-002: quant capability 把 AWQ/GPTQ/SVD 与 MMA/engine 缠在一起 (method × storage × compute 拆轴)
-   - DEBT-003: 量化与推理严格解耦 (推理只消费 模型 + 计算配置/capability, 不强行指定 engine)
-   建议三债同一方案包处理. 未拍板前勿零散改公开 API.
+当前执行顺序统一见 [改进路线图的里程碑](xqt-improvement-roadmap.md#3-六大里程碑与阶段准入). 先保证 Session 状态, 校准, artifact 与 acceptance 可信, 再接通模型结构与可执行契约, 最后验收真实模型及其部署产物.
+
+历史硬件 smoke 与局部 kernel 证据仍有价值, 但不能替代新计划要求的真实 checkpoint, block / 整模指标和新进程重载. ONNX / TensorRT dense lowering 与原生低比特执行继续分开验收. 本节不再复制设计债的 open/done 状态, 避免把台账已结案条目重复立项.
