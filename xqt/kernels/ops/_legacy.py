@@ -53,36 +53,64 @@ def register_legacy_gemm() -> None:
             continue
 
 
+_LEGACY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "triton": (
+        "attention",
+        "bias_gelu",
+        "swiglu",
+        "geglu",
+        "rmsnorm",
+        "rmsnorm_channel_first",
+        "rmsnorm_residual",
+        "rope",
+        "gemm_fp16",
+        "gemm_bf16",
+        "gemm_int8",
+        "gemm_fp8",
+        "gemm_int4_dequant",
+        "gemm_nvfp4_packed_dequant",
+        "gemm_mxfp",
+    ),
+    "tilelang": (
+        "attention",
+        "conv",
+        "conv3d_1x1x1",
+        "dequant_gemm_epilogue",
+        "dense_linear_epilogue",
+        "int8_mma",
+        "int8_linear",
+        "int8_linear_static_activation",
+        "linear",
+        "linear_marlin",
+        "norm",
+        "fp4_packed_dequant_gemm_epilogue",
+        "mxfp4_packed_dequant_gemm_epilogue",
+        "nvfp4_packed_dequant_gemm_epilogue",
+    ),
+    "cutile": ("bias_silu",),
+    "cutlass": ("gemm_epilogue",),
+    "cute_dsl": ("gemm_epilogue", "grouped_gemm"),
+}
+
+
 def register_legacy_operator_patterns() -> None:
     for bk, target in _GROUP_TARGET.items():
-        try:
-            import importlib
-
-            m = importlib.import_module(f"xqt.kernels.ops._impl.engines.{bk}")
-        except Exception:
-            continue
         backend = KernelBackend(bk)
-        for attr in dir(m):
-            if "REGISTRY" not in attr:
-                continue
-            reg = getattr(m, attr)
-            if not isinstance(reg, dict):
-                continue
-            for pattern in reg:
-                try:
-                    register_kernel(
-                        KernelSpec(
-                            op=f"{bk}.{pattern}",
-                            backend=backend,
-                            target=target,
-                            format_signature=FormatSignature(
-                                description=f"legacy operator pattern {pattern}"
-                            ),
-                        )
+        patterns = _LEGACY_PATTERNS.get(bk, ())
+        for pattern in patterns:
+            try:
+                register_kernel(
+                    KernelSpec(
+                        op=f"{bk}.{pattern}",
+                        backend=backend,
+                        target=target,
+                        format_signature=FormatSignature(
+                            description=f"legacy operator pattern {pattern}"
+                        ),
                     )
-                except ValueError:
-                    continue
-            break
+                )
+            except ValueError:
+                continue
 
 
 register_legacy_gemm()

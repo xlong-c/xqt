@@ -76,8 +76,10 @@ class GraphQuantTransform(Protocol):
 def apply_graph_transforms(
     model: nn.Module,
     transforms: Sequence[GraphQuantTransform],
+    *,
+    dry_run: bool = False,
 ) -> list[TransformReport]:
-    """Run match/apply for each transform; skip when ``match`` returns None."""
+    """Run match/apply for each transform; in dry_run mode generate plans without rewriting."""
 
     reports: list[TransformReport] = []
     for transform in transforms:
@@ -92,6 +94,22 @@ def apply_graph_transforms(
                 )
             )
             continue
+
+        if dry_run:
+            reports.append(
+                TransformReport(
+                    transform_name=transform.name,
+                    applied=False,
+                    absorbed_ops=plan.absorbed_ops,
+                    online_ops=plan.online_ops,
+                    required_kernels=tuple(transform.required_kernels),
+                    targets=plan.targets,
+                    notes=("dry_run",),
+                    metadata={"plan": plan.to_dict()},
+                )
+            )
+            continue
+
         reports.append(transform.apply(model, plan))
     return reports
 

@@ -8,8 +8,6 @@ import torch
 from torch import nn
 
 from xqt.contracts.input_utils import split_example_input
-
-from xqt.kernels.ops._impl.engines.tilelang import tilelang_validation_thresholds
 from .types import OperatorOptimizationTargetPlan
 
 
@@ -125,6 +123,8 @@ def effective_validation_thresholds(
     if list(target.patterns or []) == ["attention"]:
         thresholds["atol"] = max(thresholds["atol"], 1e-2)
         thresholds["rtol"] = max(thresholds["rtol"], 1e-2)
+    from xqt.kernels.ops._impl.engines.tilelang import tilelang_validation_thresholds
+
     dtype_defaults = tilelang_validation_thresholds(optimized_output.dtype)
     return {
         "atol": max(float(dtype_defaults["atol"]), thresholds["atol"]),

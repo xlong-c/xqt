@@ -21,9 +21,15 @@ from xqt.kernels.ops.gemm.registry import default_registry
 from xqt.kernels.ops.gemm.reference import dense_gemm_reference
 from xqt.kernels.ops.gemm.dispatch import dispatch_gemm
 
-from xqt.kernels.ops._impl.engines.tilelang import run_tilelang_kernel
-from xqt.kernels.ops._impl.engines.triton import run_triton_kernel
 from .gemm_selector import GemmShape, select_gemm_engine
+
+def run_tilelang_kernel(*args: Any, **kwargs: Any) -> Any:
+    from xqt.kernels.ops._impl.engines.tilelang import run_tilelang_kernel as _impl
+    return _impl(*args, **kwargs)
+
+def run_triton_kernel(*args: Any, **kwargs: Any) -> Any:
+    from xqt.kernels.ops._impl.engines.triton import run_triton_kernel as _impl
+    return _impl(*args, **kwargs)
 
 MatmulPrecisionSpec = PrecisionPolicy
 

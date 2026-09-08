@@ -9,7 +9,7 @@ claims real-world performance gains.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from torch import nn
 
@@ -17,6 +17,10 @@ from xqt.contracts.model_structure import (
     COMPONENT_ROLES,
     ComponentSpec,
     ModelStructureContract,
+    build_structure_contract,
+    classify_model_family,
+    component_grouping,
+    model_family_names,
 )
 from xqt.core.base import XQTConfigError
 
@@ -33,218 +37,7 @@ ModelFamily = Literal[
     "unknown",
 ]
 
-
-_FAMILY_NAMES: tuple[str, ...] = (
-    "transformer",
-    "vit",
-    "detection",
-    "llm",
-    "diffusion",
-    "moe",
-    "multimodal",
-    "convnet",
-    "unknown",
-)
-
-_TASK_TO_FAMILY: dict[str, str] = {
-    "detection": "detection",
-    "llm": "llm",
-    "text_generation": "llm",
-    "diffusion": "diffusion",
-    "image_generation": "diffusion",
-    "multimodal": "multimodal",
-    "vlm": "multimodal",
-    "classification": "transformer",
-}
-
-_DETECTION_HEAD_MARKERS = ("head", "detect", "yolo", "rtdetr")
-_EXPERT_MARKERS = ("experts", "expert", "moe")
-_ROUTER_MARKERS = ("router", "gating", "gate")
-_DIFFUSION_MARKERS = ("unet", "dit", "vae", "text_encoder", "denoiser")
-_MULTIMODAL_MARKERS = ("vision_encoder", "visual_encoder", "encoder_cache", "cross_attn")
-
-
-def model_family_names() -> tuple[str, ...]:
-    """Return the canonical model family vocabulary."""
-
-    return _FAMILY_NAMES
-
-
-def _module_paths(model: nn.Module) -> list[str]:
-    return [name for name, _module in model.named_modules()]
-
-
-def _module_types(model: nn.Module) -> list[str]:
-    return [type(module).__name__ for _name, module in model.named_modules()]
-
-
-def _contains_attention(paths: Sequence[str]) -> bool:
-    return any(
-        marker in path.lower()
-        for marker in (
-            "attention",
-            "attn",
-            "encoder",
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "out_proj",
-        )
-        for path in paths
-    )
-
-
-def _contains_conv(model: nn.Module) -> bool:
-    return any(
-        isinstance(module, nn.Conv2d)
-        for _name, module in model.named_modules()
-    )
-
-
-def classify_model_family(
-    model: nn.Module,
-    *,
-    task_type: str | None = None,
-) -> str:
-    """Classify a model into a canonical XQT model family.
-
-    ``task_type`` (from ``TaskConfig.type``) takes precedence when it maps to a
-    known family; otherwise structural heuristics on module names are used.
-    """
-
-    if task_type:
-        normalized = str(task_type).strip().lower()
-        if normalized in _TASK_TO_FAMILY:
-            return _TASK_TO_FAMILY[normalized]
-
-    paths = _module_paths(model)
-    lowered = [path.lower() for path in paths]
-    joined = " ".join(lowered)
-
-    if any(marker in joined for marker in _EXPERT_MARKERS) and any(
-        marker in joined for marker in _ROUTER_MARKERS
-    ):
-        return "moe"
-    if any(marker in joined for marker in _DIFFUSION_MARKERS):
-        return "diffusion"
-    if any(marker in joined for marker in _MULTIMODAL_MARKERS):
-        return "multimodal"
-    has_detection_head = any(
-        marker in joined for marker in ("detect", "yolo", "rtdetr", "detection_head")
-    ) or (
-        "head" in joined
-        and "patch_embed" not in joined
-        and "lm_head" not in joined
-        and "blocks" not in joined
-    )
-    if has_detection_head and _contains_conv(model):
-        return "detection"
-    if "lm_head" in joined or (
-        "q_proj" in joined and "k_proj" in joined and "v_proj" in joined
-    ):
-        return "llm"
-    if "patch_embed" in joined or ("vit" in joined and _contains_attention(paths)):
-        return "vit"
-    if _contains_attention(paths) and "norm" in joined:
-        return "transformer"
-    if _contains_conv(model):
-        return "convnet"
-    return "unknown"
-
-
-def component_grouping(
-    model: nn.Module,
-    *,
-    family: str | None = None,
-    task_type: str | None = None,
-) -> dict[str, list[str]]:
-    """Group module paths by model-family component role.
-
-    The returned mapping is a suggestion for quant / prune policy defaults
-    (for example keep the head and router in high precision); it is not an
-    automatic policy rewrite.
-    """
-
-    resolved = family or classify_model_family(model, task_type=task_type)
-    groups: dict[str, list[str]] = {
-        "attention": [],
-        "ffn": [],
-        "norm": [],
-        "head": [],
-        "backbone": [],
-        "expert": [],
-        "router": [],
-        "embedding": [],
-        "encoder": [],
-        "cross_attention": [],
-        "diffusion_component": [],
-        "other": [],
-    }
-    for name, module in model.named_modules():
-        if not name:
-            continue
-        lowered = name.lower()
-        module_type = type(module).__name__
-        if any(marker in lowered for marker in _ROUTER_MARKERS):
-            groups["router"].append(name)
-        elif any(marker in lowered for marker in _DIFFUSION_MARKERS):
-            groups["diffusion_component"].append(name)
-        elif any(
-            marker in lowered
-            for marker in ("vision_encoder", "visual_encoder", "encoder_cache")
-        ):
-            groups["encoder"].append(name)
-        elif any(marker in lowered for marker in ("cross_attn", "cross_attention")):
-            groups["cross_attention"].append(name)
-        elif any(marker in lowered for marker in _EXPERT_MARKERS):
-            groups["expert"].append(name)
-        elif isinstance(module, (nn.Embedding,)):
-            groups["embedding"].append(name)
-        elif any(marker in lowered for marker in _DETECTION_HEAD_MARKERS):
-            groups["head"].append(name)
-        elif isinstance(module, (nn.LayerNorm,)) or "rmsnorm" in module_type.lower():
-            groups["norm"].append(name)
-        elif any(
-            marker in lowered
-            for marker in ("attention", "attn", "q_proj", "k_proj", "v_proj", "out_proj")
-        ):
-            groups["attention"].append(name)
-        elif any(marker in lowered for marker in ("ffn", "mlp", "feed_forward")):
-            groups["ffn"].append(name)
-        elif isinstance(module, (nn.Conv2d,)):
-            groups["backbone"].append(name)
-        else:
-            groups["other"].append(name)
-    return groups
-
-
-def build_structure_contract(
-    model: nn.Module,
-    *,
-    family: str | None = None,
-    task_type: str | None = None,
-) -> ModelStructureContract:
-    """Derive a draft :class:`ModelStructureContract` from grouping heuristics.
-
-    只派生 components 草稿; merged projections 与 weight mapping 是模型事实,
-    启发式不猜, 必须由模型作者显式声明后补进契约. 真实接入建议把派生结果
-    固化为手写契约, 不在运行时反复推导.
-    """
-
-    resolved = family or classify_model_family(model, task_type=task_type)
-    groups = component_grouping(model, family=resolved, task_type=task_type)
-    unknown_roles = set(groups) - set(COMPONENT_ROLES)
-    if unknown_roles:
-        raise XQTConfigError(
-            f"component_grouping produced roles outside COMPONENT_ROLES: "
-            f"{sorted(unknown_roles)}"
-        )
-    components = tuple(
-        ComponentSpec(role=role, paths=tuple(sorted(paths)))
-        for role, paths in groups.items()
-        if paths
-    )
-    return ModelStructureContract(family=resolved, components=components)
+_FAMILY_NAMES = model_family_names()
 
 
 @dataclass(frozen=True)
@@ -269,6 +62,7 @@ class FamilySmokeReport:
             "module_counts": dict(self.module_counts),
             "notes": list(self.notes),
         }
+
 
 def family_smoke_report(
     model: nn.Module,

@@ -72,6 +72,8 @@ struct QuantizeRotatedActKernel {
         int padded_m;
         int padded_k;
         int rot_size;
+        const Base::half_t* norm_weight;
+        float eps;
     };
 
     template <bool StoreOutput>
@@ -80,7 +82,8 @@ struct QuantizeRotatedActKernel {
         int global_row,
         int col_base,
         int lane_id,
-        Base::half_t* output) {
+        Base::half_t* output,
+        float rsqrt_val = 1.0F) {
         constexpr unsigned FULL_MASK = 0xffffffffU;
         float values[VALUES_PER_LANE];
 
@@ -88,11 +91,15 @@ struct QuantizeRotatedActKernel {
         for (int index = 0; index < VALUES_PER_LANE; ++index) {
             const int local_col = lane_id * VALUES_PER_LANE + index;
             const int global_col = col_base + local_col;
-            values[index] =
+            float val =
                 global_row < args.actual_m && global_col < args.logical_k
                     ? static_cast<float>(
                           args.input[global_row * args.logical_k + global_col])
                     : 0.0F;
+            if (args.norm_weight != nullptr && global_row < args.actual_m && global_col < args.logical_k) {
+                val = val * rsqrt_val * static_cast<float>(args.norm_weight[global_col]);
+            }
+            values[index] = val;
         }
 
 #pragma unroll
@@ -166,15 +173,20 @@ struct QuantizeRotatedActKernel {
     __device__ __forceinline__ static float direct_row_maximum(
         const Arguments& args,
         int global_row,
-        int lane_id) {
+        int lane_id,
+        float rsqrt_val = 1.0F) {
         float maximum = 0.0F;
         if (global_row < args.actual_m) {
             for (int col = lane_id; col < args.rotated_k;
                  col += Base::WARP_SIZE) {
-                const Base::half_t value = col < args.logical_k
-                    ? args.input[global_row * args.logical_k + col]
-                    : cuda_cast<Base::half_t>(0.0F);
-                maximum = fmaxf(maximum, fabsf(static_cast<float>(value)));
+                float val = col < args.logical_k
+                    ? static_cast<float>(args.input[global_row * args.logical_k + col])
+                    : 0.0F;
+                if (args.norm_weight != nullptr && col < args.logical_k) {
+                    val = val * rsqrt_val * static_cast<float>(args.norm_weight[col]);
+                }
+                const Base::half_t converted = cuda_cast<Base::half_t>(val);
+                maximum = fmaxf(maximum, fabsf(static_cast<float>(converted)));
             }
         }
 #pragma unroll
@@ -197,12 +209,31 @@ struct QuantizeRotatedActKernel {
         __shared__ alignas(128) Base::half_t rotated[Base::WARP_M][ROT_SIZE];
         __shared__ alignas(128) float row_maximum[Base::WARP_M];
         __shared__ alignas(128) Base::half_t row_scale[Base::WARP_M];
+        __shared__ alignas(128) float row_rsqrt[Base::WARP_M];
         __shared__ alignas(128) uint8_t
             quant_scratch[Base::NUM_WARPS][QUANT_SCRATCH_BYTES];
 
         for (int row = warp_id; row < Base::WARP_M;
              row += Base::NUM_WARPS) {
             const int global_row = row_base + row;
+            float rsqrt_val = 1.0F;
+            if (args.norm_weight != nullptr && global_row < args.actual_m) {
+                float sum_sq = 0.0F;
+                for (int col = lane_id; col < args.logical_k; col += Base::WARP_SIZE) {
+                    const float v = static_cast<float>(
+                        args.input[global_row * args.logical_k + col]);
+                    sum_sq += v * v;
+                }
+#pragma unroll
+                for (int mask = Base::WARP_SIZE / 2; mask > 0; mask /= 2) {
+                    sum_sq += __shfl_xor_sync(0xffffffffU, sum_sq, mask);
+                }
+                rsqrt_val = rsqrtf(sum_sq / static_cast<float>(args.logical_k) + args.eps);
+            }
+            if (lane_id == 0) {
+                row_rsqrt[row] = rsqrt_val;
+            }
+
             float maximum = 0.0F;
             if (args.rot_size == ROT_SIZE) {
                 for (int col_base = 0; col_base < args.rotated_k;
@@ -214,10 +245,11 @@ struct QuantizeRotatedActKernel {
                             global_row,
                             col_base,
                             lane_id,
-                            nullptr));
+                            nullptr,
+                            rsqrt_val));
                 }
             } else {
-                maximum = direct_row_maximum(args, global_row, lane_id);
+                maximum = direct_row_maximum(args, global_row, lane_id, rsqrt_val);
             }
             if (lane_id == 0) {
                 row_maximum[row] = maximum;
@@ -243,7 +275,8 @@ struct QuantizeRotatedActKernel {
                         row_base + row,
                         col_base,
                         lane_id,
-                        rotated[row]);
+                        rotated[row],
+                        row_rsqrt[row]);
                 }
             } else {
                 const int elements = Base::WARP_M * ROT_SIZE;
@@ -253,12 +286,15 @@ struct QuantizeRotatedActKernel {
                     const int local_col = index % ROT_SIZE;
                     const int global_row = row_base + row;
                     const int global_col = col_base + local_col;
-                    rotated[row][local_col] =
-                        global_row < args.actual_m &&
-                            global_col < args.logical_k
-                        ? args.input[
-                              global_row * args.logical_k + global_col]
-                        : cuda_cast<Base::half_t>(0.0F);
+                    float val = global_row < args.actual_m &&
+                                global_col < args.logical_k
+                        ? static_cast<float>(args.input[
+                              global_row * args.logical_k + global_col])
+                        : 0.0F;
+                    if (args.norm_weight != nullptr && global_row < args.actual_m && global_col < args.logical_k) {
+                        val = val * row_rsqrt[row] * static_cast<float>(args.norm_weight[global_col]);
+                    }
+                    rotated[row][local_col] = cuda_cast<Base::half_t>(val);
                 }
             }
             __syncthreads();
@@ -310,16 +346,23 @@ struct SmallQuantizeKernel {
         int rotated_k;
         int padded_k;
         int rot_size;
+        const Base::half_t* norm_weight;
+        float eps;
     };
 
     __device__ __forceinline__ static float load_value(
         const Arguments& args,
         int row,
-        int col) {
+        int col,
+        float rsqrt_val = 1.0F) {
         if (col >= args.logical_k) {
             return 0.0F;
         }
-        return static_cast<float>(args.input[row * args.logical_k + col]);
+        float val = static_cast<float>(args.input[row * args.logical_k + col]);
+        if (args.norm_weight != nullptr) {
+            val = val * rsqrt_val * static_cast<float>(args.norm_weight[col]);
+        }
+        return val;
     }
 
     __device__ __forceinline__ static void transform_tile(
@@ -351,12 +394,38 @@ struct SmallQuantizeKernel {
         const int tid = static_cast<int>(threadIdx.x);
 
         __shared__ alignas(128) float tile[MAX_ROT_SIZE];
+        __shared__ float row_rsqrt_shared;
+
+        if (args.norm_weight != nullptr && row < args.actual_m) {
+            float thread_sum_sq = 0.0F;
+            for (int col = tid; col < args.logical_k; col += blockDim.x) {
+                const float v = static_cast<float>(args.input[row * args.logical_k + col]);
+                thread_sum_sq += v * v;
+            }
+            tile[tid] = thread_sum_sq;
+            __syncthreads();
+            for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    tile[tid] += tile[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                row_rsqrt_shared = rsqrtf(tile[0] / static_cast<float>(args.logical_k) + args.eps);
+            }
+            __syncthreads();
+        } else if (tid == 0) {
+            row_rsqrt_shared = 1.0F;
+        }
+        __syncthreads();
+        const float row_rsqrt = row_rsqrt_shared;
+
         float local_maximum = 0.0F;
 
         if (args.rot_size == 1) {
             for (int col = tid; col < args.padded_k; col += blockDim.x) {
                 const float value = row < args.actual_m
-                    ? load_value(args, row, col)
+                    ? load_value(args, row, col, row_rsqrt)
                     : 0.0F;
                 const Base::half_t converted = cuda_cast<Base::half_t>(value);
                 local_maximum = fmaxf(
@@ -367,7 +436,7 @@ struct SmallQuantizeKernel {
             for (int col_base = 0; col_base < args.padded_k;
                  col_base += args.rot_size) {
                 if (tid < args.rot_size) {
-                    tile[tid] = load_value(args, row, col_base + tid);
+                    tile[tid] = load_value(args, row, col_base + tid, row_rsqrt);
                 }
                 __syncthreads();
                 transform_tile(tile, args.rot_size);
@@ -404,7 +473,7 @@ struct SmallQuantizeKernel {
         if (args.rot_size == 1) {
             for (int col = tid; col < args.padded_k; col += blockDim.x) {
                 const float value = row < args.actual_m
-                    ? load_value(args, row, col)
+                    ? load_value(args, row, col, row_rsqrt)
                     : 0.0F;
                 const Base::half_t converted = cuda_cast<Base::half_t>(value);
                 args.output[row * args.padded_k + col] = cuda_cast<int8_t>(
@@ -416,7 +485,7 @@ struct SmallQuantizeKernel {
         for (int col_base = 0; col_base < args.padded_k;
              col_base += args.rot_size) {
             if (tid < args.rot_size) {
-                tile[tid] = load_value(args, row, col_base + tid);
+                tile[tid] = load_value(args, row, col_base + tid, row_rsqrt);
             }
             __syncthreads();
             transform_tile(tile, args.rot_size);
@@ -467,15 +536,16 @@ struct SmallGemmKernel {
 
         for (int k0 = 0; k0 < args.k; k0 += TILE_K) {
             // Transpose the row-major KxN weight tile into the col-major
-            // layout expected by the INT8 WMMA B fragment.
+            // layout expected by the INT8 WMMA B fragment with coalesced DRAM reads.
             for (int index = tid; index < TILE_N * TILE_K; index += blockDim.x) {
-                const int n_local = index / TILE_K;
-                const int k_local = index % TILE_K;
-                const int global_n = tile_col + n_local;
+                const int k_local = index / TILE_N;
+                const int n_local = index % TILE_N;
                 const int global_k = k0 + k_local;
-                b_tile[index] = global_n < args.n
+                const int global_n = tile_col + n_local;
+                const int8_t val = (global_k < args.k && global_n < args.n)
                     ? args.weight[global_k * args.n + global_n]
                     : static_cast<int8_t>(0);
+                b_tile[n_local * TILE_K + k_local] = val;
             }
             __syncthreads();
             const int8_t* a_ptr = args.activation + tile_row * args.k + k0;
@@ -537,6 +607,8 @@ int launch_quantize_rotated_act(
     int padded_m,
     int padded_k,
     int rot_size,
+    const void* norm_weight,
+    float eps,
     cudaStream_t stream) {
     using Kernel = QuantizeRotatedActKernel;
     auto function = invoke_kernel<Kernel, typename Kernel::Arguments>;
@@ -554,6 +626,8 @@ int launch_quantize_rotated_act(
         .padded_m = padded_m,
         .padded_k = padded_k,
         .rot_size = rot_size,
+        .norm_weight = static_cast<const Base::half_t*>(norm_weight),
+        .eps = eps,
     });
     return static_cast<int>(cudaGetLastError());
 }
@@ -630,6 +704,8 @@ int launch_small_quantize(
     int rotated_k,
     int padded_k,
     int rot_size,
+    const void* norm_weight,
+    float eps,
     cudaStream_t stream) {
     using Kernel = SmallQuantizeKernel;
     auto function = invoke_kernel<Kernel, typename Kernel::Arguments>;
@@ -642,6 +718,8 @@ int launch_small_quantize(
         .rotated_k = rotated_k,
         .padded_k = padded_k,
         .rot_size = rot_size,
+        .norm_weight = static_cast<const Base::half_t*>(norm_weight),
+        .eps = eps,
     });
     return static_cast<int>(cudaGetLastError());
 }
@@ -675,6 +753,89 @@ int launch_small_gemm(
     return static_cast<int>(cudaGetLastError());
 }
 
+__global__ void fused_swiglu_vector_kernel(
+    const Base::half_t* __restrict__ gate_up,
+    Base::half_t* __restrict__ output,
+    int m,
+    int d) {
+    constexpr int VEC = 8;
+    const int tid = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int num_vecs_per_row = d / VEC;
+    const int total_vecs = m * num_vecs_per_row;
+    if (tid < total_vecs) {
+        const int row = tid / num_vecs_per_row;
+        const int vec_idx = tid % num_vecs_per_row;
+        const int col = vec_idx * VEC;
+
+        const Base::half_t* g_ptr = gate_up + row * (2 * d) + col;
+        const Base::half_t* u_ptr = g_ptr + d;
+        Base::half_t* out_ptr = output + row * d + col;
+
+        const uint4 g_raw = *reinterpret_cast<const uint4*>(g_ptr);
+        const uint4 u_raw = *reinterpret_cast<const uint4*>(u_ptr);
+
+        const Base::half_t* g_elems = reinterpret_cast<const Base::half_t*>(&g_raw);
+        const Base::half_t* u_elems = reinterpret_cast<const Base::half_t*>(&u_raw);
+        Base::half_t res_elems[VEC];
+
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) {
+            const float g = static_cast<float>(g_elems[i]);
+            const float u = static_cast<float>(u_elems[i]);
+            const float sig = 1.0F / (1.0F + __expf(-g));
+            res_elems[i] = cuda_cast<Base::half_t>(g * sig * u);
+        }
+
+        *reinterpret_cast<uint4*>(out_ptr) = *reinterpret_cast<const uint4*>(res_elems);
+    }
+}
+
+__global__ void fused_swiglu_scalar_kernel(
+    const Base::half_t* __restrict__ gate_up,
+    Base::half_t* __restrict__ output,
+    int m,
+    int d) {
+    const int tid = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int total_elements = m * d;
+    if (tid < total_elements) {
+        const int row = tid / d;
+        const int col = tid % d;
+        const float g = static_cast<float>(gate_up[row * (2 * d) + col]);
+        const float u = static_cast<float>(gate_up[row * (2 * d) + d + col]);
+        const float sig = 1.0F / (1.0F + __expf(-g));
+        output[tid] = cuda_cast<Base::half_t>(g * sig * u);
+    }
+}
+
+int launch_fused_swiglu(
+    const void* gate_up,
+    void* output,
+    int m,
+    int d,
+    cudaStream_t stream) {
+    constexpr int VEC = 8;
+    if (d % VEC == 0) {
+        const int total_vecs = m * (d / VEC);
+        const int block_size = 256;
+        const int num_blocks = (total_vecs + block_size - 1) / block_size;
+        fused_swiglu_vector_kernel<<<num_blocks, block_size, 0, stream>>>(
+            static_cast<const Base::half_t*>(gate_up),
+            static_cast<Base::half_t*>(output),
+            m,
+            d);
+    } else {
+        const int total_elements = m * d;
+        const int block_size = 256;
+        const int num_blocks = (total_elements + block_size - 1) / block_size;
+        fused_swiglu_scalar_kernel<<<num_blocks, block_size, 0, stream>>>(
+            static_cast<const Base::half_t*>(gate_up),
+            static_cast<Base::half_t*>(output),
+            m,
+            d);
+    }
+    return static_cast<int>(cudaGetLastError());
+}
+
 }  // namespace
 
 extern "C" int xqt_convrot_w8a8_quantize_weight(
@@ -697,6 +858,8 @@ extern "C" int xqt_convrot_w8a8_quantize_rotated_act(
     int padded_m,
     int padded_k,
     int rot_size,
+    const void* norm_weight,
+    float eps,
     cudaStream_t stream) {
     return launch_quantize_rotated_act(
         input,
@@ -708,6 +871,8 @@ extern "C" int xqt_convrot_w8a8_quantize_rotated_act(
         padded_m,
         padded_k,
         rot_size,
+        norm_weight,
+        eps,
         stream);
 }
 
@@ -748,6 +913,8 @@ extern "C" int xqt_convrot_w8a8_small_quantize(
     int rotated_k,
     int padded_k,
     int rot_size,
+    const void* norm_weight,
+    float eps,
     cudaStream_t stream) {
     return launch_small_quantize(
         input,
@@ -758,6 +925,8 @@ extern "C" int xqt_convrot_w8a8_small_quantize(
         rotated_k,
         padded_k,
         rot_size,
+        norm_weight,
+        eps,
         stream);
 }
 
@@ -785,10 +954,24 @@ extern "C" int xqt_convrot_w8a8_small_gemm(
         stream);
 }
 
+extern "C" int xqt_convrot_w8a8_fused_swiglu(
+    const void* gate_up,
+    void* output,
+    int m,
+    int d,
+    cudaStream_t stream) {
+    return launch_fused_swiglu(
+        gate_up,
+        output,
+        m,
+        d,
+        stream);
+}
+
 extern "C" const char* xqt_convrot_w8a8_version() {
 #if defined(XQT_W8A8_FP16)
-    return "nunchaku_convrot_w8a8_sm89_fp16_v2";
+    return "nunchaku_convrot_w8a8_sm89_fp16_v4";
 #else
-    return "nunchaku_convrot_w8a8_sm89_bf16_v2";
+    return "nunchaku_convrot_w8a8_sm89_bf16_v4";
 #endif
 }

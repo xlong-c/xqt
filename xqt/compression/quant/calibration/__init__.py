@@ -10,6 +10,8 @@ from .scale_artifact import (
     ActivationScaleArtifact,
     activation_scales_to_mapping,
     calibrate_activation_scales,
+    preserve_module_inference_state,
+    run_calibration_batches,
 )
 from .static_scales import (
     coerce_provided_activation_scales,
@@ -28,6 +30,8 @@ __all__ = [
     "build_calibration_summary",
     "calibrate_activation_scales",
     "calibrate_activation_statistics",
+    "preserve_module_inference_state",
+    "run_calibration_batches",
     "coerce_provided_activation_scales",
     "force_static_scheme",
     "resolve_int8_scheme",

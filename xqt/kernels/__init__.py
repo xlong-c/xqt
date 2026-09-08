@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from xqt.kernels.registry import KernelRegistry, register_kernel, registry
+from xqt.kernels.registry import KernelRegistry, register_kernel, registry, sync_gemm_inventory
 from xqt.kernels.selector import (
     clear_cache,
     get_fastest_kernel,
@@ -39,6 +39,7 @@ __all__ = [
     "register_fused_op",
     "register_kernel",
     "registry",
+    "sync_gemm_inventory",
     "select_kernel",
     "select_fastest_kernel",
     "AutoTunedOperator",

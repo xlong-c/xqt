@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-__deprecated__ = "use xqt.kernels.registry for kernel inventory"
-
 _MATURITIES = {"executable", "metadata_only", "planned", "reference_guarded"}
 
 from .contracts import EpilogueSpec, GemmProblem, QuantSpec
@@ -159,9 +157,7 @@ class GemmKernelRegistration:
 
 
 class GemmKernelRegistry:
-    """Explicit registry used by dispatch and introspection."""
-
-    __deprecated__ = "use xqt.kernels.registry"
+    """Authoritative GEMM operator registry used by dispatch, planning and introspection."""
 
     def __init__(self, entries: Iterable[GemmKernelRegistration] = ()) -> None:
         self._entries: dict[str, GemmKernelRegistration] = {}
@@ -170,18 +166,14 @@ class GemmKernelRegistry:
 
     def register(self, entry: GemmKernelRegistration) -> None:
         if entry.name in self._entries:
-            raise ValueError(f"duplicate GEMM kernel registration: {entry.name!r}")
+            existing = self._entries[entry.name]
+            if existing == entry:
+                return
+            raise ValueError(
+                f"Conflicting GEMM kernel registration for {entry.name!r}: "
+                f"existing backend={existing.backend!r}, incoming backend={entry.backend!r}"
+            )
         self._entries[entry.name] = entry
-        # Keep the unified inventory authoritative while this compatibility
-        # registry remains in use by the dispatch implementation.
-        try:
-            from xqt.kernels.registry import mirror_legacy_gemm_entry
-
-            mirror_legacy_gemm_entry(entry)
-        except Exception:
-            # Registry construction must remain usable when optional kernel
-            # packages are unavailable or during an import cycle.
-            pass
 
     def replace(self, entry: GemmKernelRegistration) -> None:
         """Replace an existing entry after an artifact/correctness gate."""
@@ -191,12 +183,6 @@ class GemmKernelRegistry:
                 f"cannot replace unknown GEMM kernel registration: {entry.name!r}"
             )
         self._entries[entry.name] = entry
-        try:
-            from xqt.kernels.registry import mirror_legacy_gemm_entry
-
-            mirror_legacy_gemm_entry(entry)
-        except Exception:
-            pass
 
     def get(self, name: str) -> GemmKernelRegistration:
         try:

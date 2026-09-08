@@ -9,13 +9,13 @@ from typing import Any, Mapping, Optional
 import torch
 from torch import nn
 
-from xqt.contracts import ComputeConfig, QuantizedModel
+from xqt.contracts import ComputeConfig, ModuleQuantContract, QuantizedModel, ROOT_MODULE_PATH
 from xqt.kernels.engine_resolve import (
     normalize_engine_name,
     resolve_int8_mma_engine,
 )
 from xqt.contracts.int8_mma import Int8MmaLinear
-from xqt.core.errors import XQTBackendError
+from xqt.core.errors import XQTBackendError, XQTQuantError
 from xqt.core.types import XQTContext
 
 _PTX_SM89_ENGINES = frozenset({"ptx_sm89", "native_sm89"})
@@ -104,6 +104,29 @@ def _should_quantize_int8_mma_module(
     return _module_parameter_count(module) >= policy.min_parameters
 
 
+def _validate_static_activation_scale(
+    module_name: str,
+    value: torch.Tensor | float,
+) -> torch.Tensor:
+    """Normalize and validate one static activation scale before mutation."""
+
+    try:
+        scale = torch.as_tensor(value, dtype=torch.float32).reshape(-1)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise XQTQuantError(
+            f"invalid static activation scale for module {module_name!r}"
+        ) from exc
+    if scale.numel() != 1:
+        raise XQTQuantError(
+            f"static activation scale for module {module_name!r} must be scalar"
+        )
+    if not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any()):
+        raise XQTQuantError(
+            f"static activation scale for module {module_name!r} must be finite and > 0"
+        )
+    return scale.reshape(())
+
+
 def quantize_with_int8_mma(
     model: nn.Module,
     *,
@@ -119,11 +142,19 @@ def quantize_with_int8_mma(
     num_stages: int = 2,
     activation_scale_mode: str = "dynamic",
     activation_scales: Optional[Mapping[str, torch.Tensor | float]] = None,
+    allow_dynamic_fallback: bool = False,
+    allow_noop: bool = False,
     activation_quant_block_size: int = 256,
     eps: float = 1e-6,
 ) -> Int8MmaQuantizationResult:
     """Replace Linear modules with a requested W8A8 INT8 MMA runtime contract."""
 
+    activation_scale_mode = str(activation_scale_mode).strip().lower()
+    if activation_scale_mode not in _ACTIVATION_SCALE_MODES:
+        raise XQTQuantError(
+            "activation_scale_mode must be 'dynamic' or 'static'; "
+            f"got {activation_scale_mode!r}"
+        )
     quant_policy = (
         policy
         if isinstance(policy, QuantizationPolicy)
@@ -132,6 +163,10 @@ def quantize_with_int8_mma(
     selection_mode = "default"
     if isinstance(policy, Mapping):
         selection_mode = str(policy.get("selection_mode", "default"))
+        allow_dynamic_fallback = bool(
+            policy.get("allow_dynamic_fallback", allow_dynamic_fallback)
+        )
+        allow_noop = bool(policy.get("allow_noop", allow_noop))
     if selection_mode not in _SELECTION_MODES:
         raise ValueError("selection_mode must be default or include_only")
     selected_strategy = (
@@ -147,47 +182,94 @@ def quantize_with_int8_mma(
     )
     target_model = model if inplace else copy.deepcopy(model)
     quantized_modules: list[str] = []
+    module_contracts: list[ModuleQuantContract] = []
     static_scales = dict(activation_scales or {})
-    static_scale_modules = 0
-    dynamic_fallback_modules = 0
-
-    for name, module in list(target_model.named_modules()):
-        if not name or not isinstance(module, nn.Linear):
-            continue
-        if not _should_quantize_int8_mma_module(
-            name,
+    selected_modules = [
+        (name, module)
+        for name, module in list(target_model.named_modules())
+        if isinstance(module, nn.Linear)
+        and _should_quantize_int8_mma_module(
+            name or ROOT_MODULE_PATH,
             module,
             quant_policy,
             selection_mode=selection_mode,
-        ):
-            continue
+        )
+    ]
+    if not selected_modules and not allow_noop:
+        raise XQTQuantError(
+            "INT8 MMA quantization selected no modules; set allow_noop=True "
+            "only when an explicit no-op result is intended"
+        )
+    normalized_scales: dict[str, torch.Tensor] = {}
+    selected_names = {name for name, _ in selected_modules} | {
+        (name or ROOT_MODULE_PATH) for name, _ in selected_modules
+    }
+    if activation_scale_mode == "static":
+        missing = [
+            (name or ROOT_MODULE_PATH)
+            for name, _ in selected_modules
+            if name not in static_scales and (name or ROOT_MODULE_PATH) not in static_scales
+        ]
+        if missing and not allow_dynamic_fallback:
+            raise XQTQuantError(
+                "static activation scales are missing for modules: "
+                + ", ".join(missing)
+            )
+        for name, value in static_scales.items():
+            if name in selected_names:
+                normalized_scales[name] = _validate_static_activation_scale(name, value)
+    static_scale_modules = 0
+    dynamic_fallback_modules = 0
+
+    for name, module in selected_modules:
+        canonical_name = name or ROOT_MODULE_PATH
         module_activation_scale_mode = activation_scale_mode
-        module_activation_scale = static_scales.get(name)
+        module_activation_scale = normalized_scales.get(name) or normalized_scales.get(
+            canonical_name
+        )
         if activation_scale_mode == "static":
             if module_activation_scale is None:
                 module_activation_scale_mode = "dynamic"
                 dynamic_fallback_modules += 1
             else:
                 static_scale_modules += 1
-        _replace_submodule(
-            target_model,
-            name,
-            Int8MmaLinear.from_linear(
-                module,
-                engine=engine,
-                fallback_engine=fallback_engine,
-                block_m=block_m,
-                block_n=block_n,
-                block_k=block_k,
-                threads=threads,
-                num_stages=num_stages,
-                activation_scale_mode=module_activation_scale_mode,
-                activation_scale=module_activation_scale,
-                activation_quant_block_size=activation_quant_block_size,
-                eps=eps,
-            ),
+        module_contracts.append(
+            ModuleQuantContract(
+                module_path=canonical_name,
+                in_features=int(module.in_features),
+                out_features=int(module.out_features),
+                weight_shape=tuple(int(dim) for dim in module.weight.shape),
+                storage_dtype="int8",
+                compute_dtype="int8",
+                scale_mode=module_activation_scale_mode,
+                zero_point_mode="symmetric",
+                layout="qweight_t",
+                required_kernel="w8a8_int8_mma",
+            )
         )
-        quantized_modules.append(name)
+        replacement = Int8MmaLinear.from_linear(
+            module,
+            engine=engine,
+            fallback_engine=fallback_engine,
+            block_m=block_m,
+            block_n=block_n,
+            block_k=block_k,
+            threads=threads,
+            num_stages=num_stages,
+            activation_scale_mode=module_activation_scale_mode,
+            activation_scale=module_activation_scale,
+            activation_quant_block_size=activation_quant_block_size,
+            eps=eps,
+        )
+        if not name:
+            target_model = replacement
+        else:
+            _replace_submodule(
+                target_model,
+                name,
+                replacement,
+            )
+        quantized_modules.append(canonical_name)
 
     preferred_hint = [] if normalize_engine_name(engine) == "auto" else [normalize_engine_name(engine)]
     compute_config = ComputeConfig.from_modules(
@@ -208,11 +290,18 @@ def quantize_with_int8_mma(
     )
     from xqt.contracts.runtime_quant import (
         build_runtime_quant_contract,
-        first_linear_shapes,
     )
     from xqt.compression.quant.types import QuantScheme
 
-    global_shape, local_shape = first_linear_shapes(target_model)
+    contract_no_op = not bool(module_contracts)
+    contract_shapes = {
+        (item.out_features, item.in_features) for item in module_contracts
+    }
+    if len(contract_shapes) == 1:
+        global_shape = local_shape = next(iter(contract_shapes))
+    else:
+        # The legacy fields cannot faithfully represent heterogeneous modules.
+        global_shape = local_shape = ()
     contract = build_runtime_quant_contract(
         quant_spec=QuantScheme(
             weight_dtype="int8",
@@ -225,11 +314,13 @@ def quantize_with_int8_mma(
             sym=True,
         ),
         storage_layout="xqt_int8_mma_v1",
-        required_kernels=("w8a8_int8_mma",),
+        required_kernels=() if contract_no_op else ("w8a8_int8_mma",),
         global_shape=global_shape,
         local_shape=local_shape,
-        prefill_supported=True,
-        decode_supported=True,
+        prefill_supported=not contract_no_op,
+        decode_supported=not contract_no_op,
+        module_contracts=module_contracts,
+        no_op=contract_no_op,
     )
     from xqt.compression.quant.layout_apply_report import (
         attach_layout_kernel_metadata,
@@ -284,6 +375,16 @@ def quantize_with_int8_mma(
         "weight_scale_time": "weight_offline",
         "static_scale_module_count": static_scale_modules,
         "dynamic_fallback_module_count": dynamic_fallback_modules,
+        "dynamic_fallback_modules": [
+            (name or ROOT_MODULE_PATH)
+            for name, _ in selected_modules
+            if activation_scale_mode == "static"
+            and name not in normalized_scales
+            and (name or ROOT_MODULE_PATH) not in normalized_scales
+        ],
+        "allow_dynamic_fallback": bool(allow_dynamic_fallback),
+        "no_op": not bool(quantized_modules),
+        "allow_noop": bool(allow_noop),
         "activation_quant_block_size": int(activation_quant_block_size),
         "block_m": int(block_m),
         "block_n": int(block_n),

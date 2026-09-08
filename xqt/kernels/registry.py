@@ -11,6 +11,18 @@ from xqt.kernels.spec import FormatSignature, KernelBackend, KernelSpec
 class KernelRegistry:
     def __init__(self) -> None:
         self._by_op: Dict[str, List[KernelSpec]] = defaultdict(list)
+        self._synced_gemm: bool = False
+
+    def _ensure_synced(self) -> None:
+        if not self._synced_gemm:
+            self._synced_gemm = True
+            try:
+                from xqt.kernels.ops.gemm.registry import default_registry
+
+                for entry in default_registry().entries():
+                    mirror_legacy_gemm_entry(entry)
+            except Exception:
+                pass
 
     def register(self, spec: KernelSpec) -> KernelSpec:
         existing = self._by_op[spec.op]
@@ -27,21 +39,26 @@ class KernelRegistry:
         return spec
 
     def get(self, op: str) -> List[KernelSpec]:
+        self._ensure_synced()
         return list(self._by_op.get(op, ()))
 
     def get_backend(self, op: str, backend: KernelBackend) -> KernelSpec:
+        self._ensure_synced()
         for spec in self._by_op.get(op, ()):
             if spec.backend == backend:
                 return spec
         raise KeyError(f"No '{backend.value}' backend registered for op {op!r}")
 
     def has(self, op: str) -> bool:
+        self._ensure_synced()
         return bool(self._by_op.get(op))
 
     def ops(self) -> List[str]:
+        self._ensure_synced()
         return sorted(self._by_op.keys())
 
     def all_specs(self) -> List[KernelSpec]:
+        self._ensure_synced()
         specs: List[KernelSpec] = []
         for op in self.ops():
             specs.extend(self._by_op[op])
@@ -49,6 +66,7 @@ class KernelRegistry:
 
     def clear(self) -> None:
         self._by_op.clear()
+        self._synced_gemm = False
 
 
 registry = KernelRegistry()
@@ -56,6 +74,14 @@ registry = KernelRegistry()
 # Engine metadata is a separate compatibility surface from kernel specs.  It
 # lives here during migration so callers can observe one inventory root.
 engine_registry: dict[str, object] = {}
+
+
+def sync_gemm_inventory(*, force: bool = False) -> None:
+    """Pull GEMM operator entries from the authoritative GEMM execution registry."""
+
+    if force:
+        registry._synced_gemm = False
+    registry._ensure_synced()
 
 
 def register_kernel(spec: KernelSpec) -> KernelSpec:

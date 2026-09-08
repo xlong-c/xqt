@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -55,6 +56,49 @@ class ActivationScaleArtifact:
         }
 
 
+@contextmanager
+def preserve_module_inference_state(model: nn.Module):
+    """Temporarily evaluate ``model`` without leaking mode or buffer changes."""
+
+    modules = tuple(model.modules())
+    training_modes = {module: bool(module.training) for module in modules}
+    buffers = {
+        (module, name): buffer.detach().clone()
+        for module in modules
+        for name, buffer in module._buffers.items()
+        if buffer is not None
+    }
+    model.eval()
+    try:
+        yield
+    finally:
+        for (module, name), value in buffers.items():
+            current = module._buffers.get(name)
+            if current is None:
+                module._buffers[name] = value.clone()
+            elif current.shape == value.shape and current.dtype == value.dtype:
+                current.copy_(value.to(device=current.device))
+            else:
+                module._buffers[name] = value.to(
+                    device=current.device,
+                    dtype=current.dtype,
+                )
+        # Module.train() recursively changes children; direct assignment keeps
+        # intentionally mixed training modes intact.
+        for module, training in training_modes.items():
+            module.training = training
+
+
+def _batch_has_empty_tensor(batch: Any) -> bool:
+    if isinstance(batch, torch.Tensor):
+        return batch.numel() == 0
+    if isinstance(batch, Mapping):
+        return any(_batch_has_empty_tensor(item) for item in batch.values())
+    if isinstance(batch, (tuple, list)):
+        return any(_batch_has_empty_tensor(item) for item in batch)
+    return False
+
+
 def run_calibration_batches(
     model: nn.Module,
     batches: Iterable[Any],
@@ -65,8 +109,10 @@ def run_calibration_batches(
 
     kwargs = dict(forward_kwargs or {})
     batch_count = 0
-    with torch.no_grad():
+    with preserve_module_inference_state(model), torch.no_grad():
         for batch in batches:
+            if _batch_has_empty_tensor(batch):
+                raise ValueError("calibration batch contains an empty tensor")
             if isinstance(batch, tuple):
                 model(*batch, **kwargs)
             elif isinstance(batch, dict):
@@ -74,6 +120,8 @@ def run_calibration_batches(
             else:
                 model(batch, **kwargs)
             batch_count += 1
+    if batch_count == 0:
+        raise ValueError("calibration_inputs iterable must yield at least one batch; got 0")
     return batch_count
 
 
@@ -220,5 +268,6 @@ __all__ = [
     "ActivationScaleArtifact",
     "activation_scales_to_mapping",
     "calibrate_activation_scales",
+    "preserve_module_inference_state",
     "run_calibration_batches",
 ]

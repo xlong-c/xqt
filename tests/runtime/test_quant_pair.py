@@ -380,3 +380,57 @@ def test_write_quant_pair_from_quantized_safetensors(tmp_path: Path) -> None:
     loaded = load_quant_pair(pair_dir)
     assert loaded.manifest.weights["format"] == "safetensors"
 
+
+def test_write_quant_pair_rejects_path_traversal_and_absolute_paths(tmp_path: Path) -> None:
+    """XQT-005: Reject weights_name and sidecar_name attempting path traversal or absolute paths."""
+    model = _TinyLinear().eval()
+    valid_dir = tmp_path / "safe_pair"
+
+    with pytest.raises(XQTArtifactError, match="parent traversal"):
+        write_quant_pair(model, valid_dir, weights_name="../escape.pt")
+
+    with pytest.raises(XQTArtifactError, match="non-empty relative path"):
+        write_quant_pair(model, valid_dir, weights_name="/tmp/hack.pt")
+
+    with pytest.raises(XQTArtifactError, match="parent traversal"):
+        write_quant_pair(model, valid_dir, sidecar_name="../escape.json")
+
+    with pytest.raises(XQTArtifactError, match="non-empty relative path"):
+        write_quant_pair(model, valid_dir, sidecar_name="/tmp/escape.json")
+
+
+def test_write_quant_pair_rejects_symlink_output_dir(tmp_path: Path) -> None:
+    """XQT-005: Reject output_dir if it is a symbolic link."""
+    real_target = tmp_path / "real_dir"
+    real_target.mkdir()
+    symlink_dir = tmp_path / "symlink_dir"
+    symlink_dir.symlink_to(real_target)
+
+    model = _TinyLinear().eval()
+    with pytest.raises(XQTArtifactError, match="symbolic link"):
+        write_quant_pair(model, symlink_dir)
+
+
+def test_write_quant_pair_staging_failure_preserves_existing_pair(tmp_path: Path) -> None:
+    """XQT-005: Failures during staging keep the existing pair intact and clean up staging."""
+    model = _TinyLinear().eval()
+    pair_dir = tmp_path / "atomic_pair"
+
+    # 1. Write an initial valid pair
+    write_quant_pair(model, pair_dir)
+    initial_sidecar = (pair_dir / "quant.json").read_text()
+
+    # 2. Inject an exception during checksum / verification
+    from unittest.mock import patch
+    with patch("xqt.contracts.quant_pair.file_sha256", side_effect=RuntimeError("disk failure")):
+        with pytest.raises(RuntimeError, match="disk failure"):
+            write_quant_pair(model, pair_dir)
+
+    # 3. Existing pair must remain intact
+    assert (pair_dir / "quant.json").read_text() == initial_sidecar
+    assert (pair_dir / "model.pt").is_file()
+
+    # 4. No leftover staging directories in parent
+    staging_dirs = list(tmp_path.glob(".*staging*"))
+    assert len(staging_dirs) == 0
+

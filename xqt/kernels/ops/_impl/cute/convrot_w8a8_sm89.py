@@ -88,7 +88,7 @@ def _load_extension(dtype_key: str) -> Any:
     try:
         return load_extension(
             CompileSpec(
-                name=f"xqt_convrot_w8a8_sm89_{dtype_key}_v2",
+                name=f"xqt_convrot_w8a8_sm89_{dtype_key}_v4",
                 sources=(_BINDING_SOURCE, _CUDA_SOURCE),
                 include_dirs=(_NUNCHAKU_INCLUDE,),
                 cxx_flags=("-O3", "-std=c++20", *dtype_flags),
@@ -398,15 +398,437 @@ def bind_convrot_w8a8_linear(
     return run
 
 
+def quantize_rotated_activation_sm89(
+    inputs: torch.Tensor,
+    workspace: ConvRotW8A8Workspace,
+    *,
+    rotated_input_features: int,
+    rot_size: int = _NATIVE_ROT_SIZE,
+    norm_weight: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Execute online Hadamard rotation and dynamic INT8 quantization once into workspace."""
+    if inputs.ndim != 2 or not inputs.is_cuda:
+        raise XQTBackendError("inputs must be a two-dimensional CUDA tensor")
+    extension = _load_extension(_dtype_key(inputs.dtype))
+    m = int(inputs.shape[0])
+    weight = norm_weight.contiguous() if norm_weight is not None else None
+    if m <= 128:
+        extension.small_quantize(
+            inputs.contiguous(),
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            int(rotated_input_features),
+            int(rot_size),
+            weight,
+            float(eps),
+        )
+    else:
+        extension.quantize_rotated_act(
+            inputs.contiguous(),
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            int(rotated_input_features),
+            int(rot_size),
+            weight,
+            float(eps),
+        )
+    return workspace.quantized_activation, workspace.activation_scales
+
+
+def gemm_convrot_w8a8_sm89(
+    quantized_activation: torch.Tensor,
+    activation_scales: torch.Tensor,
+    packed: PackedConvRotW8A8Linear,
+    *,
+    output: torch.Tensor | None = None,
+    actual_rows: int | None = None,
+) -> torch.Tensor:
+    """Execute INT8 Tensor Core GEMM on pre-quantized/rotated activation."""
+    m = int(actual_rows if actual_rows is not None else quantized_activation.shape[0])
+    if output is None:
+        output = torch.empty(
+            (m, packed.output_features),
+            dtype=packed.dtype,
+            device=packed.qweight.device,
+        )
+    extension = _load_extension(_dtype_key(packed.dtype))
+    if m <= 128:
+        extension.small_gemm(
+            quantized_activation,
+            activation_scales,
+            packed.raw_qweight_t,
+            packed.raw_weight_scales,
+            packed.raw_bias,
+            output,
+        )
+    else:
+        extension.gemm(
+            quantized_activation,
+            packed.qweight,
+            output,
+            activation_scales,
+            packed.weight_scales,
+            packed.packed_bias,
+        )
+    return output
+
+
+def fused_swiglu(gate_up: torch.Tensor, output: torch.Tensor | None = None) -> torch.Tensor:
+    """Vectorized fused SwiGLU: silu(gate) * up with zero intermediate tensor allocations."""
+    if gate_up.ndim < 2:
+        raise XQTBackendError("gate_up must have at least 2 dimensions")
+    orig_shape = gate_up.shape[:-1]
+    total_d = int(gate_up.shape[-1])
+    if total_d % 2 != 0:
+        raise XQTBackendError("last dimension of gate_up must be even")
+    d = total_d // 2
+    flat_in = gate_up.reshape(-1, total_d).contiguous()
+    m = int(flat_in.shape[0])
+    if output is None:
+        flat_out = torch.empty((m, d), dtype=gate_up.dtype, device=gate_up.device)
+    else:
+        flat_out = output.reshape(-1, d)
+    extension = _load_extension(_dtype_key(gate_up.dtype))
+    extension.fused_swiglu(flat_in, flat_out)
+    if gate_up.ndim > 2:
+        return flat_out.reshape(*orig_shape, d)
+    return flat_out
+
+
+class SharedConvRotW8A8Group:
+    """Group of ConvRot W8A8 projections sharing input rotation and quantization."""
+
+    def __init__(
+        self,
+        packeds: list[PackedConvRotW8A8Linear],
+        *,
+        rot_size: int = _NATIVE_ROT_SIZE,
+        norm_weight: torch.Tensor | None = None,
+        eps: float = 1e-6,
+    ) -> None:
+        if not packeds:
+            raise ValueError("packeds must contain at least one projection")
+        self.packeds = list(packeds)
+        self.rot_size = int(rot_size)
+        self.input_features = self.packeds[0].input_features
+        self.padded_input_features = self.packeds[0].padded_input_features
+        self.dtype = self.packeds[0].dtype
+        self.device = self.packeds[0].qweight.device
+        self.norm_weight = norm_weight.to(device=self.device, dtype=self.dtype) if norm_weight is not None else None
+        self.eps = float(eps)
+        self._workspace: ConvRotW8A8Workspace | None = None
+
+    def _get_workspace(self, rows: int) -> ConvRotW8A8Workspace:
+        expected_rows = _round_up(int(rows), 16) if int(rows) <= 128 else _round_up(int(rows), 256)
+        if (
+            self._workspace is None
+            or self._workspace.padded_rows != expected_rows
+        ):
+            self._workspace = allocate_convrot_w8a8_workspace(rows, self.packeds[0])
+        return self._workspace
+
+    def __call__(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+        if inputs.ndim != 2:
+            flat = inputs.reshape(-1, self.input_features)
+        else:
+            flat = inputs
+        m = int(flat.shape[0])
+        workspace = self._get_workspace(m)
+        quantize_rotated_activation_sm89(
+            flat,
+            workspace,
+            rotated_input_features=self.padded_input_features,
+            rot_size=self.rot_size,
+            norm_weight=self.norm_weight,
+            eps=self.eps,
+        )
+        outputs: list[torch.Tensor] = []
+        for packed in self.packeds:
+            out = torch.empty((m, packed.output_features), dtype=self.dtype, device=self.device)
+            gemm_convrot_w8a8_sm89(
+                workspace.quantized_activation,
+                workspace.activation_scales,
+                packed,
+                output=out,
+                actual_rows=m,
+            )
+            if inputs.ndim > 2:
+                out = out.reshape(*inputs.shape[:-1], packed.output_features)
+            outputs.append(out)
+        return outputs
+
+
+class FusedConvRotW8A8LinearGroup:
+    """Group of ConvRot W8A8 projections fused into a single horizontal GEMM."""
+
+    def __init__(
+        self,
+        packeds: list[PackedConvRotW8A8Linear],
+        *,
+        rot_size: int = _NATIVE_ROT_SIZE,
+        norm_weight: torch.Tensor | None = None,
+        eps: float = 1e-6,
+        min_int8_rows: int = 256,
+    ) -> None:
+        if not packeds:
+            raise ValueError("packeds must contain at least one projection")
+        self.packeds = list(packeds)
+        self.rot_size = int(rot_size)
+        self.input_features = self.packeds[0].input_features
+        self.padded_input_features = self.packeds[0].padded_input_features
+        self.dtype = self.packeds[0].dtype
+        self.device = self.packeds[0].qweight.device
+        self.split_sizes = [p.output_features for p in self.packeds]
+        self.total_output_features = sum(self.split_sizes)
+        self.norm_weight = norm_weight.to(device=self.device, dtype=self.dtype) if norm_weight is not None else None
+        self.eps = float(eps)
+        self.min_int8_rows = int(min_int8_rows)
+
+        cat_qw = torch.cat([p.raw_qweight_t for p in self.packeds], dim=1)
+        cat_ws = torch.cat([p.raw_weight_scales for p in self.packeds], dim=0)
+        has_bias = any(p.raw_bias.abs().sum().item() > 0 for p in self.packeds)
+        if has_bias:
+            cat_b = torch.cat([p.raw_bias for p in self.packeds], dim=0)
+        else:
+            cat_b = None
+
+        self.fused_packed = pack_convrot_w8a8_linear(
+            cat_qw,
+            cat_ws,
+            cat_b,
+            dtype=self.dtype,
+        )
+        self.dequant_weight = torch.cat(
+            [p.raw_qweight_t.float() * p.raw_weight_scales.unsqueeze(0) for p in self.packeds],
+            dim=1,
+        ).to(device=self.device, dtype=self.dtype).detach()
+        self.cat_bias = (
+            cat_b.to(device=self.device, dtype=self.dtype).detach()
+            if cat_b is not None
+            else None
+        )
+
+        self._workspace: ConvRotW8A8Workspace | None = None
+        self._decode_fused_output: torch.Tensor | None = None
+        self._decode_outputs: list[torch.Tensor] | None = None
+        self._decode_swiglu_output: torch.Tensor | None = None
+
+    def _get_workspace(self, rows: int) -> ConvRotW8A8Workspace:
+        expected_rows = _round_up(int(rows), 16) if int(rows) <= 128 else _round_up(int(rows), 256)
+        if (
+            self._workspace is None
+            or self._workspace.padded_rows != expected_rows
+        ):
+            self._workspace = allocate_convrot_w8a8_workspace(rows, self.fused_packed)
+        return self._workspace
+
+    def __call__(self, inputs: torch.Tensor) -> list[torch.Tensor]:
+        if inputs.ndim != 2:
+            flat = inputs.reshape(-1, self.input_features)
+        else:
+            flat = inputs
+        m = int(flat.shape[0])
+
+        if 0 < self.min_int8_rows and m < self.min_int8_rows:
+            if self.norm_weight is not None:
+                normed = (flat.float() * torch.rsqrt(flat.float().pow(2).mean(-1, keepdim=True) + self.eps) * self.norm_weight.float()).to(self.dtype)
+            else:
+                normed = flat
+            normed = normed.detach()
+            if m == 1:
+                if self._decode_fused_output is None:
+                    self._decode_fused_output = torch.empty(
+                        (1, self.total_output_features),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                    self._decode_outputs = [
+                        torch.empty((1, s), dtype=self.dtype, device=self.device)
+                        for s in self.split_sizes
+                    ]
+                torch.mm(normed, self.dequant_weight, out=self._decode_fused_output)
+                if self.cat_bias is not None:
+                    self._decode_fused_output.add_(self.cat_bias)
+                col = 0
+                for i, s in enumerate(self.split_sizes):
+                    self._decode_outputs[i].copy_(self._decode_fused_output[:, col : col + s])
+                    col += s
+                if inputs.ndim > 2:
+                    orig_shape = inputs.shape[:-1]
+                    return [out.reshape(*orig_shape, -1) for out in self._decode_outputs]
+                return self._decode_outputs
+
+            fused_output = F.linear(normed, self.dequant_weight.t(), self.cat_bias)
+            outputs = list(torch.split(fused_output, self.split_sizes, dim=-1))
+            if inputs.ndim > 2:
+                orig_shape = inputs.shape[:-1]
+                outputs = [out.reshape(*orig_shape, -1) for out in outputs]
+            return outputs
+
+        workspace = self._get_workspace(m)
+        quantize_rotated_activation_sm89(
+            flat,
+            workspace,
+            rotated_input_features=self.padded_input_features,
+            rot_size=self.rot_size,
+            norm_weight=self.norm_weight,
+            eps=self.eps,
+        )
+        if m == 1:
+            if self._decode_fused_output is None:
+                self._decode_fused_output = torch.empty(
+                    (1, self.total_output_features),
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+                self._decode_outputs = [
+                    torch.empty((1, s), dtype=self.dtype, device=self.device)
+                    for s in self.split_sizes
+                ]
+            gemm_convrot_w8a8_sm89(
+                workspace.quantized_activation,
+                workspace.activation_scales,
+                self.fused_packed,
+                output=self._decode_fused_output,
+                actual_rows=1,
+            )
+            col = 0
+            for i, s in enumerate(self.split_sizes):
+                self._decode_outputs[i].copy_(self._decode_fused_output[:, col : col + s])
+                col += s
+            if inputs.ndim > 2:
+                orig_shape = inputs.shape[:-1]
+                return [out.reshape(*orig_shape, -1) for out in self._decode_outputs]
+            return self._decode_outputs
+
+        fused_output = torch.empty(
+            (m, self.total_output_features),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        gemm_convrot_w8a8_sm89(
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            self.fused_packed,
+            output=fused_output,
+            actual_rows=m,
+        )
+        outputs = list(torch.split(fused_output, self.split_sizes, dim=-1))
+        if inputs.ndim > 2:
+            orig_shape = inputs.shape[:-1]
+            outputs = [out.reshape(*orig_shape, -1) for out in outputs]
+        return outputs
+
+    def forward_swiglu(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Run Gate-Up GEMM followed immediately by fused SwiGLU in one pass."""
+        if len(self.packeds) != 2:
+            raise XQTBackendError("forward_swiglu requires exactly two packed projections (Gate and Up)")
+        if inputs.ndim != 2:
+            flat = inputs.reshape(-1, self.input_features)
+        else:
+            flat = inputs
+        m = int(flat.shape[0])
+
+        if 0 < self.min_int8_rows and m < self.min_int8_rows:
+            if self.norm_weight is not None:
+                normed = (flat.float() * torch.rsqrt(flat.float().pow(2).mean(-1, keepdim=True) + self.eps) * self.norm_weight.float()).to(self.dtype)
+            else:
+                normed = flat
+            normed = normed.detach()
+            if m == 1:
+                if self._decode_fused_output is None:
+                    self._decode_fused_output = torch.empty(
+                        (1, self.total_output_features),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                if self._decode_swiglu_output is None:
+                    self._decode_swiglu_output = torch.empty(
+                        (1, self.split_sizes[0]),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                torch.mm(normed, self.dequant_weight, out=self._decode_fused_output)
+                if self.cat_bias is not None:
+                    self._decode_fused_output.add_(self.cat_bias)
+                fused_swiglu(self._decode_fused_output, output=self._decode_swiglu_output)
+                if inputs.ndim > 2:
+                    return self._decode_swiglu_output.reshape(*inputs.shape[:-1], self.split_sizes[0])
+                return self._decode_swiglu_output
+
+            fused_output = F.linear(normed, self.dequant_weight.t(), self.cat_bias)
+            out = fused_swiglu(fused_output)
+            if inputs.ndim > 2:
+                return out.reshape(*inputs.shape[:-1], self.split_sizes[0])
+            return out
+
+        workspace = self._get_workspace(m)
+        quantize_rotated_activation_sm89(
+            flat,
+            workspace,
+            rotated_input_features=self.padded_input_features,
+            rot_size=self.rot_size,
+            norm_weight=self.norm_weight,
+            eps=self.eps,
+        )
+        if m == 1:
+            if self._decode_fused_output is None:
+                self._decode_fused_output = torch.empty(
+                    (1, self.total_output_features),
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+            if self._decode_swiglu_output is None:
+                self._decode_swiglu_output = torch.empty(
+                    (1, self.split_sizes[0]),
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+            gemm_convrot_w8a8_sm89(
+                workspace.quantized_activation,
+                workspace.activation_scales,
+                self.fused_packed,
+                output=self._decode_fused_output,
+                actual_rows=1,
+            )
+            fused_swiglu(self._decode_fused_output, output=self._decode_swiglu_output)
+            if inputs.ndim > 2:
+                return self._decode_swiglu_output.reshape(*inputs.shape[:-1], self.split_sizes[0])
+            return self._decode_swiglu_output
+
+        fused_output = torch.empty(
+            (m, self.total_output_features),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        gemm_convrot_w8a8_sm89(
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            self.fused_packed,
+            output=fused_output,
+            actual_rows=m,
+        )
+        out = fused_swiglu(fused_output)
+        if inputs.ndim > 2:
+            return out.reshape(*inputs.shape[:-1], self.split_sizes[0])
+        return out
+
+
 __all__ = [
     "ConvRotW8A8Workspace",
+    "FusedConvRotW8A8LinearGroup",
     "PackedConvRotW8A8Linear",
+    "SharedConvRotW8A8Group",
     "allocate_convrot_w8a8_workspace",
     "bind_convrot_w8a8_linear",
     "convrot_w8a8_linear",
+    "fused_swiglu",
+    "gemm_convrot_w8a8_sm89",
     "native_convrot_w8a8_available",
     "native_convrot_w8a8_shape_supported",
     "native_convrot_w8a8_version",
     "native_prerotated_w8a8_shape_supported",
     "pack_convrot_w8a8_linear",
+    "quantize_rotated_activation_sm89",
 ]

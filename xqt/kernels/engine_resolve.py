@@ -77,6 +77,7 @@ class EngineRegistration:
     convert_order: int = 999
     materializer: str | None = None
     recommended_patterns: frozenset[str] = frozenset()
+    required_packages: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
 
@@ -90,6 +91,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         operator_order=10,
         materializer="torch_compile",
         recommended_patterns=frozenset({"linear_gemm"}),
+        required_packages=("torch",),
         notes=("Uses torch.compile over the current PyTorch runtime module.",),
         limitations=(
             "Dynamic Python control flow or graph breaks can reduce optimization effectiveness.",
@@ -123,6 +125,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         priority=20,
         dispatchable=False,
         maturity="executable",
+        required_packages=("torch",),
         notes=(
             "CUTLASS-based sm_89 INT8 extension; reached through Int8MmaLinear "
             "explicit engine selection, not the generic auto chain.",
@@ -135,6 +138,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         priority=21,
         dispatchable=False,
         maturity="executable",
+        required_packages=("torch",),
         notes=(
             "Hand-written Ada sm_89 PTX INT8 tensor-core kernel; the current "
             "W8A8 production path via Int8MmaLinear with a prepacked-B cache, "
@@ -148,6 +152,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         priority=22,
         dispatchable=False,
         maturity="executable",
+        required_packages=("torch",),
         notes=("Alias of ptx_sm89 kept for name compatibility.",),
     ),
     "tilelang": EngineRegistration(
@@ -183,6 +188,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
                 "fp8_scale_cast_matmul_epilogue",
             }
         ),
+        required_packages=("tilelang",),
         notes=(
             "Primary fusion DSL line (C10 auto head): dequant GEMM epilogue, "
             "packed FP4/NVFP4 GEMM, linear_marlin, attention/conv kernels, "
@@ -200,6 +206,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         priority=40,
         dispatchable=True,
         maturity="executable",
+        required_packages=("torch",),
     ),
     "cutlass": EngineRegistration(
         name="cutlass",
@@ -213,6 +220,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         operator_visible=True,
         operator_order=60,
         recommended_patterns=frozenset({"gemm_epilogue", "grouped_gemm"}),
+        required_packages=("cutlass",),
         notes=(
             "Python adapter carries registry/metadata only; no real compile "
             "path yet. Evaluation line for CUTLASS scaled_mm.",
@@ -232,6 +240,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         convert_visible=True,
         convert_order=50,
         materializer="reference_guarded",
+        required_packages=("cutlass",),
         notes=(
             "SM90/SM100 exploration line; gemm_epilogue/grouped_gemm on dense "
             "cache reference only; requires the cutlass.cute runtime.",
@@ -252,6 +261,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         convert_order=40,
         materializer="reference_guarded",
         recommended_patterns=frozenset({"bias_silu"}),
+        required_packages=("cuda.tile",),
         notes=(
             "Observation line overlapping tilelang's role; kept "
             "reference_guarded pending upstream cuda.tile maturity.",
@@ -266,6 +276,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         convert_visible=True,
         convert_order=10,
         materializer="eager",
+        required_packages=("torch",),
     ),
     "triton": EngineRegistration(
         name="triton",
@@ -292,6 +303,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         recommended_patterns=frozenset(
             {"bias_gelu", "swiglu", "rmsnorm", "rmsnorm_residual", "rope"}
         ),
+        required_packages=("triton",),
         notes=(
             "Portable reference and fallback line; every scheme keeps a "
             "triton/torch reference implementation as the numeric baseline. "
@@ -304,6 +316,7 @@ _ENGINE_REGISTRY: dict[str, EngineRegistration] = {
         priority=100,
         dispatchable=True,
         maturity="reference_guarded",
+        required_packages=("torch",),
     ),
     "custom_cuda": EngineRegistration(
         name="custom_cuda",
@@ -544,17 +557,150 @@ def _stable_prefer(
     return ordered
 
 
-def resolve_engine(
+def _is_package_available(package_name: str) -> bool:
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(package_name) is not None
+    except Exception:
+        return False
+
+
+def _get_cuda_capability(device: str | Any | None = None) -> int | None:
+    if device is not None and str(device).lower().startswith("cpu"):
+        return None
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        dev_idx = 0
+        if isinstance(device, int):
+            dev_idx = device
+        elif device is not None and str(device).lower().startswith("cuda"):
+            dev_obj = torch.device(device)
+            dev_idx = dev_obj.index if dev_obj.index is not None else 0
+        major, minor = torch.cuda.get_device_capability(dev_idx)
+        return major * 10 + minor
+    except Exception:
+        return None
+
+
+def query_engine_capabilities(
+    capabilities: str | Sequence[str] | None = None,
+    *,
+    include_planned: bool = True,
+    include_non_dispatchable: bool = True,
+) -> list[EngineRegistration]:
+    """Pure static query of engine registrations declaring the requested capabilities.
+
+    Returns engine registrations declaring the requested capabilities, including
+    planned, metadata_only, and reference_guarded engines. Does not perform
+    environmental or hardware preflight checks and does not touch CUDA.
+    """
+    if capabilities is None:
+        caps = ()
+    elif isinstance(capabilities, str):
+        caps = (capabilities.strip(),) if capabilities.strip() else ()
+    else:
+        caps = tuple(str(c).strip() for c in capabilities if str(c).strip())
+
+    results: list[EngineRegistration] = []
+    for reg in _ENGINE_REGISTRY.values():
+        if not include_planned and (reg.status == "planned" or reg.maturity == "planned"):
+            continue
+        if not include_non_dispatchable and not reg.dispatchable:
+            continue
+        if caps and not all(c in reg.provides for c in caps):
+            continue
+        results.append(reg)
+
+    results.sort(key=lambda r: (r.priority, r.name))
+    return results
+
+
+def is_engine_executable(
+    engine: str | EngineRegistration,
+    *,
+    device: str | Any | None = None,
+) -> tuple[bool, str | None]:
+    """Check if an engine passes all preflight execution requirements.
+
+    Requirements:
+    1. dispatchable == True
+    2. maturity == 'executable'
+    3. Required dependency packages can be found in the current Python environment
+    4. Hardware SM capability meets engine.min_capability (if applicable) and CUDA
+       requirements are satisfied (if device is CPU or CUDA is unavailable, CUDA
+       engines fail preflight).
+    """
+    if isinstance(engine, str):
+        reg = get_engine_registration(engine)
+        if reg is None:
+            return False, f"engine {engine!r} is not registered"
+    else:
+        reg = engine
+
+    if not reg.dispatchable:
+        return False, f"engine {reg.name!r} is not dispatchable"
+
+    if reg.maturity != "executable":
+        return False, f"engine {reg.name!r} has maturity {reg.maturity!r} (expected 'executable')"
+
+    # Check dependencies
+    for pkg in reg.required_packages:
+        if not _is_package_available(pkg):
+            return False, f"engine {reg.name!r} requires package {pkg!r} which is not installed"
+
+    # Check device and hardware
+    is_cpu = False
+    if device is not None and str(device).lower().startswith("cpu"):
+        is_cpu = True
+
+    try:
+        import torch
+
+        cuda_avail = torch.cuda.is_available()
+    except Exception:
+        cuda_avail = False
+
+    if is_cpu:
+        if reg.requires_cuda:
+            return False, f"engine {reg.name!r} requires CUDA, but target device is CPU"
+        if reg.min_capability is not None:
+            return False, f"engine {reg.name!r} requires CUDA SM {reg.min_capability}, but target device is CPU"
+    else:
+        if reg.requires_cuda and not cuda_avail:
+            return False, f"engine {reg.name!r} requires CUDA, but CUDA is not available"
+        if reg.min_capability is not None:
+            if not cuda_avail:
+                return False, f"engine {reg.name!r} requires CUDA SM {reg.min_capability}, but CUDA is not available"
+            sm = _get_cuda_capability(device)
+            if sm is None:
+                return False, f"engine {reg.name!r} could not determine CUDA SM capability"
+            if sm < reg.min_capability:
+                return False, (
+                    f"engine {reg.name!r} requires CUDA SM >= {reg.min_capability}, "
+                    f"but target device capability is {sm}"
+                )
+
+    return True, None
+
+
+def resolve_executable_engine(
     *,
     required_capabilities: Sequence[str] | None = None,
     preferred_engines: Sequence[str] | None = None,
     default_order: Sequence[str] | None = None,
-    fallback: str = "torch_int_mm",
+    fallback: str | None = None,
+    allow_fallback: bool = False,
+    device: str | Any | None = None,
 ) -> EngineResolveResult:
-    """Resolve one operator engine from capabilities + optional preference hints.
+    """Resolve an executable operator engine with strict preflight validation.
 
-    Never treats preferred_engines as a hard required_engine constraint:
-    engines that lack capabilities are skipped even if preferred.
+    Fail-closed: If no executable engine satisfies required_capabilities,
+    raises XQTBackendError unless allow_fallback is True and a valid fallback is executable.
+    preferred_engines only acts as a ranking hint among valid executable candidates.
     """
     caps = tuple(
         str(item).strip()
@@ -565,25 +711,93 @@ def resolve_engine(
         normalize_engine_name(item) for item in (preferred_engines or ())
     ]
     preferred = tuple(item for item in preferred_raw if item != "auto")
-    providing = engines_providing_all(caps)
-    if not providing:
-        # No matrix hit: still allow explicit preferred if caller only passed hints.
-        providing = list(preferred) if preferred else [normalize_engine_name(fallback)]
-    order = tuple(default_order) if default_order is not None else _DEFAULT_INT8_MMA_ORDER
-    if preferred:
-        ranked = _stable_prefer(providing, preferred)
-    else:
-        ranked = _stable_prefer(providing, order)
-    if not ranked:
-        ranked = [normalize_engine_name(fallback)]
-    chosen = ranked[0]
-    return EngineResolveResult(
-        engine=chosen,
-        required_capabilities=caps,
-        preferred_engines=preferred,
-        candidates=tuple(ranked),
-        reason="preferred" if preferred and chosen in preferred else "default_order",
-        metadata={"fallback": normalize_engine_name(fallback)},
+
+    candidate_regs = query_engine_capabilities(caps)
+    executable_candidates: list[str] = []
+    rejection_reasons: dict[str, str] = {}
+
+    for reg in candidate_regs:
+        ok, reason = is_engine_executable(reg, device=device)
+        if ok:
+            executable_candidates.append(reg.name)
+        else:
+            rejection_reasons[reg.name] = reason or "preflight failed"
+
+    if executable_candidates:
+        order = tuple(default_order) if default_order is not None else _DEFAULT_INT8_MMA_ORDER
+        if preferred:
+            ranked = _stable_prefer(executable_candidates, preferred)
+        else:
+            ranked = _stable_prefer(executable_candidates, order)
+        chosen = ranked[0]
+        chosen_reg = get_engine_registration(chosen)
+        metadata: dict[str, Any] = {
+            "rejected_candidates": rejection_reasons,
+        }
+        if chosen_reg is not None:
+            metadata["engine_registration"] = {
+                "maturity": chosen_reg.maturity,
+                "dispatchable": chosen_reg.dispatchable,
+                "min_capability": chosen_reg.min_capability,
+                "priority": chosen_reg.priority,
+            }
+        return EngineResolveResult(
+            engine=chosen,
+            required_capabilities=caps,
+            preferred_engines=preferred,
+            candidates=tuple(ranked),
+            reason="preferred" if preferred and chosen in preferred else "default_order",
+            metadata=metadata,
+        )
+
+    if allow_fallback and fallback is not None:
+        fb_norm = normalize_engine_name(fallback)
+        fb_ok, fb_reason = is_engine_executable(fb_norm, device=device)
+        if fb_ok:
+            return EngineResolveResult(
+                engine=fb_norm,
+                required_capabilities=caps,
+                preferred_engines=preferred,
+                candidates=(fb_norm,),
+                reason="fallback",
+                metadata={
+                    "fallback": fb_norm,
+                    "rejected_candidates": rejection_reasons,
+                },
+            )
+        from xqt.core.errors import XQTBackendError
+
+        raise XQTBackendError(
+            f"No executable engine satisfies required capabilities: {list(caps)}. "
+            f"Fallback engine {fb_norm!r} also failed preflight: {fb_reason}. "
+            f"Rejections: {rejection_reasons}"
+        )
+
+    from xqt.core.errors import XQTBackendError
+
+    raise XQTBackendError(
+        f"No executable engine satisfies required capabilities: {list(caps)}. "
+        f"Rejection details: {rejection_reasons}"
+    )
+
+
+def resolve_engine(
+    *,
+    required_capabilities: Sequence[str] | None = None,
+    preferred_engines: Sequence[str] | None = None,
+    default_order: Sequence[str] | None = None,
+    fallback: str = "torch_int_mm",
+    allow_fallback: bool = False,
+    device: str | Any | None = None,
+) -> EngineResolveResult:
+    """Resolve one operator engine from capabilities + optional preference hints."""
+    return resolve_executable_engine(
+        required_capabilities=required_capabilities,
+        preferred_engines=preferred_engines,
+        default_order=default_order,
+        fallback=fallback,
+        allow_fallback=allow_fallback,
+        device=device,
     )
 
 
@@ -592,18 +806,21 @@ def resolve_int8_mma_engine(
     *,
     preferred_engines: Sequence[str] | None = None,
     fallback: str = "torch_int_mm",
+    allow_fallback: bool = False,
+    device: str | Any | None = None,
 ) -> EngineResolveResult:
     """Resolve engine for int8_mma modules (quantizer / forward shared path)."""
     normalized = normalize_engine_name(engine)
     hints: list[str] = list(preferred_engines or [])
     if normalized != "auto":
-        # Explicit request is a strong preference, not a schema required_engine key.
         hints = [normalized, *hints]
-    return resolve_engine(
+    return resolve_executable_engine(
         required_capabilities=["int8_mma"],
         preferred_engines=hints,
         default_order=_DEFAULT_INT8_MMA_ORDER,
         fallback=fallback,
+        allow_fallback=allow_fallback,
+        device=device,
     )
 
 
@@ -705,13 +922,16 @@ __all__ = [
     "engines_providing",
     "engines_providing_all",
     "get_engine_registration",
+    "is_engine_executable",
     "iter_engine_registrations",
     "map_primary_kernel_to_engine",
     "normalize_engine_name",
     "operator_contract_patterns",
     "operator_engine_names",
+    "query_engine_capabilities",
     "recommended_engine_for_pattern",
     "resolve_compute_engine",
     "resolve_engine",
+    "resolve_executable_engine",
     "resolve_int8_mma_engine",
 ]

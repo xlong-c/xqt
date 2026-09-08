@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from xqt.core.errors import XQTBackendError
+from xqt.core.errors import XQTBackendError, XQTQuantError
 from xqt.compression.quant.quantizers.int8_mma import Int8MmaLinear, quantize_with_int8_mma
 from xqt.runtime.modules import Int8MmaLinear as RuntimeInt8MmaLinear
 from xqt.workflows import XQTOptimizationSession
@@ -265,7 +265,23 @@ def test_quantize_with_int8_mma_accepts_static_activation_scales() -> None:
     assert result.metadata["dynamic_fallback_module_count"] == 0
 
 
-def test_quantize_with_int8_mma_static_mode_falls_back_without_scale() -> None:
+def test_quantize_with_int8_mma_static_mode_fails_without_scale() -> None:
+    model = _TinyLinearModel().eval()
+
+    with pytest.raises(XQTQuantError, match="static activation scales are missing"):
+        quantize_with_int8_mma(
+            model,
+            policy={"include_module_types": ["Linear"], "exclude_name_patterns": []},
+            engine="torch_int_mm",
+            inplace=True,
+            activation_scale_mode="static",
+            activation_scales={},
+        )
+
+    assert isinstance(model.fc, torch.nn.Linear)
+
+
+def test_quantize_with_int8_mma_static_mode_explicitly_allows_dynamic_fallback() -> None:
     model = _TinyLinearModel().eval()
 
     result = quantize_with_int8_mma(
@@ -275,6 +291,7 @@ def test_quantize_with_int8_mma_static_mode_falls_back_without_scale() -> None:
         inplace=False,
         activation_scale_mode="static",
         activation_scales={},
+        allow_dynamic_fallback=True,
     )
     output = result.model(torch.randn(4, 16))
     metadata = result.model.fc.execution_metadata()
@@ -282,7 +299,60 @@ def test_quantize_with_int8_mma_static_mode_falls_back_without_scale() -> None:
     assert output.shape == (4, 32)
     assert result.metadata["static_scale_module_count"] == 0
     assert result.metadata["dynamic_fallback_module_count"] == 1
+    assert result.metadata["dynamic_fallback_modules"] == ["fc"]
     assert metadata["activation_scale_mode"] == "dynamic"
+
+
+def test_quantize_with_int8_mma_contract_tracks_heterogeneous_linear_modules() -> None:
+    model = torch.nn.Sequential(
+        torch.nn.Linear(16, 32, bias=False),
+        torch.nn.Linear(32, 64, bias=False),
+    ).eval()
+
+    result = quantize_with_int8_mma(
+        model,
+        policy={"include_module_types": ["Linear"]},
+        engine="torch_int_mm",
+        inplace=False,
+    )
+    contract = result.resolve_runtime_quant_contract()
+
+    assert contract is not None
+    assert [item.module_path for item in contract.module_contracts] == ["0", "1"]
+    assert [(item.in_features, item.out_features) for item in contract.module_contracts] == [
+        (16, 32),
+        (32, 64),
+    ]
+    assert [item.weight_shape for item in contract.module_contracts] == [
+        (32, 16),
+        (64, 32),
+    ]
+    assert contract.global_shape == ()
+    assert contract.local_shape == ()
+    assert contract.no_op is False
+
+
+def test_quantize_with_int8_mma_noop_contract_is_explicit() -> None:
+    model = torch.nn.ReLU().eval()
+
+    result = quantize_with_int8_mma(
+        model,
+        policy={"include_module_types": ["Linear"]},
+        engine="torch_int_mm",
+        inplace=False,
+        allow_noop=True,
+    )
+    contract = result.resolve_runtime_quant_contract()
+
+    assert contract is not None
+    assert contract.no_op is True
+    assert contract.module_contracts == ()
+    assert contract.required_kernels == ()
+    assert contract.global_shape == ()
+    assert contract.local_shape == ()
+    assert contract.prefill_supported is False
+    assert contract.decode_supported is False
+    assert result.metadata["no_op"] is True
 
 
 def test_quantize_with_int8_mma_include_only_restricts_name_patterns() -> None:

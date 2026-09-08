@@ -2,50 +2,59 @@
 
 from __future__ import annotations
 
-from xqt.kernels.ops._impl.engines.cutile import (
-    CuTileCompileSettings,
-    CuTileKernelSpec,
-    build_cutile_artifact_metadata,
-    cutile_available,
-    get_cutile_kernel_spec,
-    list_cutile_kernel_specs,
-    run_cutile_kernel,
-)
-from xqt.kernels.ops._impl.engines.cutlass import (
-    CutlassCompileSettings,
-    CutlassKernelSpec,
-    build_cutlass_artifact_metadata,
-    get_cutlass_kernel_spec,
-    list_cutlass_kernel_specs,
-    run_cutlass_kernel,
-)
-from xqt.kernels.ops._impl.engines.cute_dsl import (
-    CuteDSLCompileSettings,
-    CuteDSLKernelSpec,
-    build_cute_dsl_artifact_metadata,
-    get_cute_dsl_kernel_spec,
-    list_cute_dsl_kernel_specs,
-    run_cute_dsl_kernel,
-)
-from xqt.kernels.ops._impl.engines.tilelang import (
-    TileLangCompileSettings,
-    TileLangKernelSpec,
-    build_tilelang_artifact_metadata,
-    get_tilelang_kernel_spec,
-    list_tilelang_kernel_specs,
-    run_tilelang_kernel,
-    tilelang_validation_thresholds,
-)
-from xqt.kernels.ops._impl.engines.triton import (
-    TritonKernelSpec,
-    get_triton_kernel_spec,
-    list_triton_kernel_specs,
-    run_triton_kernel,
-)
-from xqt.kernels.ops._impl.tilelang.validation import (
-    TileLangFP4ValidationResult,
-    validate_tilelang_packed_fp4_fused_gemm,
-)
+from typing import Any
+
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    # cutile
+    "CuTileCompileSettings": ("xqt.kernels.ops._impl.engines.cutile", "CuTileCompileSettings"),
+    "CuTileKernelSpec": ("xqt.kernels.ops._impl.engines.cutile", "CuTileKernelSpec"),
+    "build_cutile_artifact_metadata": ("xqt.kernels.ops._impl.engines.cutile", "build_cutile_artifact_metadata"),
+    "cutile_available": ("xqt.kernels.ops._impl.engines.cutile", "cutile_available"),
+    "get_cutile_kernel_spec": ("xqt.kernels.ops._impl.engines.cutile", "get_cutile_kernel_spec"),
+    "list_cutile_kernel_specs": ("xqt.kernels.ops._impl.engines.cutile", "list_cutile_kernel_specs"),
+    "run_cutile_kernel": ("xqt.kernels.ops._impl.engines.cutile", "run_cutile_kernel"),
+    # cutlass
+    "CutlassCompileSettings": ("xqt.kernels.ops._impl.engines.cutlass", "CutlassCompileSettings"),
+    "CutlassKernelSpec": ("xqt.kernels.ops._impl.engines.cutlass", "CutlassKernelSpec"),
+    "build_cutlass_artifact_metadata": ("xqt.kernels.ops._impl.engines.cutlass", "build_cutlass_artifact_metadata"),
+    "get_cutlass_kernel_spec": ("xqt.kernels.ops._impl.engines.cutlass", "get_cutlass_kernel_spec"),
+    "list_cutlass_kernel_specs": ("xqt.kernels.ops._impl.engines.cutlass", "list_cutlass_kernel_specs"),
+    "run_cutlass_kernel": ("xqt.kernels.ops._impl.engines.cutlass", "run_cutlass_kernel"),
+    # cute_dsl
+    "CuteDSLCompileSettings": ("xqt.kernels.ops._impl.engines.cute_dsl", "CuteDSLCompileSettings"),
+    "CuteDSLKernelSpec": ("xqt.kernels.ops._impl.engines.cute_dsl", "CuteDSLKernelSpec"),
+    "build_cute_dsl_artifact_metadata": ("xqt.kernels.ops._impl.engines.cute_dsl", "build_cute_dsl_artifact_metadata"),
+    "get_cute_dsl_kernel_spec": ("xqt.kernels.ops._impl.engines.cute_dsl", "get_cute_dsl_kernel_spec"),
+    "list_cute_dsl_kernel_specs": ("xqt.kernels.ops._impl.engines.cute_dsl", "list_cute_dsl_kernel_specs"),
+    "run_cute_dsl_kernel": ("xqt.kernels.ops._impl.engines.cute_dsl", "run_cute_dsl_kernel"),
+    # tilelang
+    "TileLangCompileSettings": ("xqt.kernels.ops._impl.engines.tilelang", "TileLangCompileSettings"),
+    "TileLangKernelSpec": ("xqt.kernels.ops._impl.engines.tilelang", "TileLangKernelSpec"),
+    "build_tilelang_artifact_metadata": ("xqt.kernels.ops._impl.engines.tilelang", "build_tilelang_artifact_metadata"),
+    "get_tilelang_kernel_spec": ("xqt.kernels.ops._impl.engines.tilelang", "get_tilelang_kernel_spec"),
+    "list_tilelang_kernel_specs": ("xqt.kernels.ops._impl.engines.tilelang", "list_tilelang_kernel_specs"),
+    "run_tilelang_kernel": ("xqt.kernels.ops._impl.engines.tilelang", "run_tilelang_kernel"),
+    "tilelang_validation_thresholds": ("xqt.kernels.ops._impl.engines.tilelang", "tilelang_validation_thresholds"),
+    "TileLangFP4ValidationResult": ("xqt.kernels.ops._impl.tilelang.validation", "TileLangFP4ValidationResult"),
+    "validate_tilelang_packed_fp4_fused_gemm": ("xqt.kernels.ops._impl.tilelang.validation", "validate_tilelang_packed_fp4_fused_gemm"),
+    # triton
+    "TritonKernelSpec": ("xqt.kernels.ops._impl.engines.triton", "TritonKernelSpec"),
+    "get_triton_kernel_spec": ("xqt.kernels.ops._impl.engines.triton", "get_triton_kernel_spec"),
+    "list_triton_kernel_specs": ("xqt.kernels.ops._impl.engines.triton", "list_triton_kernel_specs"),
+    "run_triton_kernel": ("xqt.kernels.ops._impl.engines.triton", "run_triton_kernel"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_EXPORTS:
+        mod_name, attr_name = _LAZY_EXPORTS[name]
+        import importlib
+
+        mod = importlib.import_module(mod_name)
+        val = getattr(mod, attr_name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 from .advisor import (
     PrecisionRecommendation,
