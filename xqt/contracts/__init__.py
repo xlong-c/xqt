@@ -65,6 +65,10 @@ from .model_structure import (
     resolve_weight_mapping,
     structure_contract_keep_high_precision_paths,
     structure_contract_mismatches,
+    compute_topology_fingerprint,
+    is_structure_contract_valid_for_model,
+    resolve_and_validate_structure_contract,
+    update_structure_contract_for_model,
 )
 from .pruned import PrunedModelPayload
 from .quantized import QuantizedModel, QuantizedModelPayload
@@ -105,6 +109,8 @@ from .runtime_manifest import (
 from .runtime_quant import (
     RUNTIME_QUANT_CONTRACT_KEY,
     RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION,
+    ROOT_MODULE_PATH,
+    ModuleQuantContract,
     RuntimeQuantContract,
     attach_runtime_quant_contract,
     build_runtime_quant_contract,
@@ -179,10 +185,16 @@ __all__ = [
     "ComponentSpec",
     "MergedProjectionSpec",
     "ModelStructureContract",
+    "ROOT_MODULE_PATH",
+    "ModuleQuantContract",
     "StructureMismatchReport",
     "WeightMappingEntry",
+    "compute_topology_fingerprint",
+    "is_structure_contract_valid_for_model",
+    "resolve_and_validate_structure_contract",
     "resolve_weight_mapping",
     "structure_contract_mismatches",
+    "update_structure_contract_for_model",
     "PrunedModelPayload",
     "QuantizedModel",
     "QuantizedModelPayload",

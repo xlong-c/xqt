@@ -140,3 +140,114 @@ def test_contract_validation_failures_are_explicit() -> None:
         MergedProjectionSpec("qkv_proj", ("q", "k", "v"), (16, 16))
     with pytest.raises(XQTConfigError, match="schema_version"):
         ModelStructureContract.from_mapping({"schema_version": 99, "family": "llm"})
+
+
+def test_topology_fingerprint_and_validity_lifecycle() -> None:
+    from xqt.contracts import (
+        compute_topology_fingerprint,
+        is_structure_contract_valid_for_model,
+        update_structure_contract_for_model,
+    )
+
+    model = _MergedQKVBlock(hidden_dim=16)
+    contract = _merged_qkv_contract()
+    fp_before = compute_topology_fingerprint(model)
+    bound_contract = contract.with_topology_fingerprint(fp_before)
+
+    assert is_structure_contract_valid_for_model(bound_contract, model)
+
+    # 改变模型参数形状（模拟剪枝）
+    model.qkv_proj = nn.Linear(16, 24)
+    fp_after = compute_topology_fingerprint(model)
+    assert fp_before != fp_after
+
+    # 验证旧契约指纹失效
+    assert not is_structure_contract_valid_for_model(bound_contract, model)
+
+    # 通过 update_structure_contract_for_model 刷新契约与维度
+    updated_contract = update_structure_contract_for_model(bound_contract, model)
+    assert updated_contract.topology_fingerprint == fp_after
+    assert updated_contract.merged_projections[0].split_out_features == (8, 8, 8)
+    assert is_structure_contract_valid_for_model(updated_contract, model)
+
+
+def test_resolve_and_validate_structure_contract_detects_mismatch() -> None:
+    from xqt.contracts import resolve_and_validate_structure_contract
+
+    class _BadModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(4, 4)
+
+    bad_model = _BadModel()
+    contract = _merged_qkv_contract()
+
+    # 通过 profile 传入带有不匹配声明的 contract
+    from xqt.model.config import ModelProfile
+
+    profile = ModelProfile(
+        profile_id="test.bad",
+        family="transformer",
+        structure_contract=contract,
+    )
+
+    with pytest.raises(XQTConfigError) as exc_info:
+        resolve_and_validate_structure_contract(bad_model, profile=profile, strict=True)
+    assert "ModelStructureContract validation failed" in str(exc_info.value)
+    assert "missing modules" in str(exc_info.value)
+
+
+from xqt.model.adapter import ModelAdapter
+
+
+class _MockAdapter(ModelAdapter):
+    def load(self, checkpoint: str | None, **params: object) -> nn.Module:
+        return _MergedQKVBlock(hidden_dim=16)
+
+    def adapt(self, model: nn.Module, **params: object) -> nn.Module:
+        return model
+
+    def structure_contract(self, model: nn.Module) -> ModelStructureContract:
+        return _merged_qkv_contract()
+
+    def inference_contract(self, model: nn.Module) -> object:
+        return None
+
+
+def test_load_model_pass_direct_inject_and_contract_parity() -> None:
+    from xqt.core.types import XQTContext
+    from xqt.model.config import ModelProfile
+    from xqt.model.registry import register_model_profile
+    from xqt.pipeline.model_pass import LoadModelPass
+
+    profile = ModelProfile(
+        profile_id="test.mock_qkv",
+        family="transformer",
+        adapter_target="tests.xqt.contracts.test_model_structure_contract._MockAdapter",
+    )
+    register_model_profile(profile, replace=True)
+
+    # 1. 方式 A: 通过 checkpoint + profile 加载
+    ctx_loaded = XQTContext()
+    ctx_loaded.model_profile = profile
+    LoadModelPass().run(ctx_loaded)
+
+    # 2. 方式 B: 直接通过 model 注入
+    ctx_injected = XQTContext()
+    ctx_injected.model = _MergedQKVBlock(hidden_dim=16)
+    ctx_injected.model_profile = profile
+    LoadModelPass().run(ctx_injected)
+
+    assert ctx_loaded.model is not None
+    assert ctx_injected.model is not None
+    assert ctx_loaded.structure_contract is not None
+    assert ctx_injected.structure_contract is not None
+    assert (
+        ctx_loaded.structure_contract.to_dict()
+        == ctx_injected.structure_contract.to_dict()
+    )
+    assert (
+        ctx_loaded.structure_contract.topology_fingerprint
+        == ctx_injected.structure_contract.topology_fingerprint
+    )
+

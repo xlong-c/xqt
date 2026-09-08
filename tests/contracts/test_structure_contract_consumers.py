@@ -251,6 +251,22 @@ def test_run_prune_stage_consumes_context_structure_contract() -> None:
     assert len(model.moe_a.experts) == 4
     assert len(model.moe_b.experts) == 2
     assert model.moe_b.router.out_features == 2
+    assert output.structure_contract is not None
+    assert output.structure_contract.topology_fingerprint is not None
+    from xqt.contracts import is_structure_contract_valid_for_model
+
+    assert is_structure_contract_valid_for_model(output.structure_contract, output.model)
+
+
+def test_structure_contract_stale_fingerprint_rejected_by_consumer() -> None:
+    from xqt.core.base import XQTConfigError
+
+    model = _TwoMoEModel()
+    contract = _moe_contract().with_topology_fingerprint("deadbeef" * 8)
+    with pytest.raises(XQTConfigError, match="invalid or expired"):
+        find_structured_pruning_targets(
+            model, granularity="expert", structure_contract=contract
+        )
 
 
 def test_run_prune_stage_without_contract_keeps_baseline_rewrite() -> None:
@@ -258,9 +274,9 @@ def test_run_prune_stage_without_contract_keeps_baseline_rewrite() -> None:
 
     import torch
 
+    from xqt.core.stage_specs import PruneStageSpec
     from xqt.core.types import XQTContext
     from xqt.pipeline.passes import run_prune_stage
-    from xqt.core.stage_specs import PruneStageSpec
 
     model = _TwoMoEModel()
     context = XQTContext(

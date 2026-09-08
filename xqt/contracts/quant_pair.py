@@ -7,8 +7,11 @@ Never runs quantizers, calibration, or sensitivity analysis.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 import torch
 from torch import nn
@@ -77,6 +80,62 @@ def _resolve_pair_file(pair_dir: Path, relative_path: str, *, name: str) -> Path
     if not resolved.is_file():
         raise XQTArtifactError(f"{name} file not found: {resolved}")
     return resolved
+
+
+def _validate_pair_relative_path(relative_path: str, *, name: str) -> Path:
+    """Reject paths that cannot safely live inside one quant-pair directory."""
+
+    candidate = Path(relative_path)
+    if not str(relative_path).strip() or candidate.is_absolute():
+        raise XQTArtifactError(f"{name} must be a non-empty relative path")
+    if any(part == ".." for part in candidate.parts):
+        raise XQTArtifactError(f"{name} must not contain parent traversal: {relative_path}")
+    if candidate.name in {"", "."}:
+        raise XQTArtifactError(f"{name} must name a file: {relative_path}")
+    return candidate
+
+
+def _write_pair_weights(
+    model: nn.Module,
+    weights_path: Path,
+    *,
+    weights_format: str,
+) -> None:
+    """Write the weight payload into an already isolated staging directory."""
+
+    weights_path.parent.mkdir(parents=True, exist_ok=True)
+    if weights_format == WEIGHTS_FORMAT_SAFETENSORS:
+        try:
+            from safetensors.torch import save_file
+        except ImportError as exc:
+            raise XQTArtifactError(
+                "saving .safetensors requires the safetensors package"
+            ) from exc
+        state = {
+            str(key): (value.detach().contiguous() if isinstance(value, torch.Tensor) else value)
+            for key, value in model.state_dict().items()
+        }
+        save_file(state, str(weights_path))
+        return
+    torch.save(model.state_dict(), weights_path)
+
+
+def _publish_staged_pair(staging_dir: Path, pair_dir: Path) -> None:
+    """Atomically promote a verified staged directory, retaining old output on error."""
+
+    parent = pair_dir.parent
+    backup_dir: Path | None = None
+    try:
+        if pair_dir.exists():
+            backup_dir = parent / f".{pair_dir.name}.backup_{uuid4().hex}"
+            os.replace(pair_dir, backup_dir)
+        os.replace(staging_dir, pair_dir)
+    except Exception:
+        if backup_dir is not None and backup_dir.exists() and not pair_dir.exists():
+            os.replace(backup_dir, pair_dir)
+        raise
+    if backup_dir is not None:
+        shutil.rmtree(backup_dir)
 
 
 def _resolve_sidecar_path(path: str | Path) -> Path:
@@ -198,39 +257,56 @@ def write_quant_pair(
             resolved_weights_name = weights_name
             resolved_format = WEIGHTS_FORMAT_TORCH_STATE_DICT
 
+    weights_relative = _validate_pair_relative_path(
+        resolved_weights_name,
+        name="weights_name",
+    )
+    sidecar_relative = _validate_pair_relative_path(
+        sidecar_name,
+        name="sidecar_name",
+    )
     pair_dir = Path(output_dir)
-    pair_dir.mkdir(parents=True, exist_ok=True)
-    weights_path = pair_dir / resolved_weights_name
-
-    if resolved_format == WEIGHTS_FORMAT_SAFETENSORS:
-        try:
-            from safetensors.torch import save_file
-        except ImportError as exc:
-            raise XQTArtifactError(
-                "saving .safetensors requires the safetensors package"
-            ) from exc
-        state = {
-            str(k): (v.detach().contiguous() if isinstance(v, torch.Tensor) else v)
-            for k, v in model.state_dict().items()
-        }
-        save_file(state, str(weights_path))
-    else:
-        torch.save(model.state_dict(), weights_path)
-
-    contract = runtime_quant_contract
-    if contract is None and metadata is not None:
-        contract = extract_runtime_quant_contract(metadata)
-    meta = _merge_pair_metadata(metadata, runtime_contract=contract)
-    QuantPairManifest(
-        weights={
-            "path": resolved_weights_name,
-            "format": resolved_format,
-            "checksum": file_sha256(weights_path),
-        },
-        compute_config=_resolve_compute_config_dict(compute_config),
-        lineage=_json_mapping(lineage, name="lineage"),
-        metadata=meta,
-    ).write_json(pair_dir / sidecar_name)
+    if pair_dir.exists() and pair_dir.is_symlink():
+        raise XQTArtifactError("output_dir must not be a symbolic link")
+    if not pair_dir.name:
+        raise XQTArtifactError("output_dir must name a quant-pair directory")
+    pair_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = pair_dir.parent / f".{pair_dir.name}.staging_{uuid4().hex}"
+    staging_dir.mkdir()
+    try:
+        weights_path = staging_dir / weights_relative
+        _write_pair_weights(model, weights_path, weights_format=resolved_format)
+        contract = runtime_quant_contract
+        if contract is None and metadata is not None:
+            contract = extract_runtime_quant_contract(metadata)
+        meta = _merge_pair_metadata(metadata, runtime_contract=contract)
+        manifest = QuantPairManifest(
+            weights={
+                "path": str(weights_relative),
+                "format": resolved_format,
+                "checksum": file_sha256(weights_path),
+            },
+            compute_config=_resolve_compute_config_dict(compute_config),
+            lineage=_json_mapping(lineage, name="lineage"),
+            metadata=meta,
+        )
+        sidecar_path = staging_dir / sidecar_relative
+        manifest.write_json(sidecar_path)
+        verified = QuantPairManifest.from_dict(
+            _load_json_mapping(sidecar_path, name="quant.json")
+        )
+        verified_weights = _resolve_pair_file(
+            staging_dir,
+            str(verified.weights["path"]),
+            name="weights.path",
+        )
+        if file_sha256(verified_weights) != verified.weights["checksum"]:
+            raise XQTArtifactError("staged quant pair checksum verification failed")
+        _publish_staged_pair(staging_dir, pair_dir)
+    except Exception:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise
     return pair_dir
 
 

@@ -13,7 +13,8 @@ never owns forward semantics and never rewrites the model.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, Mapping, Protocol
+import hashlib
+from typing import Any, Iterable, Literal, Mapping, Protocol, Sequence
 
 from xqt.core.base import XQTConfigError
 
@@ -196,6 +197,7 @@ class ModelStructureContract:
     merged_projections: tuple[MergedProjectionSpec, ...] = ()
     weight_mapping: tuple[WeightMappingEntry, ...] = ()
     schema_version: int = MODEL_STRUCTURE_CONTRACT_SCHEMA_VERSION
+    topology_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if self.family not in MODEL_FAMILY_NAMES:
@@ -248,14 +250,30 @@ class ModelStructureContract:
         comp = self.component_by_role(role)
         return comp.paths if comp is not None else ()
 
+    def with_topology_fingerprint(
+        self, fingerprint: str | None
+    ) -> "ModelStructureContract":
+        """Return a copy of this contract bound to a specific topology fingerprint."""
+        return ModelStructureContract(
+            family=self.family,
+            components=self.components,
+            merged_projections=self.merged_projections,
+            weight_mapping=self.weight_mapping,
+            schema_version=self.schema_version,
+            topology_fingerprint=fingerprint,
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "schema_version": self.schema_version,
             "family": self.family,
             "components": [component.to_dict() for component in self.components],
             "merged_projections": [merged.to_dict() for merged in self.merged_projections],
             "weight_mapping": [entry.to_dict() for entry in self.weight_mapping],
         }
+        if self.topology_fingerprint is not None:
+            data["topology_fingerprint"] = self.topology_fingerprint
+        return data
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "ModelStructureContract":
@@ -299,6 +317,11 @@ class ModelStructureContract:
                 components=components,
                 merged_projections=merged_projections,
                 weight_mapping=weight_mapping,
+                topology_fingerprint=(
+                    str(payload["topology_fingerprint"])
+                    if payload.get("topology_fingerprint") is not None
+                    else None
+                ),
             )
         except KeyError as exc:
             raise XQTConfigError(
@@ -464,6 +487,325 @@ def is_module_path_within(path: str, root: str) -> bool:
     return path == root or path.startswith(f"{root}.")
 
 
+def compute_topology_fingerprint(model: _NamedModuleLike) -> str:
+    """Compute a deterministic hash representing the model's structural topology.
+
+    Covers module hierarchy names, module type names, parameter names and tensor shapes.
+    """
+    hasher = hashlib.sha256()
+    for name, mod in model.named_modules():
+        if name:
+            cls_name = getattr(type(mod), "__name__", "")
+            hasher.update(f"m:{name}:{cls_name}\n".encode("utf-8"))
+    for name, param in model.named_parameters():
+        if name and param is not None:
+            shape = getattr(param, "shape", ())
+            shape_str = ",".join(str(int(d)) for d in shape)
+            hasher.update(f"p:{name}:{shape_str}\n".encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def is_structure_contract_valid_for_model(
+    contract: ModelStructureContract,
+    model: _NamedModuleLike,
+) -> bool:
+    """Check if the structure contract matches the current model topology."""
+    if contract.topology_fingerprint is not None:
+        current_fp = compute_topology_fingerprint(model)
+        if contract.topology_fingerprint != current_fp:
+            return False
+    return True
+
+
+def update_structure_contract_for_model(
+    contract: ModelStructureContract,
+    model: _NamedModuleLike,
+) -> ModelStructureContract:
+    """Update dimensions and fingerprint of a structure contract after pruning or rewriting."""
+    module_dict = dict(model.named_modules())
+    updated_merged: list[MergedProjectionSpec] = []
+    for spec in contract.merged_projections:
+        mod = module_dict.get(spec.module_path)
+        if mod is not None and hasattr(mod, "out_features"):
+            total_out = getattr(mod, "out_features", None)
+            if isinstance(total_out, int) and total_out > 0:
+                if total_out != sum(spec.split_out_features):
+                    num_parts = len(spec.parts)
+                    if total_out % num_parts == 0:
+                        part_dim = total_out // num_parts
+                        new_dims = tuple(part_dim for _ in range(num_parts))
+                    else:
+                        old_total = sum(spec.split_out_features)
+                        ratios = [d / old_total for d in spec.split_out_features]
+                        new_dims = tuple(max(1, int(round(r * total_out))) for r in ratios)
+                    updated_merged.append(
+                        MergedProjectionSpec(
+                            module_path=spec.module_path,
+                            parts=spec.parts,
+                            split_out_features=new_dims,
+                        )
+                    )
+                    continue
+        updated_merged.append(spec)
+
+    new_fp = compute_topology_fingerprint(model)
+    return ModelStructureContract(
+        family=contract.family,
+        components=contract.components,
+        merged_projections=tuple(updated_merged),
+        weight_mapping=contract.weight_mapping,
+        schema_version=contract.schema_version,
+        topology_fingerprint=new_fp,
+    )
+
+
+_TASK_TO_FAMILY: dict[str, str] = {
+    "detection": "detection",
+    "llm": "llm",
+    "text_generation": "llm",
+    "diffusion": "diffusion",
+    "image_generation": "diffusion",
+    "multimodal": "multimodal",
+    "vlm": "multimodal",
+    "classification": "transformer",
+}
+
+_DETECTION_HEAD_MARKERS = ("head", "detect", "yolo", "rtdetr")
+_EXPERT_MARKERS = ("experts", "expert", "moe")
+_ROUTER_MARKERS = ("router", "gating", "gate")
+_DIFFUSION_MARKERS = ("unet", "dit", "vae", "text_encoder", "denoiser")
+_MULTIMODAL_MARKERS = ("vision_encoder", "visual_encoder", "encoder_cache", "cross_attn")
+
+
+def model_family_names() -> tuple[str, ...]:
+    """Return the canonical model family vocabulary."""
+    return MODEL_FAMILY_NAMES
+
+
+def _module_paths(model: _NamedModuleLike) -> list[str]:
+    return [name for name, _module in model.named_modules()]
+
+
+def _contains_attention(paths: Sequence[str]) -> bool:
+    return any(
+        marker in path.lower()
+        for marker in (
+            "attention",
+            "attn",
+            "encoder",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "out_proj",
+        )
+        for path in paths
+    )
+
+
+def _contains_conv(model: _NamedModuleLike) -> bool:
+    return any(
+        type(module).__name__ == "Conv2d"
+        for _name, module in model.named_modules()
+    )
+
+
+def classify_model_family(
+    model: _NamedModuleLike,
+    *,
+    task_type: str | None = None,
+) -> str:
+    """Classify a model into a canonical XQT model family."""
+    if task_type:
+        normalized = str(task_type).strip().lower()
+        if normalized in _TASK_TO_FAMILY:
+            return _TASK_TO_FAMILY[normalized]
+
+    paths = _module_paths(model)
+    lowered = [path.lower() for path in paths]
+    joined = " ".join(lowered)
+
+    if any(marker in joined for marker in _EXPERT_MARKERS) and any(
+        marker in joined for marker in _ROUTER_MARKERS
+    ):
+        return "moe"
+    if any(marker in joined for marker in _DIFFUSION_MARKERS):
+        return "diffusion"
+    if any(marker in joined for marker in _MULTIMODAL_MARKERS):
+        return "multimodal"
+    has_detection_head = any(
+        marker in joined for marker in ("detect", "yolo", "rtdetr", "detection_head")
+    ) or (
+        "head" in joined
+        and "patch_embed" not in joined
+        and "lm_head" not in joined
+        and "blocks" not in joined
+    )
+    if has_detection_head and _contains_conv(model):
+        return "detection"
+    if "lm_head" in joined or (
+        "q_proj" in joined and "k_proj" in joined and "v_proj" in joined
+    ):
+        return "llm"
+    if "patch_embed" in joined or ("vit" in joined and _contains_attention(paths)):
+        return "vit"
+    if _contains_attention(paths) and "norm" in joined:
+        return "transformer"
+    if _contains_conv(model):
+        return "convnet"
+    return "unknown"
+
+
+def component_grouping(
+    model: _NamedModuleLike,
+    *,
+    family: str | None = None,
+    task_type: str | None = None,
+) -> dict[str, list[str]]:
+    """Group module paths by model-family component role."""
+    resolved = family or classify_model_family(model, task_type=task_type)
+    groups: dict[str, list[str]] = {
+        "attention": [],
+        "ffn": [],
+        "norm": [],
+        "head": [],
+        "backbone": [],
+        "expert": [],
+        "router": [],
+        "embedding": [],
+        "encoder": [],
+        "cross_attention": [],
+        "diffusion_component": [],
+        "other": [],
+    }
+    for name, module in model.named_modules():
+        if not name:
+            continue
+        lowered = name.lower()
+        module_type = type(module).__name__
+        if any(marker in lowered for marker in _ROUTER_MARKERS):
+            groups["router"].append(name)
+        elif any(marker in lowered for marker in _DIFFUSION_MARKERS):
+            groups["diffusion_component"].append(name)
+        elif any(
+            marker in lowered
+            for marker in ("vision_encoder", "visual_encoder", "encoder_cache")
+        ):
+            groups["encoder"].append(name)
+        elif any(marker in lowered for marker in ("cross_attn", "cross_attention")):
+            groups["cross_attention"].append(name)
+        elif any(marker in lowered for marker in _EXPERT_MARKERS):
+            groups["expert"].append(name)
+        elif module_type in ("Embedding", "VocabParallelEmbedding"):
+            groups["embedding"].append(name)
+        elif any(marker in lowered for marker in _DETECTION_HEAD_MARKERS):
+            groups["head"].append(name)
+        elif module_type in ("LayerNorm", "RMSNorm") or "norm" in module_type.lower():
+            groups["norm"].append(name)
+        elif any(
+            marker in lowered
+            for marker in ("attention", "attn", "q_proj", "k_proj", "v_proj", "out_proj")
+        ):
+            groups["attention"].append(name)
+        elif any(marker in lowered for marker in ("ffn", "mlp", "feed_forward")):
+            groups["ffn"].append(name)
+        elif module_type == "Conv2d":
+            groups["backbone"].append(name)
+        else:
+            groups["other"].append(name)
+    return groups
+
+
+def build_structure_contract(
+    model: _NamedModuleLike,
+    *,
+    family: str | None = None,
+    task_type: str | None = None,
+) -> ModelStructureContract:
+    """Derive a draft ModelStructureContract from grouping heuristics."""
+    resolved = family or classify_model_family(model, task_type=task_type)
+    groups = component_grouping(model, family=resolved, task_type=task_type)
+    unknown_roles = set(groups) - set(COMPONENT_ROLES)
+    if unknown_roles:
+        raise XQTConfigError(
+            f"component_grouping produced roles outside COMPONENT_ROLES: "
+            f"{sorted(unknown_roles)}"
+        )
+    components = tuple(
+        ComponentSpec(role=role, paths=tuple(sorted(paths)))
+        for role, paths in groups.items()
+        if paths
+    )
+    return ModelStructureContract(family=resolved, components=components)
+
+
+def resolve_and_validate_structure_contract(
+    model: _NamedModuleLike,
+    profile: Any | None = None,
+    adapter: Any | None = None,
+    *,
+    strict: bool = True,
+) -> ModelStructureContract | None:
+    """Resolve, validate and bind a structure contract to a model."""
+    contract: ModelStructureContract | None = None
+    if adapter is not None and hasattr(adapter, "structure_contract"):
+        contract = adapter.structure_contract(model)
+
+    if contract is None and profile is not None:
+        raw_contract = getattr(profile, "structure_contract", None)
+        if raw_contract is not None:
+            if isinstance(raw_contract, ModelStructureContract):
+                contract = raw_contract
+            elif isinstance(raw_contract, Mapping):
+                contract = ModelStructureContract.from_mapping(raw_contract)
+            elif isinstance(raw_contract, str):
+                from xqt.core.imports import resolve_target
+                target_obj = resolve_target(raw_contract)
+                if callable(target_obj):
+                    target_res = target_obj(model)
+                    contract = (
+                        target_res
+                        if isinstance(target_res, ModelStructureContract)
+                        else None
+                    )
+                elif isinstance(target_obj, ModelStructureContract):
+                    contract = target_obj
+        if contract is None:
+            family = getattr(profile, "family", None)
+            try:
+                contract = build_structure_contract(model, family=family)
+            except Exception:
+                pass
+
+    if contract is None:
+        try:
+            contract = build_structure_contract(model)
+        except Exception:
+            contract = None
+
+    if contract is not None:
+        mismatches = structure_contract_mismatches(model, contract)
+        if not mismatches.is_consistent:
+            details = []
+            if mismatches.missing_module_paths:
+                details.append(f"missing modules: {mismatches.missing_module_paths}")
+            if mismatches.missing_merged_projections:
+                details.append(f"missing merged projections: {mismatches.missing_merged_projections}")
+            if mismatches.unknown_weight_mapping_targets:
+                details.append(f"unknown weight mapping targets: {mismatches.unknown_weight_mapping_targets}")
+            if strict:
+                raise XQTConfigError(
+                    f"ModelStructureContract validation failed: {'; '.join(details)}"
+                )
+        fp = compute_topology_fingerprint(model)
+        contract = contract.with_topology_fingerprint(fp)
+    elif strict and profile is not None:
+        raise XQTConfigError(
+            f"Failed to resolve model structure contract for profile {getattr(profile, 'profile_id', profile)!r}"
+        )
+
+    return contract
+
+
 __all__ = [
     "COMPONENT_ROLES",
     "ComponentRole",
@@ -476,9 +818,17 @@ __all__ = [
     "StructureMismatchReport",
     "WEIGHT_MAPPING_KINDS",
     "WeightMappingEntry",
+    "build_structure_contract",
+    "classify_model_family",
+    "component_grouping",
+    "compute_topology_fingerprint",
     "is_module_path_within",
+    "is_structure_contract_valid_for_model",
+    "model_family_names",
+    "resolve_and_validate_structure_contract",
     "resolve_structure_role",
     "resolve_weight_mapping",
     "structure_contract_keep_high_precision_paths",
     "structure_contract_mismatches",
+    "update_structure_contract_for_model",
 ]

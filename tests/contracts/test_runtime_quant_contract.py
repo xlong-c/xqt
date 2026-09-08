@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from xqt.contracts import QuantizedModel, RuntimeQuantContract
+from xqt.contracts import ModuleQuantContract, QuantizedModel, RuntimeQuantContract
 from xqt.core.errors import XQTConfigError
 from xqt.compression.quant.types import QuantScheme
 
@@ -43,6 +43,57 @@ def test_runtime_quant_contract_round_trip_dict() -> None:
     assert payload["quant_spec"]["weight_dtype"] == "int4"
     assert payload["required_kernels"] == ["dequant_gemm_int4"]
     assert "hf_quantization_config" not in payload
+
+
+def test_runtime_quant_contract_round_trip_preserves_module_contracts() -> None:
+    module_contract = ModuleQuantContract(
+        module_path="transformer.blocks.0.attn.to_q",
+        in_features=64,
+        out_features=128,
+        weight_shape=(128, 64),
+        storage_dtype="int8",
+        compute_dtype="int8",
+        scale_mode="static",
+        zero_point_mode="symmetric",
+        layout="qweight_t",
+        required_kernel="w8a8_int8_mma",
+    )
+    contract = RuntimeQuantContract(
+        quant_spec=QuantScheme(
+            weight_dtype="int8",
+            weight_granularity="per_channel",
+            group_size=None,
+            activation_dtype="int8",
+            activation_mode="static",
+            sym=True,
+        ),
+        storage_layout="xqt_int8_mma_v1",
+        required_kernels=("w8a8_int8_mma",),
+        global_shape=(),
+        local_shape=(),
+        prefill_supported=True,
+        decode_supported=True,
+        module_contracts=(module_contract,),
+    )
+
+    restored = RuntimeQuantContract.from_dict(contract.to_dict())
+
+    assert restored == contract
+    assert restored.module_contracts == (module_contract,)
+
+
+def test_runtime_quant_contract_rejects_inconsistent_noop_advertisement() -> None:
+    with pytest.raises(XQTConfigError, match="no_op"):
+        RuntimeQuantContract(
+            quant_spec=_w4a16_scheme(),
+            storage_layout="xqt_noop_v1",
+            required_kernels=("unexpected",),
+            global_shape=(),
+            local_shape=(),
+            prefill_supported=False,
+            decode_supported=False,
+            no_op=True,
+        )
 
 
 def test_runtime_quant_contract_rejects_missing_storage_layout() -> None:
@@ -133,7 +184,7 @@ def test_quantize_awq_and_int8_mma_attach_runtime_contract() -> None:
     assert awq_contract.quant_spec.weight_dtype == "int4"
 
     int8 = quantize_with_int8_mma(
-        nn.Linear(16, 8).eval(),
+        nn.Sequential(nn.Linear(16, 8)).eval(),
         policy={"include_module_types": ["Linear"]},
         engine="torch_int_mm",
         inplace=False,

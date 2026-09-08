@@ -14,6 +14,7 @@ from xqt.core.base import XQTConfigError
 
 RUNTIME_QUANT_CONTRACT_KEY = "runtime_quant_contract"
 RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION = 1
+ROOT_MODULE_PATH = "__root__"
 
 
 def _require_mapping(payload: Mapping[str, Any], key: str) -> Any:
@@ -90,6 +91,83 @@ def _quant_scheme_from_mapping(raw: Any) -> QuantScheme:
 
 
 @dataclass(frozen=True, slots=True)
+class ModuleQuantContract:
+    """The actual storage and execution contract for one quantized module."""
+
+    module_path: str
+    in_features: int
+    out_features: int
+    weight_shape: tuple[int, ...]
+    storage_dtype: str
+    compute_dtype: str
+    scale_mode: str
+    zero_point_mode: str
+    layout: str
+    required_kernel: str
+
+    def __post_init__(self) -> None:
+        if not str(self.module_path).strip():
+            raise XQTConfigError("ModuleQuantContract.module_path must be non-empty")
+        if int(self.in_features) <= 0 or int(self.out_features) <= 0:
+            raise XQTConfigError("ModuleQuantContract feature sizes must be positive")
+        shape = tuple(int(item) for item in self.weight_shape)
+        if len(shape) != 2 or any(item <= 0 for item in shape):
+            raise XQTConfigError(
+                "ModuleQuantContract.weight_shape must be two positive dimensions"
+            )
+        for field_name in (
+            "storage_dtype",
+            "compute_dtype",
+            "scale_mode",
+            "zero_point_mode",
+            "layout",
+            "required_kernel",
+        ):
+            if not str(getattr(self, field_name)).strip():
+                raise XQTConfigError(f"ModuleQuantContract.{field_name} must be non-empty")
+        object.__setattr__(self, "in_features", int(self.in_features))
+        object.__setattr__(self, "out_features", int(self.out_features))
+        object.__setattr__(self, "weight_shape", shape)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "module_path": self.module_path,
+            "in_features": self.in_features,
+            "out_features": self.out_features,
+            "weight_shape": list(self.weight_shape),
+            "storage_dtype": self.storage_dtype,
+            "compute_dtype": self.compute_dtype,
+            "scale_mode": self.scale_mode,
+            "zero_point_mode": self.zero_point_mode,
+            "layout": self.layout,
+            "required_kernel": self.required_kernel,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ModuleQuantContract":
+        try:
+            return cls(
+                module_path=str(payload["module_path"]),
+                in_features=int(payload["in_features"]),
+                out_features=int(payload["out_features"]),
+                weight_shape=_as_shape(
+                    payload["weight_shape"],
+                    field_name="module_contract.weight_shape",
+                ),
+                storage_dtype=str(payload["storage_dtype"]),
+                compute_dtype=str(payload["compute_dtype"]),
+                scale_mode=str(payload["scale_mode"]),
+                zero_point_mode=str(payload["zero_point_mode"]),
+                layout=str(payload["layout"]),
+                required_kernel=str(payload["required_kernel"]),
+            )
+        except KeyError as exc:
+            raise XQTConfigError(
+                f"ModuleQuantContract missing required field: {exc.args[0]}"
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeQuantContract:
     """Internal contract from quantizer artifacts to self-owned runtime modules.
 
@@ -107,6 +185,8 @@ class RuntimeQuantContract:
     repack_version: str | None = None
     shard_axis: int | None = None
     kv_cache_dtype: str | None = None
+    module_contracts: tuple[ModuleQuantContract, ...] = ()
+    no_op: bool = False
     schema_version: int = RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -114,13 +194,50 @@ class RuntimeQuantContract:
             raise XQTConfigError(
                 "RuntimeQuantContract.storage_layout must be a non-empty str"
             )
+        try:
+            schema_version = int(self.schema_version)
+        except (TypeError, ValueError) as exc:
+            raise XQTConfigError(
+                "RuntimeQuantContract.schema_version must be int"
+            ) from exc
+        if schema_version <= 0:
+            raise XQTConfigError(
+                "RuntimeQuantContract.schema_version must be positive"
+            )
         if self.shard_axis is not None and int(self.shard_axis) < 0:
             raise XQTConfigError(
                 "RuntimeQuantContract.shard_axis must be >= 0 when set"
             )
+        contracts = tuple(
+            item
+            if isinstance(item, ModuleQuantContract)
+            else ModuleQuantContract.from_dict(item)
+            for item in self.module_contracts
+        )
+        paths = [item.module_path for item in contracts]
+        if len(paths) != len(set(paths)):
+            raise XQTConfigError(
+                "RuntimeQuantContract.module_contracts must not contain duplicate paths"
+            )
+        no_op = bool(self.no_op)
+        if no_op and (
+            contracts
+            or self.required_kernels
+            or self.global_shape
+            or self.local_shape
+            or self.prefill_supported
+            or self.decode_supported
+        ):
+            raise XQTConfigError(
+                "RuntimeQuantContract.no_op must not advertise modules, kernels, "
+                "shapes, or prefill/decode support"
+            )
+        object.__setattr__(self, "module_contracts", contracts)
+        object.__setattr__(self, "no_op", no_op)
+        object.__setattr__(self, "schema_version", schema_version)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": int(self.schema_version),
             "quant_spec": self.quant_spec.to_dict(),
             "storage_layout": str(self.storage_layout),
@@ -133,6 +250,13 @@ class RuntimeQuantContract:
             "decode_supported": bool(self.decode_supported),
             "kv_cache_dtype": self.kv_cache_dtype,
         }
+        if self.module_contracts:
+            payload["module_contracts"] = [
+                item.to_dict() for item in self.module_contracts
+            ]
+        if self.no_op:
+            payload["no_op"] = True
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> RuntimeQuantContract:
@@ -165,6 +289,18 @@ class RuntimeQuantContract:
         repack = payload.get("repack_version")
         shard = payload.get("shard_axis")
         kv = payload.get("kv_cache_dtype")
+        raw_module_contracts = payload.get("module_contracts", ())
+        if not isinstance(raw_module_contracts, (list, tuple)):
+            raise XQTConfigError(
+                "RuntimeQuantContract.module_contracts must be a sequence"
+            )
+        module_contracts: list[ModuleQuantContract] = []
+        for item in raw_module_contracts:
+            if not isinstance(item, Mapping):
+                raise XQTConfigError(
+                    "RuntimeQuantContract.module_contracts entries must be mappings"
+                )
+            module_contracts.append(ModuleQuantContract.from_dict(item))
         version = payload.get("schema_version", RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION)
         try:
             version_i = int(version)
@@ -183,6 +319,10 @@ class RuntimeQuantContract:
             repack_version=None if repack is None else str(repack),
             shard_axis=None if shard is None else int(shard),
             kv_cache_dtype=None if kv is None else str(kv),
+            module_contracts=tuple(module_contracts),
+            no_op=_as_bool(payload["no_op"], field_name="no_op")
+            if "no_op" in payload
+            else False,
             schema_version=version_i,
         )
 
@@ -230,6 +370,10 @@ def build_runtime_quant_contract(
     repack_version: str | None = None,
     shard_axis: int | None = None,
     kv_cache_dtype: str | None = None,
+    module_contracts: tuple[ModuleQuantContract, ...]
+    | list[ModuleQuantContract]
+    | None = None,
+    no_op: bool = False,
 ) -> RuntimeQuantContract:
     """Construct a RuntimeQuantContract from scheme + layout + shapes (U8)."""
 
@@ -246,6 +390,8 @@ def build_runtime_quant_contract(
         repack_version=repack_version,
         shard_axis=shard_axis,
         kv_cache_dtype=kv_cache_dtype,
+        module_contracts=tuple(module_contracts or ()),
+        no_op=no_op,
     )
 
 
@@ -272,6 +418,8 @@ def first_linear_shapes(model: Any) -> tuple[tuple[int, ...], tuple[int, ...]]:
 __all__ = [
     "RUNTIME_QUANT_CONTRACT_KEY",
     "RUNTIME_QUANT_CONTRACT_SCHEMA_VERSION",
+    "ROOT_MODULE_PATH",
+    "ModuleQuantContract",
     "RuntimeQuantContract",
     "attach_runtime_quant_contract",
     "build_runtime_quant_contract",
