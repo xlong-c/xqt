@@ -38,7 +38,7 @@ CONFIG: dict[str, Any] = {
     "local_files_only": True,
     "artifact_dir": "artifacts/xqt/examples/unlimited_ocr_convrot_int8",
     "input": {
-        "pdf_path": "others/resume/resume.pdf",
+        "pdf_path": "resume/resume.pdf",
         "render_dpi": 200,
         "max_pages": 3,
         "prompt": "<image>document parsing.",

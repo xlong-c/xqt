@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>唐星龙 - 个人简历</title>
+  <link rel="stylesheet" href="assets/xdl-doc.css">
+  <style>
+    /* ---- 简历专属: A4 打印优先,屏幕阅读次要 ---- */
+    :root {
+      --resume-accent: #1a5f5a;
+      --resume-accent-light: #e8f4f2;
+      --resume-text: #1a1a1a;
+      --resume-muted: #555;
+      --resume-line: #ddd;
+      --resume-gap: 6px;
+    }
+
+    .resume-page {
+      max-width: 794px;            /* A4 width in px at 96dpi */
+      margin: 0 auto;
+      padding: 40px 48px;
+      background: #fff;
+      box-shadow: var(--xdl-shadow-soft);
+      font-family: "PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--resume-text);
+    }
+
+    /* ---- Header ---- */
+    .resume-header {
+      text-align: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid var(--resume-accent);
+    }
+    .resume-header h1 {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      margin: 0 0 6px 0;
+      color: #111;
+    }
+    .resume-header .contact-row {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 4px 18px;
+      font-size: 13px;
+      color: var(--resume-muted);
+    }
+    .resume-header .contact-row span {
+      white-space: nowrap;
+    }
+    .resume-header .contact-row .sep {
+      color: #ccc;
+    }
+
+    /* ---- Section ---- */
+    .resume-section {
+      margin-bottom: 18px;
+    }
+    .resume-section h2 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--resume-accent);
+      border-bottom: 1px solid var(--resume-line);
+      padding-bottom: 4px;
+      margin: 0 0 10px 0;
+      letter-spacing: 1px;
+    }
+
+    /* ---- Numbered lists ---- */
+    .numbered-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .numbered-list li {
+      position: relative;
+      padding-left: 22px;
+      margin-bottom: 5px;
+      font-size: 13.5px;
+      line-height: 1.6;
+    }
+    .numbered-list li::before {
+      content: counter(list-item) ".";
+      position: absolute;
+      left: 0;
+      font-weight: 600;
+      color: var(--resume-accent);
+    }
+
+    /* ---- Skill blocks ---- */
+    .skill-block {
+      margin-bottom: 10px;
+    }
+    .skill-block h3 {
+      font-size: 14px;
+      font-weight: 700;
+      color: #333;
+      margin: 0 0 4px 0;
+    }
+
+    @media print {
+      .numbered-list li { font-size: 12px; line-height: 1.5; }
+      .skill-block h3 { font-size: 13px; }
+    }
+
+    /* ---- Timeline items (experience, education, projects) ---- */
+    .resume-item {
+      margin-bottom: 12px;
+    }
+    .resume-item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      flex-wrap: wrap;
+      margin-bottom: 2px;
+    }
+    .resume-item-head .title {
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .resume-item-head .sub {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--resume-muted);
+    }
+    .resume-item-head .date {
+      font-size: 13px;
+      color: #888;
+      white-space: nowrap;
+    }
+    .resume-item-detail {
+      padding-left: 0;
+      margin: 4px 0 0 0;
+      list-style: none;
+    }
+    .resume-item-detail li {
+      position: relative;
+      padding-left: 14px;
+      margin-bottom: 3px;
+      font-size: 13.5px;
+      color: #333;
+    }
+    .resume-item-detail li::before {
+      content: "–";
+      position: absolute;
+      left: 0;
+      color: var(--resume-accent);
+    }
+
+    /* ---- Achievements ---- */
+    .achievement-block {
+      margin-top: 6px;
+      padding: 6px 0 0 0;
+    }
+    .achievement-label {
+      display: inline-block;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--resume-accent);
+      background: var(--resume-accent-light);
+      padding: 1px 8px;
+      border-radius: 3px;
+      margin-bottom: 4px;
+    }
+    .achievement-list {
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+    .achievement-list li {
+      position: relative;
+      padding-left: 14px;
+      margin-bottom: 3px;
+      font-size: 13.5px;
+      color: #333;
+    }
+    .achievement-list li::before {
+      content: "✓";
+      position: absolute;
+      left: 0;
+      color: var(--resume-accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    @media print {
+      .achievement-label { font-size: 11px; }
+      .achievement-list li { font-size: 12px; }
+    }
+
+    /* ---- Print: A4 ---- */
+    @media print {
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #fff;
+      }
+      .topbar, .toc, .skip-link, .theme-switcher, nav {
+        display: none !important;
+      }
+      .resume-page {
+        max-width: none;
+        width: 100%;
+        margin: 0;
+        padding: 0 20px;
+        box-shadow: none;
+        font-size: 12.5px;
+        line-height: 1.55;
+      }
+      @page {
+        size: A4;
+        margin: 18mm 16mm 18mm 16mm;
+      }
+      .resume-section { margin-bottom: 12px; }
+      .resume-header h1 { font-size: 24px; }
+      .resume-section h2 { font-size: 14px; }
+      .resume-item-head .title { font-size: 14px; }
+      .resume-item-head .sub { font-size: 13px; }
+      .resume-item-detail li { font-size: 12px; }
+      .no-print { display: none !important; }
+    }
+
+    @media screen and (max-width: 860px) {
+      .resume-page {
+        padding: 24px 20px;
+      }
+    }
+  </style>
+</head>
+<body class="xdl-style-ledger">
+
+<a class="skip-link" href="#main">跳到正文</a>
+
+<!-- 轻量 bar,仅屏幕显示,打印隐藏 -->
+<header class="topbar no-print">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark">X</span>
+      <span>XDL Docs</span>
+    </a>
+    <nav>
+      <a href="index.html">文档首页</a>
+    </nav>
+    <div class="theme-switcher" role="group" aria-label="页面主题">
+      <button type="button" data-theme-value="system">系统</button>
+      <button type="button" data-theme-value="light">日间</button>
+      <button type="button" data-theme-value="dark">夜间</button>
+      <button type="button" data-theme-value="sepia">暖纸</button>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="resume-page">
+
+  <!-- ====== Header ====== -->
+  <header class="resume-header">
+    <h1>唐 星 龙</h1>
+    <div class="contact-row">
+      <span>男 · 籍贯: 湘潭</span>
+      <span class="sep">|</span>
+      <span>18975200351</span>
+      <span class="sep">|</span>
+      <span>starcang@qq.com</span>
+      <span class="sep">|</span>
+      <span>3 年工作经验</span>
+    </div>
+    <div class="contact-row" style="margin-top:4px;">
+      <span>求职意向: 算法工程师</span>
+      <span class="sep">|</span>
+      <span>期望薪资: 15-25K</span>
+    </div>
+  </header>
+
+  <!-- ====== 个人优势 ====== -->
+  <section class="resume-section">
+    <h2>个人优势</h2>
+    <ol class="numbered-list">
+      <li>热爱技术, 持续学习前沿方向. 三年 CV 算法研发, 具备多领域丰富经验, 跨方向技术迁移与独立交付能力突出.</li>
+      <li>以 PyTorch 为核心框架, 兼通 CUDA 算子开发与融合优化, 可独立完成从数据采集到模型部署的全流程.</li>
+      <li>深度运用 vibe coding, 擅长结构化文档与 AGENTS 规则编写, 以 agent 驱动模式显著提升研发效率.</li>
+    </ol>
+  </section>
+
+  <!-- ====== 工作经历 ====== -->
+  <section class="resume-section">
+    <h2>工作经历</h2>
+
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">上海百出信息科技有限公司信息科技有限公司</span>
+        <span class="date">2026.06 - 至今</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">算法工程师</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>独立负责图像编辑算法全流程, 涵盖数据构建, 模型设计, 训练优化, 后端服务及部署上线.</li>
+        <li>对比 GAN, VAE 与多种扩散模型, 兼顾模型规模与人类偏好视觉效果, 选定 SD3.5M 基座.</li>
+        <li>利用 Qwen Image Edit 2511 与 Clein9B 大模型自动生成训练数据, 结合分割算法与色彩采样做精细描述, 经人工筛选与一致性 ID 校验确保数据质量.</li>
+        <li>使用 FastAPI 搭建后端服务, 基于推理优化代码编写 API 接口, 本地 GPU 部署, 完成算法到服务的完整闭环.</li>
+      </ul>
+      <div class="achievement-block">
+        <span class="achievement-label">关键业绩</span>
+        <ul class="achievement-list">
+          <li>一人承担算法 + 后端全部研发, 独立完成从 0 到 1 的图像编辑产品化落地.</li>
+          <li>实施 FP8 量化 + KV-cache + torch.compile + text encoder cache 等优化, 推理速度提升约 4 倍, 显存大幅降低, 可在低端显卡稳定运行.</li>
+          <li>构建约 10 万条高质量人脸编辑数据集, 建立数据清洗与质量过滤 pipeline.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">江苏瑞康成医疗科技有限公司</span>
+        <span class="date">2024.04 - 2026.06</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">算法工程师</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>负责视频分割项目全流程: 数据标注方案设计, 基座模型选型, 模块调整与 trick 调优.</li>
+        <li>针对部署平台约束筛选并适配基座模型, 完成 ONNX 模型封装交付.</li>
+      </ul>
+      <div class="achievement-block">
+        <span class="achievement-label">关键业绩</span>
+        <ul class="achievement-list">
+          <li>模型在精度, 速度, 体积三项指标均达到应用级交付标准, 成功交付开发部集成.</li>
+          <li>OpenCV 优化预处理与后处理管线, 整体流程耗时缩短至三分之一.</li>
+          <li>设计迭代式标注方案, 结合初版模型辅助标注, 高效构建 4 万张高质量超声数据集.</li>
+          <li>模型量化推理部署后速度进一步提升, TensorRT 加速达 5 倍.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">深圳市光大激光有限公司</span>
+        <span class="date">2023.03 - 2024.03</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">算法工程师</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>基于 YOLO, DETR 等框架搭建电池包缺陷检测系统, 负责模型训练, 调优与部署.</li>
+        <li>针对微小孔洞, 细线裂纹等小目标与弱特征缺陷, 优化数据增强与模型检测策略.</li>
+        <li>应对产线复杂环境光干扰, 通过模型调优提升检测鲁棒性.</li>
+      </ul>
+      <div class="achievement-block">
+        <span class="achievement-label">关键业绩</span>
+        <ul class="achievement-list">
+          <li>检测系统成功落地工业产线并稳定运行, 替代人工目检流程.</li>
+          <li>攻克小目标与弱特征缺陷检测难题, 满足产线实时性与精度要求.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== 项目经验 ====== -->
+  <section class="resume-section">
+    <h2>项目经验</h2>
+
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">上海百出信息科技有限公司</span>
+        <span class="date">2026.06 - 至今</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">基于扩散模型的人脸图像编辑</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>技术选型: 对比 GAN, VAE 与多种扩散模型, 兼顾模型规模与人类偏好视觉效果, 选定 SD3.5M 作为基座.</li>
+        <li>数据构建: 使用 Qwen Image Edit 2511 与 Clein9B 大模型自动生成约 10 万条配对数据, 结合分割算法与色彩网格采样生成精细颜色描述, 经人工筛选与自动一致性 ID 校验确保数据质量.</li>
+        <li>训练策略: 引入深度估计作为辅助任务, 通过分化 latent 输出强化模型空间感知能力, 提升编辑质量.</li>
+        <li>模型优化: 实施 FP8 量化, KV-cache, torch.compile, text encoder cache embedding 等优化, 推理速度提升约 4 倍, 大幅降低显存占用.</li>
+        <li>实验管理: 覆盖 latent 放置策略, 学习率等超参调优, 完整记录实验日志, 系统性验证各优化方案的收益.</li>
+      </ul>
+    </div>
+
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">上海百出信息科技有限公司</span>
+        <span class="date">2026.06 - 至今</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">实时人脸光照平衡算法</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>针对摄像头画面不稳定问题, 设计并实现基于人脸检测的光照平衡算法.</li>
+        <li>通过检测算法捕捉人脸区域并计算光照参数, 输入轻量化平衡模型实现实时白平衡校正.</li>
+        <li>有效解决过曝, 发暗等常见画面问题, 视觉效果显著改善, 无额外性能压力.</li>
+      </ul>
+    </div>
+
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">江苏瑞康成医疗科技有限公司</span>
+        <span class="date">2024.04 - 2026.06</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">心脏超声心肌分割与分析系统</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>采用 MFP 交互式分割方法实现心脏超声视频中心肌区域的精准分割, 基于分割结果计算心肌面积, 变化曲线等临床参数, 并输出可视化报表.</li>
+        <li>设计迭代式数据标注流程: 先标注部分数据训练初版模型, 再借助模型辅助完成剩余标注, 最终构建 4 万张高质量超声数据集.</li>
+        <li>使用 TensorRT 对模型进行推理加速, 推理速度提升约 5 倍, 并封装为 ONNX 模型供开发部调用.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ====== 教育背景 ====== -->
+  <section class="resume-section">
+    <h2>教育背景</h2>
+    <div class="resume-item">
+      <div class="resume-item-head">
+        <span class="sub">南华大学</span>
+        <span class="date">2019 - 2023</span>
+      </div>
+      <div class="resume-item-head">
+        <span class="title">本科 · 软件工程</span>
+      </div>
+      <ul class="resume-item-detail">
+        <li>大二加入导师课题组, 早期接触计算机视觉方向, 参与图像重建相关研究.</li>
+        <li>在校期间系统学习深度学习基础, 为后续三年 CV 工程实践打下理论基础.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ====== 技能 ====== -->
+  <section class="resume-section">
+    <h2>专业技能</h2>
+
+    <div class="skill-block">
+      <h3>编程语言与工具</h3>
+      <ol class="numbered-list">
+        <li>熟练使用 Python, 以 PyTorch 为核心框架搭建独立深度学习项目 pipeline</li>
+        <li>能够使用 Linux 常用命令, 根据需求搭建数据采集, 清洗, 标注自动化工作流</li>
+        <li>熟悉 OpenCV 等常用视觉库</li>
+      </ol>
+    </div>
+
+    <div class="skill-block">
+      <h3>模型与算法</h3>
+      <ol class="numbered-list" start="4">
+        <li>能够独立开发常规计算机视觉算法: 图像识别, 目标检测, 语义分割等</li>
+        <li>熟悉 YOLO, DETR, Transformer, CNN, U-Net 等主流网络架构</li>
+        <li>能够快速阅读学术文献并独立复现, 具备前沿方法工程落地判断力</li>
+      </ol>
+    </div>
+
+    <div class="skill-block">
+      <h3>CUDA 与高性能计算</h3>
+      <ol class="numbered-list" start="7">
+        <li>了解 CUDA 底层原理, 能够编写独立算子与实现算子融合</li>
+        <li>了解 Cutlass / TileLang DSL</li>
+      </ol>
+    </div>
+
+    <div class="skill-block">
+      <h3>工程与部署</h3>
+      <ol class="numbered-list" start="9">
+        <li>会搭建 ComfyUI 工作流</li>
+        <li>熟悉模型压缩, 量化, 导出与部署全流程</li>
+        <li>掌握 NLP 基础概念与 Transformer 架构, 有小型语言模型训练经验</li>
+      </ol>
+    </div>
+
+    <div class="skill-block">
+      <h3>研发效率</h3>
+      <ol class="numbered-list" start="12">
+        <li>深度运用 vibe coding, 擅长编写规范化文档与 AGENTS 规则, 以 agent 驱动模式提升研发效率</li>
+      </ol>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>
