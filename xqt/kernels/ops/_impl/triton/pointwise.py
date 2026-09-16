@@ -91,11 +91,11 @@ if triton is not None and tl is not None:
         program_id = tl.program_id(0)
         offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
-        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0)
-        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)
+        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        up = tl.load(up_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
         sigmoid = 1.0 / (1.0 + tl.exp(-gate))
         out = gate * sigmoid * up
-        tl.store(out_ptr + offsets, out, mask=mask)
+        tl.store(out_ptr + offsets, out.to(out_ptr.dtype.element_ty), mask=mask)
 
     @triton.jit
     def _geglu_kernel(
@@ -108,11 +108,11 @@ if triton is not None and tl is not None:
         program_id = tl.program_id(0)
         offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
-        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0)
-        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)
+        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        up = tl.load(up_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
         cdf = 0.5 * (1.0 + tl.erf(gate * 0.7071067811865476))
         out = gate * cdf * up
-        tl.store(out_ptr + offsets, out, mask=mask)
+        tl.store(out_ptr + offsets, out.to(out_ptr.dtype.element_ty), mask=mask)
 
     @triton.jit
     def _rmsnorm_kernel(

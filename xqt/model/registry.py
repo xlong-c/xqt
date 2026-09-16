@@ -16,6 +16,21 @@ def _register_builtin_profiles() -> None:
 
     builtins = (
         ModelProfile(
+            profile_id="hf.minicpm5-2b",
+            family="llm",
+            loader_target="xqt.model.minicpm5.load_minicpm5",
+            loader_params={"repo_id": "openbmb/MiniCPM5-2B"},
+            inference_adapter="tensor",
+            requirements={"transformers": ">=4.57", "dtype": "bfloat16"},
+            metadata={
+                "source": "huggingface",
+                "repo_id": "openbmb/MiniCPM5-2B",
+                "architecture": "LlamaForCausalLM",
+                "context_length": 131072,
+                "text_only": True,
+            },
+        ),
+        ModelProfile(
             profile_id="hf.hunyuan-ocr",
             family="multimodal",
             loader_target="xqt.model.hunyuan_ocr.load_hunyuan_ocr",

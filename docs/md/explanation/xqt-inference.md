@@ -367,4 +367,3 @@ xqt/workflows/optimization.py # Session.export / deploy
 - 工作流入口: [../usage/xqt-workflows.md](../usage/xqt-workflows.md)
 - 架构与 Stage: [../architecture/xqt.md](../architecture/xqt.md)
 - 包内契约: [../../../xqt/FRAMEWORK.md](../../../xqt/FRAMEWORK.md)
-- 阅读页导览: [../../html/xqt.html](../../html/xqt.html)

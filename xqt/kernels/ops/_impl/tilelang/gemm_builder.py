@@ -393,6 +393,8 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
     *,
     block_m: int = 64,
     block_n: int = 64,
+    block_k: int = 64,
+    num_stages: int = 2,
     threads: int = 128,
     target_arch: str | None = None,
     has_bias: bool = False,
@@ -407,8 +409,35 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
         raise ValueError(
             "minimal fused FP4 TileLang GEMM requires m,n to be multiples of block sizes"
         )
+    if block_k <= 0 or block_k % 2 != 0:
+        raise ValueError(f"FP4 fused GEMM requires a positive even block_k, got {block_k}")
+    # Small or irregular input_features (reference tests use K=32) must still
+    # build: shrink block_k to the largest even power-of-two divisor.
+    while input_features % block_k != 0 and block_k > 2:
+        block_k //= 2
+    if input_features % block_k != 0:
+        raise ValueError(
+            f"FP4 fused GEMM requires input_features ({input_features}) to be a multiple "
+            f"of an even block_k; got block_k={block_k}"
+        )
     if activation not in {None, "gelu", "silu", "relu"}:
         raise ValueError(f"unsupported activation: {activation}")
+    # K-blocked kernel: shared usage is O(block), not O(input_features).
+    #   a_shared fp16 [block_m, block_k] + b_shared fp16 [block_n, block_k]
+    #   + packed_shared u8 [block_n, block_k // 2] + o_shared fp16 [block_m, block_n]
+    estimated_shared_bytes = (
+        (int(block_m) + int(block_n)) * int(block_k) * 2
+        + int(block_n) * (int(block_k) // 2)
+        + int(block_m) * int(block_n) * 2
+    )
+    sm_shared_limit = 101376
+    if estimated_shared_bytes > sm_shared_limit:
+        raise ValueError(
+            "build_tilelang_fp4_fused_dequant_gemm_kernel shared-memory estimate "
+            f"({estimated_shared_bytes} bytes for block_m={block_m}, block_n={block_n}, "
+            f"block_k={block_k}) exceeds the {sm_shared_limit}-byte limit on sm_89-class "
+            "GPUs; reduce the tile sizes."
+        )
 
     pass_configs = {
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -442,7 +471,7 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
         out_idx = [3]
     shape_suffix = (
         f"m{m}_n{n}_k{input_features}_g{group_size}_bm{block_m}_"
-        f"bn{block_n}_t{threads}_{target_arch or 'auto'}_{activation or 'none'}"
+        f"bn{block_n}_bk{block_k}_s{num_stages}_t{threads}_{target_arch or 'auto'}_{activation or 'none'}"
     )
 
     def tilelang_fp4_fused_gemm_with_bias_main(
@@ -457,37 +486,63 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
             T.ceildiv(n, block_n),
             threads=threads,
         ) as (bx, by):
-            a_shared = T.alloc_shared([block_m, input_features], dtype)
-            b_shared = T.alloc_shared([block_n, input_features], dtype)
+            a_shared = T.alloc_shared([block_m, block_k], dtype)
+            packed_shared = T.alloc_shared([block_n, block_k // 2], T.uint8)
+            b_shared = T.alloc_shared([block_n, block_k], dtype)
             o_shared = T.alloc_shared([block_m, block_n], dtype)
             acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
-            T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-            for row_offset, feature in T.Parallel(block_n, input_features):
-                row = by * block_n + row_offset
-                byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
-                low = T.bitwise_and(byte_u16, 15)
-                high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
-                nibble = T.if_then_else(feature % 2 == 0, low, high)
-                signed = T.if_then_else(
-                    nibble >= 8,
-                    nibble.astype(T.int16) - 16,
-                    nibble.astype(T.int16),
-                )
-                b_shared[row_offset, feature] = (
-                    signed.astype(dtype) * scale[row, feature // group_size, 0]
-                )
             T.fill(acc_o, 0)
-            T.gemm(
-                a_shared,
-                b_shared,
-                acc_o,
-                transpose_B=True,
-                policy=T.GemmWarpPolicy.FullRow,
-            )
+            row_base = by * block_n
+            for k_tile in T.Pipelined(T.ceildiv(input_features, block_k), num_stages=num_stages):
+                k_base = k_tile * block_k
+                T.copy(
+                    a[bx * block_m : (bx + 1) * block_m, k_base : k_base + block_k],
+                    a_shared,
+                )
+                # One vectorized byte tile feeds the dequant stage; each byte
+                # holds one even (low nibble) and one odd (high nibble) code.
+                T.copy(
+                    packed_weight[
+                        row_base : row_base + block_n,
+                        k_base // 2 : (k_base + block_k) // 2,
+                    ],
+                    packed_shared,
+                )
+                for row_offset, packed_col in T.Parallel(block_n, block_k // 2):
+                    row = row_base + row_offset
+                    feature = k_base + 2 * packed_col
+                    byte_u16 = packed_shared[row_offset, packed_col].astype(T.uint16)
+                    low = T.bitwise_and(byte_u16, 15)
+                    high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
+                    low_signed = T.if_then_else(
+                        low >= 8,
+                        low.astype(T.int16) - 16,
+                        low.astype(T.int16),
+                    )
+                    high_signed = T.if_then_else(
+                        high >= 8,
+                        high.astype(T.int16) - 16,
+                        high.astype(T.int16),
+                    )
+                    b_shared[row_offset, 2 * packed_col] = (
+                        low_signed.astype(dtype)
+                        * scale[row, feature // group_size, 0]
+                    )
+                    b_shared[row_offset, 2 * packed_col + 1] = (
+                        high_signed.astype(dtype)
+                        * scale[row, (feature + 1) // group_size, 0]
+                    )
+                T.gemm(
+                    a_shared,
+                    b_shared,
+                    acc_o,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
             for row_offset, column_offset in T.Parallel(block_m, block_n):
                 value = acc_o[row_offset, column_offset] + bias[
-                    by * block_n + column_offset
+                    row_base + column_offset
                 ].astype(accum_dtype)
                 acc_o[row_offset, column_offset] = _apply_activation(value)
             T.copy(acc_o, o_shared)
@@ -495,7 +550,7 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
                 o_shared,
                 out[
                     bx * block_m : (bx + 1) * block_m,
-                    by * block_n : (by + 1) * block_n,
+                    row_base : row_base + block_n,
                 ],
             )
 
@@ -529,34 +584,60 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
             T.ceildiv(n, block_n),
             threads=threads,
         ) as (bx, by):
-            a_shared = T.alloc_shared([block_m, input_features], dtype)
-            b_shared = T.alloc_shared([block_n, input_features], dtype)
+            a_shared = T.alloc_shared([block_m, block_k], dtype)
+            packed_shared = T.alloc_shared([block_n, block_k // 2], T.uint8)
+            b_shared = T.alloc_shared([block_n, block_k], dtype)
             o_shared = T.alloc_shared([block_m, block_n], dtype)
             acc_o = T.alloc_fragment([block_m, block_n], accum_dtype)
 
-            T.copy(a[bx * block_m : (bx + 1) * block_m, :], a_shared)
-            for row_offset, feature in T.Parallel(block_n, input_features):
-                row = by * block_n + row_offset
-                byte_u16 = packed_weight[row, feature // 2].astype(T.uint16)
-                low = T.bitwise_and(byte_u16, 15)
-                high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
-                nibble = T.if_then_else(feature % 2 == 0, low, high)
-                signed = T.if_then_else(
-                    nibble >= 8,
-                    nibble.astype(T.int16) - 16,
-                    nibble.astype(T.int16),
-                )
-                b_shared[row_offset, feature] = (
-                    signed.astype(dtype) * scale[row, feature // group_size, 0]
-                )
             T.fill(acc_o, 0)
-            T.gemm(
-                a_shared,
-                b_shared,
-                acc_o,
-                transpose_B=True,
-                policy=T.GemmWarpPolicy.FullRow,
-            )
+            row_base = by * block_n
+            for k_tile in T.Pipelined(T.ceildiv(input_features, block_k), num_stages=num_stages):
+                k_base = k_tile * block_k
+                T.copy(
+                    a[bx * block_m : (bx + 1) * block_m, k_base : k_base + block_k],
+                    a_shared,
+                )
+                # One vectorized byte tile feeds the dequant stage; each byte
+                # holds one even (low nibble) and one odd (high nibble) code.
+                T.copy(
+                    packed_weight[
+                        row_base : row_base + block_n,
+                        k_base // 2 : (k_base + block_k) // 2,
+                    ],
+                    packed_shared,
+                )
+                for row_offset, packed_col in T.Parallel(block_n, block_k // 2):
+                    row = row_base + row_offset
+                    feature = k_base + 2 * packed_col
+                    byte_u16 = packed_shared[row_offset, packed_col].astype(T.uint16)
+                    low = T.bitwise_and(byte_u16, 15)
+                    high = T.bitwise_and(T.shift_right(byte_u16, 4), 15)
+                    low_signed = T.if_then_else(
+                        low >= 8,
+                        low.astype(T.int16) - 16,
+                        low.astype(T.int16),
+                    )
+                    high_signed = T.if_then_else(
+                        high >= 8,
+                        high.astype(T.int16) - 16,
+                        high.astype(T.int16),
+                    )
+                    b_shared[row_offset, 2 * packed_col] = (
+                        low_signed.astype(dtype)
+                        * scale[row, feature // group_size, 0]
+                    )
+                    b_shared[row_offset, 2 * packed_col + 1] = (
+                        high_signed.astype(dtype)
+                        * scale[row, (feature + 1) // group_size, 0]
+                    )
+                T.gemm(
+                    a_shared,
+                    b_shared,
+                    acc_o,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
             for row_offset, column_offset in T.Parallel(block_m, block_n):
                 acc_o[row_offset, column_offset] = _apply_activation(
                     acc_o[row_offset, column_offset]
@@ -566,7 +647,7 @@ def build_tilelang_fp4_fused_dequant_gemm_kernel(
                 o_shared,
                 out[
                     bx * block_m : (bx + 1) * block_m,
-                    by * block_n : (by + 1) * block_n,
+                    row_base : row_base + block_n,
                 ],
             )
 

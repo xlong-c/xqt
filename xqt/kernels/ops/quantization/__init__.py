@@ -1,4 +1,4 @@
-"""quantization kernels."""
+"""quantization kernels unified with sglang.kernels."""
 from __future__ import annotations
 
 from typing import Any
@@ -13,9 +13,87 @@ from xqt.kernels.ops.quantization.nvfp4 import (
     normalize_group_scale,
     unpack_nvfp4e2m1,
 )
+from xqt.kernels.ops.quantization.convrot_w8a8 import (
+    ConvRotW8A8Workspace,
+    PackedConvRotW8A8Linear,
+    allocate_convrot_w8a8_workspace,
+    bind_convrot_w8a8_linear,
+    convrot_w8a8_linear,
+    fused_swiglu,
+    native_convrot_w8a8_available,
+    native_convrot_w8a8_shape_supported,
+    native_convrot_w8a8_version,
+    pack_convrot_w8a8_linear,
+)
+from xqt.kernels.ops.quantization.svdq_w8a8 import (
+    PackedSVDQW8A8Linear,
+    W8A8SVDQWorkspace,
+    allocate_svdq_w8a8_workspace,
+    bind_svdq_w8a8_linear,
+    native_svdq_w8a8_available,
+    native_svdq_w8a8_shape_supported,
+    native_svdq_w8a8_version,
+    pack_svdq_w8a8_linear,
+    svdq_w8a8_linear,
+    w8a8_linear,
+)
+from xqt.kernels.ops.quantization.awq_w4a16 import (
+    awq_w4a16_decode,
+    awq_w4a16_decode_bias,
+    bind_awq_w4a16_decode,
+    native_awq_w4a16_available,
+    native_awq_w4a16_version,
+    pack_awq_w4a16_interleaved,
+)
+from xqt.kernels.ops.quantization.convrot_w4a4_rowwise import (
+    ConvRotW4A4RowwiseWorkspace,
+    PackedConvRotW4A4Rowwise,
+    allocate_convrot_w4a4_rowwise_workspace,
+    bind_convrot_w4a4_rowwise_linear,
+    bind_dynamic_convrot_w4a4_rowwise_linear,
+    convrot_w4a4_rowwise_linear,
+    native_rowwise_convrot_w4a4_available,
+    native_rowwise_convrot_w4a4_shape_supported,
+    native_rowwise_convrot_w4a4_version,
+    pack_convrot_w4a4_rowwise_weight,
+)
+from xqt.kernels.ops.quantization.svdq_w4a4 import (
+    PackedSVDQW4A4Linear,
+    PackedW4A4Linear,
+    SVDQW4A4GeluMLPWorkspace,
+    W4A4Workspace,
+    allocate_svdq_w4a4_gelu_mlp_workspace,
+    allocate_w4a4_workspace,
+    bind_convrot_w4a4_linear,
+    bind_svdq_w4a4_linear,
+    bind_svdq_w4a4_linear_norm,
+    bind_svdq_w4a4_linear_smalln,
+    bind_svdq_w4a4_linear_smalln_norm,
+    bind_svdq_w4a4_qkv_rmsnorm_rope,
+    convrot_w4a4_linear,
+    native_convrot_w4a4_shape_supported,
+    native_w4a4_available,
+    native_w4a4_shape_supported,
+    native_w4a4_smalln_available,
+    native_w4a4_smalln_version,
+    native_w4a4_version,
+    pack_lowrank_weight,
+    pack_scale,
+    pack_svdq_w4a4_linear,
+    pack_svdq_w4a4_linear_smalln,
+    pack_svdq_w4a4_rotary_emb,
+    pack_w4a4_linear,
+    svdq_w4a4_gelu_mlp,
+    svdq_w4a4_linear,
+    svdq_w4a4_linear_norm,
+    svdq_w4a4_linear_smalln,
+    svdq_w4a4_linear_smalln_norm,
+    w4a4_linear,
+)
 
 
 _CUDA = frozenset({CapabilityRequirement.CUDA})
+_SM89 = frozenset({CapabilityRequirement.cuda(min_sm=(8, 9), max_sm=(8, 9))})
 
 def _per_token_quant_fp8_torch(x):
     import torch
@@ -36,6 +114,66 @@ register_kernel(
         ),
     )
 )
+register_kernel(
+    KernelSpec(
+        op="quantization.convrot_w8a8_linear",
+        backend=KernelBackend.TVM_FFI,
+        target="xqt.kernels.ops.quantization.convrot_w8a8:convrot_w8a8_linear",
+        capabilities=_SM89,
+        format_signature=FormatSignature(
+            supported_dtypes=("bfloat16", "float16"),
+            description="ConvRot W8A8 Linear via TVM FFI",
+        ),
+    )
+)
+register_kernel(
+    KernelSpec(
+        op="quantization.svdq_w8a8_linear",
+        backend=KernelBackend.TVM_FFI,
+        target="xqt.kernels.ops.quantization.svdq_w8a8:svdq_w8a8_linear",
+        capabilities=_SM89,
+        format_signature=FormatSignature(
+            supported_dtypes=("bfloat16",),
+            description="SVDQ W8A8 Linear via TVM FFI",
+        ),
+    )
+)
+register_kernel(
+    KernelSpec(
+        op="quantization.awq_w4a16_decode",
+        backend=KernelBackend.TVM_FFI,
+        target="xqt.kernels.ops.quantization.awq_w4a16:awq_w4a16_decode",
+        capabilities=_SM89,
+        format_signature=FormatSignature(
+            supported_dtypes=("float16", "bfloat16"),
+            description="AWQ W4A16 Decode GEMM via TVM FFI",
+        ),
+    )
+)
+register_kernel(
+    KernelSpec(
+        op="quantization.convrot_w4a4_rowwise_linear",
+        backend=KernelBackend.TVM_FFI,
+        target="xqt.kernels.ops.quantization.convrot_w4a4_rowwise:convrot_w4a4_rowwise_linear",
+        capabilities=_SM89,
+        format_signature=FormatSignature(
+            supported_dtypes=("float16", "bfloat16"),
+            description="ConvRot W4A4 Rowwise Linear via TVM FFI",
+        ),
+    )
+)
+register_kernel(
+    KernelSpec(
+        op="quantization.svdq_w4a4_linear",
+        backend=KernelBackend.TVM_FFI,
+        target="xqt.kernels.ops.quantization.svdq_w4a4:svdq_w4a4_linear",
+        capabilities=_SM89,
+        format_signature=FormatSignature(
+            supported_dtypes=("float16", "bfloat16"),
+            description="SVDQ W4A4 Linear via TVM FFI",
+        ),
+    )
+)
 
 __all__ = [
     "_per_token_quant_fp8_torch",
@@ -44,6 +182,78 @@ __all__ = [
     "per_token_quant_fp8",
     "svd_fused_dequant_gemm_low_rank_tilelang",
     "unpack_nvfp4e2m1",
+    # ConvRot W8A8
+    "ConvRotW8A8Workspace",
+    "PackedConvRotW8A8Linear",
+    "allocate_convrot_w8a8_workspace",
+    "bind_convrot_w8a8_linear",
+    "convrot_w8a8_linear",
+    "fused_swiglu",
+    "native_convrot_w8a8_available",
+    "native_convrot_w8a8_shape_supported",
+    "native_convrot_w8a8_version",
+    "pack_convrot_w8a8_linear",
+    # SVDQ W8A8
+    "PackedSVDQW8A8Linear",
+    "W8A8SVDQWorkspace",
+    "allocate_svdq_w8a8_workspace",
+    "bind_svdq_w8a8_linear",
+    "native_svdq_w8a8_available",
+    "native_svdq_w8a8_shape_supported",
+    "native_svdq_w8a8_version",
+    "pack_svdq_w8a8_linear",
+    "svdq_w8a8_linear",
+    "w8a8_linear",
+    # AWQ W4A16
+    "awq_w4a16_decode",
+    "awq_w4a16_decode_bias",
+    "bind_awq_w4a16_decode",
+    "native_awq_w4a16_available",
+    "native_awq_w4a16_version",
+    "pack_awq_w4a16_interleaved",
+    # ConvRot W4A4 Rowwise
+    "ConvRotW4A4RowwiseWorkspace",
+    "PackedConvRotW4A4Rowwise",
+    "allocate_convrot_w4a4_rowwise_workspace",
+    "bind_convrot_w4a4_rowwise_linear",
+    "bind_dynamic_convrot_w4a4_rowwise_linear",
+    "convrot_w4a4_rowwise_linear",
+    "native_rowwise_convrot_w4a4_available",
+    "native_rowwise_convrot_w4a4_shape_supported",
+    "native_rowwise_convrot_w4a4_version",
+    "pack_convrot_w4a4_rowwise_weight",
+    # SVDQ W4A4
+    "PackedSVDQW4A4Linear",
+    "PackedW4A4Linear",
+    "SVDQW4A4GeluMLPWorkspace",
+    "W4A4Workspace",
+    "allocate_svdq_w4a4_gelu_mlp_workspace",
+    "allocate_w4a4_workspace",
+    "bind_convrot_w4a4_linear",
+    "bind_svdq_w4a4_linear",
+    "bind_svdq_w4a4_linear_norm",
+    "bind_svdq_w4a4_linear_smalln",
+    "bind_svdq_w4a4_linear_smalln_norm",
+    "bind_svdq_w4a4_qkv_rmsnorm_rope",
+    "convrot_w4a4_linear",
+    "native_convrot_w4a4_shape_supported",
+    "native_w4a4_available",
+    "native_w4a4_shape_supported",
+    "native_w4a4_smalln_available",
+    "native_w4a4_smalln_version",
+    "native_w4a4_version",
+    "pack_lowrank_weight",
+    "pack_scale",
+    "pack_svdq_w4a4_linear",
+    "pack_svdq_w4a4_linear_smalln",
+    "pack_svdq_w4a4_rotary_emb",
+    "pack_w4a4_linear",
+    "svdq_w4a4_gelu_mlp",
+    "svdq_w4a4_linear",
+    "svdq_w4a4_linear_norm",
+    "svdq_w4a4_linear_smalln",
+    "svdq_w4a4_linear_smalln_norm",
+    "w4a4_linear",
 ]
 
 

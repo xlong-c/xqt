@@ -14,6 +14,7 @@ from .paths import (
 )
 from .spec import CompileSpec, ExtensionSpec, serialize_compile_settings
 from .toolchain import ToolchainInfo, detect_toolchain
+from .tvm_ffi_loader import load_tvm_ffi_extension
 
 __all__ = [
     "CompileSpec",
@@ -32,6 +33,7 @@ __all__ = [
     "jit_root",
     "load_extension",
     "load_jit",
+    "load_tvm_ffi_extension",
     "metadata_path",
     "serialize_compile_settings",
 ]

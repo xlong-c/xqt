@@ -45,6 +45,7 @@ from .policy import (
 # ---------------------------------------------------------------------------
 
 from .engine import HybridInferenceEngine, HybridInferenceResult
+from .graph_decode import CudaGraphDecodeSession, GraphDecodeResult
 from .model_runner import ModelRunner, ModelRunnerReport
 from .cuda_graph import (
     CUDAGraphBlockRunner,
@@ -171,6 +172,8 @@ __all__ = [
     # engine
     "HybridInferenceEngine",
     "HybridInferenceResult",
+    "CudaGraphDecodeSession",
+    "GraphDecodeResult",
     "ModelRunner",
     "ModelRunnerReport",
     "materialize_composite_compute",

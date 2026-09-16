@@ -98,6 +98,7 @@ _LEGACY_BACKENDS = {
     "cute_dsl": KernelBackend.CUTE_DSL,
     "custom_cuda": KernelBackend.CUSTOM_CUDA,
     "flashinfer": KernelBackend.FLASHINFER,
+    "sage": KernelBackend.SAGE,
 }
 
 

@@ -24,6 +24,8 @@ class KernelBackend(str, Enum):
     CUTE_DSL = "cute_dsl"
     CUSTOM_CUDA = "custom_cuda"
     FLASHINFER = "flashinfer"
+    SAGE = "sage"
+    TVM_FFI = "tvm_ffi"
 
 
 class DeviceType(str, Enum):
@@ -65,14 +67,19 @@ class PlatformInfo:
         except Exception:
             return cls()
         try:
-            if getattr(torch.version, "hip", None) is not None and torch.cuda.is_available():
+            if (
+                getattr(torch.version, "hip", None) is not None
+                and torch.cuda.is_available()
+            ):
                 return cls(device_type="hip")
             npu = getattr(torch, "npu", None)
             if npu is not None and npu.is_available():  # type: ignore[union-attr]
                 return cls(device_type="npu")
             if torch.cuda.is_available():
                 major, minor = torch.cuda.get_device_capability()
-                return cls(device_type="cuda", cuda_arch_major=major, cuda_arch_minor=minor)
+                return cls(
+                    device_type="cuda", cuda_arch_major=major, cuda_arch_minor=minor
+                )
         except Exception:
             pass
         return cls()
@@ -162,18 +169,26 @@ class KernelSpec:
         from xqt.core.base.errors import XQTBackendError
 
         if ":" not in self.target:
-            raise XQTBackendError(f"invalid kernel target {self.target!r} for op {self.op!r}")
+            raise XQTBackendError(
+                f"invalid kernel target {self.target!r} for op {self.op!r}"
+            )
         module_name, attr_path = self.target.split(":", 1)
         try:
             module = importlib.import_module(module_name)
         except ImportError as exc:
-            raise XQTBackendError(f"kernel backend {self.backend.value!r} for op {self.op!r} not available: {exc}") from exc
+            raise XQTBackendError(
+                f"kernel backend {self.backend.value!r} for op {self.op!r} not available: {exc}"
+            ) from exc
         obj: object = module
         try:
             for part in attr_path.split("."):
                 obj = getattr(obj, part)
         except AttributeError as exc:
-            raise XQTBackendError(f"kernel target {self.target!r} not found for op {self.op!r}: {exc}") from exc
+            raise XQTBackendError(
+                f"kernel target {self.target!r} not found for op {self.op!r}: {exc}"
+            ) from exc
         if not callable(obj):
-            raise XQTBackendError(f"kernel target {self.target!r} for op {self.op!r} is not callable")
+            raise XQTBackendError(
+                f"kernel target {self.target!r} for op {self.op!r} is not callable"
+            )
         return obj  # type: ignore[return-value]

@@ -50,6 +50,8 @@ class _TileLangDequantGemmWrapper(nn.Module):
         self.last_kernel_pattern = "dequant_gemm_epilogue"
         self.last_operator_family = "linear"
         self.last_fastpath = "none"
+        self.last_input_rows: int | None = None
+        self.last_padded_input_rows: int | None = None
         self._cached_nvfp4_bridge: NVFP4LinearBridge | None = None
         self._preferred_patterns_config = self._preferred_patterns()
         self._dense_linear_bridge = getattr(self.module, "tilelang_dense_linear_args", None)
@@ -463,13 +465,12 @@ class _TileLangDequantGemmWrapper(nn.Module):
                     16 if kernel_pattern == "nvfp4_packed_dequant_gemm_epilogue" else 64,
                 )
             ),
-            "threads": int(self.settings.get("threads", 128)),
-            "num_stages": int(self.settings.get("num_stages", 2)),
+            "block_k": int(self.settings.get("block_k", 128)),
+            "threads": int(self.settings.get("threads", 256)),
+            "num_stages": int(self.settings.get("num_stages", 3)),
             "target_arch": self.settings.get("target_arch"),
             "fallback": self.fallback,
         }
-        if kernel_pattern == "dense_linear_epilogue":
-            tile_kwargs["block_k"] = int(self.settings.get("block_k", 64))
         if kernel_pattern == "nvfp4_packed_dequant_gemm_epilogue":
             tile_kwargs["block_k"] = int(self.settings.get("block_k", 128))
         if kernel_pattern == "dense_linear_epilogue":
@@ -489,14 +490,34 @@ class _TileLangDequantGemmWrapper(nn.Module):
                 qweight,
                 **tile_kwargs,
             )
-        return self._run_tilelang_or_reference(
+        original_shape = tuple(x.shape[:-1])
+        flat_x = x.reshape(-1, x.shape[-1])
+        self.last_input_rows = int(flat_x.shape[0])
+        self.last_padded_input_rows = self.last_input_rows
+        if (
+            self.last_execution_mode == "cuda_tilelang_entry"
+            and kernel_pattern in {
+                "fp4_packed_dequant_gemm_epilogue",
+                "mxfp4_packed_dequant_gemm_epilogue",
+                "nvfp4_packed_dequant_gemm_epilogue",
+            }
+        ):
+            block_m = int(tile_kwargs["block_m"])
+            padded_rows = ((self.last_input_rows + block_m - 1) // block_m) * block_m
+            if padded_rows != self.last_input_rows:
+                flat_x = F.pad(flat_x, (0, 0, 0, padded_rows - self.last_input_rows))
+                self.last_padded_input_rows = padded_rows
+                self.last_fastpath = f"{self.last_fastpath}_row_padding"
+        output = self._run_tilelang_or_reference(
             kernel_pattern,
-            x,
+            flat_x,
             qweight,
             scale,
             bias,
             **tile_kwargs,
         )
+        output = output[: self.last_input_rows]
+        return output.reshape(*original_shape, output.shape[-1])
 
     def execution_metadata(self) -> dict[str, Any]:
         kernel_kind = (
@@ -534,6 +555,13 @@ class _TileLangDequantGemmWrapper(nn.Module):
             "kernel_pattern": self.last_kernel_pattern,
             "operator_family": self.last_operator_family,
             "selected_fastpath": self.last_fastpath,
+            "input_rows": self.last_input_rows,
+            "padded_input_rows": self.last_padded_input_rows,
+            "row_padding": (
+                None
+                if self.last_input_rows is None or self.last_padded_input_rows is None
+                else self.last_padded_input_rows - self.last_input_rows
+            ),
             "weight_source": self.last_weight_source,
             "weight_representation": self.last_weight_representation,
             "consumes_packed_weight": self.last_consumes_packed_weight,

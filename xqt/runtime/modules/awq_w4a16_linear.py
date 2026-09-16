@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -20,6 +20,55 @@ from xqt.kernels.ops.gemm import (
     prepack_sm89_awq_w4a16_decode,
     sm89_awq_w4a16_metadata,
 )
+
+
+def _signed_groupwise_storage_parts(
+    storage: Any,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, int, int]:
+    """Validate one signed group-64 W4 storage and return decode-ready parts.
+
+    Returns ``(remapped_qweight, scales_2d, zero_points, bias, input_features,
+    groups)`` where every tensor is CPU/CUDA-agnostic and contiguous. Storage
+    nibbles are ``u = s mod 16``; the uint4 GEMM contract needs ``u' = s + 8``,
+    which is exactly XOR 0x88 per byte.
+    """
+
+    qweight = getattr(storage, "quantized_weight", None)
+    scales = getattr(storage, "weight_scale", None)
+    bits = int(getattr(storage, "bits", 0) or 0)
+    group_size = int(getattr(storage, "group_size", 0) or 0)
+    padded_k = int(getattr(storage, "padded_input_features", 0) or 0)
+    input_features = int(getattr(storage, "input_features", 0) or 0)
+    output_features = int(getattr(storage, "output_features", 0) or 0)
+    if bits != 4 or group_size != 64:
+        raise XQTBackendError(
+            "signed groupwise storage conversion requires 4-bit group-64 weights"
+        )
+    if (
+        not isinstance(qweight, torch.Tensor)
+        or qweight.dtype != torch.uint8
+        or tuple(qweight.shape) != (output_features, padded_k // 2)
+    ):
+        raise XQTBackendError(
+            "signed groupwise storage conversion expects canonical uint8 "
+            "qweight [N, K/2]"
+        )
+    if padded_k != input_features:
+        raise XQTBackendError(
+            "signed groupwise storage conversion does not accept K padding"
+        )
+    if output_features % 8 != 0 or input_features % 64 != 0:
+        raise XQTBackendError("SM89 AWQ decode requires N % 8 == 0 and K % 64 == 0")
+    if not isinstance(scales, torch.Tensor):
+        raise XQTBackendError(
+            "signed groupwise storage conversion expects tensor weight_scale"
+        )
+    groups = input_features // group_size
+    scale_2d = scales.reshape(output_features, groups).to(torch.float32).contiguous()
+    zero_points = torch.full_like(scale_2d, 8.0)
+    bias = getattr(storage, "bias", None)
+    remapped_qweight = (qweight.detach() ^ 0x88).contiguous()
+    return remapped_qweight, scale_2d, zero_points, bias, input_features, groups
 
 
 class AWQW4A16Linear(nn.Module):
@@ -43,7 +92,9 @@ class AWQW4A16Linear(nn.Module):
         self.register_buffer("qweight", prepacked.qweight)
         self.register_buffer("canonical_qweight", prepacked.canonical_qweight)
         self.register_buffer("weight_scale", prepacked.scales.to(torch.float32))
-        self.register_buffer("weight_zero_point", prepacked.zero_points.to(torch.float32))
+        self.register_buffer(
+            "weight_zero_point", prepacked.zero_points.to(torch.float32)
+        )
         if bias is None:
             self.register_buffer("bias", None)
         else:
@@ -60,6 +111,18 @@ class AWQW4A16Linear(nn.Module):
         self._bound_runners: dict[
             tuple[int, torch.dtype, str], Callable[[torch.Tensor], torch.Tensor]
         ] = {}
+        self._residual_runners: dict[
+            tuple[int, torch.dtype, str],
+            Callable[[torch.Tensor, torch.Tensor], None],
+        ] = {}
+        self._w4a8_runners: dict[
+            tuple[int, torch.dtype, str],
+            Callable[[torch.Tensor, torch.Tensor | float], torch.Tensor],
+        ] = {}
+        self._w4a8_residual_runners: dict[
+            tuple[int, torch.dtype, str],
+            Callable[[torch.Tensor, torch.Tensor | float, torch.Tensor], None],
+        ] = {}
         self._native_only = False
         self._native_only_device: torch.device | None = None
         self._native_only_dtype: torch.dtype | None = None
@@ -71,6 +134,82 @@ class AWQW4A16Linear(nn.Module):
         ] = {}
         self._native_only_released_bytes = 0
         self._runtime_state_signature = self._state_signature()
+
+    @classmethod
+    def from_signed_groupwise_storage(
+        cls,
+        storage: Any,
+    ) -> "AWQW4A16Linear":
+        """Materialize a runtime decode view from signed groupwise W4 storage.
+
+        ``AWQGPTQWeightOnlyLinear`` stores signed nibbles (code = s + 8, low
+        nibble = even feature). The SM89 decode kernel consumes unsigned
+        uint4 with an explicit zero point: ``w = u * scale + scaled_zero``.
+        Reinterpreting the same bytes with ``zero_points = 8`` reproduces
+        ``w = s * scale`` exactly, so no weight repacking is needed.
+        """
+
+        return cls.from_signed_groupwise_storages([storage])
+
+    @classmethod
+    def from_signed_groupwise_storages(
+        cls,
+        storages: Sequence[Any],
+    ) -> "AWQW4A16Linear":
+        """Concatenate several signed group-64 storages along the output dim.
+
+        All storages must share the same input features and group size. The
+        result is one decode module whose output rows are the concatenation of
+        the inputs' rows, which lets callers fuse q/k/v or gate/up projections
+        into a single GEMV.
+        """
+
+        from xqt.kernels.ops.gemm import PackedWeight, PackedWeightMetadata
+
+        if not storages:
+            raise XQTBackendError("at least one storage is required")
+        parts = [_signed_groupwise_storage_parts(storage) for storage in storages]
+        input_features = parts[0][4]
+        groups = parts[0][5]
+        for index, (_, _, _, _, features, part_groups) in enumerate(parts):
+            if features != input_features or part_groups != groups:
+                raise XQTBackendError(
+                    "fused AWQ decode requires matching input features and "
+                    f"group layout, storage {index} has K={features}, groups={part_groups}"
+                )
+        biases = [part[3] for part in parts]
+        has_bias = any(bias is not None for bias in biases)
+        bias: torch.Tensor | None = None
+        if has_bias:
+            bias = torch.cat(
+                [
+                    part[3]
+                    if part[3] is not None
+                    else torch.zeros(int(part[0].shape[0]), dtype=torch.float32)
+                    for part in parts
+                ]
+            ).to(torch.float32)
+        qweight = torch.cat([part[0] for part in parts], dim=0).contiguous()
+        scales = torch.cat([part[1] for part in parts], dim=0).contiguous()
+        zero_points = torch.cat([part[2] for part in parts], dim=0).contiguous()
+        output_features = int(qweight.shape[0])
+        packed = PackedWeight(
+            qweight=qweight,
+            scales=scales,
+            zero_points=zero_points,
+            metadata=PackedWeightMetadata(
+                logical_shape=(output_features, input_features),
+                storage_layout="xqt_int4_nk_v1",
+                pack_version="xqt-w4a16-awq-v1",
+                weight_dtype="int4",
+                padded_k=input_features,
+                group_size=64,
+                packed_bits=4,
+                nibble_order="low_high",
+                nibble_signed=False,
+            ),
+        )
+        return cls(packed, bias=bias)
 
     def _state_signature(self) -> tuple[int, ...]:
         tensors = (
@@ -97,6 +236,7 @@ class AWQW4A16Linear(nn.Module):
             return
         self._prepared_parameters.clear()
         self._bound_runners.clear()
+        self._residual_runners.clear()
         self._runtime_state_signature = signature
 
     def _apply(self, fn: Any) -> "AWQW4A16Linear":
@@ -109,6 +249,7 @@ class AWQW4A16Linear(nn.Module):
         self._prepared_parameters.clear()
         self._spec_cache.clear()
         self._bound_runners.clear()
+        self._residual_runners.clear()
         self._runtime_state_signature = self._state_signature()
         self._last_execution = {"implementation": "not_run", "native": False}
         return self
@@ -305,7 +446,9 @@ class AWQW4A16Linear(nn.Module):
         ):
             tensor = self._buffers.get(name)
             if isinstance(tensor, torch.Tensor) and tensor.device != target_device:
-                raise RuntimeError(f"canonical {name} must already be on the target device")
+                raise RuntimeError(
+                    f"canonical {name} must already be on the target device"
+                )
 
         from xqt.kernels.ops.gemm import (
             bind_awq_w4a16_decode,
@@ -350,7 +493,9 @@ class AWQW4A16Linear(nn.Module):
                 def bound(
                     inputs: torch.Tensor,
                     *,
-                    _native_bound: Callable[[torch.Tensor], torch.Tensor] = native_bound,
+                    _native_bound: Callable[
+                        [torch.Tensor], torch.Tensor
+                    ] = native_bound,
                     _rows: int = active_rows,
                 ) -> torch.Tensor:
                     self._validate_native_only_state()
@@ -444,11 +589,11 @@ class AWQW4A16Linear(nn.Module):
         if self._native_only:
             self._validate_native_only_state()
             if dtype != self._native_only_dtype:
-                raise RuntimeError("native-only AWQ W4A16 dtype does not match frozen state")
-            if rows not in self._native_only_rows:
                 raise RuntimeError(
-                    f"native-only AWQ W4A16 rows={rows} were not frozen"
+                    "native-only AWQ W4A16 dtype does not match frozen state"
                 )
+            if rows not in self._native_only_rows:
+                raise RuntimeError(f"native-only AWQ W4A16 rows={rows} were not frozen")
             return
         self._refresh_runtime_state()
         device = self.qweight.device
@@ -467,12 +612,12 @@ class AWQW4A16Linear(nn.Module):
 
         if self._native_only:
             if dtype != self._native_only_dtype:
-                raise RuntimeError("native-only AWQ W4A16 dtype does not match frozen state")
+                raise RuntimeError(
+                    "native-only AWQ W4A16 dtype does not match frozen state"
+                )
             bound = self._native_only_bound_runners.get(int(rows))
             if bound is None:
-                raise RuntimeError(
-                    f"native-only AWQ W4A16 rows={rows} were not frozen"
-                )
+                raise RuntimeError(f"native-only AWQ W4A16 rows={rows} were not frozen")
             return bound
         self._refresh_runtime_state()
         device = self.qweight.device
@@ -517,11 +662,169 @@ class AWQW4A16Linear(nn.Module):
         self._bound_runners[key] = bound
         return bound
 
+    def bind_residual(
+        self,
+        *,
+        rows: int,
+        dtype: torch.dtype,
+    ) -> Callable[[torch.Tensor, torch.Tensor], None]:
+        """Bind a decode GEMV whose epilogue adds into a residual row in place.
+
+        The native kernel rounds the accumulator to the output dtype before the
+        epilogue add, so ``residual += projection(inputs)`` keeps exactly the
+        numerics of the unfused ``residual + projection(inputs)`` expression
+        while removing one elementwise launch. ``residual`` is a
+        ``[rows, output_features]`` row that is both the epilogue operand and
+        the destination: every thread reads its own element before overwriting
+        it.
+        """
+
+        if self._native_only:
+            raise RuntimeError(
+                "native-only AWQW4A16Linear cannot bind a residual epilogue"
+            )
+        if not 1 <= int(rows) <= 8:
+            raise XQTBackendError("bound AWQ W4A16 residual requires 1 <= rows <= 8")
+        if dtype not in {torch.float16, torch.bfloat16}:
+            raise XQTBackendError("bound AWQ W4A16 residual requires FP16 or BF16")
+        self._refresh_runtime_state()
+        device = self.qweight.device
+        key = (int(rows), dtype, str(device))
+        cached = self._residual_runners.get(key)
+        if cached is not None:
+            return cached
+        self.warmup(rows=rows, dtype=dtype)
+        spec = self._spec(rows=rows, dtype=dtype, device=device)
+        qweight, scales, scaled_zeros = self._prepared(dtype=dtype, spec=spec)
+        if self.bias is not None:
+            raise XQTBackendError("bound AWQ W4A16 residual cannot fold a module bias")
+        from xqt.kernels.ops._impl.cuda.awq_w4a16_sm89 import _load_extension
+
+        decode_bias_out = _load_extension().decode_bias_out
+
+        def bound(inputs: torch.Tensor, residual: torch.Tensor) -> None:
+            if (
+                inputs.ndim != 2
+                or tuple(inputs.shape) != (rows, self.input_features)
+                or inputs.dtype != dtype
+                or inputs.device != device
+            ):
+                raise XQTBackendError(
+                    "bound AWQ W4A16 residual input disagrees with the static "
+                    "shape/dtype/device"
+                )
+            if (
+                residual.ndim != 2
+                or tuple(residual.shape) != (rows, self.output_features)
+                or residual.dtype != dtype
+                or residual.device != device
+                or not residual.is_contiguous()
+            ):
+                raise XQTBackendError(
+                    "bound AWQ W4A16 residual must be a contiguous "
+                    f"[{rows},{self.output_features}] {dtype} row"
+                )
+            decode_bias_out(
+                inputs,
+                qweight,
+                scales,
+                scaled_zeros,
+                residual.reshape(-1),
+                residual,
+            )
+
+        self._residual_runners[key] = bound
+        return bound
+
+    def bind_w4a8(
+        self,
+        *,
+        rows: int,
+        dtype: torch.dtype,
+    ) -> Callable[[torch.Tensor, torch.Tensor | float], torch.Tensor]:
+        """Bind W4A8 decode GEMV with INT8 activation input and output dtype."""
+        if not 1 <= int(rows) <= 8:
+            raise XQTBackendError("bound AWQ W4A8 requires 1 <= rows <= 8")
+        if dtype not in {torch.float16, torch.bfloat16}:
+            raise XQTBackendError("bound AWQ W4A8 requires FP16 or BF16")
+        self._refresh_runtime_state()
+        device = self.qweight.device
+        key = (int(rows), dtype, str(device))
+        cached = self._w4a8_runners.get(key)
+        if cached is not None:
+            return cached
+        self.warmup(rows=rows, dtype=dtype)
+        spec = self._spec(rows=rows, dtype=dtype, device=device)
+        qweight, scales, _ = self._prepared(dtype=dtype, spec=spec)
+        from xqt.kernels.ops._impl.cuda.awq_w4a16_sm89 import bind_awq_w4a8_decode
+
+        runner = bind_awq_w4a8_decode(
+            qweight,
+            scales,
+            rows=rows,
+            input_features=self.input_features,
+            output_features=self.output_features,
+            dtype=dtype,
+            device=device,
+        )
+        self._w4a8_runners[key] = runner
+        return runner
+
+    def bind_residual_w4a8(
+        self,
+        *,
+        rows: int,
+        dtype: torch.dtype,
+    ) -> Callable[[torch.Tensor, torch.Tensor | float, torch.Tensor], None]:
+        """Bind W4A8 decode GEMV with fused in-place residual add."""
+        if not 1 <= int(rows) <= 8:
+            raise XQTBackendError("bound AWQ W4A8 residual requires 1 <= rows <= 8")
+        if dtype not in {torch.float16, torch.bfloat16}:
+            raise XQTBackendError("bound AWQ W4A8 residual requires FP16 or BF16")
+        self._refresh_runtime_state()
+        device = self.qweight.device
+        key = (int(rows), dtype, str(device))
+        cached = self._w4a8_residual_runners.get(key)
+        if cached is not None:
+            return cached
+        self.warmup(rows=rows, dtype=dtype)
+        spec = self._spec(rows=rows, dtype=dtype, device=device)
+        qweight, scales, _ = self._prepared(dtype=dtype, spec=spec)
+        from xqt.kernels.ops._impl.cuda.awq_w4a16_sm89 import bind_awq_w4a8_decode_bias
+
+        runner = bind_awq_w4a8_decode_bias(
+            qweight,
+            scales,
+            rows=rows,
+            input_features=self.input_features,
+            output_features=self.output_features,
+            dtype=dtype,
+            device=device,
+        )
+        self._w4a8_residual_runners[key] = runner
+        return runner
+
+    def forward_w4a8(
+        self,
+        inputs: torch.Tensor,
+        scale_a: torch.Tensor | float,
+        *,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        """Run native W4A8 decode with INT8 activation and scale."""
+        if inputs.ndim != 2:
+            inputs = inputs.reshape(-1, self.input_features)
+        rows = int(inputs.shape[0])
+        runner = self.bind_w4a8(rows=rows, dtype=output_dtype)
+        return runner(inputs, scale_a)
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if self.training:
             raise RuntimeError("AWQ W4A16 native path requires eval mode")
         if torch.is_grad_enabled():
-            raise RuntimeError("AWQ W4A16 native path requires no_grad or inference_mode")
+            raise RuntimeError(
+                "AWQ W4A16 native path requires no_grad or inference_mode"
+            )
         if inputs.shape[-1] != self.input_features:
             raise XQTBackendError(
                 "AWQ W4A16 input trailing dimension does not match input_features"
@@ -586,14 +889,10 @@ class AWQW4A16Linear(nn.Module):
                 "native_only": native_only,
                 "native_only_rows": sorted(native_only_rows),
                 "native_only_device": (
-                    None
-                    if native_only_device is None
-                    else str(native_only_device)
+                    None if native_only_device is None else str(native_only_device)
                 ),
                 "native_only_dtype": (
-                    None
-                    if native_only_dtype is None
-                    else str(native_only_dtype)
+                    None if native_only_dtype is None else str(native_only_dtype)
                 ),
                 "native_only_released_bytes": self.__dict__.get(
                     "_native_only_released_bytes",

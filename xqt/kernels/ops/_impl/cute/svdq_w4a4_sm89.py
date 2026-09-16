@@ -29,6 +29,9 @@ _BINDING_SOURCE = csrc_path("quantization", "svdq_w4a4_sm89_binding.cpp")
 _SMALLN_BINDING_SOURCE = csrc_path("quantization", "svdq_w4a4_sm89_smalln_binding.cpp")
 
 
+_TVM_BINDING_SOURCE = csrc_path("quantization", "svdq_w4a4_sm89_tvm_binding.cpp")
+
+
 def _round_up(value: int, alignment: int) -> int:
     return ((int(value) + int(alignment) - 1) // int(alignment)) * int(alignment)
 
@@ -88,8 +91,8 @@ def _require_vector_aligned_features(
     )
 
 
-@lru_cache(maxsize=1)
-def _load_extension() -> Any:
+@lru_cache(maxsize=2)
+def _load_extension(backend: str | None = None) -> Any:
     if os.environ.get("XQT_DISABLE_SVDQ_W4A4_SM89", "0") == "1":
         raise XQTBackendError("native sm_89 W4A4 backend is disabled by environment")
     if not torch.cuda.is_available():
@@ -104,12 +107,18 @@ def _load_extension() -> Any:
             f"Nunchaku kernel headers are missing at {_NUNCHAKU_INCLUDE}"
         )
 
+    selected_backend = backend or os.environ.get("XQT_JIT_BACKEND", "tvm_ffi")
+    binding_source = (
+        _TVM_BINDING_SOURCE if selected_backend == "tvm_ffi" else _BINDING_SOURCE
+    )
+    ext_suffix = "_tvm_v6" if selected_backend == "tvm_ffi" else "_v6"
+
     try:
         return load_extension(
             CompileSpec(
-                name="xqt_svdq_w4a4_sm89_v6",
+                name=f"xqt_svdq_w4a4_sm89{ext_suffix}",
                 sources=(
-                    _BINDING_SOURCE,
+                    binding_source,
                     _CUDA_SOURCE,
                     _NORM_CUDA_SOURCE,
                 ),
@@ -128,6 +137,7 @@ def _load_extension() -> Any:
                     "--generate-line-info",
                 ),
                 target_arch="sm_89",
+                backend=selected_backend,
             ),
             verbose=False,
         )
@@ -230,8 +240,11 @@ def pack_svdq_w4a4_rotary_emb(
     return packed.view(1, target_rows, _QKV_HEAD_DIM)
 
 
-@lru_cache(maxsize=1)
-def _load_smalln_extension() -> Any:
+_SMALLN_TVM_BINDING_SOURCE = csrc_path("quantization", "svdq_w4a4_sm89_smalln_tvm_binding.cpp")
+
+
+@lru_cache(maxsize=2)
+def _load_smalln_extension(backend: str | None = None) -> Any:
     if os.environ.get("XQT_DISABLE_SVDQ_W4A4_SM89", "0") == "1":
         raise XQTBackendError("native sm_89 W4A4 backend is disabled by environment")
     if not torch.cuda.is_available():
@@ -246,12 +259,18 @@ def _load_smalln_extension() -> Any:
             f"Nunchaku kernel headers are missing at {_NUNCHAKU_INCLUDE}"
         )
 
+    selected_backend = backend or os.environ.get("XQT_JIT_BACKEND", "tvm_ffi")
+    binding_source = (
+        _SMALLN_TVM_BINDING_SOURCE if selected_backend == "tvm_ffi" else _SMALLN_BINDING_SOURCE
+    )
+    ext_suffix = "_tvm_v3" if selected_backend == "tvm_ffi" else "_v3"
+
     try:
         return load_extension(
             CompileSpec(
-                name="xqt_svdq_w4a4_sm89_smalln_v3",
+                name=f"xqt_svdq_w4a4_sm89_smalln{ext_suffix}",
                 sources=(
-                    _SMALLN_BINDING_SOURCE,
+                    binding_source,
                     _SMALLN_CUDA_SOURCE,
                     _NORM_CUDA_SOURCE,
                 ),
@@ -270,6 +289,7 @@ def _load_smalln_extension() -> Any:
                     "--generate-line-info",
                 ),
                 target_arch="sm_89",
+                backend=selected_backend,
             ),
             verbose=False,
         )
@@ -708,20 +728,43 @@ def svdq_w4a4_linear_smalln(
     if active_workspace.padded_rows != _round_up(int(inputs.shape[0]), 256):
         raise ValueError("workspace row extent does not match inputs")
     smalln_extension = _load_smalln_extension()
-    return smalln_extension.svdq_linear(
+    if hasattr(smalln_extension, "svdq_linear"):
+        return smalln_extension.svdq_linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.packed_down,
+            active_workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            packed.output_features,
+            float(lora_scale),
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=inputs.dtype, device=inputs.device)
+    smalln_extension.quantize_act_lora(
         inputs.contiguous(),
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
         packed.packed_down,
         active_workspace.lora_activation,
         packed.packed_smooth,
+    )
+    smalln_extension.gemm_lora(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
+        active_workspace.lora_activation,
         packed.packed_up,
         packed.packed_bias,
-        packed.output_features,
         float(lora_scale),
     )
+    return output
 
 
 def bind_svdq_w4a4_linear_smalln(
@@ -738,21 +781,47 @@ def bind_svdq_w4a4_linear_smalln(
     if workspace.padded_rows != _round_up(int(rows), 256):
         raise ValueError("workspace row extent does not match rows")
     smalln_extension = _load_smalln_extension()
-    return smalln_extension.bind_svdq_linear(
-        workspace.quantized_activation,
-        workspace.activation_scales,
-        packed.packed_down,
-        workspace.lora_activation,
-        packed.packed_smooth,
-        packed.qweight,
-        packed.weight_scales,
-        packed.packed_up,
-        packed.packed_bias,
-        int(rows),
-        int(packed.input_features),
-        int(packed.output_features),
-        float(lora_scale),
-    )
+    if hasattr(smalln_extension, "bind_svdq_linear"):
+        return smalln_extension.bind_svdq_linear(
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            int(rows),
+            int(packed.input_features),
+            int(packed.output_features),
+            float(lora_scale),
+        )
+
+    def run_bound_smalln(inputs: torch.Tensor) -> torch.Tensor:
+        output = torch.empty((int(rows), packed.output_features), dtype=inputs.dtype, device=inputs.device)
+        smalln_extension.quantize_act_lora(
+            inputs.contiguous(),
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+        )
+        smalln_extension.gemm_lora(
+            workspace.quantized_activation,
+            packed.qweight,
+            output,
+            workspace.activation_scales,
+            packed.weight_scales,
+            workspace.lora_activation,
+            packed.packed_up,
+            packed.packed_bias,
+            float(lora_scale),
+        )
+        return output
+
+    return run_bound_smalln
 
 
 def svdq_w4a4_linear_smalln_norm(
@@ -780,7 +849,27 @@ def svdq_w4a4_linear_smalln_norm(
     if packed.norm_weight is None:
         raise ValueError("norm-fused packed state requires norm_weight")
     smalln_extension = _load_smalln_extension()
-    return smalln_extension.svdq_linear_norm(
+    if hasattr(smalln_extension, "svdq_linear_norm"):
+        return smalln_extension.svdq_linear_norm(
+            inputs.contiguous(),
+            packed.norm_weight,
+            active_workspace.row_scales,
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.packed_down,
+            active_workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            packed.output_features,
+            float(lora_scale),
+            float(eps),
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=inputs.dtype, device=inputs.device)
+    smalln_extension.norm_quantize_act_lora(
         inputs.contiguous(),
         packed.norm_weight,
         active_workspace.row_scales,
@@ -789,14 +878,19 @@ def svdq_w4a4_linear_smalln_norm(
         packed.packed_down,
         active_workspace.lora_activation,
         packed.packed_smooth,
+    )
+    smalln_extension.gemm_lora(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
+        active_workspace.lora_activation,
         packed.packed_up,
         packed.packed_bias,
-        packed.output_features,
         float(lora_scale),
-        float(eps),
     )
+    return output
 
 
 def bind_svdq_w4a4_linear_smalln_norm(
@@ -816,24 +910,52 @@ def bind_svdq_w4a4_linear_smalln_norm(
     if packed.norm_weight is None:
         raise ValueError("norm-fused packed state requires norm_weight")
     smalln_extension = _load_smalln_extension()
-    return smalln_extension.bind_svdq_linear_norm(
-        packed.norm_weight,
-        workspace.row_scales,
-        workspace.quantized_activation,
-        workspace.activation_scales,
-        packed.packed_down,
-        workspace.lora_activation,
-        packed.packed_smooth,
-        packed.qweight,
-        packed.weight_scales,
-        packed.packed_up,
-        packed.packed_bias,
-        int(rows),
-        int(packed.input_features),
-        int(packed.output_features),
-        float(lora_scale),
-        float(eps),
-    )
+    if hasattr(smalln_extension, "bind_svdq_linear_norm"):
+        return smalln_extension.bind_svdq_linear_norm(
+            packed.norm_weight,
+            workspace.row_scales,
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            int(rows),
+            int(packed.input_features),
+            int(packed.output_features),
+            float(lora_scale),
+            float(eps),
+        )
+
+    def run_bound_smalln_norm(inputs: torch.Tensor) -> torch.Tensor:
+        output = torch.empty((int(rows), packed.output_features), dtype=inputs.dtype, device=inputs.device)
+        smalln_extension.norm_quantize_act_lora(
+            inputs.contiguous(),
+            packed.norm_weight,
+            workspace.row_scales,
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+        )
+        smalln_extension.gemm_lora(
+            workspace.quantized_activation,
+            packed.qweight,
+            output,
+            workspace.activation_scales,
+            packed.weight_scales,
+            workspace.lora_activation,
+            packed.packed_up,
+            packed.packed_bias,
+            float(lora_scale),
+        )
+        return output
+
+    return run_bound_smalln_norm
 
 
 def allocate_w4a4_workspace(
@@ -925,16 +1047,34 @@ def w4a4_linear(
     else:
         packed_smooth = smooth
     extension = _load_extension()
-    return extension.linear(
+    if hasattr(extension, "linear"):
+        return extension.linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_bias,
+            packed.output_features,
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=inputs.dtype, device=inputs.device)
+    extension.quantize_act(
         inputs.contiguous(),
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
         packed_smooth,
+    )
+    extension.gemm(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
         packed.packed_bias,
-        packed.output_features,
     )
+    return output
 
 
 def convrot_w4a4_linear(
@@ -965,17 +1105,36 @@ def convrot_w4a4_linear(
     if active_workspace.padded_rows != _round_up(int(inputs.shape[0]), 256):
         raise ValueError("workspace row extent does not match inputs")
     extension = _load_extension()
-    return extension.convrot_linear(
+    if hasattr(extension, "convrot_linear"):
+        return extension.convrot_linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_bias,
+            int(packed.input_features),
+            int(rot_size),
+            packed.output_features,
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=inputs.dtype, device=inputs.device)
+    extension.quantize_rotated_act(
         inputs.contiguous(),
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
-        packed.qweight,
-        packed.weight_scales,
-        packed.packed_bias,
         int(packed.input_features),
         int(rot_size),
-        packed.output_features,
     )
+    extension.gemm(
+        active_workspace.quantized_activation,
+        packed.qweight,
+        output,
+        active_workspace.activation_scales,
+        packed.weight_scales,
+        packed.packed_bias,
+    )
+    return output
 
 
 def bind_convrot_w4a4_linear(
@@ -1003,18 +1162,40 @@ def bind_convrot_w4a4_linear(
     if int(rotated_input_features) != int(packed.input_features):
         raise ValueError("rotated_input_features must match packed input_features")
     extension = _load_extension()
-    return extension.bind_convrot_linear(
-        workspace.quantized_activation,
-        workspace.activation_scales,
-        packed.qweight,
-        packed.weight_scales,
-        packed.packed_bias,
-        int(rows),
-        int(logical_input_features),
-        int(rotated_input_features),
-        int(packed.output_features),
-        int(rot_size),
-    )
+    if hasattr(extension, "bind_convrot_linear"):
+        return extension.bind_convrot_linear(
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_bias,
+            int(rows),
+            int(logical_input_features),
+            int(rotated_input_features),
+            int(packed.output_features),
+            int(rot_size),
+        )
+
+    def run_bound_convrot(inputs: torch.Tensor) -> torch.Tensor:
+        output = torch.empty((int(rows), packed.output_features), dtype=inputs.dtype, device=inputs.device)
+        extension.quantize_rotated_act(
+            inputs.contiguous(),
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            int(rotated_input_features),
+            int(rot_size),
+        )
+        extension.gemm(
+            workspace.quantized_activation,
+            packed.qweight,
+            output,
+            workspace.activation_scales,
+            packed.weight_scales,
+            packed.packed_bias,
+        )
+        return output
+
+    return run_bound_convrot
 
 
 def svdq_w4a4_linear(
@@ -1039,20 +1220,43 @@ def svdq_w4a4_linear(
     if active_workspace.padded_rows != _round_up(int(inputs.shape[0]), 256):
         raise ValueError("workspace row extent does not match inputs")
     extension = _load_extension()
-    return extension.svdq_linear(
+    if hasattr(extension, "svdq_linear"):
+        return extension.svdq_linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.packed_down,
+            active_workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            packed.output_features,
+            float(lora_scale),
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=inputs.dtype, device=inputs.device)
+    extension.quantize_act_lora(
         inputs.contiguous(),
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
         packed.packed_down,
         active_workspace.lora_activation,
         packed.packed_smooth,
+    )
+    extension.gemm_lora(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
+        active_workspace.lora_activation,
         packed.packed_up,
         packed.packed_bias,
-        packed.output_features,
         float(lora_scale),
     )
+    return output
 
 
 def bind_svdq_w4a4_linear(
@@ -1069,21 +1273,47 @@ def bind_svdq_w4a4_linear(
     if workspace.padded_rows != _round_up(int(rows), 256):
         raise ValueError("workspace row extent does not match rows")
     extension = _load_extension()
-    return extension.bind_svdq_linear(
-        workspace.quantized_activation,
-        workspace.activation_scales,
-        packed.packed_down,
-        workspace.lora_activation,
-        packed.packed_smooth,
-        packed.qweight,
-        packed.weight_scales,
-        packed.packed_up,
-        packed.packed_bias,
-        int(rows),
-        int(packed.input_features),
-        int(packed.output_features),
-        float(lora_scale),
-    )
+    if hasattr(extension, "bind_svdq_linear"):
+        return extension.bind_svdq_linear(
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            int(rows),
+            int(packed.input_features),
+            int(packed.output_features),
+            float(lora_scale),
+        )
+
+    def run_bound_svdq(inputs: torch.Tensor) -> torch.Tensor:
+        output = torch.empty((int(rows), packed.output_features), dtype=inputs.dtype, device=inputs.device)
+        extension.quantize_act_lora(
+            inputs.contiguous(),
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+        )
+        extension.gemm_lora(
+            workspace.quantized_activation,
+            packed.qweight,
+            output,
+            workspace.activation_scales,
+            packed.weight_scales,
+            workspace.lora_activation,
+            packed.packed_up,
+            packed.packed_bias,
+            float(lora_scale),
+        )
+        return output
+
+    return run_bound_svdq
 
 
 def bind_svdq_w4a4_qkv_rmsnorm_rope(
@@ -1347,7 +1577,27 @@ def svdq_w4a4_linear_norm(
     if packed.norm_weight is None:
         raise ValueError("norm-fused packed state requires norm_weight")
     extension = _load_extension()
-    return extension.svdq_linear_norm(
+    if hasattr(extension, "svdq_linear_norm"):
+        return extension.svdq_linear_norm(
+            inputs.contiguous(),
+            packed.norm_weight,
+            active_workspace.row_scales,
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.packed_down,
+            active_workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            packed.output_features,
+            float(lora_scale),
+            float(eps),
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=inputs.dtype, device=inputs.device)
+    extension.norm_quantize_act_lora(
         inputs.contiguous(),
         packed.norm_weight,
         active_workspace.row_scales,
@@ -1356,14 +1606,19 @@ def svdq_w4a4_linear_norm(
         packed.packed_down,
         active_workspace.lora_activation,
         packed.packed_smooth,
+    )
+    extension.gemm_lora(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
+        active_workspace.lora_activation,
         packed.packed_up,
         packed.packed_bias,
-        packed.output_features,
         float(lora_scale),
-        float(eps),
     )
+    return output
 
 
 def bind_svdq_w4a4_linear_norm(
@@ -1383,24 +1638,52 @@ def bind_svdq_w4a4_linear_norm(
     if packed.norm_weight is None:
         raise ValueError("norm-fused packed state requires norm_weight")
     extension = _load_extension()
-    return extension.bind_svdq_linear_norm(
-        packed.norm_weight,
-        workspace.row_scales,
-        workspace.quantized_activation,
-        workspace.activation_scales,
-        packed.packed_down,
-        workspace.lora_activation,
-        packed.packed_smooth,
-        packed.qweight,
-        packed.weight_scales,
-        packed.packed_up,
-        packed.packed_bias,
-        int(rows),
-        int(packed.input_features),
-        int(packed.output_features),
-        float(lora_scale),
-        float(eps),
-    )
+    if hasattr(extension, "bind_svdq_linear_norm"):
+        return extension.bind_svdq_linear_norm(
+            packed.norm_weight,
+            workspace.row_scales,
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            int(rows),
+            int(packed.input_features),
+            int(packed.output_features),
+            float(lora_scale),
+            float(eps),
+        )
+
+    def run_bound_norm(inputs: torch.Tensor) -> torch.Tensor:
+        output = torch.empty((int(rows), packed.output_features), dtype=inputs.dtype, device=inputs.device)
+        extension.norm_quantize_act_lora(
+            inputs.contiguous(),
+            packed.norm_weight,
+            workspace.row_scales,
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.packed_down,
+            workspace.lora_activation,
+            packed.packed_smooth,
+        )
+        extension.gemm_lora(
+            workspace.quantized_activation,
+            packed.qweight,
+            output,
+            workspace.activation_scales,
+            packed.weight_scales,
+            workspace.lora_activation,
+            packed.packed_up,
+            packed.packed_bias,
+            float(lora_scale),
+        )
+        return output
+
+    return run_bound_norm
 
 
 __all__ = [

@@ -587,6 +587,142 @@ int launch_decode(
     return static_cast<int>(cudaGetLastError());
 }
 
+__device__ __forceinline__ uint32_t spread_nibbles(uint32_t w16) {
+    uint32_t temp = (w16 | (w16 << 8)) & 0x00ff00ff;
+    return (temp | (temp << 4)) & 0x0f0f0f0f;
+}
+
+template <typename T, bool HasResidual>
+__global__ void w4a8_dp4a_gemv_kernel(
+    const int8_t* __restrict__ inputs,
+    const uint32_t* __restrict__ weight,
+    const T* __restrict__ scales,
+    const float* __restrict__ scale_a_ptr,
+    const float scale_a_val,
+    const T* __restrict__ residual,
+    T* __restrict__ outputs,
+    int K,
+    int N)
+{
+    int const block_output_offset = blockIdx.x * (kOutputsPerBlock * kOutputInterleave);
+    int const thread_output_offset = (threadIdx.x / 2) % kOutputInterleave;
+    
+    constexpr int elements_per_thread = 32;
+    constexpr int threads_per_k_tile = 2;
+    int const input_k_offset = (threadIdx.x / (threads_per_k_tile * kOutputInterleave)) * kGroupSize +
+                               (threadIdx.x % threads_per_k_tile) * elements_per_thread;
+    int const group_offset = input_k_offset / kGroupSize;
+    
+    const uint32_t* block_weight = weight + block_output_offset * K / 8;
+    const T* scale_ptr = scales + block_output_offset + thread_output_offset + group_offset * N;
+    const int8_t* input_ptr = inputs + input_k_offset;
+    
+    int const input_forward = kBlockSize * elements_per_thread / kOutputInterleave;
+    int const scale_forward = (input_forward / kGroupSize) * N;
+    
+    float partial[kOutputsPerBlock]{0.0f, 0.0f};
+    
+    alignas(16) uint32_t local_w[4];
+    alignas(16) int8_t local_in[32];
+    
+    for (int k_idx = threadIdx.x * elements_per_thread;
+         k_idx < K * kOutputInterleave;
+         k_idx += kBlockSize * elements_per_thread)
+    {
+        *reinterpret_cast<int4*>(local_in) = *reinterpret_cast<const int4*>(input_ptr);
+        *reinterpret_cast<int4*>(local_in + 16) = *reinterpret_cast<const int4*>(input_ptr + 16);
+        
+        int sum_a = 0;
+        #pragma unroll
+        for (int i = 0; i < 32; ++i) {
+            sum_a += static_cast<int>(local_in[i]);
+        }
+        
+        int a_low[4];
+        int a_high[4];
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            int k_even = w * 2;
+            int k_odd  = w * 2 + 1;
+            uint32_t al = (static_cast<uint8_t>(local_in[k_even + 0])) |
+                          (static_cast<uint8_t>(local_in[k_even + 8]) << 8) |
+                          (static_cast<uint8_t>(local_in[k_even + 16]) << 16) |
+                          (static_cast<uint8_t>(local_in[k_even + 24]) << 24);
+            uint32_t ah = (static_cast<uint8_t>(local_in[k_odd + 0])) |
+                          (static_cast<uint8_t>(local_in[k_odd + 8]) << 8) |
+                          (static_cast<uint8_t>(local_in[k_odd + 16]) << 16) |
+                          (static_cast<uint8_t>(local_in[k_odd + 24]) << 24);
+            a_low[w] = static_cast<int>(al);
+            a_high[w] = static_cast<int>(ah);
+        }
+        
+        #pragma unroll
+        for (int out_idx = 0; out_idx < kOutputsPerBlock; ++out_idx) {
+            *reinterpret_cast<uint4*>(local_w) = *reinterpret_cast<const uint4*>(
+                block_weight + (out_idx * kOutputInterleave * K + k_idx) / 8);
+                
+            float scale_w = 0.0f;
+            if constexpr (std::is_same_v<T, half>) {
+                scale_w = __half2float(*(scale_ptr + out_idx * kOutputInterleave));
+            } else {
+                scale_w = __bfloat162float(*(scale_ptr + out_idx * kOutputInterleave));
+            }
+            
+            int acc = 0;
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) {
+                uint32_t packed = local_w[w];
+                uint32_t u_low = spread_nibbles(packed & 0xffff);
+                uint32_t u_high = spread_nibbles(packed >> 16);
+                
+                asm volatile("dp4a.s32.u32 %0, %1, %2, %3;\n" : "=r"(acc) : "r"(a_low[w]), "r"(u_low), "r"(acc));
+                asm volatile("dp4a.s32.u32 %0, %1, %2, %3;\n" : "=r"(acc) : "r"(a_high[w]), "r"(u_high), "r"(acc));
+            }
+            
+            acc -= 8 * sum_a;
+            partial[out_idx] += static_cast<float>(acc) * scale_w;
+        }
+        
+        input_ptr += input_forward;
+        scale_ptr += scale_forward;
+    }
+    
+    __shared__ float reduction[kBlockSize / kWarpSize * 2][kOutputsPerBlock * kOutputInterleave];
+    
+    #pragma unroll
+    for (int idx = 0; idx < kOutputsPerBlock; ++idx) {
+        partial[idx] += __shfl_xor_sync(0xffffffff, partial[idx], 16);
+        partial[idx] += __shfl_xor_sync(0xffffffff, partial[idx], 8);
+        partial[idx] += __shfl_xor_sync(0xffffffff, partial[idx], 1);
+    }
+    __syncthreads();
+    
+    int const warp = threadIdx.x / kWarpSize;
+    int const lane = threadIdx.x % kWarpSize;
+    if (lane == 0 || lane == 2 || lane == 4 || lane == 6) {
+        #pragma unroll
+        for (int idx = 0; idx < kOutputsPerBlock; ++idx) {
+            reduction[warp][idx * kOutputInterleave + lane / 2] = partial[idx];
+        }
+    }
+    __syncthreads();
+    
+    const float s_a = (scale_a_ptr != nullptr) ? (*scale_a_ptr) : scale_a_val;
+    for (int idx = threadIdx.x; idx < kOutputsPerBlock * kOutputInterleave; idx += kBlockSize) {
+        float val = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < kBlockSize / kWarpSize; ++w) {
+            val += reduction[w][idx];
+        }
+        val = val * s_a;
+        T result = from_float<T>(val);
+        if constexpr (HasResidual) {
+            result = add_in_output_dtype(result, residual[block_output_offset + idx]);
+        }
+        outputs[block_output_offset + idx] = result;
+    }
+}
+
 }  // namespace
 
 extern "C" int xqt_awq_w4a16_sm89_pack(
@@ -595,10 +731,11 @@ extern "C" int xqt_awq_w4a16_sm89_pack(
     int n,
     int k,
     cudaStream_t stream) {
-    int64_t const count = static_cast<int64_t>(n / 4) * (k / 2);
-    int const threads = 256;
-    int const blocks = static_cast<int>((count + threads - 1) / threads);
-    pack_kernel<<<blocks, threads, 0, stream>>>(
+    if (n <= 0 || n % 8 != 0 || k <= 0 || k % 64 != 0) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    int const blocks = (n * (k / 2) + 255) / 256;
+    pack_kernel<<<blocks, 256, 0, stream>>>(
         static_cast<const uint8_t*>(canonical),
         static_cast<uint32_t*>(interleaved),
         n,
@@ -619,11 +756,29 @@ extern "C" int xqt_awq_w4a16_sm89_decode(
     cudaStream_t stream) {
     if (scalar_kind == 0) {
         return launch_decode<half, false>(
-            input, qweight, scales, scaled_zeros, nullptr, output, m, n, k, stream);
+            input,
+            qweight,
+            scales,
+            scaled_zeros,
+            nullptr,
+            output,
+            m,
+            n,
+            k,
+            stream);
     }
     if (scalar_kind == 1) {
         return launch_decode<__nv_bfloat16, false>(
-            input, qweight, scales, scaled_zeros, nullptr, output, m, n, k, stream);
+            input,
+            qweight,
+            scales,
+            scaled_zeros,
+            nullptr,
+            output,
+            m,
+            n,
+            k,
+            stream);
     }
     return static_cast<int>(cudaErrorInvalidValue);
 }
@@ -640,17 +795,117 @@ extern "C" int xqt_awq_w4a16_sm89_decode_bias(
     int k,
     int scalar_kind,
     cudaStream_t stream) {
+    if (bias == nullptr) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
     if (scalar_kind == 0) {
         return launch_decode<half, true>(
-            input, qweight, scales, scaled_zeros, bias, output, m, n, k, stream);
+            input,
+            qweight,
+            scales,
+            scaled_zeros,
+            bias,
+            output,
+            m,
+            n,
+            k,
+            stream);
     }
     if (scalar_kind == 1) {
         return launch_decode<__nv_bfloat16, true>(
-            input, qweight, scales, scaled_zeros, bias, output, m, n, k, stream);
+            input,
+            qweight,
+            scales,
+            scaled_zeros,
+            bias,
+            output,
+            m,
+            n,
+            k,
+            stream);
     }
     return static_cast<int>(cudaErrorInvalidValue);
 }
 
+extern "C" int xqt_awq_w4a8_sm89_decode(
+    const void* inputs_int8,
+    const void* qweight,
+    const void* scales,
+    const float* scale_a_ptr,
+    float scale_a_val,
+    void* output,
+    int n,
+    int k,
+    int scalar_kind,
+    cudaStream_t stream) {
+    int const blocks = n / (kOutputsPerBlock * kOutputInterleave);
+    int const threads = kBlockSize;
+    if (scalar_kind == 0) {
+        w4a8_dp4a_gemv_kernel<half, false><<<blocks, threads, 0, stream>>>(
+            static_cast<const int8_t*>(inputs_int8),
+            static_cast<const uint32_t*>(qweight),
+            static_cast<const half*>(scales),
+            scale_a_ptr,
+            scale_a_val,
+            nullptr,
+            static_cast<half*>(output),
+            k, n);
+    } else if (scalar_kind == 1) {
+        w4a8_dp4a_gemv_kernel<__nv_bfloat16, false><<<blocks, threads, 0, stream>>>(
+            static_cast<const int8_t*>(inputs_int8),
+            static_cast<const uint32_t*>(qweight),
+            static_cast<const __nv_bfloat16*>(scales),
+            scale_a_ptr,
+            scale_a_val,
+            nullptr,
+            static_cast<__nv_bfloat16*>(output),
+            k, n);
+    } else {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int xqt_awq_w4a8_sm89_decode_bias(
+    const void* inputs_int8,
+    const void* qweight,
+    const void* scales,
+    const float* scale_a_ptr,
+    float scale_a_val,
+    const void* residual,
+    void* output,
+    int n,
+    int k,
+    int scalar_kind,
+    cudaStream_t stream) {
+    int const blocks = n / (kOutputsPerBlock * kOutputInterleave);
+    int const threads = kBlockSize;
+    if (scalar_kind == 0) {
+        w4a8_dp4a_gemv_kernel<half, true><<<blocks, threads, 0, stream>>>(
+            static_cast<const int8_t*>(inputs_int8),
+            static_cast<const uint32_t*>(qweight),
+            static_cast<const half*>(scales),
+            scale_a_ptr,
+            scale_a_val,
+            static_cast<const half*>(residual),
+            static_cast<half*>(output),
+            k, n);
+    } else if (scalar_kind == 1) {
+        w4a8_dp4a_gemv_kernel<__nv_bfloat16, true><<<blocks, threads, 0, stream>>>(
+            static_cast<const int8_t*>(inputs_int8),
+            static_cast<const uint32_t*>(qweight),
+            static_cast<const __nv_bfloat16*>(scales),
+            scale_a_ptr,
+            scale_a_val,
+            static_cast<const __nv_bfloat16*>(residual),
+            static_cast<__nv_bfloat16*>(output),
+            k, n);
+    } else {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    return static_cast<int>(cudaGetLastError());
+}
+
 extern "C" const char* xqt_awq_w4a16_sm89_version() {
-    return "xqt-awq-w4a16-sm89-v2";
+    return "xqt-awq-w4a16-w4a8-sm89-v3";
 }

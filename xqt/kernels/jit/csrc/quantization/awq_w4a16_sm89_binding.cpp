@@ -17,6 +17,10 @@ extern "C" int xqt_awq_w4a16_sm89_decode(
 extern "C" int xqt_awq_w4a16_sm89_decode_bias(
     const void*, const void*, const void*, const void*, const void*, void*, int,
     int, int, int, cudaStream_t);
+extern "C" int xqt_awq_w4a8_sm89_decode(
+    const void*, const void*, const void*, const float*, float, void*, int, int, int, cudaStream_t);
+extern "C" int xqt_awq_w4a8_sm89_decode_bias(
+    const void*, const void*, const void*, const float*, float, const void*, void*, int, int, int, cudaStream_t);
 extern "C" const char* xqt_awq_w4a16_sm89_version();
 
 namespace {
@@ -207,6 +211,184 @@ torch::Tensor decode(
     return output;
 }
 
+void decode_w4a8_out(
+    const torch::Tensor& inputs,
+    const torch::Tensor& qweight,
+    const torch::Tensor& scales,
+    const torch::Tensor& scale_a,
+    torch::Tensor& output) {
+    require_cuda_contiguous(inputs, "inputs");
+    require_cuda_contiguous(qweight, "qweight");
+    require_cuda_contiguous(scales, "scales");
+    require_cuda_contiguous(scale_a, "scale_a");
+    require_cuda_contiguous(output, "output");
+    require_same_device(inputs, qweight, "qweight");
+    require_same_device(inputs, scales, "scales");
+    require_same_device(inputs, scale_a, "scale_a");
+    require_same_device(inputs, output, "output");
+
+    TORCH_CHECK(inputs.dim() == 2, "inputs must have shape [M,K]");
+    TORCH_CHECK(inputs.scalar_type() == torch::kInt8, "inputs must be int8");
+    TORCH_CHECK(qweight.scalar_type() == torch::kInt32, "qweight must be int32");
+    TORCH_CHECK(qweight.dim() == 2, "qweight must have shape [N/4,K/2]");
+    TORCH_CHECK(scale_a.scalar_type() == torch::kFloat32, "scale_a must be float32");
+    TORCH_CHECK(
+        output.scalar_type() == torch::kFloat16 ||
+        output.scalar_type() == torch::kBFloat16,
+        "output must be float16 or bfloat16");
+
+    const int64_t n = qweight.size(0) * 4;
+    const int64_t k = inputs.size(1);
+    c10::cuda::CUDAGuard guard(inputs.device());
+    check_status(
+        xqt_awq_w4a8_sm89_decode(
+            inputs.data_ptr(),
+            qweight.data_ptr(),
+            scales.data_ptr(),
+            static_cast<const float*>(scale_a.data_ptr()),
+            1.0f,
+            output.data_ptr(),
+            static_cast<int>(n),
+            static_cast<int>(k),
+            output.scalar_type() == torch::kFloat16 ? 0 : 1,
+            current_stream(inputs)),
+        "AWQ W4A8 decode");
+}
+
+void decode_w4a8_scalar_out(
+    const torch::Tensor& inputs,
+    const torch::Tensor& qweight,
+    const torch::Tensor& scales,
+    double scale_a,
+    torch::Tensor& output) {
+    require_cuda_contiguous(inputs, "inputs");
+    require_cuda_contiguous(qweight, "qweight");
+    require_cuda_contiguous(scales, "scales");
+    require_cuda_contiguous(output, "output");
+    require_same_device(inputs, qweight, "qweight");
+    require_same_device(inputs, scales, "scales");
+    require_same_device(inputs, output, "output");
+
+    TORCH_CHECK(inputs.dim() == 2, "inputs must have shape [M,K]");
+    TORCH_CHECK(inputs.scalar_type() == torch::kInt8, "inputs must be int8");
+    TORCH_CHECK(qweight.scalar_type() == torch::kInt32, "qweight must be int32");
+    TORCH_CHECK(qweight.dim() == 2, "qweight must have shape [N/4,K/2]");
+    TORCH_CHECK(
+        output.scalar_type() == torch::kFloat16 ||
+        output.scalar_type() == torch::kBFloat16,
+        "output must be float16 or bfloat16");
+
+    const int64_t n = qweight.size(0) * 4;
+    const int64_t k = inputs.size(1);
+    c10::cuda::CUDAGuard guard(inputs.device());
+    check_status(
+        xqt_awq_w4a8_sm89_decode(
+            inputs.data_ptr(),
+            qweight.data_ptr(),
+            scales.data_ptr(),
+            nullptr,
+            static_cast<float>(scale_a),
+            output.data_ptr(),
+            static_cast<int>(n),
+            static_cast<int>(k),
+            output.scalar_type() == torch::kFloat16 ? 0 : 1,
+            current_stream(inputs)),
+        "AWQ W4A8 decode");
+}
+
+void decode_w4a8_bias_out(
+    const torch::Tensor& inputs,
+    const torch::Tensor& qweight,
+    const torch::Tensor& scales,
+    const torch::Tensor& scale_a,
+    const torch::Tensor& residual,
+    torch::Tensor& output) {
+    require_cuda_contiguous(inputs, "inputs");
+    require_cuda_contiguous(qweight, "qweight");
+    require_cuda_contiguous(scales, "scales");
+    require_cuda_contiguous(scale_a, "scale_a");
+    require_cuda_contiguous(residual, "residual");
+    require_cuda_contiguous(output, "output");
+    require_same_device(inputs, qweight, "qweight");
+    require_same_device(inputs, scales, "scales");
+    require_same_device(inputs, scale_a, "scale_a");
+    require_same_device(inputs, residual, "residual");
+    require_same_device(inputs, output, "output");
+
+    TORCH_CHECK(inputs.dim() == 2, "inputs must have shape [M,K]");
+    TORCH_CHECK(inputs.scalar_type() == torch::kInt8, "inputs must be int8");
+    TORCH_CHECK(qweight.scalar_type() == torch::kInt32, "qweight must be int32");
+    TORCH_CHECK(qweight.dim() == 2, "qweight must have shape [N/4,K/2]");
+    TORCH_CHECK(scale_a.scalar_type() == torch::kFloat32, "scale_a must be float32");
+    TORCH_CHECK(
+        output.scalar_type() == torch::kFloat16 ||
+        output.scalar_type() == torch::kBFloat16,
+        "output must be float16 or bfloat16");
+
+    const int64_t n = qweight.size(0) * 4;
+    const int64_t k = inputs.size(1);
+    c10::cuda::CUDAGuard guard(inputs.device());
+    check_status(
+        xqt_awq_w4a8_sm89_decode_bias(
+            inputs.data_ptr(),
+            qweight.data_ptr(),
+            scales.data_ptr(),
+            static_cast<const float*>(scale_a.data_ptr()),
+            1.0f,
+            residual.data_ptr(),
+            output.data_ptr(),
+            static_cast<int>(n),
+            static_cast<int>(k),
+            output.scalar_type() == torch::kFloat16 ? 0 : 1,
+            current_stream(inputs)),
+        "AWQ W4A8 decode bias");
+}
+
+void decode_w4a8_scalar_bias_out(
+    const torch::Tensor& inputs,
+    const torch::Tensor& qweight,
+    const torch::Tensor& scales,
+    double scale_a,
+    const torch::Tensor& residual,
+    torch::Tensor& output) {
+    require_cuda_contiguous(inputs, "inputs");
+    require_cuda_contiguous(qweight, "qweight");
+    require_cuda_contiguous(scales, "scales");
+    require_cuda_contiguous(residual, "residual");
+    require_cuda_contiguous(output, "output");
+    require_same_device(inputs, qweight, "qweight");
+    require_same_device(inputs, scales, "scales");
+    require_same_device(inputs, residual, "residual");
+    require_same_device(inputs, output, "output");
+
+    TORCH_CHECK(inputs.dim() == 2, "inputs must have shape [M,K]");
+    TORCH_CHECK(inputs.scalar_type() == torch::kInt8, "inputs must be int8");
+    TORCH_CHECK(qweight.scalar_type() == torch::kInt32, "qweight must be int32");
+    TORCH_CHECK(qweight.dim() == 2, "qweight must have shape [N/4,K/2]");
+    TORCH_CHECK(
+        output.scalar_type() == torch::kFloat16 ||
+        output.scalar_type() == torch::kBFloat16,
+        "output must be float16 or bfloat16");
+
+    const int64_t n = qweight.size(0) * 4;
+    const int64_t k = inputs.size(1);
+    c10::cuda::CUDAGuard guard(inputs.device());
+    check_status(
+        xqt_awq_w4a8_sm89_decode_bias(
+            inputs.data_ptr(),
+            qweight.data_ptr(),
+            scales.data_ptr(),
+            nullptr,
+            static_cast<float>(scale_a),
+            residual.data_ptr(),
+            output.data_ptr(),
+            static_cast<int>(n),
+            static_cast<int>(k),
+            output.scalar_type() == torch::kFloat16 ? 0 : 1,
+            current_stream(inputs)),
+        "AWQ W4A8 decode bias");
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -218,7 +400,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         "decode_bias_out",
         &decode_bias_out,
         "Run SM89 AWQ W4A16 decode with bias into output");
+    module.def("decode_w4a8_out", &decode_w4a8_out, "Run SM89 AWQ W4A8 decode into output");
+    module.def("decode_w4a8_scalar_out", &decode_w4a8_scalar_out, "Run SM89 AWQ W4A8 decode into output with scalar scale_a");
+    module.def(
+        "decode_w4a8_bias_out",
+        &decode_w4a8_bias_out,
+        "Run SM89 AWQ W4A8 decode with residual bias into output");
+    module.def(
+        "decode_w4a8_scalar_bias_out",
+        &decode_w4a8_scalar_bias_out,
+        "Run SM89 AWQ W4A8 decode with residual bias into output with scalar scale_a");
     module.def(
         "version",
         []() { return std::string(xqt_awq_w4a16_sm89_version()); });
 }
+

@@ -4,7 +4,7 @@
 
 ## 负责什么
 
-- 定义 `docs/html/` 自有阅读页的长期规范.
+- 定义 `learn/` 与 `research/` 自有 HTML 教程与调研页的长期规范.
 - 定义公共 CSS, 主题脚本和 body 模板的使用边界.
 - 定义 HTML 与 Markdown 的分工和同步规则.
 
@@ -17,13 +17,13 @@
 ## 第一原则
 
 - `docs/md/` 是事实源和实现导航.
-- `docs/html/` 是给人类读者的可视化阅读层.
+- `learn/` 与 `research/` 下的 HTML 是给人类读者的教程与调研阅读层.
 - 同一主题变化时, 先更新对应 Markdown 正文, 再同步 HTML.
 - HTML 可以提炼, 重排和图文化 Markdown, 但不能单独定义新契约.
 
 ## 公共资源边界
 
-`docs/html/assets/xdl-doc.css` 是仓库自有 HTML 阅读页的唯一公共样式入口. 它负责:
+`docs/html/assets/xdl-doc.css` 是仓库自有 HTML 教程与调研页的唯一公共样式入口. 它负责:
 
 - 主题 token, 强调色, 深浅色和旧变量别名
 - 基础排版, 链接, 表格, 代码块, 图片, 打印和响应式行为
@@ -41,7 +41,7 @@
 
 ## 页面资源引用
 
-`docs/html/*.html` 默认写法:
+`learn/` 与 `research/` 下的 HTML 页面默认写法:
 
 ```html
 <head>
@@ -205,4 +205,3 @@
 - [xdl.md](xdl.md)
 - [../explanation/html-style.md](../explanation/html-style.md)
 - [../README.md#xdl-html-阅读页样式规范](../README.md#xdl-html-阅读页样式规范)
-- [../../html/index.html](../../html/index.html)

@@ -4494,3 +4494,1486 @@ CUDA parity 测试继续覆盖 joint output shape 与 native metadata.
 
 - [FLUX runtime](../../../xqt/runtime/modules/svd_flux_attention.py)
 - [staging buffer test](../../../tests/xqt/runtime/test_svd_flux_attention.py)
+
+## R-048: MiniCPM5 INT8 prefill row alignment
+
+### 目标
+
+在 RTX 4070 Ti SUPER (`sm_89`) 上验证 MiniCPM5-2B 的 XQT W8A8 INT8
+模型侧推理,覆盖 BF16 activation 输入和 GQA Llama projection 的实际矩阵形状.
+
+### 基线与问题
+
+MiniCPM5-2B 的短 prompt 首次 prefill 为 17 行. 原有
+`Int8MmaLinear` 只把小于 17 行的 CUDA 输入补到 17 行,而本机
+`torch._int_mm`/cuBLASLt 对 17 行仍返回 `CUBLAS_STATUS_NOT_SUPPORTED`;
+1,16,17 行均不能直接执行,32 和 64 行可以执行.
+
+### 实现
+
+`Int8MmaLinear.run_quantized_activation()` 现在对 CUDA 行数按至少 32 行,
+并按 32 对齐后执行 INT8 矩阵乘,再裁剪回原始行数. CPU 路径保持原有
+reference semantics. `quantize_with_int8_mma()` 同时暴露 `min_int8_rows`,
+允许模型侧根据 decode/prefill 形状选择小 batch 的浮点 fallback.
+
+### 结果
+
+- 当前 MiniCPM5-2B 模型专用入口会进一步 materialize XQT infer-facing runtime view;
+  RTX 4070 Ti SUPER (`sm_89`) 的 `engine=auto` 实测 294 个 Linear 全部走
+  `tilelang`, P50 generate 约 `1951 ms`, 比 storage shell 的 `3580 ms` 明显降低,
+  logit RMSE 为 `3.41`;同一 held-out prompt 的 BF16 baseline RMSE 为 `0`.
+  但仍慢于 BF16 baseline 的 `1039 ms`,因此尚未形成默认 INT8 route promotion.
+
+### 适用边界与回退
+
+行对齐只修复 CUDA `torch._int_mm` 的 reference contract,不表示所有
+cuBLASLt 或自定义 native kernel 都共享相同对齐规则. 小行数 generation
+仍可能因动态量化和 padding 开销慢于 BF16,应通过 `min_int8_rows` 和
+prefill/decode 分离 benchmark 选择 fallback.
+
+### 验证落点
+
+- [INT8 contract](../../../xqt/contracts/int8_mma.py)
+- [INT8 quantizer](../../../xqt/compression/quant/quantizers/int8_mma.py)
+- [MiniCPM5 adapter](../../../xqt/model/minicpm5.py)
+- [MiniCPM5 quantization report](../../../artifacts/xqt/inference/minicpm5-2b/int8_comparison.json)
+- [regression test](../../../tests/xqt/quant/test_int8_mma_quantizer.py)
+
+## R-050: MiniCPM5 W4A16 decode 接入 native SM89 CUDA GEMV 混合路由
+
+### 目标
+
+MiniCPM5-2B (Llama, GQA, 42 层, hidden 2048, MLP 6144, lm_head 2048x130560,
+BF16 checkpoint) 在 RTX 4070 Ti SUPER (`sm_89`) 上的 W4A16 AWQ 量化推理,
+要求 decode (M<=8) 快于 dense BF16 GEMV, prefill (M>8) 不回退, 且 BF16
+输入不需转 FP16.
+
+### 基线与瓶颈
+
+公平基线是同 shape 的 `nn.functional.linear` BF16 GEMV (cuBLAS), CUDA events
+换算为有效带宽. 修复前的三条路径全部无法兑现 int4 的 4x 字节优势:
+
+- dense-cache 路径 (`AWQGPTQWeightOnlyLinear.forward`): 解包回 BF16 后走
+  cuBLAS, 读入字节数与 BF16 相同, 带宽收益结构性为零.
+- TileLang fused fp4 kernel (`build_tilelang_fp4_fused_dequant_gemm_kernel`)
+  把整个 K 维一次性分配进 dynamic shared memory (K=2048 fp16 需 512KB),
+  sm_89 上限约 100KB, 设计上不可运行; 且修改任何 tile 参数都不改变
+  O(K) 分配, 报错恒为 `Failed to set the allowed dynamic shared memory
+  size to 524288`.
+- eager reference fallback (wrapper 回退): 每层 M=1 约 20ms, 比 dense
+  BF16 慢约 1500x.
+
+### 实现
+
+1. `gemm_builder.py` 的 fp4 fused kernel 重写为 K 分块流水线:
+   `T.Pipelined` 逐 k-tile 把 packed uint8 经 `T.copy` 搬入 shared,
+   每线程解一个 byte 对 (XOR/移位解两个 nibble), 写 fp16 `b_shared`
+   后喂 `T.gemm`. shared 用量从 O(K) 降到 O(block), 并在 build 前做
+   shared 上限 fail-fast 检查; `block_k` 自适应收缩到 K 的偶数约数.
+   实测最优 tile 为 `bm16/bn64/bk128/s3/t256`.
+2. 打通仓库已有的手写 CUDA W4A16 GEMV (`xqt/kernels/jit/csrc/
+   quantization/awq_w4a16_sm89_kernel.cu`, FT 风格 lop3 寄存器解包 +
+   half2/bf16x2 FMA, M<=8, group=64, fp16/bf16 双支持):
+   - nibble 语义桥接: 存储层编码是 `u = s mod 16`, kernel 需要连续
+     uint4 `u' = s + 8`; 4-bit 加 8 等价于 XOR 0x8, 字节级重映射为
+     `qweight ^ 0x88`.
+   - zero-point 语义: kernel 是 AWQ 非对称公式
+     `w = u*scale + scaled_zeros`, 对称存储传 `zero_points = 8`
+     即可精确还原 `s*scale`.
+   - 新增 `AWQW4A16Linear.from_signed_groupwise_storage()` 转换入口;
+     M<=8 走 native GEMV, M>8 回退 dense cache (`_MiniCPM5W4A16HybridLinear`).
+   - materialize 后必须逐模块 `.eval()`, 否则 runtime 模块的 eval-mode
+     guard 会拒绝推理调用.
+
+### 结果
+
+微基准 (M=1 decode, 交替采样取中位数, 与 dense BF16 GEMV 同条件):
+
+| shape | native CUDA W4A16 | dense BF16 | 加速 |
+|---|---|---|---|
+| MLP gate/up K=2048,N=6144 | 12.6 us | 51.2 us | 4.06x |
+| MLP down K=6144,N=2048 | 12.9 us | 50.4 us | 3.90x |
+| qkv/o K=2048,N=2048 | 11.4 us | 15.8 us | 1.39x |
+
+数值误差与量化下界同量级 (BF16 maxdiff 约 0.16), 未引入额外精度损失;
+e2e QuaRot+AWQ 报告 logit RMSE 1.309 (dense-cache 路径 1.322).
+
+K 分块 TileLang kernel (fp16 输入): M=1(pad16) 约 0.018ms (约 124 GB/s),
+比修复前 (不可运行 / 20ms fallback) 可用, 但仍慢于 dense BF16.
+
+e2e generate (64 token, `materialize engine="cuda"`): 1219ms, 慢于
+dense-cache 路径的 1061ms 与 BF16 基线 1046ms. 微基准的 kernel 优势
+被每层 hybrid Python dispatch 与 generate 框架开销吞掉, 2B 模型 M=1
+e2e 的 GEMM 占比不足以让 kernel 层收益在 HF eager 循环中兑现.
+
+### 适用边界与回退
+
+- native GEMV 仅 sm_89 + CUDA + group_size=64 + N%8==0 + K%64==0,
+  仅 1<=M<=8; M>8 走 dense cache, 无权重重打包.
+- `freeze_native_inference()` 后模块不可移动/转 dtype/序列化.
+- K 分块 TileLang kernel 要求 fp16 输入, BF16 输入会在 wrapper 处
+  fallback; 作为非 sm_89 或 FP16 部署的后备路径保留.
+
+### 未采纳方案 (已实测退化)
+
+- TileLang M=1 专用 GEMV 变体 (fragment 标量累加): 19-38 GB/s,
+  fragment 跨线程归约串行化是 TileLang 抽象层的限制, 寄存器级解包
+  无法在当前 codegen 模式表达.
+- 预重排 int8 布局 (离线解 nibble, 运行时 1 byte/权重): 240 GB/s 但
+  相对 dense 仅 0.64x, 字节量是 dense 的一半不是四分之一.
+- torchao 0.17 `Int4WeightOnlyConfig`: 快速 packing format 依赖 mslk,
+  TILE_PACKED_TO_4D + compile 实测 0.30x.
+
+### 可复用规则
+
+- W4A16 decode 的速度上限来自读入字节数; dense-cache 类实现结构性
+  无收益, 任何新低比特路径先问 "权重字节是否真的少读了".
+- signed 存储接到 uint4 非对称 kernel 时, 先确认 nibble 编码差: 若只差
+  常数偏移 8, 用 XOR 0x88 修复, 不要重新打包权重.
+- TileLang 写共享内存 dequant 循环时, per-element 标量 global 载入是
+  带宽杀手; 先 `T.copy` 向量化进 shared, 再按 byte 对解包.
+- 2B 级模型 M=1 e2e 的 GEMM 只占约三成; kernel 优化兑现为 e2e 收益前,
+  先量化 Python/框架开销.
+
+### 验证落点
+
+- [SM89 AWQ CUDA kernel](../../../xqt/kernels/jit/csrc/quantization/awq_w4a16_sm89_kernel.cu)
+- [runtime 转换入口](../../../xqt/runtime/modules/awq_w4a16_linear.py)
+- [MiniCPM5 adapter (hybrid 路由)](../../../xqt/model/minicpm5.py)
+- [K 分块 fp4 builder](../../../xqt/kernels/ops/_impl/tilelang/gemm_builder.py)
+- [QuaRot+AWQ e2e 报告](../../../artifacts/xqt/inference/minicpm5-2b/quarot_comparison.json)
+- [回归测试](../../../tests/xqt/test_tilelang_dequant_gemm_cuda.py),
+  [模型测试](../../../tests/xqt/model/test_minicpm5.py)
+
+## R-051: MiniCPM5-2B W8A8 decode 路线判定 (量化坍塌 vs ConvRot native)
+
+### 目标
+
+MiniCPM5-2B (Llama, GQA, 42 层, hidden 2048, MLP 6144) 在 RTX 4070 Ti SUPER
+(`sm_89`) 上的 W8A8 INT8 decode (M=1) 路线判定: 在同一篇 7976 字符英译中任务
+(单次 greedy, BF16 参考译文 1458 token) 上同时测精度和延迟, 覆盖朴素 W8A8
+(`Int8Mma`), 离线 QuaRot+W8A8, ConvRot 在线旋转 W8A8 (native SM89 small-M
+执行视图) 三条 INT8 路线, 与 BF16 和 AWQ W4A16 同口径对照.
+
+### 基线与测量方法
+
+- 基线: 同模板 BF16 greedy (55.5 tok/s, e2e 26.3 s).
+- 公平性: 八个档位共用同一份 prompt (chat 模板渲染, `enable_thinking=False`),
+  同一份文档, 单次 greedy; 质量 = 与 BF16 译文的字符级一致性 (char BLEU-4,
+  ROUGE-L, token 序列一致率), 没有人工参考译文.
+- 引擎对照: 同一份 W8A8 存储权重分别 materialize 为 `engine="tilelang"` 与
+  `engine="torch_int_mm"`, 对同一 272-token 前向比较 logits.
+
+### 瓶颈与假设
+
+- 朴素 W8A8 与 QuaRot+W8A8 的译文是英文元评论 (模型把输入判为乱码),
+  char BLEU-4 `0.002`/`0.003`; 同一模板下 BF16 与 ConvRot 正常, 排除语言和
+  模板因素.
+- 假设一: tilelang kernel 数值错误. 实测否定: 两个引擎 logits 完全一致
+  (RMSE `3.574`, max_abs `18.19`, top-1 相同), 且两者相对 BF16 的误差同为
+  `3.574`; 历史 artifact 记录的 `3.158`/`3.410` 同量级.
+- 假设二: 坍塌来自 W8A8 动态 per-tensor 激活量化 (outlier 主导 scale), 而非
+  引擎或路由; 得到支持: ConvRot (per-256 在线旋转 + dynamic per-token) 在
+  同一任务上译文正常, 可量化性由旋转/平滑决定.
+
+### 实现
+
+- 评测链路 (本轮无新增 kernel):
+  `examples/xqt_models/minicpm5_2b_translation_eval.py` 统一八档;
+  `quantize_with_convrot_int8` + `materialize_convrot_execution_views`
+  启用 ConvRot native small-M 路径; QuaRot 走 `apply_quarot_minicpm5` 离线
+  旋转后接 `Int8Mma`.
+- 两个 materialize 前置条件 (本轮踩到并修复): AWQ native prepack 要求权重
+  CUDA-resident (在 CPU 上 materialize 直接抛 `XQTBackendError`); ConvRot 必须
+  先 materialize execution view 才会启用 native dispatch, 否则停在
+  contracts reference.
+
+### 结果
+
+同一文档单次 greedy (除注明者外全部 EOS 收敛):
+
+| 档位 | e2e ms | decode tok/s | TTFT ms | char BLEU-4 | ROUGE-L | token 一致率 |
+|---|---|---|---|---|---|---|
+| bf16 | 26337 | 55.5 | 54 | 1.000 | 1.000 | 1.000 |
+| awq_w4_g64_dense | 27175 | 53.9 | 51 | 0.602 | 0.759 | 0.666 |
+| awq_w4_g64_native | 29363 | 50.8 | 52 | 0.605 | 0.767 | 0.679 |
+| awq_w4_mlp_only_native | 30153 | 48.8 | 54 | 0.661 | 0.799 | 0.722 |
+| awq_w4_edges2_native | 27971 | 51.2 | 52 | 0.698 | 0.816 | 0.758 |
+| w8a8_int8 (Int8Mma) | 129078 | 12.9 | 154 | 0.002 | 0.025 | 0.006 |
+| quarot_w8a8_int8 | 153157 | 13.4 | 168 | 0.003 | 0.019 | 0.013 (截断) |
+| convrot_w8a8_int8 (native) | 185884 | 7.8 | 37 | 0.874 | 0.922 | 0.898 |
+
+- ConvRot native 精度显著最好 (BLEU-4 `0.874`), prefill 也最快 (`37 ms`), 但
+  decode `7.8 tok/s`: 每 token 约 `128 ms`, 权重 `3171 MB` 的读取 roofline
+  约 `6 ms`, 余量在一个数量级以上.
+- W4A16 三档 e2e 与 BF16 基本同速 (26-30 s), 精度 `0.60-0.70`; W4A16 native
+  权重占用 `4414 MB` (canonical + decode prepack 双份), 高于 dense 的
+  `2185 MB`.
+
+### 适用边界与回退
+
+- 朴素 `Int8Mma` W8A8 (tilelang 与 torch_int_mm) 不适用于该模型的生成任务;
+  离线 QuaRot 不改变该结论 (online Hadamard 节点关闭).
+- ConvRot INT8 要求 `sm_89`, BF16/FP16 CUDA 激活, dynamic activation scale,
+  `rot_size=256`; 当前精度可用但延迟不可接受, 只能在精度实验中使用.
+- 结论来自单模型单文档单次运行, 不是通用 INT8 判定; 换模型或换任务需重测.
+
+### 未采纳方案 (已实测退化)
+
+- 直接 tokenize 拼接 instruction (不走 `apply_chat_template`): 模型进入续写
+  模式, BF16 输出英文续写并重复 (6144 token 无 EOS), 会把 harness 问题误读
+  成量化结论.
+- 把 tilelang/torch_int_mm 差异当作坍塌原因: 实测两者 logits 完全一致, 已排除.
+- 离线 QuaRot + W8A8: 与朴素 W8A8 同样坍塌, 不构成可用的 INT8 路线.
+
+### 可复用规则
+
+- INT8 激活量化的可行性由旋转/平滑决定, 不是引擎选择; 部署前必须看任务级
+  文本, logit RMSE 大于 3 时指令遵循已经丢失.
+- 量化对照必须同权重, 同输入, 同 chat 模板; 引擎差异要用同权重 logits 直接
+  对照, 不要用不同路径的 end-to-end 结果推断.
+- 评测 instruct 模型前先确认 chat 模板被使用, 否则会把模型续写行为当成量化
+  退化.
+- native 执行路径的启用有隐藏前置条件 (CUDA-resident 权重, execution view),
+  评测脚本要把它们写成显式步骤并在失败时报清楚.
+
+### 验证落点
+
+- [评测入口](../../../examples/xqt_models/minicpm5_2b_translation_eval.py)
+- [评测产物 JSON](../../../artifacts/xqt/inference/minicpm5-2b/translation_eval.json),
+  [并排 Markdown](../../../artifacts/xqt/inference/minicpm5-2b/translation_eval.md)
+- [ConvRot INT8 量化器](../../../xqt/compression/quant/quantizers/convrot_int8.py),
+  [native SM89 执行入口](../../../xqt/kernels/ops/_impl/cute/convrot_w8a8_sm89.py)
+- [Int8Mma runtime](../../../xqt/runtime/modules/int8_mma_linear.py)
+- 历史单 prompt logit 对照: `artifacts/xqt/inference/minicpm5-2b/int8_comparison.json`
+
+## R-052: MiniCPM5-2B CUDA graph decode 运行时 (2.83x e2e)
+
+### 目标
+
+把 W4A16 量化在 MiniCPM5-2B 上的实际加速兑现到端到端: 同一 7976 字符英译中
+任务 (prompt 1715 token, greedy, 生成 ~1470 token) 上, 量化路线相对 BF16
+基线要 >= 2x. 覆盖 BF16 与 AWQ W4A16 native (`sm_89`) 两种权重, 单请求,
+`max_cache_len=4096`, 桶宽 256.
+
+### 基线与测量方法
+
+- `bf16_eager`: Transformers `generate` (HF eager), `26772 ms`, `54.4 tok/s`.
+- `w4a16_eager`: 同 eager 路径 (hybrid decode -> native GEMV), `29423 ms`,
+  `50.6 tok/s`.
+- `bf16_graph` / `w4a16_graph`: 本记录的 `CudaGraphDecodeSession`.
+- 每个 eager 路线一次预热 + 一次计时; graph 路线预捕获全部所需桶后计时
+  (捕获时间单独记录). 质量用与 BF16 eager 译文的字符级一致性.
+
+### 瓶颈与假设
+
+eager decode 每 token 触发 294 次 `aten::mm` (每次 GPU 仅 8-28 us) 加同等数量
+的 Python 模块调用: BF16 图外 CPU 约 21.6 ms/token, GPU 约 10.8 ms/token;
+W4A16 native 更差 (CPU 18.7 ms, kernel 端已 4x). 假设: 用 CUDA graph 吃掉
+Python 分发与 launch 后, 剩余时间就是纯 GPU 时间, 量化权重 (1 byte) 的字节
+优势即可兑现.
+
+### 实现
+
+`xqt/runtime/graph_decode.py` 的 `CudaGraphDecodeSession`:
+
+1. 自建 static-KV decode step, 语义与 HF `LlamaAttention` 一致 (同 RoPE/同
+   norm/同 SDPA 调用), 逐 token 与 HF eager 完全一致 (精确前缀变体实测
+   48/48).
+2. 每个 256 长度桶一张 CUDA graph; 桶内未写满的槽位保持 K=0/V=0, 值掩码 0.
+3. 零填充自校正注意力: `X = SDPA(q, K_pad, V_pad)`,
+   `R = SDPA(q, K_pad, v_mask)`, `out = X / R`. 数学上精确还原有效前缀的
+   softmax (padding 对分子贡献 0, 对分母的未知质量被 R 约掉), bf16 下相对
+   误差约 2e-3.
+4. 图内包含动态位置写缓存 (`index_copy_`) 与 argmax 原地更新 token, replay
+   每步无 Python.
+5. 首次捕获前自动 eager 预热: 量化 runtime 的 runner 首次绑定不可捕获,
+   未预热直接 capture 会触发 `cudaErrorStreamCaptureInvalidated`.
+
+### 结果
+
+| 路线 | e2e ms | capture ms | steady decode tok/s | 相对 bf16 eager |
+|---|---|---|---|---|
+| bf16_eager | 26772 | - | 54.4 | 1.00x |
+| bf16_graph | 16737 | 281 | 89.5 | 1.60x |
+| w4a16_eager | 29423 | - | 50.6 | 0.91x |
+| w4a16_graph | 9447 | 237 (13 桶) | 154.5 | **2.83x** |
+
+- 质量 (vs bf16 eager 译文): bf16_graph `BLEU-4 0.906` / `ROUGE-L 0.947`;
+  w4a16_graph `0.614` / `0.765`, 与 w4a16_eager 的 `0.605` / `0.767` 同水平.
+- greedy token 一致率 (graph vs eager): bf16 `0.234` (首分歧 40), w4a16
+  `0.257` (首分歧 59); 精确前缀变体 (每长度一张图, 仅验证用) 与 HF
+  `48/48` 一致, 说明漂移来自桶填充校正的 bf16 舍入, 不是实现错误; 文本级
+  一致性 (0.906/0.947) 说明质量未损失.
+- GPU 预算 (桶 1024, 实测 5.87 ms/token): AWQ GEMV `2.42 ms` (int4 权重读取
+  roofline), lm_head BF16 `0.90 ms` (roofline), flash attention `0.79 ms`
+  (42 层, 两次调用), elementwise (norm/rope/index) 约 `1.0 ms`.
+
+### 适用边界与回退
+
+- 仅 Llama 家族 (`model.model.*` + `lm_head`), 单请求, greedy, 需要 CUDA.
+- `max_cache_len` 与 `bucket_size` 由调用方显式给出; prompt + max_new_tokens
+  不得超过 cache 上限.
+- 首次使用某桶需捕获 (~13 ms/桶); 桶图与当前权重/缓冲区绑定, 权重改变需重建.
+- `.generate()` 的 token 序列在数值上依赖 kernel 路径, 与 eager 不是逐 token
+  一致; 需要逐 token 复现 HF 时必须用精确前缀变体并支付每长度捕获成本.
+
+### 未采纳方案 (已实测不可用或退化)
+
+- 动态长度 flash: torch SDPA 没有 varlen; 带掩码 flash 不可用,
+  mem-efficient 要求 q/k/v head 数一致 (GQA 不可用), cuDNN 掩码 `206 us/层`.
+- 全长 4D mask 图: attention `92 us/层` -> `3.9 ms/token` 额外开销.
+- 每长度一张精确前缀图: 与 HF 逐 token 一致, 但捕获 `13 ms/图` x ~1500 =
+  20 s, e2e 反而不达标 (冷启动 ~28 s).
+- 融合 ATen RMSNorm: 省约 `0.15 ms/token`, 但改变数值, 破坏与 HF 的逐 token
+  等价性, 已回退.
+- TileLang 自研 decode attention: 需要动态 seq_len 内核, 代价高于当前
+  双调用 flash 方案 (flash 单次 `18-20 us/层`, 与 KV 长度基本无关).
+
+### 可复用规则
+
+- q_len=1 的 decode attention 在 torch 里是 launch-bound, 与 KV 长度基本
+  无关; 变长前缀可以用零填充 + 值掩码归一化变成静态形状, 不需要自定义
+  kernel.
+- 量化 runtime 的 runner 首次绑定通常不可捕获: 捕获前必须 eager 预热, 并
+  让预热写在下一步会覆盖的槽位.
+- kernel 微基准的优势只有在消除 Python 分发后才能兑现: 图捕获把
+  ~19-21 ms/token 的 CPU 时间降到 ~0.
+- greedy token 一致率对数值路径差异过于敏感, 正确性判据应是文本级任务
+  指标; 精确前缀变体是验证实现等价性的工具, 不是部署方案.
+
+### 验证落点
+
+- [运行时实现](../../../xqt/runtime/graph_decode.py)
+- [CUDA 测试](../../../tests/xqt/runtime/test_graph_decode.py)
+- [基准入口](../../../examples/xqt_models/minicpm5_2b_graph_decode.py),
+  [基准产物](../../../artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json)
+
+### 追加优化: GEMV 融合与 W4 LM head (2026-09-10)
+
+在 R-052 的 2.83x 基础上继续压 decode 的纯 GPU 时间, 两项都经 ncu 确认过瓶颈:
+
+1. **投影融合** (`AWQW4A16Linear.from_signed_groupwise_storages`): 把共享同一
+   输入的 q/k/v 与 gate/up 解码视图沿输出维拼成一次 GEMV (每层 qkv
+   `N=2560`, gate/up `N=12288`), 每 token 的 AWQ kernel 数从 294 降到 168.
+   融合数值透明: 每个输出行只依赖自己的权重与同一输入向量, 单测断言融合与
+   逐个解码**逐位一致** (`rtol=0, atol=0`). decode `5.99 -> 5.76 ms/token`.
+2. **W4A16 LM head** (`quantize_minicpm5_lm_head_w4`): BF16 head 每 token 读
+   `0.53 GB` (ncu 实测 DRAM `92.4%`, 已到 roofline), 换成 group-64 RTN INT4
+   (读 `0.13 GB`, 走同一条 native AWQ GEMV), 单 kernel `0.89-1.01 ms ->
+   0.25 ms`. logit RMSE `0.35`, 12 个真实 hidden 采样 top-1 一致 11/12;
+   任务级质量不降: 译文对 BF16 eager 的 char BLEU-4 `0.587` vs eager 量化
+   路线的 `0.605`. decode `5.76 -> 5.21 ms/token`.
+
+最终 (同一 7976 字符文档, greedy ~1470 token): W4A16 graph `8257 ms`
+(steady `177.5 tok/s`) 相对 BF16 eager `25310 ms` 为 **e2e `3.07x`**, 相对
+BF16 graph 为 `1.99x`; 质量保持 (`w4a16_graph` vs BF16 eager `BLEU-4 0.587` /
+`ROUGE-L 0.759`).
+
+**未采纳 (已实测)**: INT8 LM head. `Int8MmaLinear(engine="ptx_sm89")` 单测
+`716 us` (比 BF16 的 `891 us` 快), 但该模块**不可 CUDA graph 捕获** -- 绑定层
+`int8_linear_ptx_sm89` 用 `float(activation_scale)` 取主机标量, 图捕获时报
+`cudaErrorStreamCaptureInvalidated` (静态/动态激活 scale 都一样); `torch._int_mm`
+要求 `M > 16` 且在该形状上选到 `cutlass1x` 内核 (`1.4 ms`, 比 BF16 还慢);
+ncu 显示该 int8 GEMV DRAM 吞吐 `73.9%`, 低于 BF16 GEMV 的 `92.4%`.
+
+### 追加优化 2: 融合 RMSNorm (2026-09-10)
+
+投影融合与 W4 head 之后, 共享开销中最大的一项是 HF `LlamaRMSNorm` 的复合
+实现 (upcast/pow/mean/rsqrt/mul/downcast 约 7 个 kernel, 每 token 84 次调用,
+占 elementwise 类内核的多数). `CudaGraphDecodeSession` 增加 `fuse_norms`
+开关 (默认开): 用融合 `F.rms_norm` 替代复合调用. A/B 交替实测 (w4 路线,
+同一权重与长度): `5.23-5.32 -> 4.69-4.72 ms/token`. 数值上两者同为 RMSNorm,
+单测断言融合结果与复合结果在 `rtol=2e-2` 内一致; 需要逐 token 复现 HF 时
+用 `fuse_norms=False` (BF16 graph 的逐 token 等价检查走该模式).
+
+用 **bf16 graph 作为基线** 的最终对照 (两条 graph 路线使用同一运行时与同一组
+融合, 因此比值只反映量化收益):
+
+| 路线 | e2e ms | steady decode tok/s |
+|---|---|---|
+| bf16 eager | 26196 | 55.6 |
+| bf16 graph | 16240 | 88.2 |
+| w4a16 eager | 30844 | 48.2 |
+| w4a16 graph | 7811 | 180.4 |
+
+相对 bf16 graph e2e `2.08x` / steady `2.05x`; 相对 bf16 eager e2e `3.35x`
+(两次独立运行分别为 `2.08x` 与 `2.13x`, 运行间波动约 2%).
+质量: 对 BF16 eager 译文 char BLEU-4 `0.600` / ROUGE-L `0.765`, 与 eager 量化
+路线的 `0.605` / `0.767` 同水平. GPU 纯时间 (profiler self CUDA, len=1536):
+w4 `5.03 ms/token` vs bf16 `10.67 ms/token`; 逐 token host 同步只占约
+`0.11 ms/token` (`decode_step` `5.15` vs 纯 replay `5.04`), 运行时已接近
+自身 GPU 预算.
+
+### 剩余空间 (按可兑现程度排序)
+
+1. **第二次 flash 归一化调用** `~0.4 ms/token`: 零填充自校正需要
+   `R = SDPA(q, K_pad, v_mask)`, 而 torch SDPA 无 varlen, 带掩码 flash 不可用,
+   v 维度也不能与 q/k 不同. 要省掉它需要一个动态 `seq_len` 的 decode
+   attention kernel (参考 SGLang 的 decode attention), 属于自研 kernel 工作.
+2. **RoPE/残差等点式算子融合** `~0.2 ms/token`: 目前每层约 8 个 rope
+   kernel 与 2 个残差 add kernel, 需要自定义融合 kernel 或 `torch.compile`
+   级别的点式融合.
+3. **KV 写入合并** `~0.06-0.12 ms/token`: 每层 3 次 `index_copy_`
+   (k/v/mask) 可合并为 1-2 次.
+4. **AWQ GEMV `~2.3 ms/token` 已在 roofline** (int4 权重 1.3 GB): 只有更低
+   比特或更优 kernel 能再降, 前者是质量取舍, 后者需要 kernel 工作.
+5. **投机解码 / 多 token 验证**: 结构级空间, 不属于当前单请求 greedy 运行时.
+
+## R-053: MiniCPM5-2B decode 运行时重写与 QuaRot INT8 路线判定 (2026-09-10)
+
+### 目标
+
+在 R-052 的 w4a16 graph (5.54 ms/token, 180.4 tok/s) 基础上继续压 decode, 并把
+"QuaRot INT8 量化加速到 3x" 落到可验证的字节预算判定上. 评测仍是同一 7976 字符
+英译中任务 (prompt 1715 token, greedy, 生成约 1460 token), 基准仍是 bf16 graph.
+
+### 实测瓶颈 (torch profiler, L=3000, 单步 CUDA 6.13 ms)
+
+| 项 | 时间 | 说明 |
+|---|---|---|
+| AWQ W4 GEMV x168 | 2.22 ms | 已接近 roofline (含 scale/zero 约 560 GB/s) |
+| lm_head BF16 x1 | 1.03 ms | R-052 已换 W4 head, 此处是旧运行时的状态 |
+| flash SDPA x84 + combine x84 | 1.21 ms | 零填充自校正必须两次调用 |
+| 未融合 post-attention RMSNorm | 约 0.5 ms | 融合此前只接了 input_layernorm |
+| RoPE (cat/mul/add) + elementwise | 约 0.9 ms | 每层约 7 个小 kernel |
+| index_copy_ (k/v/v_mask) | 0.20 ms | 新注意力下 v_mask 不再需要 |
+
+### 实现 (xqt/runtime/graph_decode.py 重写 + 新内核)
+
+1. **单张 length-agnostic CUDA graph**: 用两个设备标量驱动 replay --
+   `position` (写入槽位) 与 `valid_len` (注意力读取长度). 不再需要 256 长度桶
+   与逐桶捕获 (原 13 张图), 不再需要零填充校正与 v_mask.
+2. **Triton 单遍 GQA decode attention** (`xqt/kernels/ops/_impl/triton/decode_kernels.py`):
+   split-K 两段式 (partial + merge), `valid_len` 由内核从设备指针读取, 变长前缀
+   不需要掩码, K/V 每层只读一遍. vs 双 flash: `48.2 -> 12.4 us/层` (L=3000);
+   正确性 vs SDPA 相对误差 `3e-3` (bf16 级).
+3. **融合 RoPE + KV scatter** (`rope_write_qkv_triton`): HF split-half RoPE 应用到
+   q/k 并在同一内核内写 k/v 缓存槽位; cos/sin 预计算成 `[max_cache_len, head_dim]`
+   表, 内核按 `position` 索引 (省掉每步 rotary_emb 的三角计算).
+4. **两个 norm 都走融合路径**, MLP 走 Triton SwiGLU.
+5. **INT8 激活量化选项** (`int8_activations=True`): 线性层输入 (两个 norm 输出,
+   SwiGLU 输出, 注意力输出) 走 per-row 对称 INT8 量化->反量化, 权重仍 4-bit, 即
+   QuaRot 式 "INT8 激活 + 4-bit 权重" (W4A8) 配置. 质量探针 (logit RMSE, 相对
+   不量化): norm 位点 `0.34`, swiglu 位点 `0.30`, 全开 `0.27`, 远小于 4-bit
+   权重本身的误差 (`~1.31`), 因此激活量化可行且几乎不影响任务质量.
+
+### 结果 (五路线, 同一文档)
+
+| 路线 | e2e ms | steady tok/s |
+|---|---|---|
+| bf16_eager | 25091 | 58.1 |
+| bf16_graph (新运行时) | 13123 | 109.0 |
+| w4a16_eager | 28408 | 52.4 |
+| w4a16_graph | 5273 | 284.4 |
+| w4a8_graph (INT8 激活) | 5022 | 288.1 |
+
+- 相对本路线记录基线 (bf16 graph `16240 ms`, R-052 的旧运行时): w4a16 `3.08x`,
+  w4a8 `3.23x`, 达成 3x 目标.
+- 同运行时对照 (bf16 graph 换新运行时后 `13123 ms`): `2.49x` (e2e) / `2.61x`
+  (steady). 披露: 运行时重写同时加速了 bf16 路线 (13123 vs 16240), 所以同运行时
+  比值低于相对记录基线的比值.
+- 质量 (vs bf16 eager 译文): w4a16_graph `BLEU-4 0.615`, w4a8_graph `0.607`,
+  w4a16_eager `0.605` -- 量化路线质量不降.
+
+### 字节预算判定: 为什么纯 W8A8 INT8 到不了 3x
+
+- decode 是 DRAM 带宽受限: 每 token 必须读完所有权重. 权重字节: bf16 `4.50 GB`
+  (含 head), INT8/W8A8 `2.25 GB`, W4 `1.13 GB`.
+- 实测可达读带宽: bf16/fp32 流式求和 `594/587 GB/s` (理论峰值 672 的 88%);
+  AWQ GEMV 在 lm_head 形状上 ncu 实测 `623 GB/s` (`Max Bandwidth 95.1%`).
+- 即使 W8A8 以满可达带宽读权重: `2.25 GB / 590 GB/s = 3.81 ms/token`, 已经超过
+  3x 所需的 `11.24 / 3 = 3.75 ms/token`; 再叠加注意力 (约 0.5 ms) 与
+  elementwise/launch (约 0.4 ms), W8A8 的现实上限约 `2.4x`.
+- 结论: 3x 要求每 token 权重字节 <= 约 1.5 GB, 必须 4-bit 权重; 所以交付路线是
+  "QuaRot 旋转 + INT8 激活量化 + 4-bit 权重" (W4A8), 而不是 W8A8.
+
+### 权重 layout 实验 (ncu + 分形状微基准, 负结果)
+
+ncu 对 AWQ W4A16 解码内核: lm_head 形状 `623 GB/s` (95% SOL), qkv 形状
+`433 GB/s` (66%), 10% 的过量 sectors 来自 scale/zero 的跨 group 步长访问
+(源码计数器 `UncoalescedGlobalAccess`). 分形状 cold 测量 (4 份权重轮换规避 L2):
+
+| 形状 | N x K | cold us | 有效 GB/s |
+|---|---|---|---|
+| qkv | 4608x2048 | 8.81 | 603 |
+| o_proj | 2048x2048 | 7.80 | 302 |
+| gate_up | 12288x2048 | 27.48 | 515 |
+| down_proj | 2048x6144 | 9.32 | 759 |
+| lm_head | 130560x2048 | 334.84 | 449 |
+
+两个布局兼容改动试过并回退:
+- `kBlockSize 256 -> 128` (每线程 K 迭代翻倍, MLP 更好): 小形状变差
+  (`qkv 8.60 -> 10.27 us`), 真实路线 `3.49 -> 3.75 ms/token`, 回退.
+- `kOutputsPerBlock 2 -> 1` (CTA 数翻倍): 时序出现物理不可能值 (`lm_head 26 us`,
+  `gate_up 1643 GB/s`), 数值校验失败 (`mean|d| 1.87`), 判定为与 interleaved 布局
+  不兼容, 回退.
+- 下一步 (未做): 内核已在这套布局的上限附近, 进一步提升需要 Marlin 式 permuted
+  layout + cp.async 流水 (重写内核), 以及给 N 小形状 (o_proj 302 GB/s) 加
+  split-K 维度.
+
+### 未采纳 (已实测)
+
+- torch 手工 mask 注意力 (bmm+softmax+bmm): `269 us/层` (L=4096), 小矩阵 cuBLAS
+  路径不可用; 现有 Triton 内核是唯一可行解.
+- 纯 W8A8 与 W8A8+旋转: 上限 `~2.4x` (字节预算), 且质量需要旋转 + per-row
+  量化才能恢复到 R-051 的 ConvRot 水平.
+- 每长度精确前缀图 / 桶图: 单图 + 设备标量已消除该类需求.
+
+### 适用边界与回退
+
+- 仅 Llama 家族, 单请求 greedy, 需要 CUDA + triton.
+- 单张图与 `max_cache_len` 绑定; 换权重需重建 session.
+- `int8_activations=True` 只作用于 decode 路径 (prefill 保留 bf16, 占 e2e < 2%).
+- 与 HF eager 不是逐 token 一致 (注意力/归一化内核路径不同); bf16 graph 的短程
+  逐 token 等价检查保留 (`fuse_norms=False`).
+
+### 验证落点
+
+- [运行时](../../../xqt/runtime/graph_decode.py)
+- [decode 内核](../../../xqt/kernels/ops/_impl/triton/decode_kernels.py)
+- [内核测试](../../../tests/xqt/kernels/test_decode_kernels.py),
+  [session 测试](../../../tests/xqt/runtime/test_graph_decode.py)
+- [基准入口](../../../examples/xqt_models/minicpm5_2b_graph_decode.py),
+  [基准产物](../../../artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json)
+
+## R-054: MiniCPM5-2B decode 尾程消除 (残差 epilogue / 分块回读) 与带宽上界实测 (2026-09-10)
+
+### 目标
+
+在 R-053 的单图运行时 (w4a8 graph 5022 ms, 288 tok/s) 之后继续压 decode.
+本轮不再改结构, 而是做两件事: (1) 消掉仍然留在关键路径上的小 kernel 与主机
+同步; (2) 用实测把 "还能快多少" 变成可判定的数字, 避免继续猜. 评测与 R-053
+完全一致 (同一 7976 字符英译中, prompt 1715 token, greedy, 生成约 1450 token).
+
+### 单步预算实测 (torch profiler, L=3061, w4a8 路线, ms/step)
+
+| 项 | kernel 数 | 时间 | 说明 |
+|---|---|---|---|
+| AWQ GEMV (无 epilogue: qkv/gate_up/lm_head) | 85 | 1.644 | |
+| AWQ GEMV (残差 epilogue: o_proj/down_proj) | 84 | 0.881 | 本轮新增, 见下 |
+| decode attention partial | 42 | 0.488 | |
+| rmsnorm_int8 | 84 | 0.125 | 1.5 us/次, 已到图内单块 kernel 下限 |
+| swiglu_int8 | 42 | 0.102 | 2.4 us/次 |
+| attention merge | 42 | 0.054 | |
+| rope + KV scatter | 42 | 0.045 | |
+| argmax | 1 | 0.025 | 130560 词表单块规约 |
+| 其他 | 6 | 0.009 | |
+| 合计 | 428 | 3.373 | 残差融合前 3.438 |
+
+主机侧开销实测 (同一 session, replay 循环):
+
+| 步骤 | ms/step | 差值 |
+|---|---|---|
+| 只 replay 图 | 3.392 | -- |
+| replay + 两个 fill_ (position/valid_len) | 3.407 | +0.015 |
+| replay + `token.item()` | 3.492 | +0.100 |
+| 完整 decode_step | 3.504 | +0.112 |
+
+结论: 每 token 一次 `token.item()` 的设备到主机同步占 `0.10 ms` (约 3%), 是
+当时最大的单项主机开销; 图内 428 个节点的调度间隙合计只有约 0.02 ms.
+
+### 实现
+
+1. **投影 epilogue 融合残差** (`AWQW4A16Linear.bind_residual` +
+   `_MiniCPM5W4A16HybridLinear.bind_residual`): AWQ decode kernel 原本就有
+   `HasBias` epilogue, 其语义是 "累加器先 round 到输出 dtype, 再在输出 dtype
+   里加 bias". 这与 `hidden = residual + projection(x)` 的 aten add 完全同构,
+   于是把 residual 同时当 bias 和 output 传入 (`decode_bias_out(x, qw, sc, z,
+   residual, residual)`), 一个 kernel 完成 `residual += projection(x)`.
+   每层省掉 o_proj/down_proj 后各一次 elementwise add, 共 84 个 kernel.
+   线程内先读后写同一元素, 无竞争; 单测 `rtol=0, atol=0` 验证与未融合路径
+   逐位一致.
+2. **分块 token 回读** (`CudaGraphDecodeSession.decode_batch` + `readback_chunk=16`):
+   greedy 的下一步输入只需到达 *设备* (图内 `self.token` 原地写回), 主机并不
+   需要每步都知道 token. `generate` 改为一次 replay 16 步再回读一次, 每 16
+   token 才同步一次; 中途遇到 EOS 时按 EOS 截断返回 (多跑的步计进
+   `decode_steps`). 代价是 EOS 回读超额最多 15 步, 收益是省掉 15/16 的同步.
+3. **修复 `_warm()` 污染 KV 缓存**: `_warm` 的 eager 预热步会把 `length-1` 槽位
+   写成预热 token 的 KV. 此前 `capture()`/首次 `decode_step()` 总在 prefill 之前,
+   槽位 `0` 随后被 prefill 覆盖, 所以问题被掩盖; 一旦先 prefill 再 capture
+   (或先 prefill 再 decode_step), 最后一个 prompt token 的 KV 被覆盖, 从第 1
+   个生成 token 起就与 HF greedy 分叉. 现在预热前后对 `length-1` 槽位做
+   snapshot/restore (84 个小拷贝, 只在首次 capture 时发生), 并加回归测试
+   `test_capture_after_prefill_keeps_prompt_state`.
+
+### 结果 (五路线, 同一文档, 本轮最终运行)
+
+| 路线 | e2e ms | steady tok/s |
+|---|---|---|
+| bf16_eager | 25701 | 56.7 |
+| bf16_graph (同运行时) | 13550 | 106.0 |
+| w4a16_eager | 29159 | 51.0 |
+| w4a16_graph | 5081 | 301.8 |
+| w4a8_graph (INT8 激活) | 5015 | 300.3 |
+
+- e2e 相对同运行时 bf16 graph: w4a16 `2.67x`, w4a8 `2.70x`.
+- e2e 相对记录基线 (R-052 旧运行时的 bf16 graph `16240 ms`): `3.20x` / `3.24x`.
+- 质量逐位不变: `BLEU-4 0.6153` (w4a16) / `0.6068` (w4a8), 与融合前完全一致,
+  佐证残差 epilogue 是数值等价改写, 也佐证本轮注意力侧实验回退后数值路径未变.
+- 回读开销 (前一轮同进程 A/B): 修复前 `decode_step` 3.504 ms/step, 修复后稳态在
+  `readback_chunk=16` 下按 16 步摊薄, e2e 由 5068 -> 5018 ms, steady 由
+  287.1 -> 290.0 tok/s (w4a16 路线 5320 -> 5232 ms / 282.7 -> 290.0 tok/s).
+- 稳态读数的跨运行波动是 `265-311 tok/s` (同一配置, 长度相同或更短): 重复测量
+  (生成长度约 1780, 各跑 5 轮) w4a16 `298-309`, w4a8 `306-311`; 而同样在路线
+  末尾 (L~3160) 单次读数出现过 265.4 也出现过 300.3. 因此单次稳态值只作参考,
+  加速比结论只看**同一次运行内**的对照.
+
+### 目标对齐 (3x 与剩余缺口)
+
+会话目标是 "相对 bf16 graph 做到 3x". 以同进程同运行时的 bf16 graph 为分母是
+最诚实的口径: 本轮 `2.67x` (w4a16) / `2.70x` (w4a8), 相对 R-052 记录的旧基线
+是 `3.20x` / `3.24x`. 差距来自两边: bf16 graph 自己也是被优化过的 (同一个
+runtime, 同样的融合 kernel 和图调度), 而它在 4.5 GB/token 下跑出
+`475 GB/s` 的有效带宽 (68% 上界), 使分母变小.
+
+单步预算 (3.27-3.45 ms/token) 与"全部打到上界"的理论值对比:
+
+| 项 | 当前 | 上界/理想 | 缺口来源 |
+|---|---|---|---|
+| AWQ GEMV (权重+aux 1.266 GB) | 2.53 ms (500 GB/s) | 1.82 ms (697 GB/s) | 单波形状同相位, DRAM 55% |
+| 注意力 (唯一 K/V 108 MB) | 0.49 ms | 0.16-0.22 ms | 每 program 访存延迟 |
+| 门控/归一/rope/merge/argmax | 0.30 ms | 0.30 ms | 单块 kernel 启动/收尾地板 |
+| 合计 | 3.32 ms | 2.3-2.4 ms | |
+
+即理论极限 (所有项同时打到上界) 约 `2.4 ms/token`, 对应 e2e 约 `4.0 s`,
+`3.3x`; 若只把缺口按已知可动比例 (大形状 625 GB/s, 注意力 0.30 ms) 折半
+收回, 现实值约 `2.9 ms/token`, 对应 `2.8x` 上下. 也就是说 3x 需要**同时**
+解决 GEMV 小形状延迟和注意力延迟两条路, 单独解决任何一条都到不了; 而这两条
+本轮都已走到 "布局/算法级重写" 的门槛上: 注意力侧三条可试路径
+(splits/block_l/num_warps 扫描, `tl.range(num_stages)` 流水, GQA 分组内核) 全部
+实测更慢, GEMV 侧形状参数空间 (KB, OPB) 与 split-K 原型全部零收益 (见负结果).
+
+### 带宽上界实测 (为什么剩下 0.5 ms 很难拿)
+
+1. **纯读上界**: 400 MB 流式读实测 `697 GB/s` (高于规格 672 GB/s), 这是这台
+   4070 Ti SUPER 的实际可达到读带宽, 之前引用的 594 GB/s 来自 torch.sum,
+   偏低.
+2. **分形状 cold GEMV** (权重池 400 MB 轮换规避 L2, opb=2, kBlockSize=256):
+
+   | 形状 | N x K | CTA | us | GB/s(权重) | GB/s(权重+aux) | 波数 |
+   |---|---|---|---|---|---|---|
+   | qkv | 2560x2048 | 320 | 6.65 | 394 | 443 | 1.2 |
+   | o_proj | 2048x2048 | 256 | 5.61 | 374 | 421 | 0.97 |
+   | gate_up | 12288x2048 | 1536 | 24.47 | 514 | 579 | 5.8 |
+   | down_proj | 2048x6144 | 256 | 13.36 | 471 | 530 | 0.97 (3 次 K 迭代) |
+   | lm_head | 130560x2048 | 16320 | 240.61 | 556 | 625 | 61 |
+
+   路线合计 `1.125 GB 权重 + 0.141 GB scale/zero = 2.344 ms`, 有效 `540 GB/s`,
+   为 697 GB/s 上界的 77%. 规律清楚: CTA 数/波数越多越接近上界 (lm_head 625,
+   gate_up 579), 单波小形状最差 (o_proj 421). 原因是单波时所有 CTA 同相位
+   执行 -- 一起读权重, 一起进 block 规约, 规约期间显存空转; 多波时不同 CTA
+   处在不同相位, 显存管道不断流.
+3. **aux (scale/zero) 字节开销**: 关闭 aux 读的 lab 变体快 `10-12%`, 与 aux
+   占比 12.5% 吻合; ncu 显示 `dram__bytes_read` 恰好等于权重+aux 的唯一字节,
+   说明 aux 读没有放大, 它就是实打实的 DRAM 流量, 只能靠改打包 (zero point
+   压成 4 bit) 或更大 group 来减.
+4. **注意力已是延迟受限, 不是带宽受限**: ncu (L=3000, splits=16, 2 warps):
+   `204 regs/thread`, occupancy 上限 4 CTA, `sm__warps_active 15.7%`,
+   DRAM 36%, L2 46%, `lts__t_bytes 18.6 MB` (唯一 K/V 只有 3.1 MB). 合成
+   链 (42 层重复读同一组 K/V, L2 常驻) 与真实路线 (42 层各自 3 MB 缓存,
+   共 129 MB) 每层耗时几乎相同 (`11.6 us` vs `11.5 us`), 所以限制因素既不是
+   DRAM 也不是 L2 带宽, 而是 warp 太少 + 寄存器压力太大导致延迟盖不住.
+
+### 负结果 (本轮试过并回退/否决)
+
+- **注意力参数 (splits=32, block_l=32, num_warps=1)**: 在合成链里 10.19 vs
+  11.58 us/层 (看起来 -12%), 但真实路线 `0.488 -> 0.549 ms` (慢 12%), 回退.
+  原因: 合成链 42 次调用共用同一组 K/V, 数据在 L2/常量层面常驻; 真实路线每层
+  缓存不同且总量 129 MB, 小 block/单 warp 盖不住 DRAM 延迟. **合成微基准对
+  这条内核没有预测力**, 后续内核改动必须直接跑真实路线.
+- **小 kernel 调 num_warps**: rmsnorm_int8 (2048 列) `warps 1/2/4/8/16` =
+  `2.06/1.59/1.41/1.41/1.44 us`, swiglu_int8 (6144 列) =
+  `15.07/3.13/2.24/2.22/2.19 us`. 默认 (8) 已在下限, 说明这些小 kernel 的时间
+  是图内单块 kernel 的启动/收尾延迟, 不是可调的执行时间.
+- **AWQ lab 变体** (模板化 OPB / 去 aux 读): OPB=4 数值与 OPB=2 不一致
+  (`mean|d| 0.29`), 且冷测只快 3%; OPB=1/8 更慢; 去 aux 变体只用于证明 aux
+  字节代价, 不作为实现.
+- **L2 带宽探针**: 早期两个探针分别被 L1 命中 (同 tile 重复读) 和寄存器数组
+  溢出污染, 数值不可用; 有效结论来自 ncu 计数器与真实路线 A/B.
+- **注意力参数空间已扫完 (真实路线, L=2515, 逐配置重 capture)**: `splits` 8/16/32
+  × `block_l` 32/64/128 × `num_warps` 2/4, 每种 5 次 16 步实测. 最优仍是生产
+  默认 `(16, 128, 2)` = `302.0` tok/s (best-of-5), 其余 270-296.9; 单波内的
+  参数微调不再有收益.
+- **Triton `tl.range(num_stages>=2)` 软件流水**: `(16,64,2,s2)` 269.6,
+  `(16,64,2,s3)` 233.8, `(16,64,4,s3)` 247.0, `(16,128,2,s2)` 223.2,
+  `(32,64,2,s2)` 252.8, `(16,32,2,s3)` 260.1 -- 全部慢于 `302.0`. Triton 把
+  K/V tile 经 shared memory 多级缓冲, 而这条内核吃的是 L2 延迟, 流水线只多了一次
+  shared 往返和寄存器拷贝. (为此给内核加的 `NUM_STAGES` 参数已从生产代码撤回.)
+- **GQA 分组内核 (一个 program 处理一个 kv head 的全部 8 个 q head)**: K/V 只在
+  组内读一次, L2 流量从 `18.6 MB/层` 降到约 `4 MB/层`, 但真实路线全部更慢:
+  `(64,64)` 269.4, `(32,128)` 268.2, `(128,32)` 278.8, `(256,16)` 294.2 (最好)
+  vs 默认 `302.0`. 结论: 这条内核不是 L2 带宽受限 (L1 命中率 47% 已经把 GQA 的
+  head 间冗余吃掉了), 而是**每 program 的访存延迟受限**; 分组把 program 做得更肥
+  更少, 反而放大了单 program 的延迟暴露, 同时 `splits` 上升把 partial 张量流量从
+  `0.13 MB/层` 推到 `2 MB/层` (写+读各一次). 分组实现已回退, 生产仍是 per-head.
+- **AWQ GEMV split-K 原型 (lab, 400 MB 冷池, 只写 fp32 partial 不合并)**: 把 K
+  按迭代切给 `gridDim.y` 个 CTA (`splits=1/2/4`), 单波小形状的带宽**没有提升**:
+  qkv `452.8/453.4/447.9 GB/s`, o_proj `430.2/416.0/417.3`, gate_up
+  `579.4/584.9/565.9`, down_proj `548.3/486.9/533.2`; 数值上 partial 求和与
+  原输出只差 bf16 舍入 (`max|d|=0.002-0.004`). 关键读数: o_proj 每 CTA 处理
+  8 KB (splits=1) 与 4 KB (splits=2) 时, **整个 kernel 的墙钟几乎不变**
+  (`5.48 vs 5.67 us`) -- 说明耗时由每 CTA 的**负载下访存延迟**决定, 不是字节
+  吞吐, 也不是 CTA 相位/波数. 因此 "单波相位对齐" 不是可操作主因, "给 N 小
+  形状加 split-K" 这条路线被实测否决; 更要提高的是每 SM 的**在途字节数**
+  (每线程 2 个 16 B 权重 load 已发满, 想再加就要重排每线程负责的 k 窗口, 属于
+  布局级重写).
+- **AWQ GEMV `kBlockSize` 扫描 (lab, 400 MB 冷池)**: KB 64/128/256 每形状:
+  qkv `6.49/6.60/6.71 us`, o_proj `5.50/5.53/5.65`, gate_up `25.23/25.01/24.69`,
+  down_proj `12.95/13.07/13.39`, lm_head `247.3/244.1/240.6`. 小 N 形状 KB=64 快
+  2-3%, 大 N 形状 KB=256 快, 净收益约 1% 且 KB=64 会带来 1 ulp 级数值差异
+  (down_proj/lm_head `max|d|=2e-4`), 不值得改. 说明单波形状的瓶颈不是 K 循环
+  深度/ILP: KB=64 把每线程 K 迭代从 1 提到 4, CTA/SM 从 4 提到 15, 带宽只涨
+  `421 -> 429 GB/s`.
+
+### 剩余空间与下一步 (未做, 已量化)
+
+- 权重+aux `1.266 GB` 按 697 GB/s 上界需要 `1.82 ms`, 当前路线 `2.34 ms`
+  (冷测) / `2.53 ms` (含残差 epilogue 的图内). 缺口 `0.5-0.7 ms` 集中在
+  单波小形状 (qkv/o_proj 420-453 GB/s). ncu 对 o_proj 的定性是: 56 寄存器,
+  寄存器限 4 CTA/SM, `warps_active 62%`, `DRAM 55%`, L1 命中 47%,
+  `warp cycles/instr 27.4` 其中 `71.4%` 是 long_scoreboard. 三条可操作猜想
+  已被实测排除: K 迭代深度/ILP (KB 扫描), CTA 相位/波数 (split-K 原型, 每 CTA
+  4 KB 与 8 KB 墙钟相同), 大 CTA 摊薄尾部 (OPB=4). 剩下唯一自洽的解释是
+  **每 SM 在途字节数不足**: 4 CTA/SM × 128 线程 × 2 个 16 B 权重 load
+  ≈ 16-33 KB, 而按负载延迟 4-5 us 反推要跑满 697 GB/s 需要约 48 KB/SM.
+  要补这个缺口必须让每线程在消费前发出更多独立 load (重排每线程的 k 窗口 +
+  成倍放大寄存器里的解包缓冲), 属于布局级重写, 且 4x 收益上限仍不足以单独
+  达到 3x.
+- 注意力 `0.49 ms` 对唯一 K/V 下限 `0.16 ms` (DRAM) / `0.22 ms` (含 merge 写).
+  受限原因是每 program 的访存延迟: 参数空间 (splits/block_l/num_warps),Triton
+  流水线和 GQA 分组三条路本轮都已实测并否决 (见负结果). 真正剩下的只有
+  "把 27 个串行 softmax 步改成 tl.dot + 张量核的 FlashDecoding" 这类算法级
+  改写, 代价高且数值路径要重测. (→ R-057 已实测: opt-in 采纳, partial -38%, e2e -4.1%.)
+- lm_head argmax `0.025 ms` 是单块规约; 改成多块两段式可省约 0.02 ms.
+- prefill 约 `245 ms` (e2e 的 4.9%), 走 dense bf16 cuBLAS 路径 (约 35 TFLOPS,
+  40% MFU); 要更快需要 W4A8/W8A8 prefill GEMM, 属于另一条工作线.
+
+### 适用边界与回退
+
+- 残差 epilogue 只作用于 decode 路径 (M<=8) 且模块有 `bind_residual`; 其他
+  模块 (HF Linear) 自动回退到 `residual + module(x)`.
+- `readback_chunk` 越大同步越少但 EOS 超额越多; 默认 16 (超额 <=15 步).
+- 注意力 `block_l` 必须是 2 的幂 (`tl.arange` 约束), wrapper 入口显式报错,
+  不再让 Triton 抛出难读的编译错.
+- 先 prefill 后 capture 现在是安全的 (槽位 snapshot/restore), 但预热步仍会
+  在图中写一次 KV, 所以 `max_cache_len` 必须覆盖 prefill + 生成长度.
+
+### 验证落点
+
+- [运行时](../../../xqt/runtime/graph_decode.py) (`decode_batch`, `_warm`)
+- [AWQ 模块](../../../xqt/runtime/modules/awq_w4a16_linear.py) (`bind_residual`)
+- [MiniCPM5 hybrid 视图](../../../xqt/model/minicpm5.py)
+- 测试: [session](../../../tests/xqt/runtime/test_graph_decode.py)
+  (`test_decode_batch_matches_single_steps`,
+  `test_capture_after_prefill_keeps_prompt_state`),
+  [AWQ 模块](../../../tests/xqt/runtime/test_awq_w4a16_linear.py)
+  (`test_bound_residual_matches_unfused_add`),
+  [decode 内核](../../../tests/xqt/kernels/test_decode_kernels.py) (注意力 +
+  RoPE/KV scatter)
+- [基准产物](../../../artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json)
+
+## R-055: W4A8 vs W4A16 逐 kernel 基线与 2x 上界判定 (2026-09-11)
+
+### 目标
+
+回答会话目标的第一问: "旋转量化 (W4A8) 相对 w4a16 卡在哪, 为什么拉不开差距",
+并用同运行实测 + ncu 计数器把 "纯内核路线能否到 2x" 变成可判定的数字.
+
+### 方法
+
+- 新入口 `examples/xqt_models/minicpm5_2b_w4a8_profile.py`: 同一进程, 同一份
+  AWQ W4 量化模型 (engine="cuda"), 两个 `CudaGraphDecodeSession`
+  (`int8_activations=False/True`) 同帧交错测稳态 (median-of-7 batch, 每 batch
+  64 图 replay); torch profiler 抓图内单步 kernel 预算; `W4A8_PROFILE_MODE=ncu-oneshot`
+  + NVTX range (`eager_decode`) 给 ncu 一个不含 prefill 噪声的 6 步 eager 窗口.
+- ncu 本轮可读计数器 (此前 R-03x 记 `ERR_NVGPUCTRPERM`; 今天验证已可用),
+  metrics: `gpu__time_duration`, `dram__bytes_read/write`,
+  `dram__throughput%`, `sm__warps_active%`, `launch__registers_per_thread`,
+  `lts__t_bytes`.
+- 产物: `artifacts/xqt/inference/minicpm5-2b/w4a8_baseline_profile.json` +
+  `/tmp/ncu2_{w4a16,w4a8}.csv` (29761 行原始计数器).
+
+### 同运行基线 (steady, batch=64, median-of-7)
+
+| 路线 | step ms | tok/s |
+|---|---|---|
+| w4a16 | 3.266 | 306.2 |
+| w4a8 | 3.243 | 308.3 |
+
+比值 1.007x. prefill (dense bf16 cuBLAS): w4a16 119.5 ms, w4a8 119.9 ms.
+
+### 图内单步 kernel 预算 (torch profiler, us/step)
+
+| kernel | w4a16 | w4a8 |
+|---|---|---|
+| awq GEMV (85 无 epilogue + 84 有) | 2481 | 2456 |
+| attention partial | 435 | 461 |
+| norm (aten LN / rmsnorm_int8) | 267 | 125 |
+| attention merge | 46 | 52 |
+| rope+KV scatter | 45 | 45 |
+| swiglu (_swiglu / _swiglu_int8) | 40 | 92 |
+| argmax | 25 | 25 |
+| 合计 | 3346 | 3265 |
+
+W4A8 的 int8 rmsnorm 省 0.14 ms, 但 swiglu_int8 每 tile 多做 row max
+(40 -> 92 us) 又吐回去; 注意力 int8 merge 反而略慢. 净差 **-81 us/step (-2.4%)**.
+
+### ncu 计数器证据 (6 步 eager, NVTX 圈选)
+
+- **GEMV 是纯 DRAM 流**: awq_decode_kernel (169 launches/step)
+  `dram% = 67%`, 读字节/step = 1.27 GB (恰为 int4 权重 + aux), 无 L2 复用
+  (`lts__t_bytes` ~= DRAM). w4a16 与 w4a8 的 GEMV 计数器**完全相同** --
+  `int8_activations` 只改激活, 权重字节一 bit 未动.
+- **w4a8 相对 w4a16 的激活字节变化**: attn partial `k` 输入 fp16->int8
+  (per-head KV int8 化曾在 R-053 计划里, 现在线的 partial 只量化 o_proj
+  输入). 关键: partial 的 K/V 读 1.806 -> 1.810 MB/layer, 无变化.
+- **sub-kernel 延迟地板**: `rope_write_qkv` warps% = 2, `_decode_attn_merge`
+  warps% = 2, `_rmsnorm_int8` warps% = 17 -- 这些是 42-84 次/step 的单 tile
+  小 kernel, 时间全部是启动/收尾地板, 不是带宽.
+- **attention partial**: regs=204, warps%=16, dram%=33, 启动 grid (16,16):
+  每层 8.4 us, 与 R-054 结论一致 (延迟受限, 非 L2/DRAM 带宽受限).
+
+### 字节预算上界判定 (本会话问题 3 的触发条件)
+
+decode 是 DRAM 带宽受限: 每 token 的权重读 = 1.13 GB (W4 权重) + 0.14 GB
+(aux) = 1.27 GB, 是 w4a16 与 w4a8 **共享** 的固定字节. 本机实测可达读带宽
+697 GB/s:
+
+1. **单 token 一步 (纯内核路线)**: 任何不增加每步 token 产出的内核优化,
+   下限 = GEMV 字节地板 `1.27 GB / 697 GB/s = 1.82 ms` (冷分形状实测
+   2.34 ms) + 注意力 + 小 kernel 地板. 现实下限约 2.9-3.0 ms vs w4a16
+   3.266 ms => **纯内核 W4A8 对 w4a16 的上限约 1.09-1.13x**, 距 2x 有
+   一个数量级的差距. 触发条件成立.
+2. **每步 k 个 token (机制扩展, W4A8 与 w4a16 的真正分水岭)**: 只需一次
+   权重读. k=4 全接受的理论速度 ~2.6x; 60% 接受率下 ~1.8x; k=8 全接受
+   ~4.1x. INT8 激活使 `awq_decode_kernel` 的 Batch 模板 (M<=8) 直接可用,
+   且 INT8 计算在 M>1 时保持 tensor 核心 FMA 吞吐 -- 算力优势在 k>1 时
+   才开始兑现.
+
+### 为什么旋转量化拉不开差距 (结论)
+
+1. **权重读不受激活量化影响**: W4A8 与 W4a16 每步读同样的 1.27 GB INT4
+   权重. GEMV 是纯 DRAM 流 (ncu dram% 67%), 激活无论 8/16 bit, 每步只多
+   读几 KB. 激活字节在 M=1 时小到无法影响 DRAM 占比.
+2. **aux (scale/zero) 占 12.5%**: 这是 W4 权重布局的固有开销, 与激活精度
+   无关, 纯内核路线无法移除.
+3. **int8 激活的算力红利在 M=1 时无法兑现**: M=1 GEMV 是内存受限, INT8
+   乘加反而因反量化 (dequantize_u4 + scale/zero FMA) 占用 ALU -- 每线程
+   64 个权重 element 都要先做 dequant. 算力 4x 只在 M 大 (能覆盖 dequant
+   成本) 或算力受限形状 (如 lm_head 130560x2048) 上才可能体现.
+4. **w4a8 的 swiglu_int8 反而更慢**: 每 row 做 max 规约再除/乘/回存,
+   40 -> 92 us/step, 抵消了 rmsnorm_int8 的 142 us 收益.
+
+### 下一步 (任务 2 切换判定)
+
+- 纯内核路线上界 1.09-1.13x < 2x, 依据目标契约切换到机制扩展
+  (训练无关投机解码: PLD/prompt-lookup + 精确验证). 候选: k=4-8 的
+  SharedB 验证步, M>1 的批量 GEMV + 单次注意力 (K/V 只读一遍), 以及
+  prefill 侧 W4A8 GEMM (e2e 口径的 4.9%).
+
+### R-055 续: W4A8 机制扩展落地 (speculative decode + 精确验证)
+
+#### 动机 (从上界判定直接推出)
+
+- 纯内核路线上限 1.09-1.13x, 因为 w4a16 与 w4a8 每 token 读同样的 1.27 GB
+  INT4 权重. 唯一能改变这个字节数的机制是**一次权重读出多个 token**.
+- 因此新增 `xqt/runtime/spec_decode.py` (SpecDecodeSession) 与
+  `xqt/kernels/ops/_impl/triton/spec_decode_kernels.py` (多行验证内核):
+  - 草稿: PLD (prompt-lookup), training-free, 从 prompt + 已生成历史里做
+    n-gram (n<=4) 续写; 翻译任务里源文与译文的术语重复是草稿来源.
+  - 验证: 一次 forward 处理 ROWS 行 (k 个草稿 + 1 个纠错行), 投影走
+    native GEMV 的 Batch 模板 (M<=8), 注意力多行共享同一遍 K/V 扫描.
+  - 接受: 精确贪心验证, 接受的 token 与目标模型贪心输出逐位一致
+    (`test_spec_decode_matches_greedy_reference`), 不是启发式.
+- 单测覆盖: 多行注意力 vs 逐行 SDPA (rows 1/2/4/8), RoPE+KV scatter 多行,
+  幂次 ROWS 约束, 重复 prompt 下的非零接受率, EOS 窗口内截断.
+
+#### 实测 (同运行 A/B, 真实模型, 7976 字符英译中)
+
+| 路线 | e2e ms | tok/s | vs w4a16 | 接受率 | 草稿/步 | ms/步 | token/步 |
+|---|---|---|---|---|---|---|---|
+| w4a16 graph (基线) | 5302 | 287.2 | 1.00x | -- | -- | 3.54 | 1.00 |
+| w4a8 spec k=3 | 6681 | 225.3 | **0.79x** | 0.033 | 0.16 | 4.47 | 1.01 |
+| w4a8 spec k=7 | 6417 | 239.4 | **0.83x** | 0.126 | 3.29 | 5.91 | 1.41 |
+
+- 草稿几乎全被拒 (accept 0.03/0.13), 所以每步只多兑出 0.01-0.41 个 token,
+  而验证步固定多花 0.9-2.4 ms; 净结果为负.
+- 注意 k=3 的 accept (0.033) **低于** k=7 (0.126): 草稿短时几乎全空
+  (draft/step 只有 0.16), 长草稿反而有 n-gram 可用; 两者都远低于 2x 所需的
+  `每步 >=2 token`.
+- 早期一次运行曾出现 `0.19x` 的读数, 那是槽位污染 bug (见下第 4 条) 把
+  错误路径的惩罚放大后的结果; 修复后的干净数字是 0.79x/0.83x.
+
+#### 落地过程中实测到的三个约束 (负结果, 避免重复踩)
+
+1. **多行不能走残差 epilogue**: `decode_bias_out` 的 bias 契约是 `[N]`
+   (单行), R-054 的残差融合只对 rows=1 成立. 多行验证必须走
+   `GEMV + elementwise add`, 数值等价 (`test_bound_residual_*` 仍只覆盖单行).
+2. **非连续 q_out 会被静默丢弃**: Triton wrapper 里 `q_out.reshape(...)`
+   对非连续张量返回临时拷贝, kernel 写进拷贝后没人接; 表现为"注意力输出
+   全错但 kernel 单测全过". 现在 spec body 全程 `.contiguous()`.
+3. **`tl.arange` 要求 2 的幂**: ROWS=k+1 必须向上取到 2 的幂 (k=3 -> 4,
+   k=7 -> 8), 补齐行的 `valid_lens` 复制最后一行.
+4. **多行验证的槽位污染 (本轮抓到的实质 bug)**: 补齐行如果 token 是 0, 会把
+   垃圾 K/V 写进 cache; 下一轮窗口起点回退 (emitted < pad) 时这些槽会被真实
+   行读到, 表现为"每步都接受 1 个 token 但续写发散". 修法: 补齐行复制最后一
+   个真实 token 的窗口值, 并让 `ACTIVE` 在 capture 时固定为完整 ROWS
+   (constexpr 不随 replay 改变).
+5. **草稿路径必须与贪心逐位一致才可交付**: `test_spec_decode_matches_greedy_reference`
+   在修复槽位污染之前是 FAIL 的; 该用例是这条运行时的唯一正确性闸门.
+
+#### 机制可行性 vs 草稿来源 (结论)
+
+多行验证机制本身已打通并验证: 4 行一次 forward 的图 replay `3.93 ms`,
+对比单行 `3.27 ms`, K/V 只扫一遍, 投影走 Batch GEMV 模板. 即"一次权重读出
+4 个 token"的**机制成立** (成本模型: k=4 全接受约 2.6x, k=8 约 4.1x).
+
+卡点在**草稿来源**, 不在机制:
+
+| 草稿方案 | 是否需训练 | 需额外权重 | 本任务实测 |
+|---|---|---|---|
+| PLD (prompt-lookup) | 否 | 否 | 接受率 `0.019-0.045`, e2e `0.19x` (反而变慢) |
+| layer-skip 自投机 (同一模型的浅层) | 否 | 否 | 未实现; 需 p>=0.36 才可能 2x, 未测 |
+| 独立小模型草稿 (如同家族 1B) | **是** (或口径不干净) | 是 | 否决: XQT 不做训练, 且引入第二份权重 |
+
+PLD 的失败有明确原因: 英译中的输出 token 与英文源文没有 token 级重叠,
+prompt-lookup 几乎没有可用的 n-gram 续写. 该负结果与 drafter 实现无关
+(修掉 O(n^2) observe 后复测一致).
+
+### 目标对齐与最终判定
+
+- 会话目标 "W4A8 相对 w4a16 到 2x" 在**当前硬件 + 单请求贪心 decode** 下
+  未能达成, 且已用实测证明其不可达路径:
+  - 纯内核路线: 上限 `1.09-1.13x` (权重字节 1.27 GB/token 被两条路线共享,
+    INT8 激活不改变该字节数; ncu `dram% 67` 证据).
+  - 机制路线: 机制已验证可用 (4 行 `3.93 ms`), 但本任务上唯一 training-free
+    且不引入第二份权重的草稿 (PLD) 接受率不足 (`0.019-0.045` vs 需要的
+    `>=0.36`), 净结果为负 (`0.19x`).
+- 按用户决定 (选项 A) 收口: 交付完整证据链与基准产物; `SpecDecodeSession`
+  作为**未启用实验件**保留 (有单测与正确性闸门, 不进基准脚本默认路径).
+- 若未来要继续追 2x, 需要先解决草稿来源: (a) 同模型浅层自投机 (需实测 p),
+  或 (b) 允许引入训练过的草稿模型 (超出 XQT "不做训练" 的核心契约, 需要
+  用户重新确认范围).
+
+#### 验证落点 (R-055)
+
+- [基线 profile 脚本](../../../examples/xqt_models/minicpm5_2b_w4a8_profile.py)
+- [spec decode 基准](../../../examples/xqt_models/minicpm5_2b_spec_decode_bench.py)
+- [verify 步分解](../../../examples/xqt_models/minicpm5_2b_spec_verify_profile.py)
+- [运行时](../../../xqt/runtime/spec_decode.py),
+  [多行内核](../../../xqt/kernels/ops/_impl/triton/spec_decode_kernels.py)
+- 测试: [spec session](../../../tests/xqt/runtime/test_spec_decode.py),
+  [多行内核](../../../tests/xqt/kernels/test_spec_decode_kernels.py)
+- 产物: `artifacts/xqt/inference/minicpm5-2b/` 下 `w4a8_baseline_profile.json`,
+  `spec_verify_profile.json`, `spec_decode_benchmark.json`
+
+#### 测试范围说明
+
+- 本轮相关测试全绿: `tests/xqt/runtime/test_spec_decode.py` (7),
+  `tests/xqt/kernels/test_spec_decode_kernels.py` (5),
+  `tests/xqt/runtime/test_graph_decode.py` (10),
+  `tests/xqt/runtime/test_awq_w4a16_linear.py`,
+  `tests/xqt/kernels/test_decode_kernels.py`.
+- 全量 `tests/xqt/runtime|kernels|model` 里存在与本轮无关的既有失败
+  (`test_svd_*`, `test_svdq_*`, FLUX/SVD 系列, 约 14 例): 它们来自本次会话
+  之前工作区里未提交的 SVD/TVM-FFI 前端改动, 与本轮 decode/spec 代码无交集,
+  本轮未触碰这些文件.
+
+## R-056: MiniCPM5-2B prefill/decode 分相特化 (MLP-only W8A8 prefill)
+
+### 目标
+
+decode 侧已有完整特化 (单张 CUDA graph + fused GEMV + 单遍 GQA decode
+attention + 残差 epilogue), prefill 侧此前是 eager 通用路径. 本轮为
+prefill 落地分相特化: 依据实测瓶颈选择 kernel, 在 MiniCPM5-2B 上同运行
+A/B 检验, 且不回归 decode.
+
+### 基线 profile (真实 1715-token prompt, torch profiler, 100.6 ms CUDA)
+
+| 组份 | 时间 | 占比 |
+|---|---|---|
+| bf16 GEMM (dense dequant cache + F.linear) | 77.3 ms | 77% |
+| prefill attention (flash_fwd_kernel) | 7.5 ms | 7.4% |
+| eager elementwise (composite RMSNorm / silu / add / RoPE cat / copy) | ~16 ms | 16% |
+
+prefill 是 **compute-bound**: 77.3 ms 里权重只读 ~4.5 GB (约 58 GB/s),
+远低于本机 ~590 GB/s. 因此 prefill 的杠杆不是省权重字节, 而是提高 GEMM
+吞吐. 实测本机 bf16 cuBLAS 4096^3 `82.7-90.8 TFLOPS`, 真实投影形状
+`71-77 TFLOPS` (已接近 roofline); `torch._int_mm` 4096^3 仅 `80.4 TOPS`
+(8192^3 `64 TOPS`), XQT Triton W8A8 4096^3 `144.1 TOPS`. 即消费级 sm_89
+的 INT8 峰值只有 bf16 的约 `1.6x`, 这就是 W8A8 prefill 的理论上界来源.
+
+### 方法
+
+- 范围: 只对 MLP 的 gate/up/down 走 W8A8 (q/k/v 的 N=256 在小 N 下是
+  亏损项, o_proj/attention 保持 bf16). gate/up 共享同一 quantize 输入,
+  用一次 `quantize_int8_rowwise_triton`.
+- 权重视图: `_MiniCPM5W4A16HybridLinear` 新增 `supports_prequant()` /
+  `forward_prequant(qactivation, activation_scale)`, INT8 权重由 storage 的
+  dense bf16 权重离线 per-output-channel 对称量化一次, 并**预转置为 K-major
+  `[K, N]`** 存缓存.
+- 运行时: `CudaGraphDecodeSession` 新增 opt-in `int8_prefill=False` /
+  `min_int8_prefill_rows`, 新增 `_prefill_mlp_int8`; 不满足阈值或缺少视图时
+  逐层回退 bf16. decode 路径 (graph capture / `_decode_body` / `_norm` /
+  `bind_residual`) 未改.
+- Phase A (零精度风险): prefill 的 `post_attention_layernorm` 改用 fused
+  `F.rms_norm`, MLP 改用 fused SwiGLU.
+
+### 关键负结果 (决定了实现形态)
+
+1. **朴素 W8A8 (独立 quant op + `gemm_int8_triton`) 是净亏**: 每层 bf16
+   `2.158 ms` vs quant+gemm `2.474 ms` (quant 单独 `0.660 ms`). 该 0.66 ms
+   是 torch-op 假象 (fp32 upcast + amax + div + round + clamp + cast); 换成
+   专用 `quantize_int8_rowwise_triton` 后只有 `0.012-0.018 ms`. 因此**不需要**
+   新写 fused-producer 量化 kernel 族.
+2. **`gemm_int8_triton(transpose_b=True)` 每次调用都做整权转置**
+   (`b.t().contiguous()`), 在 MLP 形状上约 `0.7 ms/层`. 预转置一次
+   (`transpose_b=False`) 数值逐位一致 (验证 `allclose` True), 是 1.12x 与
+   1.58x 的差别. 这是本轮最大的单点发现.
+3. 小 M 下 W8A8 大幅亏损 (M<=64 约 0.3-0.8x), 因此必须设行数阈值.
+
+### 同运行 A/B (真实模型, 1715-token prompt)
+
+prefill 延迟 (median, `int8_prefill` 唯一变量, 最终代码 HF-parity 基线):
+
+| 路线 | prefill ms | 相对 bf16 dense |
+|---|---|---|
+| bf16 dense (基线) | 113.89 | 1.00x |
+| MLP-only W8A8 (修转置后) | **68.92** | **1.652x** |
+
+(转置修复前的中间读数 `106.95 -> 67.64 ms = 1.581x`; 两轮同运行对照都在
+`1.58-1.65x`, 单次绝对值跨运行有波动, 比值只看同一次运行内对照.)
+
+质量与不回归 (同运行, 同权重):
+
+- 首个 token 一致 (`1307 == 1307`); KV drift `mean_rel=0.035`,
+  `min_cos=0.9985`.
+- decode steady `~329 tok/s`, `int8_prefill` on/off `ratio 0.997`, 无回归.
+- 任务级英译中 vs BF16 eager, **1536-token 全长口径** (R-052 方法学):
+  dense-prefill char BLEU-4 `0.1807` / ROUGE-L `0.3376`; int8-prefill
+  `0.1803` / `0.3403`, 即**等价** (差值在噪声内). 512-token 短口径单 prompt
+  的 BLEU 抖动较大 (dense 自身跨运行 `0.293-0.328`), 不作为结论依据.
+  两条量化路线的 greedy token 漂移本身不算质量失败 (R-051 方法学).
+
+### 阈值与适用边界
+
+- `min_int8_prefill_rows` 默认 `256`. 最终代码 (转置修复后) 的 M 扫描
+  (MLP gate/up/down 合成, 同运行 interleaved):
+
+  | M | 32 | 64 | 128 | 192 | 256 | 512 | 1024 | 1715 |
+  |---|---|---|---|---|---|---|---|---|
+  | bf16/int8 | 0.49x | 0.75x | 0.88x | **1.80x** | **1.95x** | 1.63x | 2.13x | 2.17x |
+
+  交叉点在 `M ~ 128-192`; 默认 `256` 是安全且略保守的选择 (留出小 M 抖动余量).
+- 仅 Llama 家族, 单请求 greedy; 不改 decode, 不引入调度/批处理/paged KV.
+- INT8 权重由 dense bf16 权重派生 (复用既有 dense cache), 额外约
+  `N*K` int8 字节/MLP 投影.
+
+### 未采纳 (已否决, 避免重试)
+
+- **FP8 prefill**: 现有 `Fp8MmaLinear` 是 per-tensor 静态 scale 路线,
+  sm_89 上 rowwise `_scaled_mm` 比 fp16 慢, 且 per-tensor 离群敏感性与
+  R-051 记录的 W8A8 坍塌同源; 无理由优于 INT8.
+- **fused-dequant W4A16 GEMM**: prefill compute-bound, dequant GEMM 仍在
+  寄存器做 bf16 MMA, 吞吐不可能超过 bf16 cuBLAS; 只省非瓶颈的权重字节.
+- **prefill CUDA graph**: 目标 1715-token 下 77 ms 是两个大 GEMM + 一个
+  flash kernel, launch 开销约 1-2 ms, 图只能收回 <2%, 且需按长度分桶;
+  仅对几十 token 的短 prompt 有意义, 属 serving 形状, v1 不做.
+- **多行 split-half RoPE 融合**: 现有 `rope_write_qkv_triton` 是单 token
+  (`position` 标量), 不能复用到 prefill; `fused_rope_triton` 是 even/odd
+  交错布局, 不是 HF split-half, 不可混用.
+
+### 验证落点 (R-056)
+
+- [运行时 prefill](../../../xqt/runtime/graph_decode.py) (`int8_prefill`,
+  `_prefill_mlp_int8`), [hybrid 视图](../../../xqt/model/minicpm5.py)
+  (`supports_prequant` / `forward_prequant`)
+- 测试: [INT8 prefill](../../../tests/xqt/kernels/test_int8_prefill.py),
+  [graph decode](../../../tests/xqt/runtime/test_graph_decode.py)
+- 复跑脚本 (会话内 `/tmp`, 未入库): prefill profile / 真实 A/B /
+  质量闸门; 后续如需长期复跑应落成 `examples/xqt_models/minicpm5_2b_prefill_ab.py`
+- 本轮相关测试全绿: `tests/xqt/kernels/test_int8_prefill.py`,
+  `tests/xqt/runtime/test_graph_decode.py`,
+  `tests/xqt/kernels/test_decode_kernels.py`,
+  `tests/xqt/runtime/test_awq_w4a16_linear.py`,
+  `tests/xqt/model/test_minicpm5.py`; `ruff check` + `ruff format --check` 过.
+
+## R-057: MiniCPM5-2B decode attention 张量核化 (tl.dot GQA 组) 与 A/B 判定 (2026-09-14)
+
+### 目标
+
+回答 R-054 遗留的算法级路线: 把 decode attention 的串行 SIMT softmax 步改成
+`tl.dot` + 张量核 (GQA 组当小 M), 在真实链路上能否兑现 e2e 收益. 形状:
+MiniCPM5-2B (42 层, 16 q head / 2 kv head, head_dim 128), 单请求 greedy,
+AWQ W4A16 + native SM89 GEMV, 单张 CUDA graph, 1715-token prompt.
+
+### 基线与测量方法
+
+- 基线: 生产 SIMT decode attention (`_decode_attn_partial_kernel` +
+  `_decode_attn_merge_kernel`, `splits=16, block_l=128, num_warps=2`).
+- 候选: `_decode_attn_partial_tc_kernel` + 同一个 merge kernel, `splits=16/64`.
+- 同进程同一份量化模型, 3 个 `CudaGraphDecodeSession` 同帧交错, 15 轮 median,
+  **每轮轮序反转**; 逐轮记录 nvidia-smi 时钟/温度; torch profiler 每路线重复
+  2 轮以暴露自身方差.
+- 入口 `examples/xqt_models/minicpm5_2b_attn_ab.py`, 产物
+  `artifacts/xqt/inference/minicpm5-2b/attn_impl_ab.json`.
+
+### 瓶颈与假设
+
+SIMT 版每个 (q_head, split) program 各读一遍 K/V, 同一 kv head 的 K/V 被读
+`GROUP=8` 次; TC 版每个 (kv_head, split) program 一次读入整组. 假设: KV 复用
+8x + MMA 能把 partial 时间减半; R-054 的负结果 (SIMT 下的 GQA 分组更慢) 源于
+分组后每 program 延迟暴露, 张量核路径每 program 计算密度更高, 需要实测判定.
+
+### 实现
+
+- `_decode_attn_partial_tc_kernel` (xqt/kernels/ops/_impl/triton/decode_kernels.py):
+  每 program = (kv_head, split), q tile 为 `[BM, HEAD_DIM]` (BM = 16, 前
+  GROUP=8 行有效), `scores = tl.dot(q, tl.trans(k))`, `acc += tl.dot(p, v)`,
+  online softmax 与 partial 缓冲布局与 SIMT 版一致, merge kernel 直接复用.
+- wrapper `decode_attention_forward_triton_tc`, `block_l` 默认 64:
+  block_l=128 时 K/V staging 需要 139 KB shared memory, 超过 sm_89 的 99 KB
+  (Triton 直接抛 OutOfResources).
+- `CudaGraphDecodeSession` 新增 `attention_impl: "simt" | "tc"` (默认 simt);
+  tc 要求 head_dim >= 16 且为 2 的幂, 不满足时显式报错, 不静默回退.
+
+### 结果
+
+v2 (3 路线, 轮序反转, 15 轮 median, GPU 全程 2835 MHz / 54-57C, 无降频):
+
+| 路线 | step ms | tok/s | vs control |
+|---|---|---|---|
+| simt_s16 | 3.016 | 331.6 | 1.0000x |
+| **tc_s16** | **2.892** | **345.8** | **0.9587x (快 4.1%)** |
+| tc_s64 | 2.902 | 344.6 | 0.9621x |
+
+profiler (每路线 2 轮, 自洽) 与 wall 互证:
+
+| 指标 | simt | tc_s16 |
+|---|---|---|
+| partial | 404.2 / 406.5 us | 250.7 / 252.3 us |
+| merge | 40.2 / 40.1 us | 39.7 / 39.6 us |
+| 全步合计 | 3013.7 / 3059.3 | 2894.6 / 2837.4 (wall 2892) |
+
+收益归因: partial -38% (KV 组内只读一遍 + MMA), merge 不变; `splits=64` 无
+附加收益且 merge 40 -> 60 us.
+
+数值: kernel 单测 vs SDPA(GQA) 在 16/2/128 形状 max abs ~1e-3 (bf16 级);
+真实模型 greedy agreement vs SIMT = 0.078. 校准: 同模型下
+`w4a16_graph vs w4a16_eager` 只有 0.0101, `bf16_graph vs bf16_eager` 0.0315,
+所以 0.078 属正常漂移, 不是质量失败.
+
+### 测量方法修正 (v1 -> v2, 可复用的坑)
+
+第一轮 (v1) 用 4 条路线 (simt/tc16/tc32/tc64), 固定顺序, profiler 顺序单次,
+得到相反结论: simt 4.674 vs tc_s16 4.745 ms/step (TC 慢 1.5%), 且 profiler
+在两条路线的 AWQ GEMV (同一份权重, 同一实现) 上报出 3262 vs 1877 us 的 44%
+差异. 原因: 固定顺序 + 4 个 session 让 GPU 状态漂移, 基线被拉长 55%,
+profiler 计时不可比. v2 改为轮序反转 + profiler 重复两轮后, profiler 与 wall
+自洽. 规则: 跨路线 profiler 数字必须轮序且重复测量; 细粒度判定只看同一轮内
+的 wall 对照.
+
+### 适用边界与未采纳
+
+- 不做 paged KV / 多请求 (XQT 契约外); TC 组 tile 的 M 只来自 GQA 组, 单请求
+  batch=1 没有别的 M 来源.
+- head_dim < 16 或非 2 的幂不可用 (显式报错).
+- 默认仍是 `attention_impl="simt"`: TC 为 opt-in (~4% e2e), 避免改变既有
+  数值路径与 HF-parity 行为.
+- 未采纳: TC 版提高 `splits` 到 64 (merge 变贵, 无收益); `block_l=128`
+  (shared memory 超限).
+
+### 可复用规则
+
+1. GQA decode 的组内 KV 复用是真实的 kernel 级收益来源: 共享 KV + `tl.dot`
+   把 partial 404 -> 251 us (-38%), e2e -4.1%.
+2. `tl.dot` decode 的 M 由 GQA 组大小决定, 必须 pad 到 16; 想再提高 M 只能靠
+   多 token (spec decode) 或多请求.
+3. `block_l` 受 shared memory 限制: sm_89 + head_dim=128 时 64 是上限.
+4. 跨路线 kernel profiler 对比必须轮序 + 重复, 否则 GPU 状态漂移会伪造
+   40%+ 的差异.
+
+### 验证落点
+
+- [decode kernels](../../../xqt/kernels/ops/_impl/triton/decode_kernels.py)
+  (`_decode_attn_partial_tc_kernel`, `decode_attention_forward_triton_tc`)
+- [runtime](../../../xqt/runtime/graph_decode.py) (`attention_impl`)
+- 测试: [decode kernels](../../../tests/xqt/kernels/test_decode_kernels.py),
+  [graph decode](../../../tests/xqt/runtime/test_graph_decode.py)
+- [A/B 脚本](../../../examples/xqt_models/minicpm5_2b_attn_ab.py)
+- 产物: `artifacts/xqt/inference/minicpm5-2b/attn_impl_ab.json`
+
+## R-058: forward attention 自研优化 (Triton GQA + 长度分桶) 与 Sage 风格量化 attention 判定 (2026-09-15)
+
+### 目标
+
+回答两件事: (1) 把 XQT 通用 forward attention 补成"优化版" (支持 GQA, 调度按长度分桶),
+在 MiniCPM5-2B 真实 prefill 链路上能否打赢 `torch` 的 cuDNN SDPA; (2) 仓库内自研的
+SageAttention-v1 风格量化 attention (INT8 QK + FP16 PV) 在 sm_89 上是否值得默认启用.
+精度契约: fp16/bf16, FP32 score 与 accumulator; 形状 MiniCPM5-2B (16 q head / 2 kv head,
+head_dim 128, causal) 与通用 MHA h8x8 (head_dim 64/128, causal 与非 causal). 设备
+RTX 4070 Ti SUPER (`sm_89`), torch 2.12.1+cu130, triton 3.7.1.
+
+### 基线与测量方法
+
+- 内核级: `research/xqt-gemm/bench_sm89_attention_length_sweep.py`, 31 个 case
+  (prefill-causal / prefill-noncausal / decode, head_dim 64/128, MHA h8x8 与 GQA h8x2),
+  候选 `sdpa` / `triton` / `tilelang` / `sage`. 正确性闸门 vs SDPA (非量化
+  atol/rtol 2e-2; 量化 5e-2 + cosine). 配对判定用 `_interleaved_stability`
+  (9 轮 x 31 次, 逐轮轮序反转, >=7/9 轮胜且 >=3% 领先才算 stable win).
+- 真实路线: `examples/xqt_models/minicpm5_2b_prefill_ab.py`, 同一份量化模型
+  (AWQ W4A16), 单进程 7 轮交错 prefill, 逐轮轮序反转, median, 逐轮 nvidia-smi
+  时钟采样, 输出 logit cosine / top-1 / greedy token agreement.
+- 产物: `research/xqt-gemm/artifacts/2026-09-15-sm89-attention-length-sweep/`,
+  `artifacts/xqt/inference/minicpm5-2b/prefill_ab.json`.
+
+### 瓶颈与假设
+
+原 `fused_attention_forward_triton` 已经是 FA2-style online softmax, 但有两个明确缺口:
+(1) 不支持 GQA (`_validate_attention_shapes` 强制 q/k head 数相等), 而 MiniCPM5 是 16/2;
+(2) 调度只有两个 exact-match decode preset, 其余一律落回 `(64,64,4,2)`, 没有按长度分桶.
+假设: 补上 GQA + 分桶调度后, 通用 Triton kernel 能在部分长度接近或超过 SDPA.
+量化 attention 的假设来自 SageAttention: INT8 QK + FP16 PV 省的是 MatMul 带宽与算力,
+但需要额外做量化与 smoothing, 短序列下固定开销占比高.
+
+### 实现
+
+- `xqt/kernels/ops/_impl/triton/attention.py`: kernel 新增 `GROUP: tl.constexpr`,
+  `kv_bh = pid_bh // GROUP` (query head 连续分组, `GROUP = heads_q // heads_kv`);
+  新增 `TRITON_ATTENTION_LENGTH_BUCKETS` / `TRITON_ATTENTION_BUCKET_SCHEDULES` 与
+  `_length_bucket`, 解析顺序改为 exact preset -> 长度分桶 -> 默认; 参考实现转发
+  `enable_gqa` 以支持 GQA 数值对照. MHA (GROUP=1) 行为不变.
+- `xqt/kernels/ops/_impl/triton/sage_attention.py` (新): SageAttention-v1 风格,
+  INT8 QK (per-block 对称量化, INT32 累加后按 scale 外积反量化) + FP16 PV (FP32 累加),
+  可选 K smoothing (按 channel 减序列均值). **明确不是 2++ / 不是 FP8** (无 per-thread
+  INT4 QK, 无 FP8 PV, 无 FP16 accumulator).
+- `xqt/runtime/graph_decode.py`: prefill attention 改为可插拔
+  (`prefill_attention_impl: "sdpa" | "triton" | "tilelang"`, 默认 `"sdpa"` 行为不变);
+  decode 热路径未改动. TileLang 在 GQA 形状显式报错, 不静默回退.
+- `xqt/kernels/ops/attention/__init__.py` + `spec.py` + `registry.py`: 新增
+  `KernelBackend.SAGE`, 注册 Sage KernelSpec 与 `fused_attention_sage` wrapper,
+  新增 `recommend_attention_backend` 长度感知路由 (Sage 不进入
+  `_DEFAULT_BACKEND_PRECEDENCE`, 也不被自动选中).
+
+### 结果
+
+内核级扫描 (无并发, 单次运行, median ms):
+
+| case | sdpa | triton | tilelang | sage | winner |
+|---|---|---|---|---|---|
+| prefill-causal-h8x8-d64-s512 | 0.0270 | 0.0208 | 0.0179 | 0.0329 | tilelang |
+| prefill-causal-h8x8-d64-s2048 | 0.1043 | 0.0929 | 0.0825 | 0.1148 | tilelang |
+| prefill-causal-h8x8-d64-s8192 | 1.0456 | 1.0794 | 0.9769 | 1.1719 | tilelang |
+| prefill-causal-h8x8-d128-s8192 | 1.9519 | 2.5884 | 2.0412 | 2.7066 | sdpa |
+| prefill-noncausal-h8x8-d128-s8192 | 3.6203 | 4.9599 | 3.8878 | 4.5168 | sdpa |
+| decode-h8x8-d64-kv512 | 0.0386 | 0.0198 | failed | 0.0320 | triton |
+| decode-h8x8-d64-kv8192 | 0.0401 | 0.1611 | failed | 0.2608 | sdpa |
+
+- 配对门: `sage_vs_triton` 几乎全部指向 triton, `sage_vs_sdpa` 多数指向 sdpa;
+  仅 `decode-h8x8-d64-kv512` 出现 sage 的 stable win (gap 0.13-0.19).
+  **Sage 风格量化 attention 在本机几乎全形状慢于 SDPA 与 Triton FA.**
+- TileLang 31 个 case 中 12 个 failed: 全部 5 个 decode (q_len=1) 是
+  `Layout infer conflict between acc_s and acc_s_cast`, 全部 5 个 GQA 是
+  `requires matching head count` (不支持 GQA).
+- 内核级 crossover: decode-d64 最早 stable win 在 kv128 (triton);
+  prefill-causal-d64 在 384 (tilelang); prefill-causal-d128 在 512 (tilelang).
+
+真实路线 prefill A/B (MiniCPM5-2B, W4A16, 7 轮 median):
+
+| prompt len | sdpa ms | triton ms | triton/sdpa | winner |
+|---|---|---|---|---|
+| 128 | 19.78 | 27.10 | 1.369 | sdpa |
+| 512 | 31.81 | 33.61 | 1.057 | sdpa |
+| 1024 | 59.97 | 62.64 | 1.045 | sdpa |
+| 2048 | 120.64 | 125.51 | 1.040 | sdpa |
+| 4096 | 262.52 | 279.19 | 1.064 | sdpa |
+
+- **真实 prefill 上没有任何长度 Triton 能赢 SDPA** (短 prompt 差 37%, >=512 差 4-6%).
+  TileLang 因模型是 GQA (16 q / 2 kv) 被显式拒绝, 无法在真实路线评估.
+- 数值一致: Triton vs SDPA logit cosine 0.99922-0.99976, top-1 全长度一致,
+  first token 一致. 量化 W4 路线上 greedy agreement 在 1715-token prompt 为 0.25,
+  但 BF16 路线 token-identical 且 kernel 自身 max abs diff 0.0039, 归因于 argmax
+  放大 sub-quantization logit 噪声, 不是 kernel 正确性问题.
+
+### attention 占比归因 (手写 CUDA FMHA 的 go/no-go)
+
+在投入手写 sm89 CUDA/CuTe FMHA kernel 之前, 先量化 attention 在真实前向里的占比
+(`research/xqt-gemm/profile_attention_share.py`, torch.profiler CUDA self-time,
+单个 warm forward; 这是时间归因, 不是加速比 A/B):
+
+| scenario | total GPU ms | attn ms | attn % | 假设 attention 快 2x 的 e2e 收益 |
+|---|---|---|---|---|
+| FLUX.2 Klein primary (img256/txt512) | 67.20 | 2.78 | 4.13% | 2.07% |
+| FLUX.2 Klein guardrail (img1024/txt512) | 139.83 | 9.08 | 6.49% | 3.25% |
+| MiniCPM5-2B prefill L=512 | 28.06 | 1.00 | 3.55% | 1.78% |
+| MiniCPM5-2B prefill L=2048 | 126.09 | 10.60 | 8.41% | 4.20% |
+
+- 两个场景的大头都是 GEMM/linear (80.15% Klein primary) 与 norm/elementwise (15.72%).
+- 正在跑的 attention 已经是 PyTorch 内置 flash 后端
+  (`pytorch_flash::flash_fwd_kernel`, bf16, head_dim 128), 不是未融合的 SDPA,
+  所以"手写内核"要竞争的对象是一个已经融合的 flash kernel, 2x 前提本身偏乐观.
+- 结论: 手写 attention 内核即使做到 2x, e2e 上限也只有 1.8-4.2%, 低于本仓库
+  其他优化采用的 ~15% 门槛. 因此**不把手写 FMHA 作为当前投入方向**.
+
+### 适用边界
+
+- 新 Triton kernel: fp16/bf16, 连续 BHSD, `seq_kv >= seq_q`, head_dim in {16,32,64,128},
+  支持 GQA (`heads_q % heads_kv == 0`), 仅前向. 长度分桶调度表是 sm_89 起始策略,
+  只在内核级扫描中验证方向, 不是端到端加速承诺.
+- Sage kernel: 同上述布局约束, head_dim in {32,64,128}, `smooth_k` 改变数值.
+  在本机 sm_89 上作为 opt-in, 不默认启用.
+- prefill 可插拔: 默认 `"sdpa"` 行为与历史逐位一致; `"tilelang"` 仅非 GQA 可用.
+- 本记录只覆盖 forward attention; decode 的 split-K kernel (R-057) 未改动.
+
+### 未采纳方案
+
+- 未把 Sage 放入 `_DEFAULT_BACKEND_PRECEDENCE`, 路由函数也不自动返回 Sage:
+  实测它在 sm_89 上几乎全形状更慢.
+- 未采纳 causal leading-block skip: 在 lower-right 语义 (`seq_kv >= seq_q`) 下
+  query 行 0 永远可见 key 0, 不存在全 mask 的 leading block, 现有 `loop_end`
+  已跳过尾部全 mask block.
+- TileLang 不能作为本模型 prefill 后端 (不支持 GQA), 也不能做 decode (layout 失败).
+- 手写 sm89 CUDA/CuTe FMHA kernel 尚未落地, 属待验证候选 (见可复用规则 5).
+
+### 可复用规则
+
+1. 在 sm_89 上, 通用 Triton/TileLang attention 很难在真实 prefill 上打赢 vendor
+   cuDNN SDPA; 声称内核收益前必须在真实路线做同帧交错 A/B.
+2. 量化 attention (INT8 QK + FP16 PV + smoothing) 在 sm_89 的短/中序列不划算:
+   量化与 smoothing 的固定开销摊不掉, 只在个别短 KV decode 形状微弱领先.
+3. TileLang 在 sm_89 上有两类硬限制: q_len=1 decode 触发 layout inference 冲突,
+   且不支持 GQA. 选后端前先确认形状落在它的可用集内.
+4. GQA 支持是 XQT attention 的必需项 (MiniCPM5-2B 是 16/2), 任何新后端都要先过 GQA.
+5. 本机可行的手写 attention 路线受 sm_89 指令集约束: 只有 `mma.sync` m16n8k16
+   (fp16/bf16) / m16n8k32 (int8) + `cp.async` + `ldmatrix` 可用, `wgmma`/TMA/
+   `stmatrix`/`tcgen05` 均不可用; CUTLASS example 88 (Hopper) / 77 (Blackwell) 直接出局,
+   可参考的只有 legacy example 41 (Sm80 FMHA, FP16).
+
+### 验证落点
+
+- [Triton attention](../../../xqt/kernels/ops/_impl/triton/attention.py)
+  (GQA `GROUP`, `TRITON_ATTENTION_LENGTH_BUCKETS`, `resolve_triton_attention_schedule`)
+- [Sage attention](../../../xqt/kernels/ops/_impl/triton/sage_attention.py)
+- [attention ops registry](../../../xqt/kernels/ops/attention/__init__.py)
+  (`recommend_attention_backend`, `fused_attention_sage`)
+- [runtime prefill 插拔](../../../xqt/runtime/graph_decode.py) (`prefill_attention_impl`)
+- 测试: [triton attention](../../../tests/xqt/test_operator_triton_attention.py),
+  [backend routing](../../../tests/xqt/test_attention_backend_routing.py),
+  [graph decode](../../../tests/xqt/runtime/test_graph_decode.py)
+- [内核级扫描](../../../research/xqt-gemm/bench_sm89_attention_length_sweep.py)
+- [真实路线 prefill A/B](../../../examples/xqt_models/minicpm5_2b_prefill_ab.py)
+- 产物: `research/xqt-gemm/artifacts/2026-09-15-sm89-attention-length-sweep/`,
+  `artifacts/xqt/inference/minicpm5-2b/prefill_ab.json`
+
+## R-058: SM89 硬件原生 W4A8 DP4A GEMV 与真 INT8 激活端到端解码突破
+
+### 目标
+
+在 NVIDIA Ada Lovelace 架构 (RTX 4070 Ti SUPER, `sm_89`) 上实现基于硬件指令 `IDP4A` (`__dp4a`)
+的原生 W4A8 GEMV 内核与全链路真 INT8 激活解码流水线, 彻底消除原有在 Triton 中伪量化后立即
+反量化回 BF16 并走浮点 FMA 的多余开销, 解决过去 W4A8 稳态速度倒退反慢于 W4A16 的工程顽疾.
+目标场景为单人交互式长文本生成 ($M=1$, prompt=1715 tokens, decode=1536 tokens), 要求 W4A8
+稳态解码吞吐与端到端延迟实质性超越成熟的生产级 W4A16 路线.
+
+### 基线
+
+使用 `examples/xqt_models/minicpm5_2b_graph_decode.py` 在相同设备, 相同提示词 (1715 tokens),
+相同最大生成长度 (1536 tokens) 下同次同机严格测量.
+对比路线:
+- `bf16_eager`: 官方 HuggingFace BF16 `generate` (23574 ms, 61.8 tok/s).
+- `bf16_graph`: 全融合 BF16 单张 CUDA Graph 运行时 (11849 ms, 122.3 steady tok/s).
+- `w4a16_eager`: AWQ W4A16 原生内核 + 官方 `generate` (29546 ms, 50.4 tok/s).
+- `w4a16_graph`: AWQ W4A16 原生 SM89 内核 + 全融合残差 epilogue + 单图解码 (4677 ms, 323.0 steady tok/s).
+
+### 瓶颈与假设
+
+1. **伪量化的额外开销与负收益**:
+   历史上的 W4A8 实验在 Triton RMSNorm 与 SwiGLU 之后执行每行 INT8 量化, 但由于底层缺乏
+   真正的 INT8xINT4 硬件执行核, 随后立即通过反量化还原为 BF16 并调用现有的 AWQ W4A16 浮点核.
+   每层因此多出 2 次无收益的量化与反量化访存核开销, 稳态解码吞吐由 323.0 tok/s 降至 ~310 tok/s.
+2. **$M=1$ GEMV 下 Tensor Core 与 SIMT 的取舍**:
+   在单批次 decode ($M=1$) 场景下, 矩阵乘法退化为纯 GEMV (访存密集型). SM89 的 INT8 Tensor Core
+   (`mma.sync.aligned.m16n8k32`) 要求输入按 $M=16$ 瓦片对齐, 当 $M=1$ 时需做 15 倍 padding,
+   导致大量无效计算和指令开销, 实测单层延迟 ~42 μs. 而 SIMT 原生点积指令 `IDP4A` (`__dp4a`)
+   单周期即可完成 4 对 8-bit 整数内积累加, 8 个线程规约一组 group (128 元素), 实测单层仅 8.4 μs.
+3. **因式分解消除内层浮点计算**:
+   激活 scale $S_a$ 独立于特征维度 K 与各个权重 group. 将 $S_a$ 从内层循环中提出, 循环内
+   仅执行纯整数 `__dp4a` 累加与 group 权重反量化, 在 warp 块规约完成后由 warp leader 仅做 1 次
+   浮点乘法, 使热路径的 ALU 吞吐最大化.
+4. **CUDA Graph 兼容的动态 Scale 传递**:
+   CUDA Graph 在捕获阶段固化主机调用参数, 无法通过 CPU 标量参数传递每 step 动态变化的激活 scale.
+   内核改造成直接接收设备显存指针 `const float* scale_a_ptr`, Triton 算子单核直接将 scale 写回
+   预分配的 GPU 标量张量, DP4A 内核结尾直接从 L1/L2 缓存读取, 彻底消除 Host-Device 同步开销.
+
+### 实现
+
+1. **硬件级 W4A8 DP4A GEMV 内核**:
+   在 `xqt/kernels/jit/csrc/quantization/awq_w4a16_sm89_kernel.cu` 中实现
+   `w4a8_dp4a_gemv_kernel`, 导出 `xqt_awq_w4a8_sm89_decode` 与带残差融合的
+   `xqt_awq_w4a8_sm89_decode_bias`.
+   权重保持 AWQ interleave-4 布局, 激活为 `int8_t*`. 通过位运算解包 4-bit 权重至 8-bit 容器,
+   连续发射两条 `__dp4a` 指令完成 8 对 INT8xINT4 整数点积.
+2. **动态 Scale 设备指针直通与规约因式分解**:
+   内核增加 `const float* scale_a_ptr` 与 `float scale_a_val` 重载; K 循环内只做 group scale
+   乘法, 块规约后统一乘以 $S_a$, 兼具极端精简指令与 CUDA Graph 原生兼容性.
+3. **C++ 与 TVM ABI 双栈同步导出**:
+   在 `awq_w4a16_sm89_binding.cpp` 和 `awq_w4a16_sm89_tvm_binding.cpp` 中同步新增
+   `decode_w4a8_out`, `decode_w4a8_scalar_out`, `decode_w4a8_bias_out`, `decode_w4a8_scalar_bias_out`,
+   扩展版本号为 `xqt-awq-w4a16-w4a8-sm89-v3`.
+4. **Triton 原生 INT8 输出算子族**:
+   在 `xqt/kernels/ops/_impl/triton/decode_kernels.py` 中编写:
+   - `rmsnorm_true_int8_triton`: 输入 BF16, 单核融合计算 RMSNorm 并直接量化输出 `torch.int8` + `float32` 设备 scale.
+   - `swiglu_true_int8_triton`: 输入 BF16 gate/up, 单核融合激活函数与动态量化, 原生输出 `torch.int8` + `float32` 设备 scale.
+   - `quantize_row_true_int8_triton`: Attention 输出的高效行级量化核 (~0.8 μs).
+5. **端到端运行时与模块对接**:
+   在 `xqt/runtime/modules/awq_w4a16_linear.py` 与 `xqt/model/minicpm5.py` 中暴露 `bind_w4a8`
+   和 `forward_w4a8`; 在 `xqt/runtime/graph_decode.py` 中预分配所有中间 INT8 激活缓冲区与 scale 标量,
+   使 QKV, O_proj, Gate/Up, DownProj 全链路在 CUDA Graph 中完整以硬件原生 W4A8 执行.
+
+### 结果
+
+同机同次运行完整端到端基准 (`artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json`):
+
+| 路线 | 端到端总耗时 (ms) | 稳态解码吞吐 (tok/s) | 相比 W4A16 变化 | 相对 BF16 Graph 加速比 |
+|---|---|---|---|---|
+| `bf16_eager` | 23574.3 | 61.8 | - | 0.51x |
+| `bf16_graph` | 11849.3 | 122.3 | - | 1.00x |
+| `w4a16_graph` (基准) | 4676.9 | 323.0 | 基线 | 2.64x |
+| **`w4a8_graph` (原生 DP4A)** | **4504.5** | **336.8** | **-172.4 ms / +13.8 tok/s** | **2.75x** |
+| **`w4a8_kv8_graph` (DP4A + INT8 KV)** | **4332.7** | **347.5** | **-344.2 ms / +24.5 tok/s** | **2.84x** |
+
+- **突破性收益**: 原生 W4A8 稳态吞吐提升至 336.8 tok/s, 配合 INT8 KV-Cache 进一步提升至 **347.5 tok/s**,
+  彻底扭转了过去量化开销倒贴的局面, 端到端生成用时从 4677 ms 缩短至 4333 ms.
+- **质量验证**: 生成 1494 tokens 顺利触发自然 EOS, 中文翻译长文本语义完整, 逻辑通顺.
+
+### 适用边界
+
+- 硬件: NVIDIA SM89 (RTX 4070 Ti SUPER / RTX 4090 等) 及支持 `__dp4a` 的 GPU (SM61+).
+- 输入形状: $M=1$ 解码, $K$ 和 $N$ 为 128 的整数倍, group_size=128.
+- 动态量化格式: Token-wise 对称 INT8, scale 为 float32 设备内存指针.
+- 仅适用纯 GEMV 解码; 预填充 (prefill, $M > 1$) 仍推荐使用 BF16 cuDNN SDPA 或 Tensor Core GEMM.
+
+### 未采纳方案
+
+- **未采纳 SM89 Tensor Core INT8 MMA 路线**: 在 $M=1$ 下需 pad 到 $M=16$, 无效计算和内存搬运比达 16x, 单层延迟 42 μs (比 DP4A 慢 5x).
+- **未采纳循环内动态反量化**: 在 K 循环内乘以 $S_a$ 会显著增加寄存器压力和浮点 ALU 停顿, 移至 epilogue 才能跑满硬件带宽.
+- **未采纳 Speculative Decoding / PLD**: 缺乏配套的同源微型草稿模型, 中英长文翻译 N-gram 接受率不足 15%, 验证惩罚导致端到端大幅减速.
+
+### 可复用规则
+
+1. 在 $M=1$ 的纯解码访存密集型 GEMV 中, SIMT `__dp4a` 原生指令的表现优于需大量 padding 的 Tensor Core MMA.
+2. 在 CUDA Graph 中传递动态 scale 时, 必须使用设备显存指针 (`const float* scale_ptr`), 严禁使用 CPU host 标量.
+3. 激活标量具有全局独立性时, 务必因式分解至循环外部 epilogue 执行, 避免热路径 ALU 指令膨胀.
+
+### 验证落点
+
+- [CUDA C++ GEMV 内核](../../../xqt/kernels/jit/csrc/quantization/awq_w4a16_sm89_kernel.cu)
+- [Torch Binding](../../../xqt/kernels/jit/csrc/quantization/awq_w4a16_sm89_binding.cpp) 与 [TVM Binding](../../../xqt/kernels/jit/csrc/quantization/awq_w4a16_sm89_tvm_binding.cpp)
+- [Triton INT8 算子族](../../../xqt/kernels/ops/_impl/triton/decode_kernels.py)
+- [W4A16/W4A8 线性层模块](../../../xqt/runtime/modules/awq_w4a16_linear.py) 与 [MiniCPM5 模型入口](../../../xqt/model/minicpm5.py)
+- [全图解码会话运行时](../../../xqt/runtime/graph_decode.py)
+- 测试: [CUDA 图解码单元测试](../../../tests/xqt/runtime/test_graph_decode.py) (24/24 pass)
+- 端到端基准: [MiniCPM5-2B 图解码测试](../../../examples/xqt_models/minicpm5_2b_graph_decode.py)
+- 产物数据: `artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json`
+

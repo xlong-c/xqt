@@ -32,8 +32,17 @@ def load_extension(
     verbose: bool = False,
     extra: dict[str, object] | None = None,
     max_jobs: int | None = 1,
+    backend: str | None = None,
 ) -> Any:
     """Build/load one extension only when explicitly called."""
+
+    selected_backend = backend or os.environ.get("XQT_JIT_BACKEND") or spec.backend or "tvm_ffi"
+    if selected_backend == "tvm_ffi":
+        from .tvm_ffi_loader import load_tvm_ffi_extension
+
+        return load_tvm_ffi_extension(
+            spec, verbose=verbose, extra=extra, max_jobs=max_jobs
+        )
 
     try:
         from torch.utils.cpp_extension import load

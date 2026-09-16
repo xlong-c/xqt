@@ -408,6 +408,31 @@ xqt.nn facade / torch module
 4. 测试与 benchmark 镜像 `ops` 结构: `tests/kernels/ops/<group>/test_<op>.py` + `benchmark/<group>/bench_<op>.py`, 共享 helper 放 `xqt.test.kernels`.
 5. 评审规则: 新增可调用内核必须补 `xqt.kernels.ops.*` 入口, 禁止继续扩大 `xqt.kernels.jit` 作为长期公开命名空间 (复刻 `sglang.kernels` review rule).
 
+### 9.1 attention 已注册后端与长度路由
+
+`attention.fused_attention` 当前注册四个后端:
+
+| backend | target | 默认 precedence | 说明 |
+| --- | --- | --- | --- |
+| `TORCH` | `xqt.kernels.ops.attention:_fused_attention_torch` | 是 | SDPA 参考/回退 |
+| `TRITON` | `xqt.kernels.ops._impl.triton.attention:fused_attention_forward_triton` | 是 | FA2 风格 forward, 支持 GQA/MQA |
+| `TILELANG` | `xqt.kernels.ops._impl.tilelang.attention:fused_attention_forward_tilelang` | 是 | prefill 后端, 不支持 GQA |
+| `SAGE` | `xqt.kernels.ops._impl.triton.sage_attention:sage_attention_forward_triton` | **否 (显式 opt-in)** | SageAttention-v1 风格 INT8 QK / FP16 PV |
+
+`KernelBackend.SAGE` 故意不在 `_DEFAULT_BACKEND_PRECEDENCE` 中, 也不会被 `recommend_attention_backend()` 自动选中. 依据 `research/xqt-gemm/artifacts/2026-09-15-sm89-attention-length-sweep/result.json` 的 kernel 级 sweep, Sage 风格 INT8 在 sm_89 上几乎全部测试形状都慢于 SDPA 和 Triton FA, 仅在 decode d64 kv512 略微领先. 这些是 kernel 级方向性结论, 不是端到端加速承诺.
+
+`xqt.kernels.ops.attention.recommend_attention_backend(...)` 是按实测 sweep 派生的长度感知路由 (纯函数, 不接入 decode 热路径), 返回 `AttentionRoutingDecision(backend, reason, bucket)`:
+
+| 形状条件 | bucket | 推荐 backend | 理由 |
+| --- | --- | --- | --- |
+| `seq_q <= 1` | decode | `triton` | Triton 在短 KV decode 形状获胜 |
+| `heads_q > heads_kv` (GQA/MQA) | 任意 | `triton` | TileLang 不支持 GQA, Triton 在分组形状获胜 |
+| 非 GQA, `seq_kv <= 512` | short | `triton` | Triton 在短 prefill 获胜 |
+| 非 GQA, `512 < seq_kv <= 2048` | medium | `tilelang` | TileLang 在中等长度 prefill 获胜 |
+| 非 GQA, `seq_kv > 2048` | long | `tilelang` | TileLang 在长 prefill 获胜 |
+
+当推荐后端在 `available_backends` 中不可用时回退到 `sdpa`/`torch`. Sage 永不自动返回.
+
 ## 十,迁移与兼容
 
 - Phase 1-2 仅新增 `xqt/kernels` 骨架与 `register_kernel` 盘点, 不搬实现, 零破现有链路.

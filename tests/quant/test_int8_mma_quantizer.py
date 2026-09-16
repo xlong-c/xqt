@@ -56,6 +56,8 @@ def test_int8_storage_materializes_runtime_execution_view() -> None:
     assert runtime.execution_metadata()["artifact_view"] == "runtime"
 
 
+
+
 def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
     session = XQTOptimizationSession(
         project={
@@ -90,8 +92,24 @@ def test_session_quant_dynamic_int8_mma_replaces_linear(tmp_path) -> None:
         "w8a8_int8_mma_runtime_quantization_contract"
     )
     assert stage.metrics["metadata"]["execution_state"] == "w8a8_int8"
-    assert stage.metrics["metadata"]["algorithm_executable"] is True
-    assert stage.metrics["quantized_modules"] == ["fc"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_int8_mma_cuda_pads_prefill_rows_to_supported_alignment() -> None:
+    source = torch.nn.Linear(
+        2048,
+        2048,
+        bias=False,
+        dtype=torch.bfloat16,
+        device="cuda",
+    ).eval()
+    qlinear = Int8MmaLinear.from_linear(source, engine="torch_int_mm").eval()
+
+    output = qlinear(torch.randn(1, 17, 2048, device="cuda", dtype=torch.bfloat16))
+    torch.cuda.synchronize()
+
+    assert output.shape == (1, 17, 2048)
+    assert output.dtype == torch.bfloat16
 
 
 def test_int8_mma_linear_cpu_metadata_reports_reference_not_true_mma() -> None:

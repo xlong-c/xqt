@@ -25,6 +25,7 @@ _NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
 _VECTOR_ALIGNMENT = 4
 _CUDA_SOURCE = csrc_path("quantization", "svdq_w8a8_sm89_kernel.cu")
 _BINDING_SOURCE = csrc_path("quantization", "svdq_w8a8_sm89_binding.cpp")
+_TVM_BINDING_SOURCE = csrc_path("quantization", "svdq_w8a8_sm89_tvm_binding.cpp")
 
 
 def _round_up(value: int, alignment: int) -> int:
@@ -54,8 +55,9 @@ def _require_bf16_cuda_2d(tensor: torch.Tensor, name: str) -> None:
         raise XQTBackendError(f"{name} must be bfloat16")
 
 
-@lru_cache(maxsize=1)
-def _load_extension() -> Any:
+@lru_cache(maxsize=2)
+def _load_extension(backend: str | None = None) -> Any:
+    selected_backend = backend or os.environ.get("XQT_JIT_BACKEND", "tvm_ffi")
     if os.environ.get("XQT_DISABLE_SVDQ_W8A8_SM89", "0") == "1":
         raise XQTBackendError("native sm_89 SVDQuant W8A8 backend is disabled")
     if not torch.cuda.is_available():
@@ -70,11 +72,16 @@ def _load_extension() -> Any:
             f"Nunchaku kernel headers are missing at {_NUNCHAKU_INCLUDE}"
         )
 
+    binding_source = (
+        _TVM_BINDING_SOURCE if selected_backend == "tvm_ffi" else _BINDING_SOURCE
+    )
+    ext_suffix = "_tvm_v1" if selected_backend == "tvm_ffi" else "_v1"
+
     try:
         return load_extension(
             CompileSpec(
-                name="xqt_svdq_w8a8_sm89_v1",
-                sources=(_BINDING_SOURCE, _CUDA_SOURCE),
+                name=f"xqt_svdq_w8a8_sm89{ext_suffix}",
+                sources=(binding_source, _CUDA_SOURCE),
                 include_dirs=(_NUNCHAKU_INCLUDE,),
                 cxx_flags=("-O3", "-std=c++20"),
                 cuda_flags=(
@@ -90,6 +97,7 @@ def _load_extension() -> Any:
                     "--generate-line-info",
                 ),
                 target_arch="sm_89",
+                backend=selected_backend,
             ),
             verbose=False,
         )
@@ -264,19 +272,41 @@ def svdq_w8a8_linear(
     if active_workspace.padded_rows != _round_up(int(inputs.shape[0]), 256):
         raise ValueError("workspace row extent does not match inputs")
     extension = _load_extension()
-    return extension.svdq_linear(
+    if hasattr(extension, "svdq_linear"):
+        return extension.svdq_linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.packed_down,
+            active_workspace.lora_activation,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_up,
+            packed.packed_bias,
+            packed.output_features,
+            float(lora_scale),
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=torch.bfloat16, device=inputs.device)
+    extension.quantize_act_lora(
         inputs.contiguous(),
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
         packed.packed_down,
         active_workspace.lora_activation,
+    )
+    extension.gemm_lora(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
+        active_workspace.lora_activation,
         packed.packed_up,
         packed.packed_bias,
-        packed.output_features,
         float(lora_scale),
     )
+    return output
 
 
 def bind_svdq_w8a8_linear(
@@ -302,22 +332,47 @@ def bind_svdq_w8a8_linear(
     output_features = packed.output_features
     scale = float(lora_scale)
 
-    def run(inputs: torch.Tensor) -> torch.Tensor:
-        return extension.svdq_linear(
+    if hasattr(extension, "svdq_linear"):
+        def run(inputs: torch.Tensor) -> torch.Tensor:
+            return extension.svdq_linear(
+                inputs.contiguous(),
+                quantized_activation,
+                activation_scales,
+                packed_down,
+                lora_activation,
+                qweight,
+                weight_scales,
+                packed_up,
+                packed_bias,
+                output_features,
+                scale,
+            )
+
+        return run
+
+    def run_tvm(inputs: torch.Tensor) -> torch.Tensor:
+        output = torch.empty((inputs.shape[0], output_features), dtype=torch.bfloat16, device=inputs.device)
+        extension.quantize_act_lora(
             inputs.contiguous(),
             quantized_activation,
             activation_scales,
             packed_down,
             lora_activation,
+        )
+        extension.gemm_lora(
+            quantized_activation,
             qweight,
+            output,
+            activation_scales,
             weight_scales,
+            lora_activation,
             packed_up,
             packed_bias,
-            output_features,
             scale,
         )
+        return output
 
-    return run
+    return run_tvm
 
 
 def w8a8_linear(
@@ -340,15 +395,32 @@ def w8a8_linear(
     if active_workspace.padded_rows != _round_up(int(inputs.shape[0]), 256):
         raise ValueError("workspace row extent does not match inputs")
     extension = _load_extension()
-    return extension.linear(
+    if hasattr(extension, "linear"):
+        return extension.linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.packed_bias,
+            packed.output_features,
+        )
+
+    output = torch.empty((inputs.shape[0], packed.output_features), dtype=torch.bfloat16, device=inputs.device)
+    extension.quantize_act(
         inputs.contiguous(),
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
+    )
+    extension.gemm(
+        active_workspace.quantized_activation,
         packed.qweight,
+        output,
+        active_workspace.activation_scales,
         packed.weight_scales,
         packed.packed_bias,
-        packed.output_features,
     )
+    return output
 
 
 __all__ = [

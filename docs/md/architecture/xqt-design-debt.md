@@ -118,7 +118,6 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 - [xqt-infer-handoff.md](xqt-infer-handoff.md)
 - [xqt-realignment-guide.md](xqt-realignment-guide.md) 术语准则; convert/nn/operator 合流仍待做
 - [xqt.md](xqt.md), [../usage/xqt-workflows.md](../usage/xqt-workflows.md)
-- [../../html/xqt.html](../../html/xqt.html) (阅读层, 仍反映现状 API)
 
 ---
 

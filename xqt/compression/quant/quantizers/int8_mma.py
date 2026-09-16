@@ -145,6 +145,7 @@ def quantize_with_int8_mma(
     allow_dynamic_fallback: bool = False,
     allow_noop: bool = False,
     activation_quant_block_size: int = 256,
+    min_int8_rows: int = 0,
     eps: float = 1e-6,
 ) -> Int8MmaQuantizationResult:
     """Replace Linear modules with a requested W8A8 INT8 MMA runtime contract."""
@@ -167,6 +168,9 @@ def quantize_with_int8_mma(
             policy.get("allow_dynamic_fallback", allow_dynamic_fallback)
         )
         allow_noop = bool(policy.get("allow_noop", allow_noop))
+        min_int8_rows = int(policy.get("min_int8_rows", min_int8_rows))
+    if min_int8_rows < 0:
+        raise XQTQuantError("min_int8_rows must be non-negative")
     if selection_mode not in _SELECTION_MODES:
         raise ValueError("selection_mode must be default or include_only")
     selected_strategy = (
@@ -260,6 +264,7 @@ def quantize_with_int8_mma(
             activation_scale=module_activation_scale,
             activation_quant_block_size=activation_quant_block_size,
             eps=eps,
+            min_int8_rows=min_int8_rows,
         )
         if not name:
             target_model = replacement
@@ -386,6 +391,7 @@ def quantize_with_int8_mma(
         "no_op": not bool(quantized_modules),
         "allow_noop": bool(allow_noop),
         "activation_quant_block_size": int(activation_quant_block_size),
+        "min_int8_rows": int(min_int8_rows),
         "block_m": int(block_m),
         "block_n": int(block_n),
         "block_k": int(block_k),

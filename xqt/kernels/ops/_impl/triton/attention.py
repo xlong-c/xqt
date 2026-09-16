@@ -59,6 +59,157 @@ _TRITON_ATTENTION_SM89_PRESETS: dict[
     ),
 }
 
+_BUCKET_DECODE = "decode"
+_BUCKET_SHORT = "short"
+_BUCKET_MEDIUM = "medium"
+_BUCKET_LONG = "long"
+
+# Length buckets for the schedule policy.  The boundaries are sequence-length
+# based so a caller can reason about them without any tuning cache:
+#   decode  seq_q == 1                 (one query row per request step)
+#   short   seq_kv <= 512              (small prompt / single chunk prefill)
+#   medium  512 < seq_kv <= 2048       (multi-chunk prefill)
+#   long    seq_kv > 2048              (long-context prefill)
+TRITON_ATTENTION_LENGTH_BUCKETS: tuple[str, ...] = (
+    _BUCKET_DECODE,
+    _BUCKET_SHORT,
+    _BUCKET_MEDIUM,
+    _BUCKET_LONG,
+)
+
+# Starting SM89 length-bucket policy.
+#
+# IMPORTANT: every entry here is a *starting point*, not a measured winner.  The
+# only evidence-backed schedules in this module are the two exact decode presets
+# above.  The bucket tiles below must be validated (or rejected) by the A/B
+# harness in research/xqt-gemm/bench_sm89_triton_attention.py before anyone
+# reports a speedup for them.
+#
+# Key: (bucket, head_dim, input_dtype, causal).  A missing key falls back to
+# _TRITON_ATTENTION_DEFAULT_SCHEDULE.  head_dim 64 float16 is intentionally
+# absent from this table: the long-prefill audit found no stable tile win at
+# that width, so it keeps the historical (64, 64, 4, 2) default for every
+# bucket, and the two exact decode presets already specialise its common
+# decode shapes.
+TRITON_ATTENTION_BUCKET_SCHEDULES: dict[
+    tuple[str, int, str, bool],
+    tuple[str, tuple[int, int, int, int]],
+] = {
+    # head_dim 128: narrow the M tile while decoding and deepen the pipeline as
+    # the KV length grows.  block_n stays at 64 to keep the K/V/score tiles
+    # inside SM89 shared-memory limits at head_dim 128.
+    (_BUCKET_DECODE, 128, "float16", True): (
+        "sm89_bucket_decode_d128_fp16",
+        (16, 64, 4, 2),
+    ),
+    (_BUCKET_DECODE, 128, "float16", False): (
+        "sm89_bucket_decode_d128_fp16",
+        (16, 64, 4, 2),
+    ),
+    (_BUCKET_DECODE, 128, "bfloat16", True): (
+        "sm89_bucket_decode_d128_bf16",
+        (16, 64, 4, 2),
+    ),
+    (_BUCKET_DECODE, 128, "bfloat16", False): (
+        "sm89_bucket_decode_d128_bf16",
+        (16, 64, 4, 2),
+    ),
+    (_BUCKET_SHORT, 128, "float16", True): (
+        "sm89_bucket_short_d128",
+        (64, 64, 4, 2),
+    ),
+    (_BUCKET_SHORT, 128, "float16", False): (
+        "sm89_bucket_short_d128",
+        (64, 64, 4, 2),
+    ),
+    (_BUCKET_SHORT, 128, "bfloat16", True): (
+        "sm89_bucket_short_d128",
+        (64, 64, 4, 2),
+    ),
+    (_BUCKET_SHORT, 128, "bfloat16", False): (
+        "sm89_bucket_short_d128",
+        (64, 64, 4, 2),
+    ),
+    (_BUCKET_MEDIUM, 128, "float16", True): (
+        "sm89_bucket_medium_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_MEDIUM, 128, "float16", False): (
+        "sm89_bucket_medium_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_MEDIUM, 128, "bfloat16", True): (
+        "sm89_bucket_medium_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_MEDIUM, 128, "bfloat16", False): (
+        "sm89_bucket_medium_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_LONG, 128, "float16", True): (
+        "sm89_bucket_long_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_LONG, 128, "float16", False): (
+        "sm89_bucket_long_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_LONG, 128, "bfloat16", True): (
+        "sm89_bucket_long_d128",
+        (64, 64, 4, 3),
+    ),
+    (_BUCKET_LONG, 128, "bfloat16", False): (
+        "sm89_bucket_long_d128",
+        (64, 64, 4, 3),
+    ),
+    # head_dim 64 bfloat16 mirrors the exact bf16 decode preset's preference
+    # for a wider N tile; float16 head_dim 64 is pinned to the default above.
+    (_BUCKET_DECODE, 64, "bfloat16", True): (
+        "sm89_bucket_decode_d64_bf16",
+        (16, 128, 4, 2),
+    ),
+    (_BUCKET_DECODE, 64, "bfloat16", False): (
+        "sm89_bucket_decode_d64_bf16",
+        (16, 128, 4, 2),
+    ),
+    (_BUCKET_SHORT, 64, "bfloat16", True): (
+        "sm89_bucket_short_d64_bf16",
+        (64, 64, 4, 2),
+    ),
+    (_BUCKET_SHORT, 64, "bfloat16", False): (
+        "sm89_bucket_short_d64_bf16",
+        (64, 64, 4, 2),
+    ),
+    (_BUCKET_MEDIUM, 64, "bfloat16", True): (
+        "sm89_bucket_medium_d64_bf16",
+        (64, 128, 4, 2),
+    ),
+    (_BUCKET_MEDIUM, 64, "bfloat16", False): (
+        "sm89_bucket_medium_d64_bf16",
+        (64, 128, 4, 2),
+    ),
+    (_BUCKET_LONG, 64, "bfloat16", True): (
+        "sm89_bucket_long_d64_bf16",
+        (64, 128, 4, 3),
+    ),
+    (_BUCKET_LONG, 64, "bfloat16", False): (
+        "sm89_bucket_long_d64_bf16",
+        (64, 128, 4, 3),
+    ),
+}
+
+
+def _length_bucket(*, seq_q: int, seq_kv: int) -> str:
+    """Classify one shape into the documented decode/short/medium/long bucket."""
+
+    if int(seq_q) == 1:
+        return _BUCKET_DECODE
+    if int(seq_kv) <= 512:
+        return _BUCKET_SHORT
+    if int(seq_kv) <= 2048:
+        return _BUCKET_MEDIUM
+    return _BUCKET_LONG
+
 
 @lru_cache(maxsize=256)
 def resolve_triton_attention_schedule(
@@ -76,7 +227,20 @@ def resolve_triton_attention_schedule(
     num_stages: int | None = None,
     target_arch: str | None = None,
 ) -> TritonAttentionSchedule:
-    """Resolve exact-signature presets and explicit per-field overrides."""
+    """Resolve SM89 exact presets, then length buckets, then per-field overrides.
+
+    Selection order:
+
+    1. The evidence-backed exact SM89 decode presets, keyed by the full
+       (batch, heads, seq_q, seq_kv, head_dim, dtype, causal) signature.
+    2. The documented SM89 length-bucket table, keyed by
+       (bucket, head_dim, dtype, causal).  Buckets are a starting policy that
+       the A/B harness still has to validate.
+    3. The historical default schedule for anything uncovered.
+
+    Explicit ``block_m``/``block_n``/``num_warps``/``num_stages`` kwargs always
+    override whatever the preset or bucket selected.
+    """
 
     preset = "default"
     defaults = _TRITON_ATTENTION_DEFAULT_SCHEDULE
@@ -94,6 +258,13 @@ def resolve_triton_attention_schedule(
         )
         if resolved is not None:
             preset, defaults = resolved
+        else:
+            bucket = _length_bucket(seq_q=int(seq_q), seq_kv=int(seq_kv))
+            bucketed = TRITON_ATTENTION_BUCKET_SCHEDULES.get(
+                (bucket, int(head_dim), str(input_dtype), bool(causal))
+            )
+            if bucketed is not None:
+                preset, defaults = bucketed
 
     return TritonAttentionSchedule(
         block_m=defaults[0] if block_m is None else int(block_m),
@@ -116,8 +287,16 @@ def _validate_attention_shapes(
         )
     if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
         raise XQTBackendError("Triton attention requires matching q, k, v batch size")
-    if q.shape[1] != k.shape[1] or q.shape[1] != v.shape[1]:
-        raise XQTBackendError("Triton attention requires matching q, k, v head count")
+    if k.shape[1] != v.shape[1]:
+        raise XQTBackendError(
+            "Triton attention requires matching k, v head count for GQA"
+        )
+    if int(q.shape[1]) <= 0 or int(k.shape[1]) <= 0:
+        raise XQTBackendError("Triton attention head counts must be positive")
+    if q.shape[1] != k.shape[1] and q.shape[1] % k.shape[1] != 0:
+        raise XQTBackendError(
+            "Triton attention requires q heads to be a multiple of kv heads for GQA/MQA"
+        )
     if q.shape[3] != k.shape[3] or q.shape[3] != v.shape[3]:
         raise XQTBackendError("Triton attention requires matching q, k, v head_dim")
     if k.shape[2] != v.shape[2]:
@@ -139,13 +318,16 @@ def fused_attention_forward_reference(
     dropout_p: float = 0.0,
     scale: float | None = None,
 ) -> torch.Tensor:
-    """SDPA reference with lower-right causal semantics for non-square inputs."""
+    """SDPA reference with GQA/MQA and lower-right causal semantics."""
 
     _validate_attention_shapes(q, k, v)
     if q.device != k.device or q.device != v.device:
         raise XQTBackendError("Triton attention reference requires one shared device")
     if q.dtype != k.dtype or q.dtype != v.dtype:
-        raise XQTBackendError("Triton attention reference requires matching q, k, v dtype")
+        raise XQTBackendError(
+            "Triton attention reference requires matching q, k, v dtype"
+        )
+    enable_gqa = int(q.shape[1]) != int(k.shape[1])
     if causal and q.shape[2] != k.shape[2]:
         try:
             from torch.nn.attention.bias import causal_lower_right
@@ -160,6 +342,7 @@ def fused_attention_forward_reference(
             attn_mask=causal_lower_right(q.shape[2], k.shape[2]),
             dropout_p=dropout_p,
             scale=scale,
+            enable_gqa=enable_gqa,
         )
     return F.scaled_dot_product_attention(
         q,
@@ -168,6 +351,7 @@ def fused_attention_forward_reference(
         dropout_p=dropout_p,
         is_causal=causal,
         scale=scale,
+        enable_gqa=enable_gqa,
     )
 
 
@@ -185,9 +369,7 @@ def _validate_schedule(schedule: TritonAttentionSchedule) -> None:
                 f"Triton attention {name} must be a power of two and at least 16"
             )
     if schedule.num_warps not in {1, 2, 4, 8}:
-        raise XQTBackendError(
-            "Triton attention num_warps must be one of 1, 2, 4, or 8"
-        )
+        raise XQTBackendError("Triton attention num_warps must be one of 1, 2, 4, or 8")
     if schedule.num_stages <= 0:
         raise XQTBackendError("Triton attention num_stages must be positive")
 
@@ -208,6 +390,7 @@ def _flash_attention_forward_kernel(
     SEQ_Q: tl.constexpr,
     SEQ_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    GROUP: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -220,8 +403,25 @@ def _flash_attention_forward_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_D)
-    q_base = pid_bh * SEQ_Q * HEAD_DIM
-    kv_base = pid_bh * SEQ_KV * HEAD_DIM
+
+    # GQA/MQA head indexing.
+    #
+    # q has layout [B, HEADS_Q, SEQ_Q, HEAD_DIM] and the grid's second axis
+    # enumerates the flattened (batch, query head) plane, so `pid_bh` is
+    # already the q head row to read.  k/v have layout
+    # [B, HEADS_KV, SEQ_KV, HEAD_DIM] with HEADS_Q == GROUP * HEADS_KV, and
+    # query heads are grouped contiguously: query heads [g*GROUP, (g+1)*GROUP)
+    # share kv head g.  Hence
+    #
+    #     q_bh  = pid_bh
+    #     kv_bh = pid_bh // GROUP     # == batch * HEADS_KV + kv_head
+    #
+    # is the k/v head row to read.  For MHA (GROUP == 1) this collapses to
+    # kv_bh == pid_bh, i.e. the original shared-index behaviour.
+    q_bh = pid_bh
+    kv_bh = pid_bh // GROUP
+    q_base = q_bh * SEQ_Q * HEAD_DIM
+    kv_base = kv_bh * SEQ_KV * HEAD_DIM
 
     q = tl.load(
         q_ptr + q_base + offs_m[:, None] * HEAD_DIM + offs_d[None, :],
@@ -233,13 +433,28 @@ def _flash_attention_forward_kernel(
     row_sum = tl.zeros((BLOCK_M,), tl.float32)
     acc = tl.zeros((BLOCK_M, BLOCK_D), tl.float32)
 
+    loop_start = 0
     loop_end = SEQ_KV
     if CAUSAL:
+        # Lower-right causal visibility: query row m attends key n iff
+        #     m + (SEQ_KV - SEQ_Q) >= n.
+        #
+        # Block skip: a whole BLOCK_N block is fully masked when even the
+        # lowest visible key of the tile is past it.  The tile's highest row
+        # is offs_m_max = (pid_m + 1) * BLOCK_M - 1, whose largest visible key
+        # is offs_m_max + (SEQ_KV - SEQ_Q); every block starting at or beyond
+        # that bound is fully masked and is skipped by ending the loop there.
+        #
+        # The leading bound is always 0: query row 0 sees key 0 because
+        # 0 + (SEQ_KV - SEQ_Q) >= 0 under the enforced SEQ_KV >= SEQ_Q
+        # contract, so no fully-masked block exists before the diagonal.  It is
+        # computed explicitly so a future sliding-window or upper-left mask can
+        # raise it without touching the loop body.
         loop_end = tl.minimum(
             (pid_m + 1) * BLOCK_M + (SEQ_KV - SEQ_Q),
             SEQ_KV,
         )
-    for start_n in tl.range(0, loop_end, BLOCK_N):
+    for start_n in tl.range(loop_start, loop_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         kv_offsets = start_n + offs_n
         k = tl.load(
@@ -256,9 +471,7 @@ def _flash_attention_forward_kernel(
         scores = tl.dot(q, tl.trans(k)) * sm_scale_log2
         valid = (offs_m[:, None] < SEQ_Q) & (kv_offsets[None, :] < SEQ_KV)
         if CAUSAL:
-            valid = valid & (
-                offs_m[:, None] + (SEQ_KV - SEQ_Q) >= kv_offsets[None, :]
-            )
+            valid = valid & (offs_m[:, None] + (SEQ_KV - SEQ_Q) >= kv_offsets[None, :])
         scores = tl.where(valid, scores, -float("inf"))
 
         block_max = tl.max(scores, axis=1)
@@ -376,6 +589,7 @@ def fused_attention_forward_triton(
         SEQ_Q=int(q.shape[2]),
         SEQ_KV=int(k.shape[2]),
         HEAD_DIM=int(q.shape[3]),
+        GROUP=int(q.shape[1]) // int(k.shape[1]),
         BLOCK_M=schedule.block_m,
         BLOCK_N=schedule.block_n,
         BLOCK_D=block_d,
@@ -391,11 +605,15 @@ TRITON_ATTENTION_KERNEL_METADATA: dict[str, dict[str, Any]] = {
     "attention": {
         "kernel_name": "fused_attention_forward_triton",
         "algorithm": "FlashAttention-2 style online softmax forward",
-        "tensor_layout": "batch, heads, seq, head_dim",
+        "tensor_layout": "q [batch, heads, seq, head_dim]; k/v [batch, kv_heads, seq_kv, head_dim]",
         "supported_dtypes": ["float16", "bfloat16"],
         "supported_head_dims": sorted(_SUPPORTED_HEAD_DIMS),
         "supports_non_square": True,
+        "supports_gqa": True,
+        "supports_mqa": True,
+        "gqa_contract": "q heads must be a multiple of kv heads; GROUP = heads_q // heads_kv",
         "causal_semantics": "lower-right when seq_kv >= seq_q",
+        "causal_block_skip": "causal loop stops at the last key visible to the tile",
         "supports_dropout": False,
         "supports_backward": False,
         "requires_contiguous": True,
@@ -403,7 +621,21 @@ TRITON_ATTENTION_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "block_n": _TRITON_ATTENTION_DEFAULT_SCHEDULE[1],
         "num_warps": _TRITON_ATTENTION_DEFAULT_SCHEDULE[2],
         "num_stages": _TRITON_ATTENTION_DEFAULT_SCHEDULE[3],
-        "schedule_policy": "exact signature presets with explicit per-field override",
+        "schedule_policy": (
+            "exact SM89 signature presets, then SM89 length-bucket table, "
+            "with explicit per-field override"
+        ),
+        "schedule_buckets": list(TRITON_ATTENTION_LENGTH_BUCKETS),
+        "schedule_bucket_boundaries": {
+            "decode": "seq_q == 1",
+            "short": "seq_kv <= 512",
+            "medium": "512 < seq_kv <= 2048",
+            "long": "seq_kv > 2048",
+        },
+        "schedule_bucket_status": (
+            "starting policy for sm_89; bucket tiles are unvalidated and must be "
+            "confirmed by the A/B harness before any speedup claim"
+        ),
         "schedule_presets": [
             "sm89_fp16_decode_q1_kv1024_d64",
             "sm89_bf16_decode_q1_kv1024_d64",
@@ -419,7 +651,9 @@ TRITON_ATTENTION_KERNEL_METADATA: dict[str, dict[str, Any]] = {
 
 
 __all__ = [
+    "TRITON_ATTENTION_BUCKET_SCHEDULES",
     "TRITON_ATTENTION_KERNEL_METADATA",
+    "TRITON_ATTENTION_LENGTH_BUCKETS",
     "TritonAttentionSchedule",
     "fused_attention_forward_reference",
     "fused_attention_forward_triton",

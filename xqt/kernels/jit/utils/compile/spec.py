@@ -24,6 +24,7 @@ class CompileSpec:
     target_arch: str | int | tuple[int, int] | None = None
     cache_dir: str | Path | None = None
     with_cuda: bool = True
+    backend: str = "tvm_ffi"
     env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -31,6 +32,8 @@ class CompileSpec:
             raise ValueError("extension name must be non-empty and contain no whitespace")
         if not self.sources:
             raise ValueError("at least one source is required")
+        if self.backend not in {"torch_cpp", "tvm_ffi"}:
+            raise ValueError(f"unsupported JIT backend: {self.backend!r}, expected 'torch_cpp' or 'tvm_ffi'")
         source_paths = _paths(self.sources)
         if any(not source.is_file() for source in source_paths):
             missing = next(source for source in source_paths if not source.is_file())
@@ -53,6 +56,7 @@ class CompileSpec:
             "target_arch": self.target_arch,
             "cache_dir": None if self.cache_dir is None else str(self.cache_dir),
             "with_cuda": self.with_cuda,
+            "backend": self.backend,
         }
 
 

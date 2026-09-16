@@ -108,6 +108,33 @@ def test_warmup_bind_metadata_and_cache_invalidation() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_bound_residual_matches_unfused_add() -> None:
+    if torch.cuda.get_device_capability() != (8, 9):
+        pytest.skip("requires sm_89")
+    module = AWQW4A16Linear(_cuda_weight()).eval()
+    inputs = torch.randn(1, 128, device="cuda", dtype=torch.float16) * 0.1
+    residual = torch.randn(1, 64, device="cuda", dtype=torch.float16)
+    with torch.no_grad():
+        expected = residual + module(inputs)
+    runner = module.bind_residual(rows=1, dtype=torch.float16)
+    actual = residual.clone()
+    runner(inputs, actual)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    with pytest.raises(XQTBackendError, match=r"contiguous \[1,64\]"):
+        runner(inputs, torch.zeros(64, device="cuda", dtype=torch.float16))
+    with pytest.raises(XQTBackendError, match="static shape/dtype/device"):
+        runner(torch.randn(2, 128, device="cuda", dtype=torch.float16), actual)
+
+
+def test_residual_binding_rejects_native_only_modules() -> None:
+    module = object.__new__(AWQW4A16Linear)
+    module._native_only = True
+    with pytest.raises(RuntimeError, match="residual epilogue"):
+        AWQW4A16Linear.bind_residual(module, rows=1, dtype=torch.float16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_bound_input_contract_is_explicit() -> None:
     if torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("requires sm_89")
@@ -126,7 +153,9 @@ def test_warmup_rejects_unsupported_rows_and_dtype() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_freeze_native_inference_preserves_output_and_releases_canonical_state() -> None:
+def test_freeze_native_inference_preserves_output_and_releases_canonical_state() -> (
+    None
+):
     if torch.cuda.get_device_capability() != (8, 9):
         pytest.skip("requires sm_89")
     bias = torch.randn(64, device="cuda", dtype=torch.float16)
@@ -182,7 +211,10 @@ def test_freeze_native_inference_rejects_mismatch_state_changes_and_mutation() -
         module(inputs.bfloat16())
     with torch.inference_mode(), pytest.raises(RuntimeError, match="input device"):
         module(torch.randn(1, 128, dtype=torch.float16))
-    with torch.inference_mode(), pytest.raises(RuntimeError, match="rows=2 were not frozen"):
+    with (
+        torch.inference_mode(),
+        pytest.raises(RuntimeError, match="rows=2 were not frozen"),
+    ):
         module(torch.randn(2, 128, device="cuda", dtype=torch.float16))
     with pytest.raises(RuntimeError, match="requires no_grad"):
         module(inputs)
@@ -201,3 +233,68 @@ def test_freeze_native_inference_rejects_mismatch_state_changes_and_mutation() -
         module._native_only_tensors[0].view(-1)[0].add_(1)
     with torch.inference_mode(), pytest.raises(RuntimeError, match="state was mutated"):
         module(inputs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_signed_groupwise_storages_match_individual_decodes() -> None:
+    if torch.cuda.get_device_capability() != (8, 9):
+        pytest.skip("requires sm_89")
+    from types import SimpleNamespace
+
+    def storage(n: int, seed: int) -> SimpleNamespace:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        codes = torch.randint(0, 16, (n, 128), generator=generator, dtype=torch.uint8)
+        qweight = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
+        scales = torch.rand((n, 2), generator=generator) * 0.1 + 0.01
+        return SimpleNamespace(
+            quantized_weight=qweight.cuda(),
+            weight_scale=scales.cuda(),
+            bias=None,
+            bits=4,
+            group_size=64,
+            padded_input_features=128,
+            input_features=128,
+            output_features=n,
+        )
+
+    first_storage = storage(64, 11)
+    second_storage = storage(32, 12)
+    fused = AWQW4A16Linear.from_signed_groupwise_storages(
+        [first_storage, second_storage]
+    ).eval()
+    parts = [
+        AWQW4A16Linear.from_signed_groupwise_storage(first_storage).eval(),
+        AWQW4A16Linear.from_signed_groupwise_storage(second_storage).eval(),
+    ]
+
+    inputs = torch.randn(3, 128, dtype=torch.bfloat16, device="cuda")
+    with torch.no_grad():
+        expected = torch.cat([part(inputs) for part in parts], dim=-1)
+        actual = fused(inputs)
+    assert fused.output_features == 96
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_signed_groupwise_storages_reject_mismatched_input_features() -> None:
+    from types import SimpleNamespace
+
+    def storage(n: int, k: int) -> SimpleNamespace:
+        codes = torch.zeros((n, k), dtype=torch.uint8)
+        qweight = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
+        return SimpleNamespace(
+            quantized_weight=qweight,
+            weight_scale=torch.ones((n, k // 64)),
+            bias=None,
+            bits=4,
+            group_size=64,
+            padded_input_features=k,
+            input_features=k,
+            output_features=n,
+        )
+
+    with pytest.raises(XQTBackendError, match="matching input features"):
+        AWQW4A16Linear.from_signed_groupwise_storages(
+            [storage(64, 128), storage(32, 192)]
+        )

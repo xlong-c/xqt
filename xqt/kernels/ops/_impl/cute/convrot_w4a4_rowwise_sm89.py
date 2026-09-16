@@ -28,6 +28,7 @@ _MIN_K = 1024
 _MAX_K = 32768
 _CUDA_SOURCE = csrc_path("quantization", "convrot_w4a4_rowwise_sm89_kernel.cu")
 _BINDING_SOURCE = csrc_path("quantization", "convrot_w4a4_rowwise_sm89_binding.cpp")
+_TVM_BINDING_SOURCE = csrc_path("quantization", "convrot_w4a4_rowwise_sm89_tvm_binding.cpp")
 
 
 def _cutlass_include_dir() -> Path | None:
@@ -58,8 +59,8 @@ def native_rowwise_convrot_w4a4_shape_supported(
     )
 
 
-@lru_cache(maxsize=1)
-def _load_extension() -> Any:
+@lru_cache(maxsize=2)
+def _load_extension(backend: str | None = None) -> Any:
     if os.environ.get("XQT_DISABLE_CONVROT_W4A4_ROWWISE_SM89", "0") == "1":
         raise XQTBackendError("rowwise ConvRot W4A4 backend is disabled by environment")
     if not torch.cuda.is_available():
@@ -73,11 +74,17 @@ def _load_extension() -> Any:
     if cutlass_include is None:
         raise XQTBackendError("CUTLASS headers bundled with TileLang are unavailable")
 
+    selected_backend = backend or os.environ.get("XQT_JIT_BACKEND", "tvm_ffi")
+    binding_source = (
+        _TVM_BINDING_SOURCE if selected_backend == "tvm_ffi" else _BINDING_SOURCE
+    )
+    ext_suffix = "_tvm_v1" if selected_backend == "tvm_ffi" else "_v1"
+
     try:
         return load_extension(
             CompileSpec(
-                name="xqt_convrot_w4a4_rowwise_sm89_v1",
-                sources=(_BINDING_SOURCE, _CUDA_SOURCE),
+                name=f"xqt_convrot_w4a4_rowwise_sm89{ext_suffix}",
+                sources=(binding_source, _CUDA_SOURCE),
                 include_dirs=(cutlass_include,),
                 cxx_flags=("-O3", "-std=c++20"),
                 cuda_flags=(
@@ -92,6 +99,7 @@ def _load_extension() -> Any:
                     "--generate-line-info",
                 ),
                 target_arch="sm_89",
+                backend=selected_backend,
             ),
             verbose=False,
         )
@@ -284,15 +292,35 @@ def convrot_w4a4_rowwise_linear(
     )
     if active_workspace.rows != int(inputs.shape[0]):
         raise ValueError("workspace row extent does not match inputs")
-    return _load_extension().linear(
-        inputs.contiguous(),
+    ext = _load_extension()
+    if hasattr(ext, "bind_linear"):
+        return ext.linear(
+            inputs.contiguous(),
+            active_workspace.quantized_activation,
+            active_workspace.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.bias,
+            packed.output_features,
+        )
+    
+    inputs_contiguous = inputs.contiguous()
+    output = torch.empty(
+        (active_workspace.rows, packed.output_features),
+        dtype=inputs_contiguous.dtype,
+        device=inputs_contiguous.device,
+    )
+    ext.linear(
+        inputs_contiguous,
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
         packed.qweight,
         packed.weight_scales,
         packed.bias,
+        output,
         packed.output_features,
     )
+    return output
 
 
 def bind_convrot_w4a4_rowwise_linear(
@@ -305,16 +333,39 @@ def bind_convrot_w4a4_rowwise_linear(
 
     if workspace.rows != int(rows):
         raise ValueError("workspace row extent does not match rows")
-    return _load_extension().bind_linear(
-        workspace.quantized_activation,
-        workspace.activation_scales,
-        packed.qweight,
-        packed.weight_scales,
-        packed.bias,
-        int(rows),
-        int(packed.input_features),
-        int(packed.output_features),
-    )
+    ext = _load_extension()
+    if hasattr(ext, "bind_linear"):
+        return ext.bind_linear(
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.bias,
+            int(rows),
+            int(packed.input_features),
+            int(packed.output_features),
+        )
+
+    def _bound_linear(inputs: torch.Tensor) -> torch.Tensor:
+        inputs_contiguous = inputs.contiguous()
+        output = torch.empty(
+            (int(rows), packed.output_features),
+            dtype=inputs_contiguous.dtype,
+            device=inputs_contiguous.device,
+        )
+        ext.linear(
+            inputs_contiguous,
+            workspace.quantized_activation,
+            workspace.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.bias,
+            output,
+            packed.output_features,
+        )
+        return output
+
+    return _bound_linear
 
 
 def bind_dynamic_convrot_w4a4_rowwise_linear(
@@ -338,17 +389,66 @@ def bind_dynamic_convrot_w4a4_rowwise_linear(
     )
     if expected_scalar_kind == -2:
         raise ValueError("expected_dtype must be float16, bfloat16, or None")
-    return _load_extension().bind_dynamic_linear(
-        packed.qweight,
-        packed.weight_scales,
-        packed.bias,
-        int(packed.input_features),
-        int(packed.output_features),
-        source_weight,
-        source_weight_scales,
-        source_bias,
-        expected_scalar_kind,
-    )
+    ext = _load_extension()
+    if hasattr(ext, "bind_dynamic_linear"):
+        return ext.bind_dynamic_linear(
+            packed.qweight,
+            packed.weight_scales,
+            packed.bias,
+            int(packed.input_features),
+            int(packed.output_features),
+            source_weight,
+            source_weight_scales,
+            source_bias,
+            expected_scalar_kind,
+        )
+
+    import threading
+    workspaces: dict[tuple[int, int], ConvRotW4A4RowwiseWorkspace] = {}
+    workspace_lock = threading.Lock()
+    source_weight_version = source_weight._version if source_weight is not None else -1
+    source_weight_scales_version = source_weight_scales._version if source_weight_scales is not None else -1
+    source_bias_version = source_bias._version if source_bias is not None else -1
+
+    def _run(inputs: torch.Tensor) -> torch.Tensor:
+        curr_sw_ver = source_weight._version if source_weight is not None else -1
+        curr_sws_ver = source_weight_scales._version if source_weight_scales is not None else -1
+        curr_sb_ver = source_bias._version if source_bias is not None else -1
+        if curr_sw_ver != source_weight_version or curr_sws_ver != source_weight_scales_version or curr_sb_ver != source_bias_version:
+            raise RuntimeError("XQT_ROWWISE_W4A4_STALE_STATE")
+
+        inputs_contiguous = inputs.contiguous()
+        actual_kind = 0 if inputs_contiguous.dtype == torch.float16 else 1 if inputs_contiguous.dtype == torch.bfloat16 else -1
+        if expected_scalar_kind >= 0 and actual_kind != expected_scalar_kind:
+            raise RuntimeError("XQT_ROWWISE_W4A4_INPUT_DTYPE_CHANGED")
+
+        rows = inputs_contiguous.numel() // packed.input_features
+        stream = torch.cuda.current_stream(inputs_contiguous.device).cuda_stream
+        key = (rows, stream)
+
+        with workspace_lock:
+            if key not in workspaces:
+                workspaces[key] = allocate_convrot_w4a4_rowwise_workspace(rows, packed)
+            ws = workspaces[key]
+
+        output_shape = list(inputs_contiguous.shape)
+        output_shape[-1] = packed.output_features
+        output = torch.empty(output_shape, dtype=inputs_contiguous.dtype, device=inputs_contiguous.device)
+
+        ext.linear(
+            inputs_contiguous,
+            ws.quantized_activation,
+            ws.activation_scales,
+            packed.qweight,
+            packed.weight_scales,
+            packed.bias,
+            output,
+            packed.output_features,
+        )
+        return output
+
+    _run.workspace_count = lambda: len(workspaces)
+    return _run
 
 
 __all__ = [

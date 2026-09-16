@@ -227,19 +227,21 @@ class Int8MmaLinear(nn.Module):
         flat = qactivation.reshape(-1, self.input_features).to(torch.int8)
         original_rows = int(flat.shape[0])
         padded = flat
-        if flat.is_cuda and original_rows < 17:
-            padded = torch.cat(
-                [
-                    flat,
-                    torch.zeros(
-                        17 - original_rows,
-                        self.input_features,
-                        dtype=torch.int8,
-                        device=flat.device,
-                    ),
-                ],
-                dim=0,
-            )
+        if flat.is_cuda:
+            aligned_rows = max(32, ((original_rows + 31) // 32) * 32)
+            if aligned_rows > original_rows:
+                padded = torch.cat(
+                    [
+                        flat,
+                        torch.zeros(
+                            aligned_rows - original_rows,
+                            self.input_features,
+                            dtype=torch.int8,
+                            device=flat.device,
+                        ),
+                    ],
+                    dim=0,
+                )
         accum = torch._int_mm(padded.contiguous(), self.qweight_t)
         accum = accum[:original_rows]
         scale = torch.as_tensor(

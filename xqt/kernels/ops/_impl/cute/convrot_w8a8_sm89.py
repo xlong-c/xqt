@@ -23,6 +23,7 @@ _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _NATIVE_ROT_SIZE = 256
 _CUDA_SOURCE = csrc_path("quantization", "convrot_w8a8_sm89_kernel.cu")
 _BINDING_SOURCE = csrc_path("quantization", "convrot_w8a8_sm89_binding.cpp")
+_TVM_BINDING_SOURCE = csrc_path("quantization", "convrot_w8a8_sm89_tvm_binding.cpp")
 
 
 def _round_up(value: int, alignment: int) -> int:
@@ -66,8 +67,8 @@ def _dtype_key(dtype: torch.dtype) -> str:
     raise XQTBackendError("native ConvRot W8A8 requires float16 or bfloat16")
 
 
-@lru_cache(maxsize=2)
-def _load_extension(dtype_key: str) -> Any:
+@lru_cache(maxsize=4)
+def _load_extension(dtype_key: str, backend: str | None = None) -> Any:
     if os.environ.get("XQT_DISABLE_CONVROT_W8A8_SM89", "0") == "1":
         raise XQTBackendError("native sm_89 ConvRot W8A8 backend is disabled")
     if not torch.cuda.is_available():
@@ -84,12 +85,18 @@ def _load_extension(dtype_key: str) -> Any:
             f"Nunchaku kernel headers are missing at {_NUNCHAKU_INCLUDE}"
         )
 
+    selected_backend = backend or os.environ.get("XQT_JIT_BACKEND", "tvm_ffi")
+    binding_source = (
+        _TVM_BINDING_SOURCE if selected_backend == "tvm_ffi" else _BINDING_SOURCE
+    )
+    ext_suffix = "_tvm_v4" if selected_backend == "tvm_ffi" else "_v4"
+
     dtype_flags = ["-DXQT_W8A8_FP16=1"] if dtype_key == "fp16" else []
     try:
         return load_extension(
             CompileSpec(
-                name=f"xqt_convrot_w8a8_sm89_{dtype_key}_v4",
-                sources=(_BINDING_SOURCE, _CUDA_SOURCE),
+                name=f"xqt_convrot_w8a8_sm89_{dtype_key}{ext_suffix}",
+                sources=(binding_source, _CUDA_SOURCE),
                 include_dirs=(_NUNCHAKU_INCLUDE,),
                 cxx_flags=("-O3", "-std=c++20", *dtype_flags),
                 cuda_flags=(
@@ -106,12 +113,13 @@ def _load_extension(dtype_key: str) -> Any:
                     "--generate-line-info",
                 ),
                 target_arch="sm_89",
+                backend=selected_backend,
             ),
             verbose=False,
         )
     except Exception as exc:
         raise XQTBackendError(
-            f"failed to build native sm_89 ConvRot W8A8 {dtype_key} extension: {exc}"
+            f"failed to build native sm_89 ConvRot W8A8 {dtype_key} ({selected_backend}) extension: {exc}"
         ) from exc
 
 
@@ -264,6 +272,94 @@ def allocate_convrot_w8a8_workspace(
     )
 
 
+def _run_small_m_linear(
+    extension: Any,
+    inputs: torch.Tensor,
+    quantized_activation: torch.Tensor,
+    activation_scales: torch.Tensor,
+    raw_qweight_t: torch.Tensor,
+    raw_weight_scales: torch.Tensor,
+    raw_bias: torch.Tensor,
+    rotated_k: int,
+    rot_size: int,
+) -> torch.Tensor:
+    if hasattr(extension, "small_m_linear"):
+        return extension.small_m_linear(
+            inputs.contiguous(),
+            quantized_activation,
+            activation_scales,
+            raw_qweight_t,
+            raw_weight_scales,
+            raw_bias,
+            rotated_k,
+            rot_size,
+        )
+    output = torch.empty((inputs.shape[0], raw_qweight_t.shape[1]), dtype=inputs.dtype, device=inputs.device)
+    extension.small_quantize(
+        inputs.contiguous(),
+        quantized_activation,
+        activation_scales,
+        rotated_k,
+        rot_size,
+        None,
+        1e-6,
+    )
+    extension.small_gemm(
+        quantized_activation,
+        activation_scales,
+        raw_qweight_t,
+        raw_weight_scales,
+        raw_bias,
+        output,
+    )
+    return output
+
+
+def _run_linear(
+    extension: Any,
+    inputs: torch.Tensor,
+    quantized_activation: torch.Tensor,
+    activation_scales: torch.Tensor,
+    qweight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    packed_bias: torch.Tensor,
+    rotated_k: int,
+    rot_size: int,
+    output_features: int,
+) -> torch.Tensor:
+    if hasattr(extension, "linear"):
+        return extension.linear(
+            inputs.contiguous(),
+            quantized_activation,
+            activation_scales,
+            qweight,
+            weight_scales,
+            packed_bias,
+            rotated_k,
+            rot_size,
+            output_features,
+        )
+    output = torch.empty((inputs.shape[0], output_features), dtype=inputs.dtype, device=inputs.device)
+    extension.quantize_rotated_act(
+        inputs.contiguous(),
+        quantized_activation,
+        activation_scales,
+        rotated_k,
+        rot_size,
+        None,
+        1e-6,
+    )
+    extension.gemm(
+        quantized_activation,
+        qweight,
+        output,
+        activation_scales,
+        weight_scales,
+        packed_bias,
+    )
+    return output
+
+
 def convrot_w8a8_linear(
     inputs: torch.Tensor,
     packed: PackedConvRotW8A8Linear,
@@ -315,8 +411,9 @@ def convrot_w8a8_linear(
         raise ValueError("workspace feature extent does not match packed weights")
     extension = _load_extension(_dtype_key(inputs.dtype))
     if int(inputs.shape[0]) <= 128:
-        return extension.small_m_linear(
-            inputs.contiguous(),
+        return _run_small_m_linear(
+            extension,
+            inputs,
             active_workspace.quantized_activation,
             active_workspace.activation_scales,
             packed.raw_qweight_t,
@@ -325,8 +422,9 @@ def convrot_w8a8_linear(
             rotated_k,
             int(rot_size),
         )
-    return extension.linear(
-        inputs.contiguous(),
+    return _run_linear(
+        extension,
+        inputs,
         active_workspace.quantized_activation,
         active_workspace.activation_scales,
         packed.qweight,
@@ -373,8 +471,9 @@ def bind_convrot_w8a8_linear(
 
     def run(inputs: torch.Tensor) -> torch.Tensor:
         if int(inputs.shape[0]) <= 128:
-            return extension.small_m_linear(
-                inputs.contiguous(),
+            return _run_small_m_linear(
+                extension,
+                inputs,
                 quantized_activation,
                 activation_scales,
                 raw_qweight_t,
@@ -383,8 +482,9 @@ def bind_convrot_w8a8_linear(
                 rotated_k,
                 rotation_size,
             )
-        return extension.linear(
-            inputs.contiguous(),
+        return _run_linear(
+            extension,
+            inputs,
             quantized_activation,
             activation_scales,
             qweight,
