@@ -19,7 +19,7 @@ from xqt.kernels.jit.utils.arch import target_arch_mismatch
 
 @dataclass(frozen=True)
 class TileLangAttentionDesign:
-    """Reusable TileLang attention design extracted from learn/tilelang/flashatt.py."""
+    """Reusable TileLang attention design owned by the XQT TileLang backend."""
 
     kernel_name: str = "fused_attention_forward"
     tensor_layout: str = "batch, heads, seq, head_dim"
@@ -35,7 +35,7 @@ class TileLangAttentionDesign:
     default_block_n: int = 64
     default_threads: int = 128
     default_num_stages: int = 2
-    source: str = "learn/tilelang/flashatt.py"
+    source: str = "xqt/kernels/ops/_impl/tilelang/flashatt_kernel.py"
     production_status: str = "runtime_kernel"
     limitations: tuple[str, ...] = (
         "Only CUDA tensors are accepted by the guarded TileLang entry point.",
@@ -122,7 +122,7 @@ def _build_tilelang_flashatt_kernel(
     input_dtype: str,
 ) -> Any:
     require_tilelang()
-    from learn.tilelang.flashatt import build_tilelang_flashatt
+    from xqt.kernels.ops._impl.tilelang.flashatt_kernel import build_tilelang_flashatt
 
     return build_tilelang_flashatt(
         batch=batch,

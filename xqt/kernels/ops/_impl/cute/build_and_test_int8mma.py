@@ -19,6 +19,21 @@ SRC = csrc_path("quantization", "int8mma_kernel.cu")
 SO = ROOT / "build" / "int8mma_sm89.so"
 
 
+def _cutlass_include_dir() -> Path:
+    """Resolve CUTLASS headers for both the monorepo and standalone checkouts."""
+
+    override = os.environ.get("XQT_CUTLASS_INCLUDE")
+    if override:
+        return Path(override).expanduser().resolve()
+    for ancestor in ROOT.parents[3:5]:
+        candidate = ancestor / "third_party" / "cutlass" / "include"
+        if (candidate / "cutlass").is_dir():
+            return candidate
+    raise RuntimeError(
+        "CUTLASS headers not found; set XQT_CUTLASS_INCLUDE to an include directory"
+    )
+
+
 def build() -> Path:
     SO.parent.mkdir(parents=True, exist_ok=True)
     nvcc = os.environ.get("NVCC", "nvcc")
@@ -36,7 +51,7 @@ def build() -> Path:
         "-gencode",
         "arch=compute_89,code=compute_89",
         "-I",
-        str(ROOT.parents[4] / "third_party" / "cutlass" / "include"),
+        str(_cutlass_include_dir()),
         str(SRC),
         "-o",
         str(SO),

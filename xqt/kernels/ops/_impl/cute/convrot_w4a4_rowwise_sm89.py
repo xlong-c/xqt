@@ -21,7 +21,6 @@ import torch
 from xqt.core.errors import XQTBackendError
 from xqt.kernels.jit.utils.compile import CompileSpec, csrc_path, load_extension
 
-_HERE = Path(__file__).resolve().parent
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _ROT_SIZE = 256
 _MIN_K = 1024

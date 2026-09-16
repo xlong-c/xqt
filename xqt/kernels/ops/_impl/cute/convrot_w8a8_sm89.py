@@ -6,19 +6,21 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
-from xqt.kernels.jit.utils.compile import CompileSpec, csrc_path, load_extension
+from xqt.kernels.jit.utils.compile import (
+    CompileSpec,
+    csrc_path,
+    include_root,
+    load_extension,
+)
 from xqt.kernels.ops._impl.cute.svdq_w4a4_sm89 import pack_scale
 
-_HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parents[4]
-_NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
+_NUNCHAKU_INCLUDE = include_root() / "nunchaku"
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _NATIVE_ROT_SIZE = 256
 _CUDA_SOURCE = csrc_path("quantization", "convrot_w8a8_sm89_kernel.cu")

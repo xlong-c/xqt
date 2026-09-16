@@ -533,7 +533,7 @@ def build_tilelang_kv_int8_attention_kernel(
 ) -> Any:
     """编译 (并按形状缓存) KV-int8 fused attention TileLang kernel.
 
-    mainloop 结构沿用 `learn/tilelang/flashatt.py` 的 flash-attention 设计,
+    mainloop 结构沿用 `xqt/kernels/ops/_impl/tilelang/flashatt_kernel.py` 的 flash-attention 设计,
     差异在于 K/V 输入为 int8, 每个 kv tile 先经 `T.copy` 进入 int8 shared,
     再在 kernel 内 dequant 为 fp16 shared 后参与 GEMM.
     """
@@ -912,7 +912,7 @@ TILELANG_KV_INT8_ATTENTION_KERNEL_METADATA: dict[str, dict[str, Any]] = {
         "packed_qkv_input": (
             "contiguous fp16 [batch, seq, 3 * heads * head_dim]"
         ),
-        "source_mainloop": "learn/tilelang/flashatt.py",
+        "source_mainloop": "xqt/kernels/ops/_impl/tilelang/flashatt_kernel.py",
     },
 }
 

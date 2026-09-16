@@ -6,18 +6,20 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 from xqt.core.errors import XQTBackendError
-from xqt.kernels.jit.utils.compile import CompileSpec, csrc_path, load_extension
+from xqt.kernels.jit.utils.compile import (
+    CompileSpec,
+    csrc_path,
+    include_root,
+    load_extension,
+)
 
-_HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parents[4]
-_NUNCHAKU_INCLUDE = _REPO_ROOT / "learn" / "nunchaku"
+_NUNCHAKU_INCLUDE = include_root() / "nunchaku"
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _VECTOR_ALIGNMENT = 4
 _SUPPORTED_ROTATION_SIZES = frozenset({1, 4, 16, 64, 256})

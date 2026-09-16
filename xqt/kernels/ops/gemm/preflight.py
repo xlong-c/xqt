@@ -82,13 +82,23 @@ def _version_from_output(output: str | None) -> str | None:
 
 
 def _find_cutlass_include(repo_root: Path | None = None) -> Path | None:
+    """Locate a CUTLASS include directory without requiring a build.
+
+    Resolution order: explicit ``XQT_CUTLASS_INCLUDE``, the caller-supplied
+    repository root, this checkout's own ``third_party/cutlass``, then the
+    CUTLASS bundled by an installed TileLang / CUDA-Tile package.
+    """
+
     candidates: list[Path] = []
     env_path = os.environ.get("XQT_CUTLASS_INCLUDE")
     if env_path:
         candidates.append(Path(env_path))
     if repo_root is not None:
         candidates.append(repo_root / "third_party" / "cutlass" / "include")
-    candidates.append(Path(__file__).resolve().parents[3] / "third_party" / "cutlass" / "include")
+    # parents[3] is the checkout root when xqt is a standalone repository;
+    # parents[4] is the root when xqt is nested inside the XDL monorepo.
+    for ancestor in Path(__file__).resolve().parents[3:5]:
+        candidates.append(ancestor / "third_party" / "cutlass" / "include")
     for package_name in ("tilelang", "cuda_tile"):
         module_spec = importlib.util.find_spec(package_name)
         if module_spec is None or module_spec.origin is None:
