@@ -14,8 +14,6 @@ script.
 # pyright: reportArgumentType=false
 # pyright: reportAttributeAccessIssue=false
 
-from __future__ import annotations
-
 from collections.abc import Callable
 
 import tilelang
