@@ -62,3 +62,8 @@ outputs/
 # Agent 工具目录中的技能软链 (skills/ 是唯一实体来源)
 /.claude/skills/
 /.codex/skills/
+
+# research/ 已拆为独立仓库 /root/workspace/research; 以软链形式挂入本仓库.
+# 必须同时列出无斜杠形式, 否则 git 不忽略软链.
+/research
+/research/
