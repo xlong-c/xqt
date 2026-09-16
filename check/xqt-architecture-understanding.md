@@ -96,7 +96,7 @@ nn.Linear
 普通 int8 的实现落点:
 
 - storage/reference 语义: [xqt/contracts/int8_mma.py](../xqt/contracts/int8_mma.py)
-- quantizer: [xqt/quant/quantizers/int8_mma.py](../xqt/quant/quantizers/int8_mma.py)
+- quantizer: [xqt/compression/quant/quantizers/int8_mma.py](../xqt/compression/quant/quantizers/int8_mma.py)
 - execution view: [xqt/runtime/modules/int8_mma_linear.py](../xqt/runtime/modules/int8_mma_linear.py)
 - compute handoff: [xqt/contracts/compute.py](../xqt/contracts/compute.py)
 - runtime quant contract: [xqt/contracts/runtime_quant.py](../xqt/contracts/runtime_quant.py)
@@ -115,8 +115,8 @@ nn.Linear
 
 文档目标是 `quant -> contracts -> runtime`, 但当前代码仍有部分历史性能特化:
 
-- [xqt/quant/quantizers/convrot_int8.py](../xqt/quant/quantizers/convrot_int8.py) 内含 runtime fastpath, cache 和多 backend fallback 判断.
-- [xqt/quant/quantizers/convrot_4bit.py](../xqt/quant/quantizers/convrot_4bit.py) 内含部分 mixed-precision execution 逻辑.
+- [xqt/compression/quant/quantizers/convrot_int8.py](../xqt/compression/quant/quantizers/convrot_int8.py) 内含 runtime fastpath, cache 和多 backend fallback 判断.
+- [xqt/compression/quant/quantizers/convrot_4bit.py](../xqt/compression/quant/quantizers/convrot_4bit.py) 内含部分 mixed-precision execution 逻辑.
 - 部分 quantizer 会 lazy import `operator_opt.kernels`, 所以当前代码的实际依赖图比目标层级更宽.
 
 这不是本轮必须立即重构的功能 bug, 但必须在架构检查中明确标记为例外. 当前的正确理解是:

@@ -23,7 +23,7 @@ from xqt.compression.quant.quantizers.awq_gptq_weight_only import (
 )
 from xqt.runtime.bridges.external_weight_only import load_external_quantized_model
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FIXTURE_ROOT = _REPO_ROOT / "data" / "xqt_hf_quant_fixtures"
 
 

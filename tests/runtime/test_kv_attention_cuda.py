@@ -34,7 +34,7 @@ from xqt.runtime.modules import KvScaleAttention
 
 
 def _kv_contract() -> RuntimeQuantContract:
-    """与 tests/xqt/runtime/test_runtime_features.py 一致的 KV contract."""
+    """与 tests/runtime/test_runtime_features.py 一致的 KV contract."""
 
     return build_runtime_quant_contract(
         quant_spec={

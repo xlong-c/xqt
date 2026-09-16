@@ -16,7 +16,7 @@ from scripts.verify_ovisocr2_convrot_pdf_speedup import (
 )
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _PDF_PATH = (
     _REPO_ROOT
     / "others"

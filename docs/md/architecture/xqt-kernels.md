@@ -2,7 +2,7 @@
 
 本文定义 `xqt.kernels` 的系统边界, 分层模型和调用契约. 它是 `XQT` 架构层事实源之一, 承接 `sglang.kernels` (RFC #29630) 的设计, 适配 `XQT` 只关注模型本身的约束.
 
-> 修改指导 (research): [GUIDE](../../research/xqt-quant-inference-architecture/GUIDE.md), [TODO](../../research/xqt-quant-inference-architecture/TODO.md).
+> 修改指导 (research): [GUIDE](../../../research/xqt-quant-inference-architecture/GUIDE.md), [TODO](../../../research/xqt-inference-optimization/README.md).
 
 ## 负责什么
 
@@ -446,4 +446,4 @@ xqt.nn facade / torch module
 - [xqt-kernel-wrapper-nn-boundary.md](xqt-kernel-wrapper-nn-boundary.md)
 - [xqt-engine-quant-boundary.md](xqt-engine-quant-boundary.md)
 - [xqt-operator-block-optimization.md](xqt-operator-block-optimization.md)
-- [../../xqt/FRAMEWORK.md](../../xqt/FRAMEWORK.md)
+- [../../../xqt/FRAMEWORK.md](../../../xqt/FRAMEWORK.md)

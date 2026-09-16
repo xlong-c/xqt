@@ -110,7 +110,7 @@ convert 更像语义 / 精度 / contract 变换; 选 kernel 实现更像 operato
 ### 全量落地 (2026-08-03)
 
 - 词表合一: 实现侧 `engine_registry_names()` (`xqt/kernels/engine_resolve.py`), 配置面 `OPERATOR_OPT_ENGINES` (`xqt/core/schema.py`), convert materialize 子集 `CONVERT_ENGINE_NAMES` (`torch` / `triton` / `tilelang` / `cutile` / `cute_dsl`); `xqt.convert` 对非子集 engine 显式报错.
-- 回归测试 `tests/xqt/quant/test_quant_axes.py::test_engine_vocabulary_fact_sources_are_aligned` 断言三份词表不漂移; `test_convert_engine_preference_uses_canonical_subset` 锁定 convert 子集.
+- 回归测试 `tests/quant/test_quant_axes.py::test_engine_vocabulary_fact_sources_are_aligned` 断言三份词表不漂移; `test_convert_engine_preference_uses_canonical_subset` 锁定 convert 子集.
 - 文档: `xqt/FRAMEWORK.md` Backend / Engine 术语注明词表事实源.
 
 ### 相关
@@ -379,7 +379,7 @@ InferRuntime:
 ### 源码锚点
 
 - `xqt/kernels/ops/_impl/gemm_selector.py` `select_gemm_engine`
-- `tests/xqt/kernels/wrappers/test_gemm_selector.py`
+- `tests/kernels/wrappers/test_gemm_selector.py`
 
 ### 本阶段明确不做
 
@@ -433,10 +433,10 @@ SVDQuant 量化结果是 **低秩高位支路 + 量化 residual 支路**, 语义
 | --- | --- |
 | 通用 additive composite reference artifact | `xqt/contracts/composite.py` |
 | SVD reference quantization 输出 `CompositeAddLinear` | `xqt/compression/quant/quantizers/svd.py` |
-| 低秩因子 + packed residual 的 reference 重建测试 | `tests/xqt/quant/test_quant_svd_method.py` |
+| 低秩因子 + packed residual 的 reference 重建测试 | `tests/quant/test_quant_svd_method.py` |
 | GELU materializer 接受通用 composite module | `xqt/runtime/composite_inference.py`, `xqt/runtime/modules/svd_gelu_mlp.py` |
 | 通用 W4A4 main/small-N executor + `compute_config` materialize 入口 | `xqt/runtime/modules/composite_add_w4a4.py`, `xqt/runtime/modules/composite_add.py` |
-| RMSNorm 作为独立输入变换 wrapper | `xqt/runtime/modules/composite_norm.py`, `tests/xqt/runtime/test_composite_norm.py` |
+| RMSNorm 作为独立输入变换 wrapper | `xqt/runtime/modules/composite_norm.py`, `tests/runtime/test_composite_norm.py` |
 | 旧 `SVDQuantLinear` 复用 generic artifact 存储与基础校验 | `xqt/runtime/modules/svd_w4a4_legacy.py` |
 | INT8-MMA quantizer 先输出 artifact, 再按 `compute_config` 物化 | `xqt/compression/quant/quantizers/svd.py`, `xqt/runtime/modules/composite_add.py` |
 | FP8 split/collapse 也从 generic artifact 显式物化 | `xqt/runtime/modules/composite_add_fp8.py`, `xqt/runtime/modules/composite_add.py` |
@@ -474,7 +474,7 @@ W4A4 executor, 但 QKV/RoPE 和 CUDA Graph 仍是特例, 默认 SVD reference
 | `svd_legacy.py` 降为兼容门面 | `xqt/runtime/modules/svd_legacy.py` |
 | runtime executor 不再继承 canonical artifact | `xqt/contracts/composite.py`, `xqt/runtime/modules/composite_add_w4a4.py`, `svd_w4a4_legacy.py` |
 | artifact/runtime 共用显式 storage 初始化协议 | `initialize_composite_add_storage()` |
-| 类型边界回归 | `tests/xqt/runtime/test_composite_add.py` |
+| 类型边界回归 | `tests/runtime/test_composite_add.py` |
 
 ### 仍待做 / 部分完成 (2026-07-30)
 

@@ -61,7 +61,7 @@ def test_standalone_deployment_subprocess_forward(deployed_toy_artifact: Path) -
 import sys
 import torch
 from xqt.runtime.deploy_loader import StandaloneDeployLoader
-from tests.xqt.runtime.test_standalone_subprocess_deployment import _DeploymentToyModel
+from tests.runtime.test_standalone_subprocess_deployment import _DeploymentToyModel
 
 loader = StandaloneDeployLoader()
 shell = _DeploymentToyModel().eval()

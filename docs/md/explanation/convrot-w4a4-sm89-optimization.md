@@ -78,7 +78,7 @@ XQT 完整 wrapper 延迟为 `13.297-26.766 us`. `xqt_wrapper / rowwise_bound_fl
 2. [convrot_w4a4_rowwise_sm89.py](../../../xqt/kernels/ops/_impl/cute/convrot_w4a4_rowwise_sm89.py): capability,JIT build,rowwise weight packing 和 Python binding.
 3. [convrot_w4a4_rowwise_sm89_binding.cpp](../../../xqt/kernels/jit/csrc/quantization/convrot_w4a4_rowwise_sm89_binding.cpp): 参数验证,dynamic runner,workspace cache 和 tensor version 失效.
 4. [convrot_w4a4_rowwise_sm89_kernel.cu](../../../xqt/kernels/jit/csrc/quantization/convrot_w4a4_rowwise_sm89_kernel.cu): warp-FHT,quant/pack,CUTLASS EVT epilogue 和 GEMM dispatch.
-5. [test_convrot_4bit_quantizer.py](../../../tests/xqt/quant/test_convrot_4bit_quantizer.py): non-contiguous,高维,multi-stream,mutation 和数值 reference 验证.
+5. [test_convrot_4bit_quantizer.py](../../../tests/quant/test_convrot_4bit_quantizer.py): non-contiguous,高维,multi-stream,mutation 和数值 reference 验证.
 6. [benchmark_convrot_w4a4_sm89.py](../../../tools/benchmark_convrot_w4a4_sm89.py): 正式 CUDA-event benchmark 口径.
 7. [profile_convrot_w4a4_sm89.py](../../../tools/profile_convrot_w4a4_sm89.py): NVTX range 和 Nsight Systems workload.
 
@@ -994,7 +994,7 @@ grouped packed artifact
 ### 22.1 运行 policy 和 CUDA correctness tests
 
 ```bash
-pytest -q tests/xqt/quant/test_convrot_4bit_quantizer.py -k "rowwise or runtime_backend"
+pytest -q tests/quant/test_convrot_4bit_quantizer.py -k "rowwise or runtime_backend"
 ```
 
 CUDA case 需要 `sm_89`,TileLang bundled CUTLASS headers 和可用 extension toolchain. 其他机器会跳过或走 capability fallback.

@@ -19,7 +19,7 @@ from typing import Iterable, Sequence
 
 import pytest
 
-XQT_ROOT = Path(__file__).resolve().parent.parent.parent / "xqt"
+XQT_ROOT = Path(__file__).resolve().parent.parent / "xqt"
 
 # --- AST scan ------------------------------------------------------------------
 

@@ -46,7 +46,7 @@
 
 ## 已通过检查
 
-- [x] `tests/xqt/test_layer_import_boundaries.py` 层级守卫通过.
+- [x] `tests/test_layer_import_boundaries.py` 层级守卫通过.
 - [x] StageSpec/workflow,quant,runtime,export 针对性回归通过.
 - [x] `python -m compileall` 通过.
 - [x] `ruff check xqt examples/xqt_models tests/xqt` 通过.

@@ -176,7 +176,7 @@ Usually inspect these files in this order:
 2. `xqt/kernels/ops/_impl/engines/tilelang.py`
 3. `xqt/kernels/ops/_impl/tilelang/attention.py`
 4. `tools/benchmark_tilelang_half_ops.py`
-5. `tests/xqt/test_operator_tilelang_*`
+5. `tests/test_operator_tilelang_*`
 
 Look for:
 

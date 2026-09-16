@@ -9,7 +9,7 @@ from xqt.workflows import optimize_model
 
 def test_quant_layer_statistics_workflow_runs_via_optimize_model() -> None:
     recipe = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[1]
         / "xqt"
         / "recipes"
         / "analysis"

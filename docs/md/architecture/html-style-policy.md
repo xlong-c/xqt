@@ -1,10 +1,10 @@
-# XDL HTML 阅读页规范
+# XQT HTML 阅读页规范
 
-本文承接 `XDL` 自有 HTML 阅读页的规范正文. 它定义长期 HTML 页面应该怎样组织, 引用什么公共资源, 以及哪些写法不允许继续扩散.
+本文承接本仓库自有 HTML 阅读页的规范正文. 它定义长期 HTML 页面应该怎样组织, 引用什么公共资源, 以及哪些写法不允许继续扩散. 公共资源沿用 vendored 的 `xdl-doc.css` / `xdl-theme.js` 命名, 不随仓库改名.
 
 ## 负责什么
 
-- 定义 `learn/` 与 `research/` 自有 HTML 教程与调研页的长期规范.
+- 定义 `research/` 自有 HTML 教程与调研页的长期规范.
 - 定义公共 CSS, 主题脚本和 body 模板的使用边界.
 - 定义 HTML 与 Markdown 的分工和同步规则.
 
@@ -17,7 +17,7 @@
 ## 第一原则
 
 - `docs/md/` 是事实源和实现导航.
-- `learn/` 与 `research/` 下的 HTML 是给人类读者的教程与调研阅读层.
+- `research/` 下的 HTML 是给人类读者的教程与调研阅读层.
 - 同一主题变化时, 先更新对应 Markdown 正文, 再同步 HTML.
 - HTML 可以提炼, 重排和图文化 Markdown, 但不能单独定义新契约.
 
@@ -41,7 +41,7 @@
 
 ## 页面资源引用
 
-`learn/` 与 `research/` 下的 HTML 页面默认写法:
+`research/` 下的 HTML 页面默认写法:
 
 ```html
 <head>
@@ -95,7 +95,7 @@
   <a class="skip-link" href="#main">跳到正文</a>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="index.html">XDL Docs</a>
+      <a class="brand" href="index.html">XQT Docs</a>
       <nav aria-label="页面导航">
         <a href="#overview">概览</a>
       </nav>
@@ -202,6 +202,4 @@
 
 ## 相关页面
 
-- [xdl.md](xdl.md)
 - [../explanation/html-style.md](../explanation/html-style.md)
-- [../README.md#xdl-html-阅读页样式规范](../README.md#xdl-html-阅读页样式规范)

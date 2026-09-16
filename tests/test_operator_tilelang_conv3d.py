@@ -15,7 +15,7 @@ from xqt.kernels.ops._impl.tilelang.conv import (
 from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
 from xqt.pipeline.passes import LoadModelPass
-from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
+from tests.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(

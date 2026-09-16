@@ -38,12 +38,12 @@ XQT-017 的核心目标在于:
 | **模型侧导出 (Model-side)** | `xqt/model/flux2_klein/__init__.py` | 修改 | 公开导出新增的 Adapter 类 |
 | **模型注册表 (Model-side)** | `xqt/model/registry.py` | 修改 | 声明并注册 `diffusers.flux2-klein-nvfp4` Profile, 配置 `adapter_target` |
 | **通用核心主链 (Generic Core)** | `xqt/core/*`, `xqt/session/*`, `xqt/contracts/*`, `xqt/transforms/*`, `xqt/runtime/deploy_loader.py` | **零变更 (0 改动)** | **完全复用, 无任何 model-specific 分支代码** |
-| **自动化测试 (Tests)** | `tests/xqt/model/test_second_model_family_reuse.py` | 新增 | 包含 Profile 解析, 契约绑定, 负向安全与静态零污染审计在内的 4 项单元测试 |
+| **自动化测试 (Tests)** | `tests/model/test_second_model_family_reuse.py` | 新增 | 包含 Profile 解析, 契约绑定, 负向安全与静态零污染审计在内的 4 项单元测试 |
 | **全流程脚本 (Scripts)** | `scripts/verify_second_model_family_reuse.py` | 新增 | 真实硬件端到端闭环验证脚本 |
 
 ### 3.2 静态代码零污染审计证据
 
-在 `scripts/verify_second_model_family_reuse.py` 与 `tests/xqt/model/test_second_model_family_reuse.py` 中内置静态 AST/文本扫描器, 针对全部通用核心包执行模型标识检测:
+在 `scripts/verify_second_model_family_reuse.py` 与 `tests/model/test_second_model_family_reuse.py` 中内置静态 AST/文本扫描器, 针对全部通用核心包执行模型标识检测:
 - **扫描路径**: `xqt/core/`, `xqt/session/`, `xqt/contracts/`, `xqt/transforms/`, `xqt/runtime/deploy_loader.py`, `xqt/compression/quant/transforms/`.
 - **匹配敏感词**: `"flux"`, `"flux2"`, `"flux_2"`, `"klein"`.
 - **检测结果**: **0 个违规匹配 (Violations = 0, Passed = True)**. 通用主链保持 100% 架构纯洁度.

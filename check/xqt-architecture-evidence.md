@@ -83,7 +83,7 @@
 ### E.1 xqt/gemm/ 三份平行基础设施
 
 - `xqt/gemm/common/` (12 模块, 7,108 行): 与平铺版 md5 相同 6 个 (`p4/fp8/benchmark/quantize/grouped_dispatch/tuning_cache`); 已分叉 6 个 (`contracts/dispatch/layout/preflight/reference/registry`, diff 7~236 行, 平铺版更新). 全仓零引用, 实测 import 失败 (`__init__.py:106` 引用不存在的 `xqt.gemm.common.backends`). 由单次 commit 一次性加入后无人维护.
-- `xqt/gemm/backends/sm89/` (13 py, 6,897 行): 11 个与平铺版 md5 相同; 已分叉 3 个 - `sm89_build.py` (平铺 973 vs 子包 890, 缺 `Sm89W4A8BuildConfig`/`build_sm89_w4a8_artifact`), `sm90_fp8_wgmma.py` (平铺 792 vs 子包 295, 缺 6 个符号, 且 sm90 文件放 sm89/ 错位), `tilelang_marlin.py` (import 路径机械改写错误, 实测 ModuleNotFoundError). 唯一引用者 `tests/xqt/gemm/test_sm89_backend.py:26`.
+- `xqt/gemm/backends/sm89/` (13 py, 6,897 行): 11 个与平铺版 md5 相同; 已分叉 3 个 - `sm89_build.py` (平铺 973 vs 子包 890, 缺 `Sm89W4A8BuildConfig`/`build_sm89_w4a8_artifact`), `sm90_fp8_wgmma.py` (平铺 792 vs 子包 295, 缺 6 个符号, 且 sm90 文件放 sm89/ 错位), `tilelang_marlin.py` (import 路径机械改写错误, 实测 ModuleNotFoundError). 唯一引用者 `tests/gemm/test_sm89_backend.py:26`.
 - `xqt/gemm/backends/sm89.py` (353 行) 与 `backends/sm89/` 包同名撞车, 包优先解析, 平铺文件不可达.
 - `xqt/gemm/backends/` 顶层 9 个 shim (contracts/fp8/grouped_dispatch/layout/preflight/quantize/reference/registry/tuning_cache, 各 ~13 行): `from .. import X as _impl; globals().update(...)`, docstring 自述迁移落地后删除.
 - `xqt/gemm/backends/sm90/`, `sm100/`: 空包 (0 字节 `__init__.py`), 零引用.

@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-from tests.xqt.svd_test_helpers import (
+from tests.svd_test_helpers import (
     make_legacy_svd_int8,
     make_legacy_svd_linear,
 )

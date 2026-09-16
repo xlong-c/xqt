@@ -24,7 +24,6 @@
 ## 该看哪里
 
 - 看正式样式规范: [../architecture/html-style-policy.md](../architecture/html-style-policy.md)
-- 看兼容锚点: [../README.md#xdl-html-阅读页样式规范](../README.md#xdl-html-阅读页样式规范)
 
 ## 常见误区
 

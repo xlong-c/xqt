@@ -852,12 +852,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 源码 commit: 9d254042f268e3bf5a9f9ab546fcf738c0b494a4
   - 已完成依赖与适用 freeze version: 无前置依赖, M0 工程基线
 改动范围与关键决策:
-  - 修改模块清单: xqt/compression/prune/discovery.py, tests/xqt/
+  - 修改模块清单: xqt/compression/prune/discovery.py, tests/
   - 同步事实文档: docs/md/architecture/xqt-improvement-goals.md
   - 采纳的关键设计决策: 修复 ruff F821 未定义符号, 建立 CPU, SM89, Optional 三层自动化测试矩阵
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/prune/test_discovery.py
-  - 执行命令与测试环境: pytest tests/xqt/ (Python 3.12.12, PyTorch 2.12.1+cu130, RTX 4070 Ti SUPER)
+  - 新增/修改测试用例: tests/prune/test_discovery.py
+  - 执行命令与测试环境: pytest tests/ (Python 3.12.12, PyTorch 2.12.1+cu130, RTX 4070 Ti SUPER)
   - 测试结果统计: 1650+ passed, 5 skipped (无未声明伪绿)
   - 已验证失败分支: 语法扫描与未定义符号拦截
 证据文件索引:
@@ -877,12 +877,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/workflows/optimization.py, xqt/workflows/session_runner.py, xqt/workflows/stage_specs.py
   - 采纳的关键设计决策: 采纳方案 C, 建立 Prepare-Execute-Validate-Commit 四阶段事务模型与 TransactionSnapshot 拓扑参数隔离
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/test_stage_transactions.py
-  - 执行命令: pytest tests/xqt/test_stage_transactions.py
+  - 新增/修改测试用例: tests/test_stage_transactions.py
+  - 执行命令: pytest tests/test_stage_transactions.py
   - 测试结果统计: 12 passed
   - 已验证失败分支: stage 执行异常回滚, validate rejected 门槛回滚, 原始模型对象不变式
 证据文件索引:
-  - 详细日志路径: tests/xqt/test_stage_transactions.py
+  - 详细日志路径: tests/test_stage_transactions.py
 后续承接任务: XQT-003, XQT-006
 ================================================================================
 
@@ -898,12 +898,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/workflows/optimization.py, xqt/workflows/session_runner.py
   - 采纳的关键设计决策: 采纳方案 A+B, 显式维护 current_stage 与 baseline_stage, Lineage DAG 防自指校验, best_stage 走显式指标评选
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/test_stage_transaction_lineage.py
-  - 执行命令: pytest tests/xqt/test_stage_transaction_lineage.py
+  - 新增/修改测试用例: tests/test_stage_transaction_lineage.py
+  - 执行命令: pytest tests/test_stage_transaction_lineage.py
   - 测试结果统计: 8 passed
   - 已验证失败分支: 自指 parent 拦截, 环状依赖检测, 跨分支 use() 模型重置
 证据文件索引:
-  - 详细日志路径: tests/xqt/test_stage_transaction_lineage.py
+  - 详细日志路径: tests/test_stage_transaction_lineage.py
 后续承接任务: XQT-010, XQT-015
 ================================================================================
 
@@ -919,12 +919,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/compression/quant/calibration.py, xqt/compression/quant/policy.py
   - 采纳的关键设计决策: 引入 calibration_context 上下文管理器, 逐模块记录 training 原生标志并在 finally 阶段 100% 恢复, 严格注销 hooks
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/quant/test_calibration_isolation.py
-  - 执行命令: pytest tests/xqt/quant/test_calibration_isolation.py
+  - 新增/修改测试用例: tests/quant/test_calibration_isolation.py
+  - 执行命令: pytest tests/quant/test_calibration_isolation.py
   - 测试结果统计: 10 passed
   - 已验证失败分支: 校准中途抛异常时 hook 自动注销, Dropout/BatchNorm 状态回退
 证据文件索引:
-  - 详细日志路径: tests/xqt/quant/test_calibration_isolation.py
+  - 详细日志路径: tests/quant/test_calibration_isolation.py
 后续承接任务: XQT-006, XQT-015
 ================================================================================
 
@@ -940,12 +940,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/contracts/quant_pair.py, xqt/contracts/quant_pair_schema.py
   - 采纳的关键设计决策: 采纳方案 B, 建立 Staging 两阶段发布机制, 写入临时目录校验 SHA256 完整后执行同文件系统原子目录重命名, 严格防范 ../../ 路径逃逸
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/contracts/test_quant_pair.py
-  - 执行命令: pytest tests/xqt/contracts/test_quant_pair.py
+  - 新增/修改测试用例: tests/contracts/test_quant_pair.py
+  - 执行命令: pytest tests/contracts/test_quant_pair.py
   - 测试结果统计: 14 passed
   - 已验证失败分支: 目录越界读写拒绝, 写入中途崩溃不破坏原产物, 非安全 pickle 拒绝
 证据文件索引:
-  - 详细日志路径: tests/xqt/contracts/test_quant_pair.py
+  - 详细日志路径: tests/contracts/test_quant_pair.py
 后续承接任务: XQT-016
 ================================================================================
 
@@ -961,12 +961,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/compression/quant/quantizers/int8_mma.py, xqt/compression/quant/policy.py
   - 采纳的关键设计决策: Static INT8 MMA 量化缺少 scale 时强制抛出 XQTConfigError (fail-closed), 坚决禁止静默降级为 dynamic; 计算契约与实际执行保持双向一致
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/quant/test_int8_mma_contract_consistency.py
-  - 执行命令: pytest tests/xqt/quant/test_int8_mma_contract_consistency.py
+  - 新增/修改测试用例: tests/quant/test_int8_mma_contract_consistency.py
+  - 执行命令: pytest tests/quant/test_int8_mma_contract_consistency.py
   - 测试结果统计: 9 passed
   - 已验证失败分支: 无 activation scale 静态请求抛错, 动态模式拒绝伪造 static 报告
 证据文件索引:
-  - 详细日志路径: tests/xqt/quant/test_int8_mma_contract_consistency.py
+  - 详细日志路径: tests/quant/test_int8_mma_contract_consistency.py
 后续承接任务: XQT-007
 ================================================================================
 
@@ -982,12 +982,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/contracts/module_quant.py, xqt/contracts/__init__.py, xqt/compression/quant/
   - 采纳的关键设计决策: 采纳方案 B, 实现 ModuleQuantContract 结构, 逐模块记录量化方案, storage/compute 类型, scale 信息与显式 no-op 状态, 彻底解决全局契约与局部模块失真问题
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/contracts/test_module_quant_contract.py
-  - 执行命令: pytest tests/xqt/contracts/test_module_quant_contract.py
+  - 新增/修改测试用例: tests/contracts/test_module_quant_contract.py
+  - 执行命令: pytest tests/contracts/test_module_quant_contract.py
   - 测试结果统计: 11 passed
   - 已验证失败分支: 未被量化模块标记为 no-op, 混合精度局部 shape 映射校验
 证据文件索引:
-  - 详细日志路径: tests/xqt/contracts/test_module_quant_contract.py
+  - 详细日志路径: tests/contracts/test_module_quant_contract.py
 后续承接任务: XQT-008, XQT-010, XQT-015
 ================================================================================
 
@@ -1003,12 +1003,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/kernels/registry.py, xqt/kernels/resolver.py
   - 采纳的关键设计决策: 采纳方案 B, 明确区分 capability (静态支持), resolver (环境就绪预检), materialize (权重物化) 与 observed (实际物理 kernel) 四层证据; 严格执行 SM 算力门禁, 禁止在缺乏硬件时返回可用
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/kernels/test_resolver_capability_separation.py
-  - 执行命令: pytest tests/xqt/kernels/test_resolver_capability_separation.py
+  - 新增/修改测试用例: tests/kernels/test_resolver_capability_separation.py
+  - 执行命令: pytest tests/kernels/test_resolver_capability_separation.py
   - 测试结果统计: 15 passed
   - 已验证失败分支: CPU 环境拒绝 GPU 专属 kernel, SM80 硬件拒绝 SM89 专属 kernel, 未知 engine 显式报错
 证据文件索引:
-  - 详细日志路径: tests/xqt/kernels/test_resolver_capability_separation.py
+  - 详细日志路径: tests/kernels/test_resolver_capability_separation.py
 后续承接任务: XQT-011, XQT-013, XQT-016
 ================================================================================
 
@@ -1024,12 +1024,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/workflows/optimization.py, xqt/workflows/stage_specs.py, xqt/analysis/
   - 采纳的关键设计决策: 采纳方案 A+B, 支持点分路径表达式 (如 latency.p50_ms), 显式指定聚合方向 (min/max/worst/exact), 杜绝递归盲目取 max; Speedup 严格要求同一 profile 成对 run 计算
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/test_metric_scope_and_acceptance.py
-  - 执行命令: pytest tests/xqt/test_metric_scope_and_acceptance.py
+  - 新增/修改测试用例: tests/test_metric_scope_and_acceptance.py
+  - 执行命令: pytest tests/test_metric_scope_and_acceptance.py
   - 测试结果统计: 16 passed
   - 已验证失败分支: 错误点分路径报错, 聚合策略非法报错, 门槛越界严格拒绝 commit
 证据文件索引:
-  - 详细日志路径: tests/xqt/test_metric_scope_and_acceptance.py
+  - 详细日志路径: tests/test_metric_scope_and_acceptance.py
 后续承接任务: XQT-013, XQT-014, XQT-015
 ================================================================================
 
@@ -1045,12 +1045,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/contracts/model_structure.py, xqt/pipeline/model_pass.py
   - 采纳的关键设计决策: 统一直接注入 (model=...) 与 adapter 加载的 ModelStructureContract 管道, 自动生成拓扑指纹; 发生拓扑剪枝重写时强制刷新契约, 杜绝契约过时
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/contracts/test_model_structure_contract.py
-  - 执行命令: pytest tests/xqt/contracts/test_model_structure_contract.py
+  - 新增/修改测试用例: tests/contracts/test_model_structure_contract.py
+  - 执行命令: pytest tests/contracts/test_model_structure_contract.py
   - 测试结果统计: 18 passed
   - 已验证失败分支: 契约与模型模块不匹配拦截, 拓扑指纹失效检测, 缺失契约 fail-closed 拦截
 证据文件索引:
-  - 详细日志路径: tests/xqt/contracts/test_model_structure_contract.py
+  - 详细日志路径: tests/contracts/test_model_structure_contract.py
 后续承接任务: XQT-012, XQT-015
 ================================================================================
 
@@ -1066,12 +1066,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/kernels/registry.py, xqt/kernels/ops/gemm/registry.py
   - 采纳的关键设计决策: 收敛单一权威源: xqt/kernels/ops/ 作为物理算子实现的唯一事实源, xqt/kernels/registry.py 作为单向消费派生的元数据视图, 彻底消除镜像冗余与职责重叠
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/kernels/test_registry_convergence.py
-  - 执行命令: pytest tests/xqt/kernels/test_registry_convergence.py
+  - 新增/修改测试用例: tests/kernels/test_registry_convergence.py
+  - 执行命令: pytest tests/kernels/test_registry_convergence.py
   - 测试结果统计: 13 passed
   - 已验证失败分支: 算子反向注册拒绝, 重复注册检测, 权威元数据一致性
 证据文件索引:
-  - 详细日志路径: tests/xqt/kernels/test_registry_convergence.py
+  - 详细日志路径: tests/kernels/test_registry_convergence.py
 后续承接任务: XQT-013
 ================================================================================
 
@@ -1087,12 +1087,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/compression/quant/transforms/base.py, xqt/compression/quant/transforms/patterns.py
   - 采纳的关键设计决策: 实现强类型图重写框架, 交付 dequant_gemm, norm_quant, activation_quant 三大经典 pattern, 支持事务级 pattern 替换与参数回滚
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/transforms/test_graph_rewrite_patterns.py
-  - 执行命令: pytest tests/xqt/transforms/test_graph_rewrite_patterns.py
+  - 新增/修改测试用例: tests/transforms/test_graph_rewrite_patterns.py
+  - 执行命令: pytest tests/transforms/test_graph_rewrite_patterns.py
   - 测试结果统计: 14 passed
   - 已验证失败分支: 局部匹配失败安全回滚, 结构契约不匹配拒绝重写
 证据文件索引:
-  - 详细日志路径: tests/xqt/transforms/test_graph_rewrite_patterns.py
+  - 详细日志路径: tests/transforms/test_graph_rewrite_patterns.py
 后续承接任务: XQT-013, XQT-015
 ================================================================================
 
@@ -1108,12 +1108,12 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/runtime/block_materialize.py, xqt/runtime/cuda_graph.py
   - 采纳的关键设计决策: 消除通用 wrapper 的中间对象包装开销; 实现 CUDAGraphBlockRunner, 规范 CUDA Graph 缓存防参数更新静默失效机制 (按拓扑指纹 + 参数 version 自动驱逐)
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/runtime/test_block_materialize_and_cuda_graph.py
-  - 执行命令: pytest tests/xqt/runtime/test_block_materialize_and_cuda_graph.py
+  - 新增/修改测试用例: tests/runtime/test_block_materialize_and_cuda_graph.py
+  - 执行命令: pytest tests/runtime/test_block_materialize_and_cuda_graph.py
   - 测试结果统计: 15 passed
   - 已验证失败分支: 输入 shape 漂移拒绝 replay, 参数更新后 graph 自动失效重建, 内存池复用安全
 证据文件索引:
-  - 详细日志路径: tests/xqt/runtime/test_block_materialize_and_cuda_graph.py
+  - 详细日志路径: tests/runtime/test_block_materialize_and_cuda_graph.py
 后续承接任务: XQT-015
 ================================================================================
 
@@ -1178,8 +1178,8 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/runtime/deploy_loader.py, xqt/runtime/__init__.py, scripts/verify_flux2_klein_deployment.py
   - 采纳的关键设计决策: 采纳方案 A+B, 实现脱离 Session 的轻量无状态生产加载器 StandaloneDeployLoader; 严格校验 Sidecar 与 Safetensors SHA256 完整性; 通过全新 Python 解释器子进程零父进程内存泄漏验证推理重载
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/runtime/test_standalone_subprocess_deployment.py, scripts/verify_flux2_klein_deployment.py
-  - 执行命令与测试环境: pytest tests/xqt/runtime/test_standalone_subprocess_deployment.py && python scripts/verify_flux2_klein_deployment.py
+  - 新增/修改测试用例: tests/runtime/test_standalone_subprocess_deployment.py, scripts/verify_flux2_klein_deployment.py
+  - 执行命令与测试环境: pytest tests/runtime/test_standalone_subprocess_deployment.py && python scripts/verify_flux2_klein_deployment.py
   - 独立子进程实测结果:
     - 重载推理稳态延迟: 76.27 ms
     - 重载峰值显存: 7508.88 MB
@@ -1203,8 +1203,8 @@ XQT-002 与 XQT-003 必须共同实现下面的状态边界. 表中 "恢复 sour
   - 修改模块清单: xqt/model/flux2_klein/adapter.py, xqt/model/registry.py, xqt/model/flux2_klein/__init__.py, xqt/contracts/model_structure.py, xqt/pipeline/model_pass.py
   - 采纳的关键设计决策: 采纳方案 A, 选定同族第二真实模型 FLUX.2 Klein NVFP4, 通过四项核验准则; 核心主链 0 侵入 (零 if model == xxx 分支); 仅通过声明 Profile 与 Adapter 实现端到端优化, 产物发布与独立子进程部署重载
 回归测试与验证结果:
-  - 新增/修改测试用例: tests/xqt/model/test_second_model_family_reuse.py, scripts/verify_second_model_family_reuse.py
-  - 执行命令与测试环境: pytest tests/xqt/model/test_second_model_family_reuse.py && python scripts/verify_second_model_family_reuse.py
+  - 新增/修改测试用例: tests/model/test_second_model_family_reuse.py, scripts/verify_second_model_family_reuse.py
+  - 执行命令与测试环境: pytest tests/model/test_second_model_family_reuse.py && python scripts/verify_second_model_family_reuse.py
   - 静态零污染代码审计: 违规匹配 0 个 (Passed = True)
   - 独立子进程实测重载:
     - 稳态延迟: 77.43 ms

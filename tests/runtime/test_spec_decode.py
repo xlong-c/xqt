@@ -7,7 +7,7 @@ import torch
 
 from xqt.runtime.graph_decode import CudaGraphDecodeSession
 from xqt.runtime.spec_decode import PromptLookupDrafter, SpecDecodeSession
-from tests.xqt.runtime.test_graph_decode import _tiny_llama
+from tests.runtime.test_graph_decode import _tiny_llama
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="spec decode requires CUDA"

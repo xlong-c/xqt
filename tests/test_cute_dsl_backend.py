@@ -12,7 +12,7 @@ from xqt.kernels.wrappers.capability import describe_operator_engine_capability
 from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
 from xqt.kernels.wrappers.plan import build_operator_optimization_plan
 from xqt.pipeline.preflight import preflight_optimization_config
-from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
+from tests.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 def _cute_dsl_operator_config() -> dict[str, object]:

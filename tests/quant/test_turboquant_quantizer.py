@@ -101,7 +101,7 @@ def test_turboquant_weight_only_forward_matches_dequantized_weight() -> None:
 
 def test_turboquant_workflow_runs_via_optimize_model() -> None:
     recipe = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[2]
         / "xqt"
         / "recipes"
         / "quant"

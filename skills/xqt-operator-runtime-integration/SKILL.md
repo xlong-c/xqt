@@ -21,7 +21,7 @@ Use this skill to diagnose the layer between a fast kernel and a disappointing X
    - `xqt/kernels/ops/_impl/engines/tilelang.py`
    - `xqt/kernels/ops/_impl/tilelang/attention.py`
    - `tools/benchmark_tilelang_half_ops.py`
-   - `tests/xqt/test_operator_tilelang_*`
+   - `tests/test_operator_tilelang_*`
 4. Keep every conclusion grounded in a same-layer comparison. Do not compare kernel-only microbenchmarks against whole-module operator reports and call the difference a kernel regression.
 5. If wrapper, whole-module, and operator-stage measurements all agree that the kernel body itself is slow, switch to `$xqt-gpu-kernel-tuning`.
 

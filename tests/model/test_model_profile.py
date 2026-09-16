@@ -118,7 +118,7 @@ def test_profile_adapter_can_construct_model_without_loader_target() -> None:
         ModelProfile(
             profile_id="external.adapter",
             family="transformer",
-            adapter_target="tests.xqt.model.test_model_profile.DemoAdapter",
+            adapter_target="tests.model.test_model_profile.DemoAdapter",
         ),
         replace=True,
     )

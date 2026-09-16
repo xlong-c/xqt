@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions / compiled kernels
+*.so
+
+# Dot-files (individual files starting with ".")
+.DS_Store
+.coverage
+.coverage.*
+.python-version
+*.swp
+*.swo
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# Local artifact tree (gitignored, moved into this repo separately)
+artifacts/
+
+# Curated XQT benchmark evidence. Keep the artifact tree ignored by default,
+# but allow the audited SVDQuant parity records used by long-term docs.
+!research/xqt-gemm/artifacts/
+research/xqt-gemm/artifacts/*
+!research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-norm-runner/
+!research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-norm-runner/result.json
+!research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-mlp-parity-v1/
+!research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-mlp-parity-v1/result.json
+
+# Local data and download caches
+data/
+downloads/
+
+# Local JIT build dirs
+xqt/kernels/ops/_impl/cute/build/

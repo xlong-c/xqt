@@ -223,7 +223,7 @@ def test_load_model_pass_direct_inject_and_contract_parity() -> None:
     profile = ModelProfile(
         profile_id="test.mock_qkv",
         family="transformer",
-        adapter_target="tests.xqt.contracts.test_model_structure_contract._MockAdapter",
+        adapter_target="tests.contracts.test_model_structure_contract._MockAdapter",
     )
     register_model_profile(profile, replace=True)
 

@@ -1,6 +1,6 @@
 # XQT 摘要
 
-本文保留为 `XQT` 的兼容摘要入口. 新的 Markdown 主导航已经迁到 [index.md](index.md), 并按架构 / 说明 / 使用三层组织.
+本文保留为 `XQT` 的兼容摘要入口. Markdown 主导航按架构 / 说明 / 使用三层组织, 完整正文见 [XQT.md](XQT.md).
 
 XQT 只关注模型本身. 它做模型压缩,图变换,导出适配,误差分析和 benchmark,不接管训练,QAT,finetune,distillation,recovery 或 dataset / provider 语义.
 
@@ -14,8 +14,7 @@ XQT 是仓库内唯一推理优化主体. Python API 是主入口; `triton`, `ti
 
 ## 先看什么
 
-- 先看 [index.md](index.md): 新 Markdown 总入口.
-- 再看 [architecture/xqt.md](architecture/xqt.md): `XQT` 架构正文.
+- 先看 [architecture/xqt.md](architecture/xqt.md): `XQT` 架构正文.
 - 再看 [explanation/xqt-concepts.md](explanation/xqt-concepts.md): `XQT` 概念说明.
 - 再看 [usage/xqt-workflows.md](usage/xqt-workflows.md): `XQT` 工作流入口.
 - 需要兼容旧结构时看 [XQT.md](XQT.md): 旧长期事实源.

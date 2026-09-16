@@ -8,7 +8,7 @@ import torch
 from xqt.kernels.wrappers.execute import execute_operator_optimization_plan
 from xqt.kernels.ops._impl.tilelang._common import tilelang_runtime_usable
 from xqt.kernels.wrappers.plan import build_operator_optimization_plan
-from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
+from tests.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(

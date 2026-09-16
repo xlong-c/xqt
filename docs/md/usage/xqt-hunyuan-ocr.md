@@ -210,7 +210,7 @@ result = optimize_hunyuan_ocr_dflash_svd_int4_blocks(
 ## 验证
 
 ```bash
-pytest -q tests/xqt/quant/test_quant_svd_method.py tests/xqt/test_hunyuan_ocr_svd_quant.py tests/xqt/test_operator_tilelang_hunyuan_block.py tests/xqt/test_hunyuan_ocr_tilelang_decode.py
+pytest -q tests/quant/test_quant_svd_method.py tests/test_hunyuan_ocr_svd_quant.py tests/test_operator_tilelang_hunyuan_block.py tests/test_hunyuan_ocr_tilelang_decode.py
 python examples/hunyuan_ocr_svd_int4_blocks.py
 ```
 

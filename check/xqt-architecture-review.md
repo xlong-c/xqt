@@ -57,7 +57,7 @@ XQT 的概念骨架设计意图是清晰的: stage workflow 单一配置形态, 
 
 **第二层: `xqt/gemm/backends/sm89/` 子包与平铺层同时存活 (6,897 行)**
 
-- 13 个 py 中 11 个与平铺 `backends/*.py` md5 完全相同; 平铺版被 `backends/__init__.py` 和多个测试真实使用, 子包版被 `tests/xqt/gemm/test_sm89_backend.py:26` 真实 import - **两份都被引用, 是最糟的重复形态**.
+- 13 个 py 中 11 个与平铺 `backends/*.py` md5 完全相同; 平铺版被 `backends/__init__.py` 和多个测试真实使用, 子包版被 `tests/gemm/test_sm89_backend.py:26` 真实 import - **两份都被引用, 是最糟的重复形态**.
 - 3 个文件已分叉 (平铺新, 子包旧): `sm89_build.py` (973 vs 890 行, 子包缺 `Sm89W4A8BuildConfig`), `sm90_fp8_wgmma.py` (792 vs 295 行, 且 sm90 的文件放在 sm89/ 里属错位), `tilelang_marlin.py` (子包版 import 路径机械改写错误, 实测 ModuleNotFoundError, 是潜伏的坏文件).
 - `backends/sm89.py` (平铺, 353 行) 与 `backends/sm89/` (包) 同名撞车, 包优先解析使平铺文件成为不可达死代码.
 
@@ -72,8 +72,8 @@ XQT 的概念骨架设计意图是清晰的: stage workflow 单一配置形态, 
 
 1. **内容以平铺层为准, 位置以子包为准**: `common/` 现有副本是过期快照且 `__init__.py:106` 已坏 (引用了不存在的 `common.backends`), 不能保留其内容; 把平铺层的最新版本移入 `common/` 覆盖. 同理 `backends/sm89/` 的 3 个分叉文件 (`sm89_build.py`, `sm90_fp8_wgmma.py`, `tilelang_marlin.py`) 用平铺版新内容对齐, 其中 `sm90_fp8_wgmma.py` 本就错位, 应移入 `backends/sm90/`; `sm120.py` 与 `_sm1xx_runtime.py` 落入对应 arch 子包.
 2. **删除平铺层**: 被移走的重复文件, 9 个 shim, 与 `backends/sm89/` 撞车的不可达 `backends/sm89.py` (同名撞车必须只留包), 坏的 `tilelang_marlin.py` 双份.
-3. **切换引用**: `gemm/__init__.py` (503 行) 与 `backends/__init__.py` (290 行) 改为从 `common/` 和各 arch 子包聚合; 全仓 (含 tests) 对 `xqt.gemm.X` 平铺路径的 import 改为 `xqt.gemm.common.X` / `xqt.gemm.backends.<arch>.X`. `tests/xqt/gemm/test_sm89_backend.py:26` 已在用子包路径, 无需改.
-4. 迁移完成的标准: 全树 md5 对拍无重复, `import xqt.gemm.common` 与每个 arch 子包可独立导入, `tests/xqt/gemm/` 全绿.
+3. **切换引用**: `gemm/__init__.py` (503 行) 与 `backends/__init__.py` (290 行) 改为从 `common/` 和各 arch 子包聚合; 全仓 (含 tests) 对 `xqt.gemm.X` 平铺路径的 import 改为 `xqt.gemm.common.X` / `xqt.gemm.backends.<arch>.X`. `tests/gemm/test_sm89_backend.py:26` 已在用子包路径, 无需改.
+4. 迁移完成的标准: 全树 md5 对拍无重复, `import xqt.gemm.common` 与每个 arch 子包可独立导入, `tests/gemm/` 全绿.
 
 ### 2.3 循环依赖成网, `import xqt` 拉起全树
 
@@ -102,7 +102,7 @@ AST 级依赖分析 (区分顶层 / TYPE_CHECKING / 函数体内 import) 发现�
 
 ### 3.1 两套互不相通的 GEMM 决策系统
 
-- 体系 A (`xqt/gemm/`): registry 驱动的合约级 dispatch - `dispatch_gemm()` 查 `GemmKernelRegistration` maturity + executor 走 fallback chain. **但生产代码里几乎无人调用**: 调用方只有 `tests/xqt/gemm/*` 和 research bench; 包内唯一实质用户是 `runtime/modules/awq_w4a16_linear.py:12-13`.
+- 体系 A (`xqt/gemm/`): registry 驱动的合约级 dispatch - `dispatch_gemm()` 查 `GemmKernelRegistration` maturity + executor 走 fallback chain. **但生产代码里几乎无人调用**: 调用方只有 `tests/gemm/*` 和 research bench; 包内唯一实质用户是 `runtime/modules/awq_w4a16_linear.py:12-13`.
 - 体系 B (`operator_opt/backends/gemm_precision.py` + `gemm_selector.py`): function-call 级 `gemm_with_precision(engine="auto")`, 自带 family 表 + pattern 路由 + 硬编码 if/elif engine 排名. `gemm_precision` 从不查 `xqt.gemm` registry; registry 也看不到 operator_opt kernel (23 个 cutlass 条目全是 metadata_only).
 - 桥接只有一条: 体系 B 的各 kernel `from xqt.gemm import dense_gemm_reference` - gemm/ 对体系 B 的实际角色只是 "reference 提供商". 物理依赖反向穿透: `gemm/backends/sm89.py:25-32` 直接加载 `operator_opt/kernels/cute/build/int8mma_sm89.so` 并 import `operator_opt.kernels.cute.int8mma_binding`, docstring 自述 "migrated from the historical operator_opt location" - 迁移未收尾.
 - 同一 GEMM 的 schedule 知识散在两处: `kernels/triton/gemm.py:685-843` 硬编码 preset vs `gemm/tuning_cache.py` 离线调优缓存, 机制不同, 覆盖不同.
@@ -309,7 +309,7 @@ engine 能力描述存在三套词汇: `runtime/engine_resolve.py` (maturity 4 �
 | 15 export 契约与粒度 | 已落地 | 新增 `ExportAdapter`/`ExportResultBase`;TensorRT plugin/inspect/perf 合并到 `trt_diagnostics.py`. |
 | 16 contracts 边界 | 已落地 | typed payload,存储协议,packing 与 reference 语义归 contracts;native execution view 归 runtime/operator_opt. |
 
-层级守卫 `tests/xqt/test_layer_import_boundaries.py` 与 `pytest -q tests/xqt` 已全绿. 16 项架构整改均已落地,`root-workspace-xdl` 知识图谱已刷新并达到 `ready` 状态;最终状态以 TODO 文档的验证清单为准.
+层级守卫 `tests/test_layer_import_boundaries.py` 与 `pytest -q tests/xqt` 已全绿. 16 项架构整改均已落地,`root-workspace-xdl` 知识图谱已刷新并达到 `ready` 状态;最终状态以 TODO 文档的验证清单为准.
 
 ## 6. 决策记录
 
@@ -341,7 +341,7 @@ engine 能力描述存在三套词汇: `runtime/engine_resolve.py` (maturity 4 �
 **未决 2 (已定: 混合方案): contracts 层边界 (3.7, 路线图 16)**
 
 - 轻/重二分的实测结论: `runtime_quant`/`runtime_manifest`/`runtime_features`/`contract_consume` 是纯 dataclass 构建与校验, 本就属于 contracts 典型职责, 不应计入 "行为混入". 真正的重行为只有三处: `CompositeAddLinear.forward`/`dequantize_residual` (composite.py:159,187), `_quantize_grouped_fp4_weight` (packing_int4.py:62), `compute_hybrid_linear` (channel.py:98).
-- `CompositeAdd*` 下沉 contracts 是**有意设计**而非意外: design-debt 文档 (`docs/md/architecture/xqt-design-debt.md:445,471`) 记录了决策, `tests/xqt/runtime/test_composite_add.py:18-21` 显式锁定 artifact/runtime view 分离, 5 个子类全在 `runtime/modules/`. contracts 恰是 quant 与 runtime 的共同下游中立位, 移到任一侧都制造新的反向依赖.
+- `CompositeAdd*` 下沉 contracts 是**有意设计**而非意外: design-debt 文档 (`docs/md/architecture/xqt-design-debt.md:445,471`) 记录了决策, `tests/runtime/test_composite_add.py:18-21` 显式锁定 artifact/runtime view 分离, 5 个子类全在 `runtime/modules/`. contracts 恰是 quant 与 runtime 的共同下游中立位, 移到任一侧都制造新的反向依赖.
 - packing 双拷贝 (contracts 版与 fp4_weight_only 版 8 个 helper 语义全同) **无论选什么都应消重**为 contracts 唯一实体, 6 个文件改 import 即可, 顺带消除 `quant/quantizers/w4_storage_int8_mma.py:32` 绕道 runtime.modules 的反向依赖.
 - 文档面事实: FRAMEWORK.md 并无 "contracts 只放数据" 的明文承诺, 关键抽象表已把行为函数与 contracts 路径写在一起; `xqt/AGENTS.md` 包模块清单缺 contracts 条目. 选 "承认轻行为" 的文档成本很小 (FRAMEWORK.md 补 1-2 条 + AGENTS.md 补条目).
 - 倾向: **混合方案** - 文档化 "contracts = payload + 存储协议 + reference 语义, 后端执行归 runtime", packing 消重, 重计算保留但明示为 reference 语义.

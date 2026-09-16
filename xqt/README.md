@@ -4,7 +4,7 @@
 
 ## 先看什么
 
-- Markdown 总入口: [../docs/md/index.md](../docs/md/index.md)
+- Markdown 总入口: [../docs/md/XQT.md](../docs/md/XQT.md)
 - 架构正文: [../docs/md/architecture/xqt.md](../docs/md/architecture/xqt.md)
 - 概念说明: [../docs/md/explanation/xqt-concepts.md](../docs/md/explanation/xqt-concepts.md)
 - 工作流入口: [../docs/md/usage/xqt-workflows.md](../docs/md/usage/xqt-workflows.md)

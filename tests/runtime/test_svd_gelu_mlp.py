@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from tests.xqt.svd_test_helpers import make_legacy_svd_linear
+from tests.svd_test_helpers import make_legacy_svd_linear
 from xqt.compression.quant.quantizers.svd import quantize_with_svd
 from xqt.runtime import (
     fuse_composite_modules,

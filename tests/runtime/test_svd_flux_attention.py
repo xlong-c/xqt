@@ -5,7 +5,7 @@ import torch
 from diffusers.models.transformers.transformer_flux import FluxAttention
 from torch import nn
 
-from tests.xqt.svd_test_helpers import make_legacy_svd_linear
+from tests.svd_test_helpers import make_legacy_svd_linear
 from xqt.runtime import (
     SVDQuantFluxAttention,
     materialize_svd_flux_attention,

@@ -1,0 +1,120 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xqt"
+version = "0.1.0"
+description = "模型侧压缩, 图变换, 导出适配, 误差分析与 benchmark 工具链"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+keywords = ["model-compression", "quantization", "pruning", "export", "benchmark", "pytorch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "omegaconf>=2.3.0",
+    "numpy>=1.21.0",
+    "tqdm>=4.62.0",
+    "typing-extensions>=4.0.0",
+    "loguru>=0.7.0",
+    "Pillow>=10.0.0",
+    "einops>=0.6.0",
+]
+
+[project.optional-dependencies]
+# 算子优化与 JIT kernel 后端.
+optimization = [
+    "torchao",
+    "triton",
+    "tilelang",
+    "apache-tvm-ffi",
+    "cuda-tile",
+    "nvidia-cutlass-dsl",
+]
+
+# 导出与离线误差分析.
+export = [
+    "onnx",
+    "onnxconverter-common",
+    "onnxruntime",
+    "pandas",
+]
+
+# 可视化报告.
+viz = [
+    "matplotlib",
+]
+
+# 训练侧兄弟仓库 XDL 是可选运行时依赖, 不由本仓库声明或固定版本.
+# 5 个 recipe (xqt/recipes/ 下的 prune/quant/fp8) 使用 `xdl.model.*` 字符串
+# target, 需要同工作区内的本地 editable 安装 (pip install -e ../xdl) 才能解析.
+# 只做纯模型侧压缩 / 导出 / benchmark 时不需要安装 XDL.
+xdl = []
+
+# 完整安装.
+all = [
+    "xqt[optimization]",
+    "xqt[export]",
+    "xqt[viz]",
+    "xqt[xdl]",
+]
+
+# 开发和测试.
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.8.0",
+    "pyright>=1.1.389",
+]
+
+[project.scripts]
+xqt-run-workflow = "xqt.run_workflow:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xqt*"]
+
+[tool.setuptools.package-data]
+xqt = [
+    "py.typed",
+    "recipes/**/*.yaml",
+    "recipes/*/*.yaml",
+    "recipes/*/*/*.yaml",
+    "kernels/jit/csrc/**/*.cu",
+    "kernels/jit/csrc/**/*.cuh",
+    "kernels/jit/csrc/**/*.cpp",
+    "kernels/jit/include/**/*.h",
+    "kernels/jit/include/**/*.cuh",
+    "kernels/jit/include/**/*.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = [
+    "data",
+    "downloads",
+]
+
+# 与训练侧 monorepo 保持一致: 只启用会真正导致运行错误的规则.
+# 全量 ruff 默认规则会在既有代码上产生大量历史 F401/E402 噪声, 不属于本次拆分范围.
+[tool.ruff.lint]
+select = ["E9", "F821"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

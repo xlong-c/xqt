@@ -115,7 +115,7 @@ Static 激活路径 (推荐):
 | `xqt/kernels/jit/csrc/quantization/int8mma_kernel.cu` | PTX kernel + CUTLASS `int8mma_run_cutlass_64x128_prepacked_b` |
 | `xqt/kernels/ops/_impl/cute/int8mma_binding.py` | ctypes + `prepack_qweight_t_for_ptx_sm89` + `int8_linear_cutlass_sm89` |
 | `xqt/runtime/modules/int8_mma_linear.py` | `ptx_sm89` / `cuda_sm89` 的 prepack cache, version invalidation, auto routing |
-| `tests/xqt/kernels/wrappers/test_prepack_int8_sm89.py` | 单测 |
+| `tests/kernels/wrappers/test_prepack_int8_sm89.py` | 单测 |
 
 ---
 

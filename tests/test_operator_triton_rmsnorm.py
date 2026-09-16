@@ -16,7 +16,7 @@ from xqt.kernels.ops._impl.triton.pointwise import (
     fused_rmsnorm_triton,
 )
 from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
-from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
+from tests.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(
@@ -76,7 +76,7 @@ def _triton_rmsnorm_operator_config(device: str, *, min_speedup: float = 1.00000
             "artifact_dir": f"artifacts/xqt/tests/triton_rmsnorm_{device}",
         },
         "model": {
-            "target": "tests.xqt.test_operator_triton_rmsnorm:_FakeWanRMSNormBlock",
+            "target": "tests.test_operator_triton_rmsnorm:_FakeWanRMSNormBlock",
             "params": {
                 "hidden_dim": 64,
             },

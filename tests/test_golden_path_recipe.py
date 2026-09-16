@@ -49,7 +49,7 @@ requires_golden_tensorrt_hardware = pytest.mark.skipif(
 
 def _golden_recipe_path() -> Path:
     return (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[1]
         / "xqt"
         / "recipes"
         / "smoke"

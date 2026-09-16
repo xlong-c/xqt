@@ -10,7 +10,7 @@
 - 说明 `xqt.nn`, `wrapper/materialize`, `kernel` 的总体分工入口.
 
 
-修改指导 (research): [GUIDE](../../research/xqt-quant-inference-architecture/GUIDE.md) (长期原则), [TODO](../../research/xqt-quant-inference-architecture/TODO.md) (当前冲刺), [PLAN](../../research/xqt-quant-inference-architecture/PLAN.md) (接口草案).
+修改指导 (research): [GUIDE](../../../research/xqt-quant-inference-architecture/GUIDE.md) (长期原则), [TODO](../../../research/xqt-inference-optimization/README.md) (当前冲刺), [PLAN](../../../research/xqt-quant-inference-architecture/PLAN.md) (接口草案).
 
 ## 不负责什么
 

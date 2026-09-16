@@ -18,7 +18,7 @@ from xqt.kernels.wrappers.triton_wrappers import (
     build_triton_candidate_model,
 )
 from xqt.kernels.wrappers.types import OperatorOptimizationTargetPlan
-from tests.xqt.runtime_helpers import operator_config_from_dict, operator_runtime_context
+from tests.runtime_helpers import operator_config_from_dict, operator_runtime_context
 
 
 requires_cuda = pytest.mark.skipif(
@@ -80,7 +80,7 @@ def _operator_config(
             "artifact_dir": f"artifacts/xqt/tests/triton_linear_{device}",
         },
         "model": {
-            "target": "tests.xqt.test_operator_triton_linear:_LinearBlock",
+            "target": "tests.test_operator_triton_linear:_LinearBlock",
             "params": {"in_features": 64, "out_features": 96},
             "device": device,
         },

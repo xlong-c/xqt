@@ -37,7 +37,7 @@ def test_sm90_and_sm120_build_configs_are_architecture_specific() -> None:
 
 
 def test_target_manifests_declare_stream_aware_runtime_abi() -> None:
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     sm90_source = (root / "xqt/kernels/ops/_impl/gemm_backends/sm90/sm90_fp8_wgmma.py").read_text()
     sm120_source = (root / "xqt/kernels/ops/_impl/gemm_backends/sm120/sm120.py").read_text()
 
@@ -192,7 +192,7 @@ def test_sm120_nvfp4_metadata_candidate_is_architecture_isolated() -> None:
 
 
 def test_arch_sources_keep_runtime_probe_abi_explicit() -> None:
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     sm90_source = (root / "xqt/kernels/jit/csrc/gemm/sm90_fp8_wgmma.cu").read_text()
     sm120_source = (root / "xqt/kernels/jit/csrc/gemm/sm120_gemm.cu").read_text()
 

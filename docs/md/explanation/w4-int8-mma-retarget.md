@@ -334,4 +334,4 @@ W8A8 / `ptx_sm89` 热路径应对 int8 权重做 **offline prepack** (`int8:sm_8
 | `xqt/compression/quant/capability.py` | 策略 → nature 映射 (TRUE/PSEUDO) |
 | `xqt/core/schema.py` | strategy 别名注册 |
 | `examples/mlp_w4_int8_mma_acceptance.py` | 10 层 MLP 验收脚本 |
-| `tests/xqt/quant/test_w4_storage_int8_mma.py` | 单元测试 |
+| `tests/quant/test_w4_storage_int8_mma.py` | 单元测试 |

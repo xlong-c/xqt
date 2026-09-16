@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from tests.xqt.svd_test_helpers import (
+from tests.svd_test_helpers import (
     make_legacy_svd_int8,
     make_legacy_svd_linear,
 )

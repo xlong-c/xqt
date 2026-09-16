@@ -32,7 +32,7 @@ from xqt.model.flux2_klein.adapter import (
 )
 from xqt.runtime.deploy_loader import StandaloneDeployLoader
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_second_model_profile_and_adapter_registration() -> None:

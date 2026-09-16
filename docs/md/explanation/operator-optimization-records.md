@@ -144,7 +144,7 @@ benchmark 和 SASS 采集入口. 当前本机仍不是 SM90/SM120,因此没有�
 - [SM120 build adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm120/sm120.py)
 - [target benchmark harness](../../../research/xqt-gemm/bench_sm90_sm120.py)
 - [registry](../../../xqt/kernels/ops/gemm/registry.py)
-- [architecture tests](../../../tests/xqt/gemm/test_sm90_sm120_backends.py)
+- [architecture tests](../../../tests/gemm/test_sm90_sm120_backends.py)
 
 ---
 
@@ -212,8 +212,8 @@ benchmark 和 SASS 采集入口. 当前本机仍不是 SM90/SM120,因此没有�
 - [CUDA binding](../../../xqt/kernels/ops/_impl/cute/int8mma_binding.py)
 - [runtime auto routing](../../../xqt/runtime/modules/int8_mma_linear.py)
 - [ConvRot specialized routing](../../../xqt/compression/quant/quantizers/convrot_int8.py)
-- [prepack tests](../../../tests/xqt/kernels/wrappers/test_prepack_int8_sm89.py)
-- [ConvRot CUDA routing test](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
+- [prepack tests](../../../tests/operator_opt/test_prepack_int8_sm89.py)
+- [ConvRot CUDA routing test](../../../tests/quant/test_convrot_int8_quantizer.py)
 
 ## R-002: XQT GEMM SM89 dense 与 W8A8 correctness gate
 
@@ -277,7 +277,7 @@ decode 对比也覆盖了 `M=1/4/8`. `M=1` 使用 DP4A GEMV,最大误差为 `0`,
 - [SM89 INT8 adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89.py)
 - [artifact manifest gate](../../../xqt/kernels/ops/gemm/preflight.py)
 - [CUDA event benchmark](../../../xqt/kernels/ops/gemm/benchmark.py)
-- [GEMM tests](../../../tests/xqt/gemm)
+- [GEMM tests](../../../tests/gemm)
 
 ## R-003: W4A16 GPTQ/AWQ canonical repack
 
@@ -299,7 +299,7 @@ canonical/repack/reference,还没有把它标成 CUDA W4A16 native.
 ### 验证落点
 
 - [canonical pack](../../../xqt/kernels/ops/gemm/layout.py)
-- [W4 pack tests](../../../tests/xqt/gemm/test_w4_pack.py)
+- [W4 pack tests](../../../tests/gemm/test_w4_pack.py)
 
 ---
 
@@ -339,7 +339,7 @@ canonical/repack/reference,还没有把它标成 CUDA W4A16 native.
 ### 验证落点
 
 - [linear_marlin kernel](../../../xqt/kernels/ops/_impl/tilelang/linear_marlin.py)
-- [GPU smoke test](../../../tests/xqt/test_tilelang_linear_marlin.py) (`test_linear_marlin_int4_gpu_correctness_and_latency_smoke`)
+- [GPU smoke test](../../../tests/test_tilelang_linear_marlin.py) (`test_linear_marlin_int4_gpu_correctness_and_latency_smoke`)
 - [TileLang runtime guard](../../../xqt/kernels/ops/_impl/tilelang/_common.py)
 
 ## R-004: XQT GEMM SM89 canonical W4A16 fallback gate
@@ -488,8 +488,8 @@ dispatch.
 
 - [W4A16 CUDA source](../../../xqt/kernels/jit/csrc/gemm/w4a16_sm89.cu)
 - [W4A16 Python adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w4a16_sm89.py)
-- [dispatch and registry tests](../../../tests/xqt/gemm/test_registry.py)
-- [resource query test](../../../tests/xqt/gemm/test_sm89_backend.py)
+- [dispatch and registry tests](../../../tests/gemm/test_registry.py)
+- [resource query test](../../../tests/gemm/test_sm89_backend.py)
 - [reproducible evidence script](../../../research/xqt-gemm/bench_sm89_w4a16.py)
 
 ## R-006: SM89 fused groupwise W4A16 CUTLASS warp MMA
@@ -589,8 +589,8 @@ fused sidecar 位于
 - [fused adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w4a16_fused_sm89.py)
 - [build and manifest gate](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89_build.py)
 - [fused evidence script](../../../research/xqt-gemm/bench_sm89_w4a16_fused.py)
-- [GPU correctness test](../../../tests/xqt/gemm/test_sm89_backend.py)
-- [alignment fallback test](../../../tests/xqt/gemm/test_registry.py)
+- [GPU correctness test](../../../tests/gemm/test_sm89_backend.py)
+- [alignment fallback test](../../../tests/gemm/test_registry.py)
 
 ## R-007: SM89 FP8 tensorwise CUTLASS native contract
 
@@ -690,7 +690,7 @@ profiling 证据见 `research/xqt-gemm/profile_sm89_fp8.py` 和
 - [SM89 FP8 probe](../../../xqt/kernels/jit/csrc/gemm/fp8_cutlass_probe_sm89.cu)
 - [FP8 evidence script](../../../research/xqt-gemm/bench_sm89_fp8.py)
 - [FP8 profile script](../../../research/xqt-gemm/profile_sm89_fp8.py)
-- [FP8 tests](../../../tests/xqt/gemm/test_fp8.py)
+- [FP8 tests](../../../tests/gemm/test_fp8.py)
 
 ## R-035: SVDQuant fused kernel (TileLang) - current status and improvements
 
@@ -788,7 +788,7 @@ profiling 证据见 `research/xqt-gemm/profile_sm89_fp8.py` 和
 
 - [fused kernel 与入口](../../../xqt/kernels/ops/_impl/tilelang/svd_fused.py)
 - [runtime 接线](../../../xqt/runtime/svd_fusion.py)
-- [GPU 测试](../../../tests/xqt/runtime/test_svd_fusion.py)
+- [GPU 测试](../../../tests/runtime/test_svd_fusion.py)
 - [evidence 脚本](../../../research/xqt-inference-optimization/bench_svd_fused_tilelang.py): 复跑命令 `python research/xqt-inference-optimization/bench_svd_fused_tilelang.py`
 
 ## R-009: KV-int8 fused attention TileLang kernel (RUNTIME-1)
@@ -814,7 +814,7 @@ iters 50, 对实体级 forward (含 qkv projection 和 int8 量化) 取平均.
 ### 实现
 
 1. 新增 `xqt/kernels/ops/_impl/tilelang/kv_int8_attention.py`. mainloop
-   沿用 `learn/tilelang/flashatt.py` 的 flash-attention 设计 (online
+   沿用仓库内 vendored 的 `xqt/kernels/ops/_impl/tilelang/flashatt_kernel.py` 的 flash-attention 设计 (online
    softmax, `T.GemmWarpPolicy.FullRow`), 差异是 K/V 输入为 int8 tensor,
    每个 kv tile 先 `T.copy` 进 int8 shared, 再在 kernel 内做
    `int8 -> fp32 * scale -> fp16` dequant 后参与 GEMM, 不在 host 侧物化
@@ -893,8 +893,8 @@ R-019 已用 device-resident scale tensor ABI 消除这两次同步;本节数字
 
 - [KV-int8 fused kernel](../../../xqt/kernels/ops/_impl/tilelang/kv_int8_attention.py)
 - [runtime 接线](../../../xqt/runtime/modules/kv_attention.py)
-- [CUDA 测试](../../../tests/xqt/runtime/test_kv_attention_cuda.py): 复跑命令 `python -m pytest tests/xqt/runtime/test_kv_attention_cuda.py -q`
-- 既有回归 `tests/xqt/runtime/test_runtime_features.py` 保持通过 (10 passed)
+- [CUDA 测试](../../../tests/runtime/test_kv_attention_cuda.py): 复跑命令 `python -m pytest tests/runtime/test_kv_attention_cuda.py -q`
+- 既有回归 `tests/runtime/test_runtime_features.py` 保持通过 (10 passed)
 
 ## R-010: SM89 FP8 K-blockwise mainloop (scale 进入 K 主循环)
 
@@ -1015,8 +1015,8 @@ split-K 在该 shape 未快于 full-K,当前定位为 opt-in 能力加保守启�
 - [SM89 build/manifest](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89_build.py)
 - [FP8 evidence script](../../../research/xqt-gemm/bench_sm89_fp8.py)
 - [FP8 evidence artifact](../../../research/xqt-gemm/artifacts/sm89_fp8_evidence.json)
-- [FP8 contract tests](../../../tests/xqt/gemm/test_fp8.py)
-- [FP8 backend GPU tests](../../../tests/xqt/gemm/test_fp8_backend.py)
+- [FP8 contract tests](../../../tests/gemm/test_fp8.py)
+- [FP8 backend GPU tests](../../../tests/gemm/test_fp8_backend.py)
 
 ## R-011: XQT Attention TileLang full-forward CUDA Graph fastpath
 
@@ -1092,7 +1092,7 @@ occupancy/cache/stall 结论.
 
 - [XQT Attention wrapper](../../../xqt/kernels/wrappers/xqt_attention.py)
 - [CUDA graph runtime helpers](../../../xqt/kernels/wrappers/runtime.py)
-- [CUDA regression tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [CUDA regression tests](../../../tests/test_operator_tilelang_cuda.py)
 - [benchmark script](../../../research/xqt-gemm/bench_sm89_xqt_attention.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-04-sm89-xqt-attention-graph/summary.json)
 
@@ -1185,7 +1185,7 @@ occupancy,L2 或 warp stall.
 - [grouped CUDA kernel](../../../xqt/kernels/jit/csrc/gemm/w4a16_grouped_sm89.cu)
 - [grouped adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w4a16_grouped_sm89.py)
 - [SM89 build/manifest](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89_build.py)
-- [grouped tests](../../../tests/xqt/gemm/test_grouped_w4a16_sm89.py)
+- [grouped tests](../../../tests/gemm/test_grouped_w4a16_sm89.py)
 - [benchmark and profile script](../../../research/xqt-gemm/bench_sm89_grouped_w4a16.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-07-sm89-grouped-w4a16/)
 
@@ -1291,7 +1291,7 @@ load 或 warp-stall counter 结论.
 - [grouped INT8 CUDA kernel](../../../xqt/kernels/jit/csrc/gemm/w8a8_grouped_sm89.cu)
 - [grouped INT8 adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w8a8_grouped_sm89.py)
 - [SM89 build/manifest](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89_build.py)
-- [grouped INT8 tests](../../../tests/xqt/gemm/test_grouped_w8a8_sm89.py)
+- [grouped INT8 tests](../../../tests/gemm/test_grouped_w8a8_sm89.py)
 - [benchmark and profile script](../../../research/xqt-gemm/bench_sm89_grouped_w8a8.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-w8a8/)
 
@@ -1415,7 +1415,7 @@ Nsight Systems 的 blockwise NVTX 区间为 grouped `2.213 ms`,逐 expert
 - [grouped FP8 CUDA kernel](../../../xqt/kernels/jit/csrc/gemm/fp8_grouped_sm89.cu)
 - [grouped FP8 adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/fp8_grouped_sm89.py)
 - [SM89 build/manifest](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89_build.py)
-- [grouped FP8 tests](../../../tests/xqt/gemm/test_grouped_fp8_sm89.py)
+- [grouped FP8 tests](../../../tests/gemm/test_grouped_fp8_sm89.py)
 - [benchmark and profile script](../../../research/xqt-gemm/bench_sm89_grouped_fp8.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-fp8/)
 
@@ -1531,10 +1531,10 @@ warp stall 或 tensor-pipe 结论.
 ### 验证落点
 
 - [TileLang Attention entry](../../../xqt/kernels/ops/_impl/tilelang/attention.py)
-- [TileLang FlashAttention source](../../../learn/tilelang/flashatt.py)
+- [TileLang FlashAttention source](../../../xqt/kernels/ops/_impl/tilelang/flashatt_kernel.py)
 - [tile sweep and profile script](../../../research/xqt-gemm/bench_sm89_tilelang_attention_tiles.py)
-- [TileLang Attention CUDA tests](../../../tests/xqt/test_tilelang_attention_cuda.py)
-- [operator integration CUDA tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [TileLang Attention CUDA tests](../../../tests/test_tilelang_attention_cuda.py)
+- [operator integration CUDA tests](../../../tests/test_operator_tilelang_cuda.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-attention-tiles/)
 
 ## R-016: Unified grouped GEMM reference dispatch
@@ -1632,10 +1632,10 @@ strict native 不可执行时得到与声明 reference 一致的输出,同时 re
 - [W4A16 bridge](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w4a16_grouped_sm89.py)
 - [W8A8 bridge](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w8a8_grouped_sm89.py)
 - [FP8 bridge](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/fp8_grouped_sm89.py)
-- [dispatcher tests](../../../tests/xqt/gemm/test_grouped_dispatch.py)
-- [W4A16 grouped tests](../../../tests/xqt/gemm/test_grouped_w4a16_sm89.py)
-- [W8A8 grouped tests](../../../tests/xqt/gemm/test_grouped_w8a8_sm89.py)
-- [FP8 grouped tests](../../../tests/xqt/gemm/test_grouped_fp8_sm89.py)
+- [dispatcher tests](../../../tests/gemm/test_grouped_dispatch.py)
+- [W4A16 grouped tests](../../../tests/gemm/test_grouped_w4a16_sm89.py)
+- [W8A8 grouped tests](../../../tests/gemm/test_grouped_w8a8_sm89.py)
+- [FP8 grouped tests](../../../tests/gemm/test_grouped_fp8_sm89.py)
 
 ## R-017: SM89 grouped GEMM versioned offline tuning cache
 
@@ -1757,7 +1757,7 @@ load efficiency,warp stall,tensor-pipe utilization 或 counter-derived occupancy
 - [W4A16 bridge](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w4a16_grouped_sm89.py)
 - [W8A8 bridge](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w8a8_grouped_sm89.py)
 - [FP8 bridge](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/fp8_grouped_sm89.py)
-- [tuning cache tests](../../../tests/xqt/gemm/test_tuning_cache.py)
+- [tuning cache tests](../../../tests/gemm/test_tuning_cache.py)
 - [artifact generator](../../../research/xqt-gemm/bench_sm89_grouped_tuning_cache.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-tuning-cache/)
 
@@ -1861,8 +1861,8 @@ rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
 - [persistent CUDA source](../../../xqt/kernels/jit/csrc/gemm/w4a16_grouped_sm89.cu)
 - [W4A16 adapter](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/w4a16_grouped_sm89.py)
 - [build manifest](../../../xqt/kernels/ops/_impl/gemm_backends/sm89/sm89_build.py)
-- [CUDA tests](../../../tests/xqt/gemm/test_grouped_w4a16_sm89.py)
-- [tuning cache tests](../../../tests/xqt/gemm/test_tuning_cache.py)
+- [CUDA tests](../../../tests/gemm/test_grouped_w4a16_sm89.py)
+- [tuning cache tests](../../../tests/gemm/test_tuning_cache.py)
 - [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_grouped_w4a16_persistent.py)
 - [persistent evidence](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-w4a16-persistent/)
 - [updated tuning cache](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-grouped-tuning-cache/)
@@ -1947,7 +1947,7 @@ rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
 
 - [KV-int8 fused kernel](../../../xqt/kernels/ops/_impl/tilelang/kv_int8_attention.py)
 - [runtime 接线](../../../xqt/runtime/modules/kv_attention.py)
-- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [CUDA/runtime tests](../../../tests/runtime/test_kv_attention_cuda.py)
 - [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_scale_tensor.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-scale-tensor/)
 
@@ -2058,7 +2058,7 @@ rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
 
 - [quantize-layout and attention kernels](../../../xqt/kernels/ops/_impl/tilelang/kv_int8_attention.py)
 - [runtime pipeline](../../../xqt/runtime/modules/kv_attention.py)
-- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [CUDA/runtime tests](../../../tests/runtime/test_kv_attention_cuda.py)
 - [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_quant_layout.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-quant-layout/)
 
@@ -2171,8 +2171,8 @@ rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
 - [packed quantize-layout and attention kernels](../../../xqt/kernels/ops/_impl/tilelang/kv_int8_attention.py)
 - [runtime pipeline](../../../xqt/runtime/modules/kv_attention.py)
 - [KV-scale calibration](../../../xqt/compression/quant/quantizers/kv_scale.py)
-- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
-- [calibration tests](../../../tests/xqt/quant/test_kv_scale.py)
+- [CUDA/runtime tests](../../../tests/runtime/test_kv_attention_cuda.py)
+- [calibration tests](../../../tests/quant/test_kv_scale.py)
 - [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_quant_layout.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-packed-qkv/)
 
@@ -2285,7 +2285,7 @@ rate,warp stall,tensor-pipe utilization 或其他 counter-derived 指标.
 
 - [runtime pipeline](../../../xqt/runtime/modules/kv_attention.py)
 - [shared CUDA Graph helpers](../../../xqt/kernels/wrappers/runtime.py)
-- [CUDA/runtime tests](../../../tests/xqt/runtime/test_kv_attention_cuda.py)
+- [CUDA/runtime tests](../../../tests/runtime/test_kv_attention_cuda.py)
 - [benchmark and profiler script](../../../research/xqt-gemm/bench_sm89_kv_int8_packed_graph.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-kv-int8-packed-graph/)
 
@@ -2400,8 +2400,8 @@ warp stall,scheduler,roofline,tensor-pipe utilization 等 counter-derived 指标
 - [TileLang attention kernel](../../../xqt/kernels/ops/_impl/tilelang/attention.py)
 - [MHA wrapper](../../../xqt/kernels/wrappers/attention.py)
 - [xqt.nn.Attention wrapper](../../../xqt/kernels/wrappers/xqt_attention.py)
-- [kernel CUDA tests](../../../tests/xqt/test_tilelang_attention_cuda.py)
-- [operator/runtime CUDA tests](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [kernel CUDA tests](../../../tests/test_tilelang_attention_cuda.py)
+- [operator/runtime CUDA tests](../../../tests/test_operator_tilelang_cuda.py)
 - [BF16 sweep entry](../../../research/xqt-gemm/bench_sm89_tilelang_attention_bf16.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-attention-bf16/)
 
@@ -2487,8 +2487,8 @@ storage 或 scale 会触发重建.
 - [SVDQuant runtime](../../../xqt/runtime/modules/svd_w4a4_legacy.py)
 - [W4 storage cache](../../../xqt/runtime/modules/w4_storage_int8_mma_linear.py)
 - [FP8 fallback cache](../../../xqt/runtime/modules/fp8_mma_linear.py)
-- [runtime cache tests](../../../tests/xqt/runtime/test_composite_runtime_caches.py)
-- [ConvRot Norm fusion tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
+- [runtime cache tests](../../../tests/runtime/test_composite_runtime_caches.py)
+- [ConvRot Norm fusion tests](../../../tests/quant/test_convrot_int8_quantizer.py)
 
 ## R-025: SM89 TileLang BF16 direct Linear coverage and decode schedule
 
@@ -2593,8 +2593,8 @@ occupancy,L2/cache hit,warp stall,scheduler,roofline,register 或 tensor-pipe
 - [TileLang Linear kernel](../../../xqt/kernels/ops/_impl/tilelang/linear.py)
 - [unified GEMM dispatcher](../../../xqt/kernels/ops/_impl/gemm_precision.py)
 - [Linear wrapper](../../../xqt/kernels/wrappers/linear.py)
-- [kernel CUDA tests](../../../tests/xqt/test_tilelang_half_ops_cuda.py)
-- [operator/runtime tests](../../../tests/xqt/test_operator_tilelang_linear.py)
+- [kernel CUDA tests](../../../tests/test_tilelang_half_ops_cuda.py)
+- [operator/runtime tests](../../../tests/test_operator_tilelang_linear.py)
 - [benchmark and profiler entry](../../../research/xqt-gemm/bench_sm89_tilelang_linear_bf16.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-tilelang-linear-bf16/)
 
@@ -2957,7 +2957,7 @@ tensor-pipe utilization.
 - [Triton GEMM launcher](../../../xqt/kernels/ops/_impl/triton/gemm.py)
 - [Triton Linear wrapper and metadata](../../../xqt/kernels/wrappers/triton_wrappers.py)
 - [candidate materializer](../../../xqt/kernels/wrappers/materialize.py)
-- [wrapper tests](../../../tests/xqt/test_operator_triton_linear.py)
+- [wrapper tests](../../../tests/test_operator_triton_linear.py)
 - [weight-layout benchmark](../../../research/xqt-gemm/bench_sm89_triton_bf16_weight_layout.py)
 - [wrapper/graph benchmark](../../../research/xqt-gemm/bench_sm89_triton_bf16_linear_wrapper.py)
 - [weight-layout artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-bf16-weight-layout/)
@@ -3089,7 +3089,7 @@ stall,roofline,register pressure 或 tensor-pipe utilization.
 - [Triton GEMM launcher](../../../xqt/kernels/ops/_impl/triton/gemm.py)
 - [Triton Linear wrapper](../../../xqt/kernels/wrappers/triton_wrappers.py)
 - [schedule regression](../../../tests/operator_opt/test_gemm_precision.py)
-- [wrapper regression](../../../tests/xqt/test_operator_triton_linear.py)
+- [wrapper regression](../../../tests/test_operator_triton_linear.py)
 - [schedule benchmark](../../../research/xqt-gemm/bench_sm89_triton_fp16_schedule.py)
 - [wrapper benchmark](../../../research/xqt-gemm/bench_sm89_triton_fp16_linear_wrapper.py)
 - [schedule artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-fp16-schedule/)
@@ -3254,7 +3254,7 @@ kernel 内存流量结论. NCU 返回 `ERR_NVGPUCTRPERM` (`counter_permission_de
 - [Triton attention kernel](../../../xqt/kernels/ops/_impl/triton/attention.py)
 - [Triton backend registry](../../../xqt/kernels/ops/_impl/engines/triton.py)
 - [attention kernel exports](../../../xqt/kernels/ops/_impl/attention.py)
-- [CUDA/CPU contract tests](../../../tests/xqt/test_operator_triton_attention.py)
+- [CUDA/CPU contract tests](../../../tests/test_operator_triton_attention.py)
 - [sweep and profiling entry](../../../research/xqt-gemm/bench_sm89_triton_attention.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-09-sm89-triton-attention/)
 
@@ -3410,9 +3410,9 @@ roofline,register pressure 或 tensor-pipe utilization;管理员启用 counter p
 - [SVDQuant W4A4 native kernel](../../../xqt/kernels/ops/_impl/cute/svdq_w4a4_sm89.py)
 - [SVDQuant W8A8 native kernel](../../../xqt/kernels/ops/_impl/cute/svdq_w8a8_sm89.py)
 - [CUDA benchmark/profile entry](../../../research/xqt-gemm/bench_sm89_convrot_svdq_fusion.py)
-- [ConvRot CUDA tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
-- [SVDQuant CUDA tests](../../../tests/xqt/runtime/test_svd_fusion.py)
-- [runtime cache tests](../../../tests/xqt/runtime/test_composite_runtime_caches.py)
+- [ConvRot CUDA tests](../../../tests/quant/test_convrot_int8_quantizer.py)
+- [SVDQuant CUDA tests](../../../tests/runtime/test_svd_fusion.py)
+- [runtime cache tests](../../../tests/runtime/test_composite_runtime_caches.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-10-sm89-convrot-svdq-fusion/)
 
 ## R-032: SM89 ConvRot W4A4 warp-FHT rowwise INT4 fusion
@@ -3504,9 +3504,9 @@ rowwise capability 要求 CUDA `sm_89`,FP16/BF16,dynamic activation scale,未旋
 
 - [ConvRot W4A4 runtime](../../../xqt/compression/quant/quantizers/convrot_4bit.py)
 - [rowwise Python binding](../../../xqt/kernels/ops/_impl/cute/convrot_w4a4_rowwise_sm89.py)
-- [rowwise C++ binding](../../../xqt/kernels/ops/_impl/cute/convrot_w4a4_rowwise_sm89_binding.cpp)
+- [rowwise C++ binding](../../../xqt/kernels/jit/csrc/quantization/convrot_w4a4_rowwise_sm89_binding.cpp)
 - [rowwise CUDA kernel](../../../xqt/kernels/jit/csrc/quantization/convrot_w4a4_rowwise_sm89_kernel.cu)
-- [policy and runtime tests](../../../tests/xqt/quant/test_convrot_4bit_quantizer.py)
+- [policy and runtime tests](../../../tests/quant/test_convrot_4bit_quantizer.py)
 - [CUDA benchmark entry](../../../tools/benchmark_convrot_w4a4_sm89.py)
 - [Nsight Systems entry](../../../tools/profile_convrot_w4a4_sm89.py)
 - [benchmark artifact](../../../artifacts/xqt/benchmarks/convrot_w4a4_sm89/summary.json)
@@ -3627,8 +3627,8 @@ activation 或 layout 必须重新完成 correctness,paired CUDA-event gate 和 
 ### 验证落点
 
 - [TileLang Linear resolver](../../../xqt/kernels/ops/_impl/tilelang/linear.py)
-- [resolver and CUDA contract tests](../../../tests/xqt/test_tilelang_half_ops_cuda.py)
-- [operator integration tests](../../../tests/xqt/test_operator_tilelang_linear.py)
+- [resolver and CUDA contract tests](../../../tests/test_tilelang_half_ops_cuda.py)
+- [operator integration tests](../../../tests/test_operator_tilelang_linear.py)
 - [precision dispatcher tests](../../../tests/operator_opt/test_gemm_precision.py)
 - [benchmark and profiling entry](../../../research/xqt-gemm/bench_sm89_tilelang_linear_fp16.py)
 - [evidence artifact](../../../research/xqt-gemm/artifacts/2026-08-10-sm89-tilelang-linear-fp16/)
@@ -3804,7 +3804,7 @@ wrapper 10-call mean 为 `0.038976 ms`,仅用于记录可执行性,不作为 pro
 - [boundary correctness metadata](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/correctness.json)
 - [boundary benchmark metadata](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/benchmark.json)
 - [boundary reproduction](../../../research/xqt-gemm/artifacts/2026-08-12-p3-boundary-gate/reproduction.md)
-- [regression tests](../../../tests/xqt/test_p3_boundary_contracts.py)
+- [regression tests](../../../tests/test_p3_boundary_contracts.py)
 - [CUDA Graph runtime helper](../../../xqt/kernels/wrappers/runtime.py)
 - [attention wrapper](../../../xqt/kernels/wrappers/attention.py)
 - [KV model-side entity](../../../xqt/runtime/modules/kv_attention.py)
@@ -3960,7 +3960,7 @@ CUDA 13.0.
 - [native runner](../../../xqt/kernels/ops/_impl/cute/svdq_w4a4_sm89.py)
 - [same-layer benchmark](../../../research/xqt-gemm/bench_sm89_svdq_norm_runner.py)
 - [tracked result](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-norm-runner/result.json)
-- [runtime tests](../../../tests/xqt/runtime/test_svd_norm_fusion.py)
+- [runtime tests](../../../tests/runtime/test_svd_norm_fusion.py)
 
 ## R-038: SM89 官方 Nunchaku tanh-GELU MLP module parity
 
@@ -4037,7 +4037,7 @@ CUDA 内核不是 PyTorch `approximate="none"` exact GELU.
 - [materializer](../../../xqt/runtime/composite_inference.py)
 - [official paired benchmark](../../../research/xqt-gemm/bench_sm89_svdq_official_mlp_parity_v1.py)
 - [tracked result](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-mlp-parity-v1/result.json)
-- [module tests](../../../tests/xqt/runtime/test_svd_gelu_mlp.py)
+- [module tests](../../../tests/runtime/test_svd_gelu_mlp.py)
 
 ## R-040: FLUX.2 Klein ConvRot W8A8 official Triton parity
 
@@ -4133,7 +4133,7 @@ transformer parity.
 - [ConvRot runtime](../../../xqt/compression/quant/quantizers/convrot_int8.py)
 - [paired benchmark](../../../research/xqt-gemm/bench_sm89_flux2_klein_convrot_w8a8.py)
 - [benchmark artifact](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-flux2-klein-convrot-w8a8/result.json)
-- [regression tests](../../../tests/xqt/test_flux2_klein_nvfp4_backend.py)
+- [regression tests](../../../tests/test_flux2_klein_nvfp4_backend.py)
 - [Triton W8A8 tests](../../../tests/operator_opt/test_gemm_precision.py)
 
 ## R-041: FLUX.2 Klein calibrated-static ConvRot W8A8 experiment
@@ -4196,8 +4196,8 @@ ConvRot module 和 3 个 fallback module.
 - [ConvRot runtime](../../../xqt/compression/quant/quantizers/convrot_int8.py)
 - [static proxy benchmark](../../../research/xqt-gemm/bench_convrot_static_proxy_v1.py)
 - [isolated Klein benchmark](../../../research/xqt-gemm/bench_flux2_klein_convrot_static_v1.py)
-- [Klein regression tests](../../../tests/xqt/test_flux2_klein_nvfp4_backend.py)
-- [ConvRot quantizer tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
+- [Klein regression tests](../../../tests/test_flux2_klein_nvfp4_backend.py)
+- [ConvRot quantizer tests](../../../tests/quant/test_convrot_int8_quantizer.py)
 
 ## R-042: INT8/W4 quant artifact 与 runtime execution view 解耦
 
@@ -4230,9 +4230,9 @@ runtime 负责后端执行视图. 本轮覆盖 `Int8MmaLinear` 与
 - [W4 storage shell](../../../xqt/contracts/w4_storage.py)
 - [INT8 runtime view](../../../xqt/runtime/modules/int8_mma_linear.py)
 - [W4 runtime view](../../../xqt/runtime/modules/w4_storage_int8_mma_linear.py)
-- [layer boundary tests](../../../tests/xqt/test_layer_import_boundaries.py)
-- [INT8 quantizer tests](../../../tests/xqt/quant/test_int8_mma_quantizer.py)
-- [W4 quantizer tests](../../../tests/xqt/quant/test_w4_storage_int8_mma.py)
+- [layer boundary tests](../../../tests/test_layer_import_boundaries.py)
+- [INT8 quantizer tests](../../../tests/quant/test_int8_mma_quantizer.py)
+- [W4 quantizer tests](../../../tests/quant/test_w4_storage_int8_mma.py)
 
 ## R-043: OvisOCR2 ConvRot W8A8 SM89 runtime path
 
@@ -4283,7 +4283,7 @@ this proxy result.
 
 - [OvisOCR2 adapter](../../../xqt/model/ovisocr2.py)
 - [SM89 native ConvRot runtime](../../../xqt/kernels/ops/_impl/cute/convrot_w8a8_sm89.py)
-- [OvisOCR2 adapter tests](../../../tests/xqt/test_ovisocr2_convrot.py)
+- [OvisOCR2 adapter tests](../../../tests/test_ovisocr2_convrot.py)
 - [benchmark entry](../../../research/xqt-gemm/bench_sm89_ovisocr2_convrot_w8a8.py)
 - [benchmark artifact](../../../research/xqt-gemm/artifacts/2026-08-31-sm89-ovisocr2-convrot-w8a8/result.json)
 
@@ -4307,7 +4307,7 @@ benchmark are recorded in R-048.
 
 ### Verification
 
-- [OvisOCR2 adapter test](../../../tests/xqt/test_ovisocr2_convrot.py)
+- [OvisOCR2 adapter test](../../../tests/test_ovisocr2_convrot.py)
 - [small-M benchmark](../../../research/xqt-gemm/bench_sm89_ovisocr2_convrot_w8a8.py)
 
 ## R-048: SM89 small-M dense INT8 ConvRot kernel
@@ -4343,7 +4343,7 @@ workspace 和 metadata 回归测试, `small_m_specialized=true` 明确标识该�
 - [SM89 small-M CUDA kernel](../../../xqt/kernels/jit/csrc/quantization/convrot_w8a8_sm89_kernel.cu)
 - [small-M binding](../../../xqt/kernels/jit/csrc/quantization/convrot_w8a8_sm89_binding.cpp)
 - [ConvRot runtime dispatch](../../../xqt/compression/quant/quantizers/convrot_int8.py)
-- [small-M regression tests](../../../tests/xqt/quant/test_convrot_int8_quantizer.py)
+- [small-M regression tests](../../../tests/quant/test_convrot_int8_quantizer.py)
 
 ## R-049: SM89 M=256 ConvRot CUTLASS visitor route
 
@@ -4377,7 +4377,7 @@ CUTLASS visitor 的 warp-level K 静态约束; `32x128x64` 和 `64x64x64` 虽然
 
 - RTX 4070 Ti SUPER,SM89,CUDA 13.0,PyTorch 2.12.1+cu130,BF16,
   `M=256,K=4096,N=12288`.
-- `pytest -q tests/xqt/quant/test_convrot_int8_quantizer.py`
+- `pytest -q tests/quant/test_convrot_int8_quantizer.py`
   (包含 M=256 auto 路由回归)通过.
 - Nsight Systems trace:
   `research/xqt-gemm/artifacts/2026-09-01-sm89-ovisocr2-convrot-m256/nsys/m256_cutlass_64x128_range.nsys-rep`
@@ -4426,7 +4426,7 @@ binding 没有该 ABI,额外 `copy_` 不能减少 device-to-device copy. R-047 �
 ### 验证落点
 
 - [FLUX runtime](../../../xqt/runtime/modules/svd_flux_attention.py)
-- [Nunchaku path test](../../../tests/xqt/runtime/test_svd_flux_attention.py)
+- [Nunchaku path test](../../../tests/runtime/test_svd_flux_attention.py)
 - [历史 FLUX parity artifact](../../../research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-flux-attention-parity-v1/result.json)
 
 ## R-046: TileLang self-attention packed QKV projection
@@ -4465,7 +4465,7 @@ Q/K/V. Cross-attention 或 Q/K/V 输入不同的调用继续走原来的三次�
 - CPU 回归测试确认 self-attention 数值等价且 `F.linear` 调用次数为 1.
 - 现有 CUDA attention wrapper 测试继续覆盖 cross-attention 数值和 causal 语义.
 - [TileLang attention wrapper](../../../xqt/kernels/wrappers/attention.py)
-- [packed projection test](../../../tests/xqt/test_operator_tilelang_cuda.py)
+- [packed projection test](../../../tests/test_operator_tilelang_cuda.py)
 
 ## R-047: FLUX SDPA joint-QKV staging buffer reuse
 
@@ -4493,7 +4493,7 @@ CUDA parity 测试继续覆盖 joint output shape 与 native metadata.
 ### 验证落点
 
 - [FLUX runtime](../../../xqt/runtime/modules/svd_flux_attention.py)
-- [staging buffer test](../../../tests/xqt/runtime/test_svd_flux_attention.py)
+- [staging buffer test](../../../tests/runtime/test_svd_flux_attention.py)
 
 ## R-048: MiniCPM5 INT8 prefill row alignment
 
@@ -4537,7 +4537,7 @@ prefill/decode 分离 benchmark 选择 fallback.
 - [INT8 quantizer](../../../xqt/compression/quant/quantizers/int8_mma.py)
 - [MiniCPM5 adapter](../../../xqt/model/minicpm5.py)
 - [MiniCPM5 quantization report](../../../artifacts/xqt/inference/minicpm5-2b/int8_comparison.json)
-- [regression test](../../../tests/xqt/quant/test_int8_mma_quantizer.py)
+- [regression test](../../../tests/quant/test_int8_mma_quantizer.py)
 
 ## R-050: MiniCPM5 W4A16 decode 接入 native SM89 CUDA GEMV 混合路由
 
@@ -4642,8 +4642,8 @@ e2e 的 GEMM 占比不足以让 kernel 层收益在 HF eager 循环中兑现.
 - [MiniCPM5 adapter (hybrid 路由)](../../../xqt/model/minicpm5.py)
 - [K 分块 fp4 builder](../../../xqt/kernels/ops/_impl/tilelang/gemm_builder.py)
 - [QuaRot+AWQ e2e 报告](../../../artifacts/xqt/inference/minicpm5-2b/quarot_comparison.json)
-- [回归测试](../../../tests/xqt/test_tilelang_dequant_gemm_cuda.py),
-  [模型测试](../../../tests/xqt/model/test_minicpm5.py)
+- [回归测试](../../../tests/test_tilelang_dequant_gemm_cuda.py),
+  [模型测试](../../../tests/model/test_minicpm5.py)
 
 ## R-051: MiniCPM5-2B W8A8 decode 路线判定 (量化坍塌 vs ConvRot native)
 
@@ -4845,7 +4845,7 @@ Python 分发与 launch 后, 剩余时间就是纯 GPU 时间, 量化权重 (1 b
 ### 验证落点
 
 - [运行时实现](../../../xqt/runtime/graph_decode.py)
-- [CUDA 测试](../../../tests/xqt/runtime/test_graph_decode.py)
+- [CUDA 测试](../../../tests/runtime/test_graph_decode.py)
 - [基准入口](../../../examples/xqt_models/minicpm5_2b_graph_decode.py),
   [基准产物](../../../artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json)
 
@@ -5032,8 +5032,8 @@ ncu 对 AWQ W4A16 解码内核: lm_head 形状 `623 GB/s` (95% SOL), qkv 形状
 
 - [运行时](../../../xqt/runtime/graph_decode.py)
 - [decode 内核](../../../xqt/kernels/ops/_impl/triton/decode_kernels.py)
-- [内核测试](../../../tests/xqt/kernels/test_decode_kernels.py),
-  [session 测试](../../../tests/xqt/runtime/test_graph_decode.py)
+- [内核测试](../../../tests/kernels/test_decode_kernels.py),
+  [session 测试](../../../tests/runtime/test_graph_decode.py)
 - [基准入口](../../../examples/xqt_models/minicpm5_2b_graph_decode.py),
   [基准产物](../../../artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json)
 
@@ -5264,12 +5264,12 @@ runtime, 同样的融合 kernel 和图调度), 而它在 4.5 GB/token 下跑出
 - [运行时](../../../xqt/runtime/graph_decode.py) (`decode_batch`, `_warm`)
 - [AWQ 模块](../../../xqt/runtime/modules/awq_w4a16_linear.py) (`bind_residual`)
 - [MiniCPM5 hybrid 视图](../../../xqt/model/minicpm5.py)
-- 测试: [session](../../../tests/xqt/runtime/test_graph_decode.py)
+- 测试: [session](../../../tests/runtime/test_graph_decode.py)
   (`test_decode_batch_matches_single_steps`,
   `test_capture_after_prefill_keeps_prompt_state`),
-  [AWQ 模块](../../../tests/xqt/runtime/test_awq_w4a16_linear.py)
+  [AWQ 模块](../../../tests/runtime/test_awq_w4a16_linear.py)
   (`test_bound_residual_matches_unfused_add`),
-  [decode 内核](../../../tests/xqt/kernels/test_decode_kernels.py) (注意力 +
+  [decode 内核](../../../tests/kernels/test_decode_kernels.py) (注意力 +
   RoPE/KV scatter)
 - [基准产物](../../../artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json)
 
@@ -5463,19 +5463,19 @@ prompt-lookup 几乎没有可用的 n-gram 续写. 该负结果与 drafter 实�
 - [verify 步分解](../../../examples/xqt_models/minicpm5_2b_spec_verify_profile.py)
 - [运行时](../../../xqt/runtime/spec_decode.py),
   [多行内核](../../../xqt/kernels/ops/_impl/triton/spec_decode_kernels.py)
-- 测试: [spec session](../../../tests/xqt/runtime/test_spec_decode.py),
-  [多行内核](../../../tests/xqt/kernels/test_spec_decode_kernels.py)
+- 测试: [spec session](../../../tests/runtime/test_spec_decode.py),
+  [多行内核](../../../tests/kernels/test_spec_decode_kernels.py)
 - 产物: `artifacts/xqt/inference/minicpm5-2b/` 下 `w4a8_baseline_profile.json`,
   `spec_verify_profile.json`, `spec_decode_benchmark.json`
 
 #### 测试范围说明
 
-- 本轮相关测试全绿: `tests/xqt/runtime/test_spec_decode.py` (7),
-  `tests/xqt/kernels/test_spec_decode_kernels.py` (5),
-  `tests/xqt/runtime/test_graph_decode.py` (10),
-  `tests/xqt/runtime/test_awq_w4a16_linear.py`,
-  `tests/xqt/kernels/test_decode_kernels.py`.
-- 全量 `tests/xqt/runtime|kernels|model` 里存在与本轮无关的既有失败
+- 本轮相关测试全绿: `tests/runtime/test_spec_decode.py` (7),
+  `tests/kernels/test_spec_decode_kernels.py` (5),
+  `tests/runtime/test_graph_decode.py` (10),
+  `tests/runtime/test_awq_w4a16_linear.py`,
+  `tests/kernels/test_decode_kernels.py`.
+- 全量 `tests/runtime|kernels|model` 里存在与本轮无关的既有失败
   (`test_svd_*`, `test_svdq_*`, FLUX/SVD 系列, 约 14 例): 它们来自本次会话
   之前工作区里未提交的 SVD/TVM-FFI 前端改动, 与本轮 decode/spec 代码无交集,
   本轮未触碰这些文件.
@@ -5589,15 +5589,15 @@ prefill 延迟 (median, `int8_prefill` 唯一变量, 最终代码 HF-parity 基�
 - [运行时 prefill](../../../xqt/runtime/graph_decode.py) (`int8_prefill`,
   `_prefill_mlp_int8`), [hybrid 视图](../../../xqt/model/minicpm5.py)
   (`supports_prequant` / `forward_prequant`)
-- 测试: [INT8 prefill](../../../tests/xqt/kernels/test_int8_prefill.py),
-  [graph decode](../../../tests/xqt/runtime/test_graph_decode.py)
+- 测试: [INT8 prefill](../../../tests/kernels/test_int8_prefill.py),
+  [graph decode](../../../tests/runtime/test_graph_decode.py)
 - 复跑脚本 (会话内 `/tmp`, 未入库): prefill profile / 真实 A/B /
   质量闸门; 后续如需长期复跑应落成 `examples/xqt_models/minicpm5_2b_prefill_ab.py`
-- 本轮相关测试全绿: `tests/xqt/kernels/test_int8_prefill.py`,
-  `tests/xqt/runtime/test_graph_decode.py`,
-  `tests/xqt/kernels/test_decode_kernels.py`,
-  `tests/xqt/runtime/test_awq_w4a16_linear.py`,
-  `tests/xqt/model/test_minicpm5.py`; `ruff check` + `ruff format --check` 过.
+- 本轮相关测试全绿: `tests/kernels/test_int8_prefill.py`,
+  `tests/runtime/test_graph_decode.py`,
+  `tests/kernels/test_decode_kernels.py`,
+  `tests/runtime/test_awq_w4a16_linear.py`,
+  `tests/model/test_minicpm5.py`; `ruff check` + `ruff format --check` 过.
 
 ## R-057: MiniCPM5-2B decode attention 张量核化 (tl.dot GQA 组) 与 A/B 判定 (2026-09-14)
 
@@ -5699,8 +5699,8 @@ profiler 计时不可比. v2 改为轮序反转 + profiler 重复两轮后, prof
 - [decode kernels](../../../xqt/kernels/ops/_impl/triton/decode_kernels.py)
   (`_decode_attn_partial_tc_kernel`, `decode_attention_forward_triton_tc`)
 - [runtime](../../../xqt/runtime/graph_decode.py) (`attention_impl`)
-- 测试: [decode kernels](../../../tests/xqt/kernels/test_decode_kernels.py),
-  [graph decode](../../../tests/xqt/runtime/test_graph_decode.py)
+- 测试: [decode kernels](../../../tests/kernels/test_decode_kernels.py),
+  [graph decode](../../../tests/runtime/test_graph_decode.py)
 - [A/B 脚本](../../../examples/xqt_models/minicpm5_2b_attn_ab.py)
 - 产物: `artifacts/xqt/inference/minicpm5-2b/attn_impl_ab.json`
 
@@ -5858,9 +5858,9 @@ RTX 4070 Ti SUPER (`sm_89`), torch 2.12.1+cu130, triton 3.7.1.
 - [attention ops registry](../../../xqt/kernels/ops/attention/__init__.py)
   (`recommend_attention_backend`, `fused_attention_sage`)
 - [runtime prefill 插拔](../../../xqt/runtime/graph_decode.py) (`prefill_attention_impl`)
-- 测试: [triton attention](../../../tests/xqt/test_operator_triton_attention.py),
-  [backend routing](../../../tests/xqt/test_attention_backend_routing.py),
-  [graph decode](../../../tests/xqt/runtime/test_graph_decode.py)
+- 测试: [triton attention](../../../tests/test_operator_triton_attention.py),
+  [backend routing](../../../tests/test_attention_backend_routing.py),
+  [graph decode](../../../tests/runtime/test_graph_decode.py)
 - [内核级扫描](../../../research/xqt-gemm/bench_sm89_attention_length_sweep.py)
 - [真实路线 prefill A/B](../../../examples/xqt_models/minicpm5_2b_prefill_ab.py)
 - 产物: `research/xqt-gemm/artifacts/2026-09-15-sm89-attention-length-sweep/`,
@@ -5973,7 +5973,7 @@ RTX 4070 Ti SUPER (`sm_89`), torch 2.12.1+cu130, triton 3.7.1.
 - [Triton INT8 算子族](../../../xqt/kernels/ops/_impl/triton/decode_kernels.py)
 - [W4A16/W4A8 线性层模块](../../../xqt/runtime/modules/awq_w4a16_linear.py) 与 [MiniCPM5 模型入口](../../../xqt/model/minicpm5.py)
 - [全图解码会话运行时](../../../xqt/runtime/graph_decode.py)
-- 测试: [CUDA 图解码单元测试](../../../tests/xqt/runtime/test_graph_decode.py) (24/24 pass)
+- 测试: [CUDA 图解码单元测试](../../../tests/runtime/test_graph_decode.py) (24/24 pass)
 - 端到端基准: [MiniCPM5-2B 图解码测试](../../../examples/xqt_models/minicpm5_2b_graph_decode.py)
 - 产物数据: `artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json`
 

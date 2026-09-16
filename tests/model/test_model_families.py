@@ -31,7 +31,7 @@ from xqt.kernels.nn.fixtures.toy_models import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_model_family_names_are_stable() -> None:

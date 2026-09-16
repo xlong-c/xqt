@@ -231,7 +231,7 @@ G0 基线可复核
 | 量化 / 校准 | `xqt/compression/quant/`, `xqt/contracts/` | request -> module result -> storage/compute contract 的映射 |
 | engine / runtime | `xqt/kernels/`, `xqt/runtime/` | 静态能力,执行探测,materialize,fallback 与 observed evidence |
 | 产物 / 导出 | `xqt/contracts/quant_pair.py`, `xqt/export/`, `xqt/runtime/package.py` | path ownership,发布协议,schema 和新进程加载条件 |
-| 验收 / 证据 | `tests/xqt/`, `research/` artifacts | scope,raw samples,环境,阈值和结论状态 |
+| 验收 / 证据 | `tests/`, `research/` artifacts | scope,raw samples,环境,阈值和结论状态 |
 
 一个改动触及多个责任面时, 先写出 data flow,状态所有权和失败边界. 单纯把逻辑移动到另一目录不能算完成.
 

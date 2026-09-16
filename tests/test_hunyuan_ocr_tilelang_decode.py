@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from tests.xqt.svd_test_helpers import make_legacy_svd_int8
+from tests.svd_test_helpers import make_legacy_svd_int8
 from examples.xqt_models.hunyuan_ocr_tilelang import (
     HunyuanOcrTileLangCudaGraphRunner,
     HunyuanOcrTileLangDecodeBlock,
