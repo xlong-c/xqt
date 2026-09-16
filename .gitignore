@@ -28,7 +28,15 @@ MANIFEST
 .pyright/
 
 # Local artifact tree (gitignored, moved into this repo separately)
-artifacts/
+# 外层工作区资产以软链形式挂入本仓库; 同时列出无斜杠形式, 否则 git 不会忽略软链.
+/artifacts
+/artifacts/
+/others
+/others/
+/third_party
+/third_party/
+/runs
+/runs/
 
 # Curated XQT benchmark evidence. Keep the artifact tree ignored by default,
 # but allow the audited SVDQuant parity records used by long-term docs.
@@ -40,11 +48,17 @@ research/xqt-gemm/artifacts/*
 !research/xqt-gemm/artifacts/2026-08-13-sm89-svdq-official-mlp-parity-v1/result.json
 
 # Local data and download caches
-data/
-downloads/
+/data
+/data/
+/downloads
+/downloads/
 
 # Local JIT build dirs
 xqt/kernels/ops/_impl/cute/build/
 
 # 生成产物 (研究/冒烟输出)
 outputs/
+
+# Agent 工具目录中的技能软链 (skills/ 是唯一实体来源)
+/.claude/skills/
+/.codex/skills/
