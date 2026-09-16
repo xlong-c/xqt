@@ -95,6 +95,22 @@ XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配
 - `tests/` 直接对应当前包的测试树, 不再有 monorepo 时期的 `tests/xqt/` 中间层.
 - 仓库维护脚本放 `scripts/`, 工程工具放 `tools/`.
 
+## decode 加速链路 (改内核前先看)
+
+端到端链路跨五个文件, 改任何一处都要按整条链路验证, 不能只看单 kernel 微基准:
+
+- `xqt/runtime/graph_decode.py` - `CudaGraphDecodeSession`: 单张 length-agnostic graph, 逐层 decode body, 残差 epilogue 绑定, `decode_batch` 分块回读.
+- `xqt/kernels/ops/_impl/triton/decode_kernels.py` - 单遍 GQA decode attention (partial + merge; SIMT 默认, `attention_impl="tc"` 走张量核组变体 R-057), 融合 RoPE/KV scatter, RMSNorm/SwiGLU int8.
+- `xqt/kernels/jit/csrc/quantization/awq_w4a16_sm89_kernel.cu` - native W4A16 decode GEMV (interleave-4 打包; `HasBias` 语义就是残差 epilogue).
+- `xqt/runtime/modules/awq_w4a16_linear.py` + `xqt/model/minicpm5.py` - 模块入口与 hybrid 视图; `bind_residual` 必须一路转发到 hybrid 视图, 否则运行时绑不上 (曾因此静默退化成 `residual + module(x)`).
+- `examples/xqt_models/minicpm5_2b_graph_decode.py` - 五路线 e2e 基准, 产物 `artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json`.
+
+测量纪律 (R-052/053/054 的代价换来的):
+
+- **合成微基准对本链路没有预测力** (多次出现 "合成链快 12%, 真实路线慢 12%"), 内核参数或结构改动必须直接跑真实路线 A/B.
+- 单次稳态读数跨运行可波动 (同配置 265-311 tok/s), 加速比结论只看**同一次运行内**的对照.
+- 改内核前先读 `docs/md/explanation/operator-optimization-records.md` 里最新的 R-0xx: 那里记着本机带宽上界, 分形状实测和所有已否决方案, 不要重复试已证伪的路.
+
 ## Profiling 工具约定
 
 - XQT 可以记录和消费 profiler 产物,但不接管厂商 profiler 的安装,权限,驱动版本或 GUI 工作流.
