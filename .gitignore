@@ -45,3 +45,6 @@ downloads/
 
 # Local JIT build dirs
 xqt/kernels/ops/_impl/cute/build/
+
+# 生成产物 (研究/冒烟输出)
+outputs/
