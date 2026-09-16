@@ -90,8 +90,8 @@ XQT 只提供两种配置方式, 前者为第一选择, 原则上没有其他配
 ## 目录规范
 
 - 训练侧入口,数据集和 checkpoint 交接不在本仓库; 数据集与本地数据一律放 `data/` (整体 gitignore).
-- 阶段性研究资料放 `research/`, 不能替代长期文档.
-- 长期事实源与工作文档放 `docs/md/`; HTML 阅读页放 `research/` 下, 样式规范见 `docs/md/architecture/html-style-policy.md`.
+- 阶段性研究资料放独立的 `../research` 仓库 (本仓库内以软链 `research/` 挂入), 不能替代长期文档.
+- 长期事实源与工作文档放 `docs/md/`; HTML 阅读页放 `../research` 下, 样式规范见 `docs/md/architecture/html-style-policy.md`.
 - `tests/` 直接对应当前包的测试树, 不再有 monorepo 时期的 `tests/xqt/` 中间层.
 - 仓库维护脚本放 `scripts/`, 工程工具放 `tools/`.
 
