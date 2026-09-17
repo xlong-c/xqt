@@ -23,6 +23,9 @@ remaining drafted cache slots are simply overwritten by the next verify pass.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
+import json
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -105,6 +108,154 @@ class PromptLookupDrafter:
         return out[:k]
 
 
+class NullDrafter:
+    """Drafter that never proposes anything.
+
+    Passing this to :class:`SpecDecodeSession` turns the verify path into a
+    plain greedy decoder with a one-token window, which is how the runtime
+    proves that verifying scores exactly the model the single-step route
+    deploys.
+    """
+
+    def draft(self, k: int) -> list[int]:
+        return []
+
+    def observe(self, tokens: list[int]) -> None:
+        return None
+
+
+class DSparkDrafter(nn.Module):
+    """Ultra-lightweight neural drafter (DSpark) for speculative decoding.
+
+    Architecture:
+    - 1-layer TransformerEncoderLayer (d_model=2048, nhead=16, dim_feedforward=3072)
+    - K residual MTP MLP heads (modulating base layer features)
+    - 1 confidence scoring head for dynamic speculation length scheduling
+
+    Inference drafts are projected through the target model's LM head,
+    leveraging frozen target vocabulary representations.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 2048,
+        num_heads: int = 6,
+        num_layers: int = 2,
+        ffn_hidden_size: int = 3072,
+        *,
+        conf_threshold: float = 0.05,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.conf_threshold = float(conf_threshold)
+        self.layers = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=hidden_size,
+                    nhead=16,
+                    dim_feedforward=ffn_hidden_size,
+                    dropout=0.0,
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=True,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.mtp_heads = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(hidden_size, hidden_size),
+                    nn.SiLU(),
+                    nn.Linear(hidden_size, hidden_size),
+                )
+                for _ in range(num_heads)
+            ]
+        )
+        self.conf_head = nn.Linear(hidden_size, num_heads)
+
+    def forward(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Forward pass over [B, S, H] or [1, H] hidden states."""
+
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(0)
+        drafter_dtype = next(self.layers[0].parameters()).dtype
+        if hidden_states.dtype != drafter_dtype:
+            hidden_states = hidden_states.to(dtype=drafter_dtype)
+        z = hidden_states
+        for layer in self.layers:
+            z = layer(z)
+        head_features: list[torch.Tensor] = [z + head(z) for head in self.mtp_heads]
+        conf_logits = self.conf_head(z)
+        return head_features, conf_logits
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        path: str | Path,
+        *,
+        device: torch.device | str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        conf_threshold: float = 0.05,
+    ) -> DSparkDrafter:
+        path = Path(path)
+        config_path = path.parent / "config.json"
+        num_heads = 6
+        num_layers = 2
+        hidden_size = 2048
+        ffn_hidden_size = 3072
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                num_heads = cfg.get("num_draft_tokens", num_heads)
+                num_layers = cfg.get("num_layers", num_layers)
+                hidden_size = cfg.get("hidden_size", hidden_size)
+                ffn_hidden_size = cfg.get("ffn_hidden_size", ffn_hidden_size)
+        drafter = cls(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            ffn_hidden_size=ffn_hidden_size,
+            conf_threshold=conf_threshold,
+        ).to(device=device, dtype=dtype)
+        state = torch.load(path, map_location=device, weights_only=True)
+        drafter.load_state_dict(state)
+        drafter.eval()
+        return drafter
+
+    @torch.inference_mode()
+    def draft(
+        self,
+        hidden: torch.Tensor,
+        head_fn: Callable[[torch.Tensor], torch.Tensor],
+        k: int,
+    ) -> list[int]:
+        """Draft up to ``k`` candidate tokens using confidence scheduling.
+
+        ``hidden`` is the normalized hidden state of the token immediately
+        preceding ``tokens[-1]``. Head 1 predicts the token after ``tokens[-1]``,
+        Head 2 predicts the next, etc.
+        """
+
+        feats, conf_logits = self(hidden)
+        probs = torch.sigmoid(conf_logits.squeeze(0).squeeze(0))
+        selected = []
+        for idx in range(1, min(k + 1, self.num_heads)):
+            if probs[idx].item() >= self.conf_threshold:
+                selected.append(feats[idx].squeeze(0))
+            else:
+                break
+        if not selected:
+            return []
+        stacked = torch.cat(selected, dim=0)
+        logits = head_fn(stacked)
+        return logits.argmax(-1).tolist()
+
+
 class SpecDecodeSession:
     """Greedy generation with prompt-lookup drafting and exact verification.
 
@@ -119,6 +270,7 @@ class SpecDecodeSession:
         session: CudaGraphDecodeSession,
         *,
         draft_tokens: int = 4,
+        drafter: PromptLookupDrafter | DSparkDrafter | NullDrafter | None = None,
     ) -> None:
         if not isinstance(session, CudaGraphDecodeSession):
             raise XQTBackendError("SpecDecodeSession wraps a CudaGraphDecodeSession")
@@ -126,6 +278,25 @@ class SpecDecodeSession:
             raise ValueError(f"draft_tokens must be in [1, {MAX_DRAFT - 1}]")
         self._session = session
         self._k = int(draft_tokens)
+        self._drafter = drafter
+        self._final_hidden: torch.Tensor | None = None
+        self._prompt_tokens = 0
+        if session._kv_quant != "none":
+            # ``decode_attention_rows_forward_triton`` has no k_scale/v_scale
+            # parameters and requires the cache's last dim to equal head_dim,
+            # so an int4 cache fails a shape check and an int8 cache fails to
+            # compile in ``tl.dot``. Surface that here instead of inside Triton.
+            raise XQTBackendError(
+                "SpecDecodeSession verify requires kv_quant='none' (bf16 KV); "
+                f"got kv_quant={session._kv_quant!r}. The rows attention kernel "
+                "cannot read a quantized cache - build the "
+                "CudaGraphDecodeSession with kv_quant='none'."
+            )
+        # ``rope_write_qkv_rows_triton`` writes slot ``pos + row`` for every
+        # row with no mask, and reads the RoPE tables at the same offset, so an
+        # over-long window corrupts device memory silently rather than raising.
+        # Every bound check in ``generate`` is expressed against this.
+        self._max_cache_len = int(session.max_cache_len)
         # Triton's tl.arange requires a power-of-two extent, so the verify
         # window rounds up; only the first ``_active`` rows carry drafts and
         # the padded rows reuse the last real row's valid length (their logits
@@ -138,7 +309,7 @@ class SpecDecodeSession:
         self._kv_heads = session.num_kv_heads
         self._head_dim = session.head_dim
         self._hidden = session.hidden_size
-        self._attention_splits = 16
+        self._attention_splits = int(session._attention_splits)
         self._valid_lens = torch.zeros(
             self._rows, dtype=torch.int32, device=self._device
         )
@@ -149,12 +320,78 @@ class SpecDecodeSession:
         )
         self._draft_pad = session.token  # unused; placeholder for symmetry
         self._graphs: list[torch.cuda.CUDAGraph] = []
+        self._dspark_graphs: list[torch.cuda.CUDAGraph] = []
+        self._dspark_in_hidden = torch.zeros(
+            (1, 1, self._hidden), dtype=torch.bfloat16, device=self._device
+        )
+        self._dspark_tokens_out: torch.Tensor | None = None
+        self._dspark_confs_out: torch.Tensor | None = None
+        self._window_cpu = torch.zeros(
+            (self._rows, 1), dtype=torch.long, pin_memory=True
+        )
+        self._lens_offsets = torch.arange(
+            1, self._rows + 1, dtype=torch.int32, device=self._device
+        )
         self._pos = torch.zeros(1, dtype=torch.long, device=self._device)
         self._logits_out = None  # filled by _verify_body
+        # Row-shaped true-INT8 staging buffers. ``CudaGraphDecodeSession`` owns
+        # single-row equivalents that cannot be resized, so the verify path
+        # allocates its own set. These must exist before the graph is captured
+        # so replays always address the same memory.
+        self._int8_rows = bool(session._int8_activations)
+        self._norm_int8_buf: torch.Tensor | None = None
+        self._norm_scale_buf: torch.Tensor | None = None
+        self._mlp_norm_int8_buf: torch.Tensor | None = None
+        self._mlp_norm_scale_buf: torch.Tensor | None = None
+        self._attn_int8_buf: torch.Tensor | None = None
+        self._attn_scale_buf: torch.Tensor | None = None
+        self._swiglu_int8_buf: torch.Tensor | None = None
+        self._swiglu_scale_buf: torch.Tensor | None = None
+        if self._int8_rows:
+            cfg = getattr(self._model, "config", None)
+            intermediate = int(
+                getattr(cfg, "intermediate_size", self._hidden * 3)
+            )
+            activate = torch.zeros(
+                (self._rows, self._hidden), dtype=torch.int8, device=self._device
+            )
+            scale = torch.zeros(
+                (self._rows,), dtype=torch.float32, device=self._device
+            )
+            self._norm_int8_buf = activate
+            self._mlp_norm_int8_buf = torch.zeros_like(activate)
+            self._attn_int8_buf = torch.zeros_like(activate)
+            self._norm_scale_buf = scale
+            self._mlp_norm_scale_buf = torch.zeros_like(scale)
+            self._attn_scale_buf = torch.zeros_like(scale)
+            self._swiglu_int8_buf = torch.zeros(
+                (self._rows, intermediate), dtype=torch.int8, device=self._device
+            )
+            self._swiglu_scale_buf = torch.zeros_like(scale)
 
     # ------------------------------------------------------------- drafting
     def _drafter_for(self, input_ids: list[int]) -> PromptLookupDrafter:
         return PromptLookupDrafter(input_ids, max_ngram=4)
+
+    def _propose_tokens(self, k: int, tokens: list[int]) -> list[int] | None:
+        """Draft hook; subclasses override to supply their own proposals.
+
+        Returning ``None`` means "no opinion" and selects the built-in
+        prompt-lookup / DSpark paths, so the default implementation keeps the
+        existing behaviour for every caller that does not override it.
+        """
+
+        return None
+
+    def _after_verify(self, *, base: int, accepted: int, rows: int) -> None:
+        """Post-round hook for drafters that maintain their own state.
+
+        ``base`` is the cache slot of the window's first row, ``accepted`` the
+        number of drafts that survived verification, and ``rows`` the window
+        height. Called after the accept decision and before the next round.
+        """
+
+        return None
 
     # --------------------------------------------------------- verify body
     def _verify_body(self) -> None:
@@ -173,46 +410,64 @@ class SpecDecodeSession:
         hidden = model.model.embed_tokens(self._window).reshape(
             self._rows, self._hidden
         )
-        quantize = self._session._int8_activations
+        quantize = self._int8_rows
         rows = self._rows
         k_caches = self._session.k_cache
         v_caches = self._session.v_cache
         session = self._session
         for index, layer in enumerate(model.model.layers):
             residual = hidden
-            normed = session._norm(layer.input_layernorm, hidden, quantize)
             attention = layer.self_attn
             fused = session._fused_qkv[index]
-            if fused is not None:
-                qkv = fused(normed)
-            else:
-                qkv = (
-                    attention.q_proj(normed),
-                    attention.k_proj(normed),
-                    attention.v_proj(normed),
+            if quantize:
+                # Mirror ``CudaGraphDecodeSession._decode_body`` exactly: the
+                # same true-INT8 kernel set, so the verifier scores the model
+                # that the single-step route actually deploys.
+                session._rmsnorm_true_int8(
+                    hidden,
+                    layer.input_layernorm.weight,
+                    eps=float(layer.input_layernorm.variance_epsilon),
+                    out_q=self._norm_int8_buf,
+                    out_scale=self._norm_scale_buf,
                 )
-            # Contiguous [1, heads, ROWS, head_dim] buffers: the Triton
-            # wrappers reshape into (heads, ROWS, head_dim) views, and
-            # non-contiguous inputs would make those reshapes silently copy
-            # into scrap tensors that the kernels never write back.
-            q = (
-                qkv[0]
-                .reshape(1, rows, self._heads, self._head_dim)
-                .transpose(1, 2)
-                .contiguous()
-            )
-            k = (
-                qkv[1]
-                .reshape(1, rows, self._kv_heads, self._head_dim)
-                .transpose(1, 2)
-                .contiguous()
-            )
-            v = (
-                qkv[2]
-                .reshape(1, rows, self._kv_heads, self._head_dim)
-                .transpose(1, 2)
-                .contiguous()
-            )
+                q, k, v = session._project_qkv_w4a8(
+                    index, layer, self._norm_int8_buf, self._norm_scale_buf
+                )
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
+            else:
+                normed = session._norm(layer.input_layernorm, hidden, quantize)
+                if fused is not None:
+                    qkv = fused(normed)
+                else:
+                    qkv = (
+                        attention.q_proj(normed),
+                        attention.k_proj(normed),
+                        attention.v_proj(normed),
+                    )
+                # Contiguous [1, heads, ROWS, head_dim] buffers: the Triton
+                # wrappers reshape into (heads, ROWS, head_dim) views, and
+                # non-contiguous inputs would make those reshapes silently copy
+                # into scrap tensors that the kernels never write back.
+                q = (
+                    qkv[0]
+                    .reshape(1, rows, self._heads, self._head_dim)
+                    .transpose(1, 2)
+                    .contiguous()
+                )
+                k = (
+                    qkv[1]
+                    .reshape(1, rows, self._kv_heads, self._head_dim)
+                    .transpose(1, 2)
+                    .contiguous()
+                )
+                v = (
+                    qkv[2]
+                    .reshape(1, rows, self._kv_heads, self._head_dim)
+                    .transpose(1, 2)
+                    .contiguous()
+                )
             q_out = torch.empty_like(q)
             rope_write_qkv_rows_triton(
                 q,
@@ -234,27 +489,93 @@ class SpecDecodeSession:
             )
             # [heads, ROWS, head_dim] -> [ROWS, heads * head_dim]
             out = out.permute(1, 0, 2).reshape(rows, -1)
-            # The AWQ residual epilogue (decode_bias_out) takes a single [N]
-            # bias row, so multi-row verifies must not route through
-            # bind_residual; the GEMV plus an elementwise add is exact.
-            hidden = residual + attention.o_proj(out)
-            residual = hidden
-            hidden = session._mlp_forward(
-                index,
-                layer,
-                session._norm(layer.post_attention_layernorm, hidden, quantize),
-                fused_ops=True,
-                quantize=quantize,
-                residual=None,
-            )
-            hidden = residual + hidden
-        final = _rms_norm_rowwise(model.model.norm, hidden)
+            if quantize:
+                session._quantize_row_true_int8(
+                    out,
+                    out_q=self._attn_int8_buf,
+                    out_scale=self._attn_scale_buf,
+                )
+                hidden = session._residual_project_w4a8(
+                    attention.o_proj,
+                    self._attn_int8_buf,
+                    self._attn_scale_buf,
+                    residual,
+                )
+                residual = hidden
+                session._rmsnorm_true_int8(
+                    hidden,
+                    layer.post_attention_layernorm.weight,
+                    eps=float(layer.post_attention_layernorm.variance_epsilon),
+                    out_q=self._mlp_norm_int8_buf,
+                    out_scale=self._mlp_norm_scale_buf,
+                )
+                hidden = session._mlp_forward_w4a8(
+                    index,
+                    layer,
+                    self._mlp_norm_int8_buf,
+                    self._mlp_norm_scale_buf,
+                    residual=residual,
+                    swiglu_out=self._swiglu_int8_buf,
+                    swiglu_scale=self._swiglu_scale_buf,
+                )
+            else:
+                # The AWQ residual epilogue (decode_bias_out) takes a single [N]
+                # bias row, so multi-row verifies must not route through
+                # bind_residual; the GEMV plus an elementwise add is exact.
+                hidden = residual + attention.o_proj(out)
+                residual = hidden
+                hidden = session._mlp_forward(
+                    index,
+                    layer,
+                    session._norm(layer.post_attention_layernorm, hidden, quantize),
+                    fused_ops=True,
+                    quantize=quantize,
+                    residual=None,
+                )
+                hidden = residual + hidden
+            session._capture_layer_rows(index, hidden, rows)
+        # Match ``CudaGraphDecodeSession._decode_body``'s final norm exactly
+        # (same fused/non-fused choice), because this tensor is both the
+        # verifier's logits source and the next round's drafter input.
+        final = session._norm(model.model.norm, hidden, False)
         head = self._session._lm_head_override
         if head is not None:
             logits = head(final)
         else:
             logits = model.lm_head(final)
         self._logits_out = logits
+        self._final_hidden = final
+
+    def _draft_body_dspark(self) -> None:
+        """Draft pass: DSpark drafter + LM head on static device buffers."""
+
+        assert isinstance(self._drafter, DSparkDrafter)
+        feats, conf_logits = self._drafter(self._dspark_in_hidden)
+        n_draft = min(self._k, self._drafter.num_heads - 1)
+        selected = [feats[i].squeeze(1) for i in range(1, n_draft + 1)]
+        stacked = torch.cat(selected, dim=0)  # [n_draft, hidden]
+        head_fn = (
+            self._session._lm_head_override
+            if self._session._lm_head_override is not None
+            else self._model.lm_head
+        )
+        logits = head_fn(stacked)
+        self._dspark_tokens_out = logits.argmax(-1)
+        self._dspark_confs_out = conf_logits.squeeze(0).squeeze(0)
+
+    def _capture_dspark(self) -> None:
+        """Capture the DSpark draft graph once."""
+
+        if self._dspark_graphs or not isinstance(self._drafter, DSparkDrafter):
+            return
+        with torch.inference_mode():
+            for _ in range(3):
+                self._draft_body_dspark()
+            torch.cuda.synchronize()
+            self._dspark_graphs.append(torch.cuda.CUDAGraph())
+            with torch.cuda.graph(self._dspark_graphs[0]):
+                self._draft_body_dspark()
+            torch.cuda.synchronize()
 
     def _capture(self) -> None:
         """Capture the verify graph once (requires prefill done)."""
@@ -277,41 +598,130 @@ class SpecDecodeSession:
         *,
         max_new_tokens: int,
         eos_token_ids: tuple[int, ...] = (),
+        on_cache_full: str = "raise",
     ) -> tuple[list[int], dict[str, Any]]:
-        """Greedy generation with exact speculative verification."""
+        """Greedy generation with exact speculative verification.
+
+        The verify window writes ``rows`` cache slots starting at the last
+        confirmed token, so a run needs ``prompt + max_new_tokens + rows <=
+        max_cache_len``. ``on_cache_full`` decides what to do when that does
+        not hold: ``"raise"`` (default) refuses before touching the cache,
+        ``"truncate"`` shrinks ``max_new_tokens`` to the largest value that
+        fits. Truncation is applied to ``max_new_tokens`` and never to ``k``:
+        ``rows`` and the captured graph are fixed at construction, so a
+        smaller ``k`` would not narrow the write window.
+        """
 
         session = self._session
         prompt_tokens = int(input_ids.shape[1])
+        self._prompt_tokens = prompt_tokens
+        if on_cache_full not in {"raise", "truncate"}:
+            raise ValueError(
+                f"on_cache_full must be 'raise' or 'truncate', got {on_cache_full!r}"
+            )
+        budget = self._max_cache_len - prompt_tokens - self._rows
+        if max_new_tokens > budget:
+            if on_cache_full == "raise":
+                raise ValueError(
+                    f"prompt {prompt_tokens} + max_new_tokens {max_new_tokens} + "
+                    f"rows {self._rows} exceeds max_cache_len "
+                    f"{self._max_cache_len}; the rows kernel writes "
+                    "position + row with no mask"
+                )
+            if budget < 1:
+                raise ValueError(
+                    f"prompt {prompt_tokens} leaves no room to generate within "
+                    f"max_cache_len {self._max_cache_len} (rows={self._rows})"
+                )
+            max_new_tokens = budget
         first = session.prefill(input_ids)
-        drafter = self._drafter_for(input_ids[0].tolist() + [first])
         tokens: list[int] = [first]
         hit_eos = first in eos_token_ids
         steps = 0
         total_draft = 0
         total_accepted = 0
+
+        is_dspark = isinstance(self._drafter, DSparkDrafter)
+        if is_dspark:
+            pld_drafter = None
+            dspark_drafter: DSparkDrafter = self._drafter
+            lm_head_fn = (
+                session._lm_head_override
+                if session._lm_head_override is not None
+                else self._model.lm_head
+            )
+            last_hidden = session.last_hidden
+            if not self._dspark_graphs:
+                self._capture_dspark()
+        else:
+            # Any explicitly supplied non-DSpark drafter is used as-is; only a
+            # missing one falls back to prompt lookup.
+            pld_drafter = (
+                self._drafter_for(input_ids[0].tolist() + [first])
+                if self._drafter is None
+                else self._drafter
+            )
+            dspark_drafter = None
+
         while len(tokens) < max_new_tokens and not hit_eos:
             k = min(self._k, max_new_tokens - len(tokens) - 1)
-            draft = drafter.draft(k) if k > 0 else []
+            draft = self._propose_tokens(k, tokens)
+            if draft is not None:
+                pass
+            elif is_dspark:
+                if last_hidden is not None and k == self._k and self._dspark_graphs:
+                    self._dspark_in_hidden.copy_(
+                        last_hidden.reshape(1, 1, self._hidden)
+                    )
+                    self._dspark_graphs[0].replay()
+                    assert self._dspark_tokens_out is not None
+                    assert self._dspark_confs_out is not None
+                    tokens_list = self._dspark_tokens_out.tolist()
+                    probs_list = torch.sigmoid(self._dspark_confs_out).tolist()
+                    draft = []
+                    for idx in range(1, len(tokens_list) + 1):
+                        if probs_list[idx] >= self._drafter.conf_threshold:
+                            draft.append(tokens_list[idx - 1])
+                        else:
+                            break
+                elif last_hidden is not None and k > 0:
+                    assert dspark_drafter is not None
+                    draft = dspark_drafter.draft(last_hidden, lm_head_fn, k)
+                else:
+                    draft = []
+            elif pld_drafter is not None and k > 0:
+                draft = pld_drafter.draft(k)
+            else:
+                draft = []
+
             # Padded positions repeat the last real token: they are written to
             # the cache by the fixed graph and must not contain garbage.
             filled = [tokens[-1]] + draft
-            window = filled + [filled[-1]] * (self._rows - len(filled))
+            n_filled = len(filled)
+            last_val = filled[-1]
+            for r in range(n_filled):
+                self._window_cpu[r, 0] = filled[r]
+            for r in range(n_filled, self._rows):
+                self._window_cpu[r, 0] = last_val
             total_draft += len(draft)
             base = prompt_tokens + len(tokens) - 1
+            if base + self._rows > self._max_cache_len:
+                # Unreachable when the up-front budget check ran, but the
+                # kernel would corrupt memory rather than raise, so keep the
+                # authoritative check on the hot path too. Host-side ints only,
+                # no device sync, no graph impact.
+                raise ValueError(
+                    f"verify window writes slots {base}..{base + self._rows - 1} "
+                    f"but max_cache_len is {self._max_cache_len}"
+                )
             pad = len(draft) + 1
             # Row r lands at slot base+r (padded rows re-write the last real
             # slot's value at a later slot) and attends [0, base+r+1). Only
             # rows < pad are verified; padded logits are discarded.
-            lens = [base + r + 1 for r in range(self._rows)]
             self._pos.fill_(base)
-            self._valid_lens.copy_(
-                torch.tensor(lens, dtype=torch.int32, device=self._device)
-            )
-            self._window.copy_(
-                torch.tensor(window, dtype=torch.long, device=self._device).reshape(
-                    self._rows, 1
-                )
-            )
+            self._valid_lens.copy_(self._lens_offsets)
+            self._valid_lens.add_(base)
+            self._window.copy_(self._window_cpu, non_blocking=True)
             if not self._graphs:
                 self._capture()
             self._graphs[0].replay()
@@ -324,7 +734,7 @@ class SpecDecodeSession:
             emitted: list[int] = []
             accepted = 0
             for r in range(1, pad):
-                draft_tok = window[r]
+                draft_tok = filled[r]
                 target = targets_list[r - 1]
                 if draft_tok == target:
                     accepted += 1
@@ -339,6 +749,14 @@ class SpecDecodeSession:
                 # greedy continuation because all drafts matched).
                 emitted.append(targets_list[pad - 1])
             total_accepted += accepted
+            self._after_verify(base=base, accepted=accepted, rows=self._rows)
+
+            if is_dspark:
+                assert self._final_hidden is not None
+                last_hidden = self._final_hidden[accepted : accepted + 1, :]
+            elif pld_drafter is not None:
+                pld_drafter.observe(emitted)
+
             for tok in emitted:
                 tokens.append(tok)
                 if tok in eos_token_ids:
@@ -348,7 +766,6 @@ class SpecDecodeSession:
             # window starts at the last confirmed token; slots beyond it are
             # overwritten by the next pass's rope/scatter, so no rollback of
             # the KV cache is needed (contiguous writes cover them).
-            drafter.observe(emitted)
         stats = {
             "verify_steps": steps,
             "drafted_tokens": total_draft,
@@ -358,12 +775,4 @@ class SpecDecodeSession:
         return tokens, stats
 
 
-def _rms_norm_rowwise(module: nn.Module, hidden: torch.Tensor) -> torch.Tensor:
-    """RMSNorm over a [ROWS, hidden] tensor using the fused aten op."""
-
-    weight = module.weight
-    eps = float(module.variance_epsilon)
-    return torch.nn.functional.rms_norm(hidden, (hidden.shape[-1],), weight, eps)
-
-
-__all__ = ["PromptLookupDrafter", "SpecDecodeSession"]
+__all__ = ["DSparkDrafter", "PromptLookupDrafter", "SpecDecodeSession"]

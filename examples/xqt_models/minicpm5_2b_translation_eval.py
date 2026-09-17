@@ -61,6 +61,7 @@ from xqt.model.minicpm5 import (
     minicpm5_quantization_policy,
     quantize_minicpm5,
 )
+from xqt.model.minicpm5_chat import TRANSLATION_INSTRUCTION, render_chat_input_ids
 from xqt.model.minicpm5_quarot import apply_quarot_minicpm5
 from xqt.runtime import materialize_convrot_execution_views
 from examples.xqt_models.minicpm5_2b_quant_benchmark import (
@@ -78,15 +79,11 @@ MARKDOWN_OUTPUT = ARTIFACT_DIR / "translation_eval.md"
 MAX_NEW_TOKENS = 2048
 WARMUP_NEW_TOKENS = 8
 EOS_TOKEN_IDS = (1, 130073)
-INPUT_KEYS = frozenset({"input_ids", "attention_mask"})
 
 # The prompt is rendered through the model's ChatML template with
 # enable_thinking=False; the BF16 translation of the document is about 1500
 # tokens, so MAX_NEW_TOKENS leaves headroom for the quantized candidates.
-INSTRUCTION = (
-    "Translate the following English text into Chinese. "
-    "Output only the translation, preserving technical terms when appropriate.\n\n"
-)
+INSTRUCTION = TRANSLATION_INSTRUCTION
 
 # A self-authored, neutral multi-domain English document (narrative, technical,
 # argumentative, procedural, travel, Q&A, reflection) used as the translation
@@ -181,6 +178,12 @@ def _translation_prompt() -> str:
     return INSTRUCTION + SOURCE_DOCUMENT
 
 
+def _translation_prompt_document() -> str:
+    """The document without the instruction prefix, for the canonical renderer."""
+
+    return SOURCE_DOCUMENT
+
+
 def _generate_once(
     model: Any,
     tokenizer: Any,
@@ -191,15 +194,10 @@ def _generate_once(
     """Run one greedy generation and decompose the full pipeline latency."""
 
     started = time.perf_counter()
-    rendered = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
-    )
-    encoded = tokenizer(rendered, return_tensors="pt")
+    ids = render_chat_input_ids(tokenizer, prompt)
     device_inputs = {
-        key: value.to(DEVICE) for key, value in encoded.items() if key in INPUT_KEYS
+        "input_ids": torch.tensor([ids], dtype=torch.long, device=DEVICE),
+        "attention_mask": torch.ones(1, len(ids), dtype=torch.long, device=DEVICE),
     }
     prepared = time.perf_counter()
     prompt_tokens = int(device_inputs["input_ids"].shape[-1])

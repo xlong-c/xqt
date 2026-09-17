@@ -46,6 +46,12 @@ from .policy import (
 
 from .engine import HybridInferenceEngine, HybridInferenceResult
 from .graph_decode import CudaGraphDecodeSession, GraphDecodeResult
+from .spec_decode import (
+    DSparkDrafter,
+    NullDrafter,
+    PromptLookupDrafter,
+    SpecDecodeSession,
+)
 from .model_runner import ModelRunner, ModelRunnerReport
 from .cuda_graph import (
     CUDAGraphBlockRunner,
@@ -255,4 +261,8 @@ __all__ = [
     "DeployedModelInstance",
     "DeploymentExecutionReport",
     "StandaloneDeployLoader",
+    "DSparkDrafter",
+    "NullDrafter",
+    "PromptLookupDrafter",
+    "SpecDecodeSession",
 ]

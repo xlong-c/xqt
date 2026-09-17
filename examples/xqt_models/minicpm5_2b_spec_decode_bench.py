@@ -30,16 +30,25 @@ from xqt.model.minicpm5 import (
     quantize_minicpm5,
     quantize_minicpm5_lm_head_w4,
 )
-from xqt.runtime import CudaGraphDecodeSession, SpecDecodeSession
+from xqt.model.minicpm5_chat import render_translation_input_ids
+from xqt.runtime import CudaGraphDecodeSession, DSparkDrafter, SpecDecodeSession
 
 ARTIFACT_DIR = Path("artifacts/xqt/inference/minicpm5-2b")
 OUTPUT = ARTIFACT_DIR / "spec_decode_benchmark.json"
 MODEL_PATH = "downloads/MiniCPM5-2B-bf16"
+DSPARK_CKPT_CANDIDATES = [
+    Path("artifacts/dspark_minicpm5_2b/dspark_drafter.pt"),
+    Path("../artifacts/dspark_minicpm5_2b/dspark_drafter.pt"),
+    Path("/root/workspace/xdl/artifacts/dspark_minicpm5_2b/dspark_drafter.pt"),
+]
 DEVICE = torch.device("cuda")
 MAX_NEW_TOKENS = 1536
 MAX_CACHE_LEN = 4096
 EOS_TOKEN_IDS = (1, 130073)
 STEADY_REPEATS = 5
+# Set True only to reproduce the pre-2026-09-17 double-BOS numbers recorded in
+# spec_decode_benchmark.json; new runs must use the canonical single-BOS prompt.
+LEGACY_DOUBLE_BOS = False
 
 
 def _free_cuda() -> None:
@@ -48,13 +57,10 @@ def _free_cuda() -> None:
 
 
 def _render(tokenizer: Any) -> torch.Tensor:
-    rendered = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ev._translation_prompt()}],
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+    ids = render_translation_input_ids(
+        tokenizer, ev._translation_prompt_document(), legacy_double_bos=LEGACY_DOUBLE_BOS
     )
-    return tokenizer(rendered, return_tensors="pt")["input_ids"].to(DEVICE)
+    return torch.tensor(ids, dtype=torch.long, device=DEVICE).unsqueeze(0)
 
 
 def _build_model() -> tuple[Any, Any, Any]:
@@ -122,6 +128,7 @@ def _run_spec(
     *,
     int8: bool,
     draft_tokens: int,
+    drafter: Any = None,
 ) -> dict[str, Any]:
     session = CudaGraphDecodeSession(
         model,
@@ -129,7 +136,7 @@ def _run_spec(
         lm_head=head,
         int8_activations=int8,
     )
-    spec = SpecDecodeSession(session, draft_tokens=draft_tokens)
+    spec = SpecDecodeSession(session, draft_tokens=draft_tokens, drafter=drafter)
     # warmup (compiles kernels + captures the verify graph)
     spec.generate(input_ids, max_new_tokens=MAX_NEW_TOKENS, eos_token_ids=EOS_TOKEN_IDS)
     torch.cuda.synchronize()
@@ -163,13 +170,33 @@ def main() -> None:
         flush=True,
     )
 
+    dspark_ckpt = None
+    for cand in DSPARK_CKPT_CANDIDATES:
+        if cand.exists():
+            dspark_ckpt = cand
+            break
+
+    dspark_drafter = None
+    if dspark_ckpt is not None:
+        print(f"[spec-bench] loading DSpark drafter from {dspark_ckpt} ...", flush=True)
+        dspark_drafter = DSparkDrafter.from_checkpoint(
+            dspark_ckpt, device=DEVICE, dtype=torch.bfloat16, conf_threshold=0.05
+        )
+
+    spec_configs: list[tuple[str, bool, int, Any]] = [
+        ("w4a8_pld_k3", True, 3, None),
+    ]
+    if dspark_drafter is not None:
+        spec_configs.append(("w4a8_dspark_k2", True, 2, dspark_drafter))
+        spec_configs.append(("w4a8_dspark_k3", True, 3, dspark_drafter))
+        spec_configs.append(("w4a8_dspark_k5", True, 5, dspark_drafter))
+
     runs: dict[str, Any] = {}
-    for name, int8, k in [
-        ("w4a8_spec_k3", True, 3),
-        ("w4a8_spec_k7", True, 7),
-    ]:
+    for name, int8, k, drafter_inst in spec_configs:
         print(f"[spec-bench] {name} ...", flush=True)
-        out = _run_spec(model, head, input_ids, int8=int8, draft_tokens=k)
+        out = _run_spec(
+            model, head, input_ids, int8=int8, draft_tokens=k, drafter=drafter_inst
+        )
         agree = sum(1 for a, b in zip(base["token_ids"], out["token_ids"]) if a == b)
         shared = min(len(base["token_ids"]), len(out["token_ids"]))
         out["agreement_with_baseline"] = agree / shared if shared else 0.0
@@ -181,7 +208,8 @@ def main() -> None:
             f"[spec-bench] {name}: e2e={out['e2e_ms']:.0f}ms "
             f"tok/s={out['decode_tokens_per_second']:.1f} "
             f"speedup={base['e2e_ms'] / out['e2e_ms']:.2f}x "
-            f"accept={out['accept_rate']:.2f}",
+            f"accept={out['accept_rate']:.2f} "
+            f"agree={out['agreement_with_baseline']:.2%}",
             flush=True,
         )
         _free_cuda()

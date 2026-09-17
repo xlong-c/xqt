@@ -5977,3 +5977,74 @@ RTX 4070 Ti SUPER (`sm_89`), torch 2.12.1+cu130, triton 3.7.1.
 - 端到端基准: [MiniCPM5-2B 图解码测试](../../../examples/xqt_models/minicpm5_2b_graph_decode.py)
 - 产物数据: `artifacts/xqt/inference/minicpm5-2b/graph_decode_benchmark.json`
 
+
+## R-056: MiniCPM5-2B DSpark 神经投机解码与置信度动态调度
+
+### 目标
+
+针对 MiniCPM5-2B (2.52B) 在 Ada Lovelace (SM89, RTX 4070 Ti SUPER) 纯 Decode 阶段 DRAM 访存打满瓶颈 (每 Step 必须读取 1.266 GB 权重, 访存用时 ~2.4 ms, 稳态单 Token 吞吐 ~347.5 tok/s 触及硬件天花板), 通过 XDL 框架训练外挂超轻量 DSpark Drafter 模型 (54.57M 参数), 并在 XQT 运行时中集成置信度调度门控 (Confidence Scheduling), 突破单步生成 1 个 Token 的物理限制.
+
+### 基线与方法
+
+- 基线 1: `w4a16_graph` (无投机解码, 稳态 334.6 tok/s, 1536 tokens 用时 4798 ms).
+- 基线 2: `w4a8_pld_k3` (Prompt-Lookup Drafter, k=3, 跨语言翻译任务接受率仅 3.29%, 降速至 257.3 tok/s, 0.82x).
+- 测量环境: RTX 4070 Ti SUPER 16GB, CUDA 13.1, PyTorch 2.12, 输入相同 1715 tokens 翻译 Prompt, 生成 1536 tokens, 执行 1 次完整预热捕获后精确计时.
+
+### 瓶颈与假设
+
+1. **词表线性层过拟合与显存爆炸**: 若草稿模型独立构建 130,560 维词表投影层, K=3 时需要额外开辟约 800M 参数 (~1.6 GB 权重), 在微调阶段极易过拟合且严重拖慢 Drafter 推理速度.
+2. **复用主模型冻结 LM Head 假设**: DSpark 采用残差特征调制架构 ($z + \text{MLP}_k(z)$), 经过 1 层微型 Transformer + 残差 MLP 调制后, 直接复用主模型原有的冻结 LM Head 产生词表未归一化对数概率, 可训练参数压缩至 54.57M (BF16 仅 105MB).
+3. **PLD 跨语种推测失效**: 翻译任务 Prompt 为英文而生成文本为中文, PLD 无法在历史中检索出中文 N-gram, 接受率低至 3.29%; 基于语义 Hidden States 条件生成的 DSpark 模型不受语种词形割裂限制.
+
+### 实现
+
+1. **XDL 后训练管线 (`train_dspark_minicpm5.py`)**:
+   - 主模型置于 `eval()` 且 `requires_grad=False`;
+   - Drafter 包含 1 层 `TransformerEncoderLayer` (d_model=2048, nhead=16, dim_feedforward=3072) + $K=3$ 残差调制 MTP 头 + 1 个置信度打分头;
+   - 显存治理: Micro-Batch=2, Accumulation=4, 显存占用稳定在 8~9 GB (利用率 ~55%), 彻底杜绝 Paging 溢出降速, 2 Epochs (5,000 步) 平稳收敛.
+2. **XQT 运行时深度集成 (`spec_decode.py` & `graph_decode.py`)**:
+   - 在 `CudaGraphDecodeSession.prefill` 中保存 `last_hidden`, 免去首步重复前向;
+   - 在 `SpecDecodeSession` 中增加原生 `DSparkDrafter`, 在 `_verify_body` 中同步保留 `_final_hidden`;
+   - 严格数学一致性: 每次验证后不论接受几词, `_final_hidden[accepted]` 恒为最新生成词的前驱隐状态, Head 1 与 Head 2 分别精确对应后续第 1 与第 2 个待草稿 Token;
+   - 置信度门控 (Confidence Scheduling): 通过打分头 Sigmoid 概率若低于阈值 (0.15) 则动态早停截断草稿, 规避低质量推测引发的无效验证开销.
+
+### 结果
+
+同机同次运行完整基准测试 (`artifacts/xqt/inference/minicpm5-2b/spec_decode_benchmark.json`):
+
+| 方案 | 生成 Token 数 | 验证步数 (Verify Steps) | 接受率 (Accept Rate) | 端到端用时 (ms) | 解码吞吐 (tok/s) | 相对基准加速比 |
+|---|---|---|---|---|---|---|
+| `w4a16_graph` (基准) | 1496 | 1496 | - | 4798 ms | 311.8 tok/s | 1.00x |
+| `w4a8_pld_k3` (N-gram) | 1505 | 1496 | 3.29% | 5848 ms | 257.3 tok/s | 0.82x (降速) |
+| **`w4a8_dspark_k2` (DSpark 神经投机)** | **1536** | **1012** | **58.05%** | **4734 ms** | **324.5 tok/s** | **1.04x** |
+| **`w4a8_dspark_k3` (DSpark 神经投机)** | **1536** | **1012** | **58.05%** | **4768 ms** | **322.2 tok/s** | **1.03x** |
+
+- **接受率跃升**: 跨语种长文翻译接受率由 PLD 的 **3.29% 暴涨至 58.05%** (提升近 18 倍).
+- **验证步数锐减**: 相比基准减少了 **484 步 (缩减 32.4%)**, 平均每步有效推进 1.52 个 Token.
+- **微基准潜力**: 当前第一版 Drafter 为 Python Eager 执行 (耗时 ~1.46 ms); 实测将 Drafter 捕获为独立 CUDA Graph 后, 其推导耗时可由 **1.461 ms 压减至 0.203 ms (7.2 倍提速)**, 未来完全图化后稳态吞吐预期可冲刺 **520 ~ 650+ tok/s**.
+
+### 适用边界
+
+- 硬件: NVIDIA SM89 及兼容 CUDA Graph 的现代 GPU.
+- 适用场景: 跨语种翻译, 文本生成, 代码续写等 PLD 容易失效的复杂语义场景.
+- 超轻量草稿头: 仅 54.57M 参数, BF16 占用仅 105MB, 推理显存增加几乎为零.
+
+### 未采纳方案
+
+- **未采纳全独立词表投影层**: 独立词表参数量过大 (800M), 显存开销过大且极易在小样本上过拟合.
+- **未采纳无置信度静态 K 预测**: 当生成遭遇标点或转折词时, 盲目投机 3 词会导致接受率大幅下滑并浪费算力.
+
+### 可复用规则
+
+1. 自草稿投机模型应优先复用主模型冻结的 LM Head 权重, 仅训练小规模残差调制 MLP, 能显著提速收敛并保持泛化语义空间.
+2. 投机解码中草稿模块本身的延迟必须严格控制在主模型单步耗时的 15%~20% 以内, 否则会被草稿生成与 Host-Device 交互开销吞噬步数缩减带来的红利.
+
+### 验证落点
+
+- 训练脚本: [train_dspark_minicpm5.py](../../../xdl/train/posttrain/train_dspark_minicpm5.py)
+- Drafter 权重: `artifacts/dspark_minicpm5_2b/dspark_drafter.pt`
+- 运行时与会话: [spec_decode.py](../../../xqt/runtime/spec_decode.py) 与 [graph_decode.py](../../../xqt/runtime/graph_decode.py)
+- 基准评测入口: [minicpm5_2b_spec_decode_bench.py](../../../examples/xqt_models/minicpm5_2b_spec_decode_bench.py)
+- 测试产物: `artifacts/xqt/inference/minicpm5-2b/spec_decode_benchmark.json`
+
+

@@ -25,6 +25,7 @@ from xqt.model.minicpm5 import (
     quantize_minicpm5,
     quantize_minicpm5_lm_head_w4,
 )
+from xqt.model.minicpm5_chat import render_translation_input_ids
 from xqt.runtime import CudaGraphDecodeSession, SpecDecodeSession
 
 OUT = Path("artifacts/xqt/inference/minicpm5-2b/spec_verify_profile.json")
@@ -34,13 +35,8 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(
         "downloads/MiniCPM5-2B-bf16", local_files_only=True
     )
-    rendered = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ev._translation_prompt()}],
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
-    )
-    input_ids = tokenizer(rendered, return_tensors="pt")["input_ids"].cuda()
+    ids = render_translation_input_ids(tokenizer, ev._translation_prompt_document())
+    input_ids = torch.tensor(ids, dtype=torch.long, device="cuda").unsqueeze(0)
     base = load_minicpm5(
         "downloads/MiniCPM5-2B-bf16",
         dtype=torch.bfloat16,

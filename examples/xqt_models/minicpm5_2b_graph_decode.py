@@ -48,6 +48,7 @@ from xqt.model.minicpm5 import (
     quantize_minicpm5,
     quantize_minicpm5_lm_head_w4,
 )
+from xqt.model.minicpm5_chat import render_translation_input_ids
 from xqt.runtime import CudaGraphDecodeSession
 
 ARTIFACT_DIR = Path("artifacts/xqt/inference/minicpm5-2b")
@@ -59,6 +60,9 @@ RECORDED_BF16_GRAPH_MS = 16240.1
 MAX_NEW_TOKENS = 1536
 MAX_CACHE_LEN = 4096
 EOS_TOKEN_IDS = (1, 130073)
+# Set True only to reproduce the pre-2026-09-17 double-BOS numbers recorded in
+# graph_decode_benchmark.json; new runs must use the canonical single-BOS prompt.
+LEGACY_DOUBLE_BOS = False
 DEVICE = torch.device("cuda")
 
 
@@ -68,13 +72,10 @@ def _free_cuda() -> None:
 
 
 def _render(tokenizer: Any) -> torch.Tensor:
-    rendered = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ev._translation_prompt()}],
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
+    ids = render_translation_input_ids(
+        tokenizer, ev._translation_prompt_document(), legacy_double_bos=LEGACY_DOUBLE_BOS
     )
-    return tokenizer(rendered, return_tensors="pt")["input_ids"].to(DEVICE)
+    return torch.tensor(ids, dtype=torch.long, device=DEVICE).unsqueeze(0)
 
 
 def _eager_generate(

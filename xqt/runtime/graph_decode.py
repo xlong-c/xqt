@@ -285,6 +285,25 @@ def _resolve_prefill_attention(
     raise ValueError("prefill_attention_impl must be 'sdpa', 'triton' or 'tilelang'")
 
 
+def _dequant_activations(
+    inputs: torch.Tensor, scale_a: torch.Tensor, dtype: torch.dtype
+) -> torch.Tensor:
+    """Undo a per-row INT8 activation scale.
+
+    ``scale_a`` holds one value per row, so it has to be broadcast against the
+    leading dimension rather than the trailing one; a bare ``inputs * scale_a``
+    only works for a single row and silently mismatches for a multi-row verify.
+    """
+
+    scale = scale_a.to(dtype).reshape(-1, *([1] * (inputs.dim() - 1)))
+    return inputs.to(dtype) * scale
+
+
+# The verify window is capped at MAX_DRAFT rows (see SpecDecodeSession), so a
+# row-indexed capture buffer of that height covers every multi-row path.
+_MAX_CAPTURE_ROWS = 8
+
+
 class CudaGraphDecodeSession:
     """Greedy single-request decode behind one length-agnostic CUDA graph.
 
@@ -310,6 +329,7 @@ class CudaGraphDecodeSession:
         int8_prefill: bool = False,
         min_int8_prefill_rows: int = 256,
         kv_quant: str = "none",
+        capture_layer_ids: Sequence[int] | None = None,
     ) -> None:
         if not torch.cuda.is_available():
             raise XQTBackendError("CudaGraphDecodeSession requires CUDA")
@@ -436,10 +456,27 @@ class CudaGraphDecodeSession:
         self.token = torch.zeros(1, 1, dtype=torch.long, device="cuda")
         self.position = torch.zeros(1, dtype=torch.long, device="cuda")
         self.valid_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+        self.last_hidden: torch.Tensor | None = None
         self.rope_cos, self.rope_sin = self._build_rope_tables(dtype)
 
         self._graphs: list[torch.cuda.CUDAGraph] = []
         self._warmed = False
+        self._pos = torch.zeros(1, dtype=torch.long, device="cuda")
+        self._capture_layer_ids = tuple(int(item) for item in (capture_layer_ids or ()))
+        self._capture_slots = {
+            layer_id: slot for slot, layer_id in enumerate(self._capture_layer_ids)
+        }
+        if self._capture_layer_ids:
+            features = len(self._capture_layer_ids) * self.hidden_size
+            self.captured_prefill = torch.zeros(
+                (self.max_cache_len, features), dtype=dtype, device="cuda"
+            )
+            self.captured_rows = torch.zeros(
+                (_MAX_CAPTURE_ROWS, features), dtype=dtype, device="cuda"
+            )
+        else:
+            self.captured_prefill = None
+            self.captured_rows = None
         self.length = 0
         self.decode_steps = 0
         self._residual_bindings: dict[
@@ -617,11 +654,20 @@ class CudaGraphDecodeSession:
                     layer.post_attention_layernorm(hidden),
                     fused_ops=False,
                 )
-        logits = self._logits(
-            _rms_norm(model.model.norm, hidden, fused=self._fuse_norms)[:, -1:, :]
-        )
+            if self.captured_prefill is not None:
+                slot = self._capture_slots.get(index)
+                if slot is not None:
+                    low = slot * self.hidden_size
+                    self.captured_prefill[
+                        :seq_len, low : low + self.hidden_size
+                    ].copy_(hidden[0])
+        normed_last = _rms_norm(model.model.norm, hidden, fused=self._fuse_norms)[
+            :, -1:, :
+        ]
+        logits = self._logits(normed_last)
         self.token.copy_(logits.argmax(-1))
         self.length = seq_len
+        self.last_hidden = normed_last
         return int(self.token.item())
 
     def _prefill_mlp_int8(
@@ -820,6 +866,23 @@ class CudaGraphDecodeSession:
         )
         self.token.copy_(logits.argmax(-1))
 
+    def _capture_layer_rows(self, index: int, hidden: torch.Tensor, rows: int) -> None:
+        """Record a layer's output rows for the DSpark draft's context features.
+
+        Row-indexed rather than position-indexed on purpose: the write offset is
+        a compile-time constant inside the captured verify graph, so a changing
+        cache position cannot invalidate graph reuse. Callers copy the rows they
+        actually accepted into position space outside the graph.
+        """
+
+        if self.captured_rows is None:
+            return
+        slot = self._capture_slots.get(index)
+        if slot is None:
+            return
+        low = slot * self.hidden_size
+        self.captured_rows[:rows, low : low + self.hidden_size].copy_(hidden)
+
     def _linear_w4a8_or_fallback(
         self, module: nn.Module, inputs: torch.Tensor, scale_a: torch.Tensor
     ) -> torch.Tensor:
@@ -828,7 +891,7 @@ class CudaGraphDecodeSession:
             return forward_w4a8(inputs, scale_a)
         weight = getattr(module, "weight", None)
         dtype = weight.dtype if weight is not None else torch.bfloat16
-        dequant = inputs.to(dtype) * scale_a.to(dtype)
+        dequant = _dequant_activations(inputs, scale_a, dtype)
         return module(dequant)
 
     def _project_qkv_w4a8(
@@ -844,16 +907,17 @@ class CudaGraphDecodeSession:
             if forward_w4a8 is not None:
                 q, k, v = forward_w4a8(inputs, scale_a)
             else:
-                dequant = inputs.to(torch.bfloat16) * scale_a.to(torch.bfloat16)
+                dequant = _dequant_activations(inputs, scale_a, torch.bfloat16)
                 q, k, v = fused(dequant)
         else:
             attention = layer.self_attn
             q = self._linear_w4a8_or_fallback(attention.q_proj, inputs, scale_a)
             k = self._linear_w4a8_or_fallback(attention.k_proj, inputs, scale_a)
             v = self._linear_w4a8_or_fallback(attention.v_proj, inputs, scale_a)
-        q = q.view(1, 1, self.num_q_heads, self.head_dim).transpose(1, 2)
-        k = k.view(1, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(1, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        rows = int(inputs.numel() // int(inputs.shape[-1]))
+        q = q.view(1, rows, self.num_q_heads, self.head_dim).transpose(1, 2)
+        k = k.view(1, rows, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(1, rows, self.num_kv_heads, self.head_dim).transpose(1, 2)
         return q, k, v
 
     def _mlp_forward_w4a8(
@@ -864,7 +928,16 @@ class CudaGraphDecodeSession:
         scale_a: torch.Tensor,
         *,
         residual: torch.Tensor,
+        swiglu_out: torch.Tensor | None = None,
+        swiglu_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Gated MLP with true-INT8 activations.
+
+        ``swiglu_out``/``swiglu_scale`` override the single-row staging buffers
+        so multi-row callers can pass their own; they must hold ``rows *
+        intermediate_size`` int8 elements and ``rows`` float32 scales.
+        """
+
         mlp = layer.mlp
         fused = self._fused_gate_up[index]
         if fused is not None:
@@ -872,17 +945,15 @@ class CudaGraphDecodeSession:
             if forward_w4a8 is not None:
                 gate, up = forward_w4a8(inputs, scale_a)
             else:
-                dequant = inputs.to(torch.bfloat16) * scale_a.to(torch.bfloat16)
+                dequant = _dequant_activations(inputs, scale_a, torch.bfloat16)
                 gate, up = fused(dequant)
         else:
             gate = self._linear_w4a8_or_fallback(mlp.gate_proj, inputs, scale_a)
             up = self._linear_w4a8_or_fallback(mlp.up_proj, inputs, scale_a)
-        self._swiglu_true_int8(
-            gate, up, out_q=self._swiglu_int8_buf, out_scale=self._swiglu_scale_buf
-        )
-        return self._residual_project_w4a8(
-            mlp.down_proj, self._swiglu_int8_buf, self._swiglu_scale_buf, residual
-        )
+        out_q = self._swiglu_int8_buf if swiglu_out is None else swiglu_out
+        out_scale = self._swiglu_scale_buf if swiglu_scale is None else swiglu_scale
+        self._swiglu_true_int8(gate, up, out_q=out_q, out_scale=out_scale)
+        return self._residual_project_w4a8(mlp.down_proj, out_q, out_scale, residual)
 
     def _residual_project_w4a8(
         self,
