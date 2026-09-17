@@ -309,7 +309,7 @@ engine 能力描述存在三套词汇: `runtime/engine_resolve.py` (maturity 4 �
 | 15 export 契约与粒度 | 已落地 | 新增 `ExportAdapter`/`ExportResultBase`;TensorRT plugin/inspect/perf 合并到 `trt_diagnostics.py`. |
 | 16 contracts 边界 | 已落地 | typed payload,存储协议,packing 与 reference 语义归 contracts;native execution view 归 runtime/operator_opt. |
 
-层级守卫 `tests/test_layer_import_boundaries.py` 与 `pytest -q tests/xqt` 已全绿. 16 项架构整改均已落地,`root-workspace-xdl` 知识图谱已刷新并达到 `ready` 状态;最终状态以 TODO 文档的验证清单为准.
+层级守卫 `tests/test_layer_import_boundaries.py` 与 `pytest -q tests/xqt` 已全绿. 16 项架构整改均已落地,`xqt` 知识图谱已刷新并达到 `ready` 状态;最终状态以 TODO 文档的验证清单为准.
 
 ## 6. 决策记录
 

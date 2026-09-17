@@ -56,5 +56,5 @@
 
 ## 收尾要求
 
-- [x] 完成结构性变更后运行 `index_repository`,项目名使用 `root-workspace-xdl` (`status=ready`,24,005 nodes,128,787 edges).
+- [x] 完成结构性变更后运行 `index_repository`,项目名使用 `xqt` (`status=ready`).
 - [x] `pytest -q tests/xqt` 全量通过,文档标点检查通过.

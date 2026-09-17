@@ -63,7 +63,7 @@ Session 内存状态不承诺在进程被强制终止,主机掉电或解释器�
 ## 2. 审阅依据与限制
 
 - **审阅源码基线**: `9d254042f268e3bf5a9f9ab546fcf738c0b494a4`. 下列 `已确认` / `待验证` 结论均指向此初始审阅基线, 不是对之后 worktree 的永久断言. 后续实施必须记录实际测量所用 commit 和 worktree diff 摘要, 不清理或覆盖用户已有修改.
-- **图谱与知识库状态**: 审阅时项目 `root-workspace-xdl` 状态为 `ready`, coverage generation 为 `2026-09-05T17:51:04Z`. 图谱用于定向发现, 不替代当前源码. 每个变更包都要记录其实际查询 generation,候选路径和 `check_index_coverage` 结果; 若 worktree 在生成后有改动, 必须阅读当前源码, 不能用旧图谱证明最新实现.
+- **图谱与知识库状态**: 审阅时项目 `xqt` 状态为 `ready`. 图谱用于定向发现, 不替代当前源码. 每个变更包都要记录其实际查询 generation,候选路径和 `check_index_coverage` 结果; 若 worktree 在生成后有改动, 必须阅读当前源码, 不能用旧图谱证明最新实现.
 - **静态检查初始现状**: 初始审阅执行 `ruff check xqt` 时确认存在 2 项 F821 静态错误:
   - `xqt/compression/prune/discovery.py:270`: `_StructuredCandidate` 未定义;
   - `xqt/compression/prune/discovery.py:299`: `_StructuredCandidate` 未定义.
