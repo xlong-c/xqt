@@ -79,6 +79,11 @@ dev = [
 [project.scripts]
 xqt-run-workflow = "xqt.run_workflow:main"
 
+[project.urls]
+Homepage = "https://github.com/xlong-c/xqt"
+Repository = "https://github.com/xlong-c/xqt"
+Documentation = "https://github.com/xlong-c/xqt#readme"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["xqt*"]
